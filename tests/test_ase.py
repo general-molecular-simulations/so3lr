@@ -9,6 +9,8 @@ from mlff.md.calculator_sparse import mlffCalculatorSparse
 
 @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
 def test_molecules(name: str):
+    package_dir = pathlib.Path(__file__).parent.parent.resolve()
+
     jax.config.update('jax_enable_x64', True)
 
     # target_predictions = np.load(
@@ -23,12 +25,12 @@ def test_molecules(name: str):
     #         __name__, f'test_data/{name}.xyz')
     # )
 
-    target_predictions = np.load(f'test_data/{name}_ase.npz')
+    target_predictions = np.load(package_dir / f'tests/test_data/{name}_ase.npz')
 
-    atoms = read(f'test_data/{name}.xyz')
+    atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
     calc = mlffCalculatorSparse.create_from_ckpt_dir(
-        ckpt_dir=pathlib.Path(__file__).parent.parent.resolve() / 'sup_gems' / 'sup_gems_params',
+        ckpt_dir=package_dir / 'sup_gems' / 'sup_gems_params',
         lr_cutoff=12.,
         dispersion_energy_lr_cutoff_damping=2.,
         from_file=True,
