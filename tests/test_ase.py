@@ -12,6 +12,7 @@ def test_molecules(name: str):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
     jax.config.update('jax_enable_x64', True)
+    jax.config.update('jax_disable_jit', True)
 
     target_predictions = np.load(package_dir / f'tests/test_data/{name}_ase.npz')
 
@@ -43,7 +44,7 @@ def test_molecules(name: str):
     npt.assert_allclose(
         target_predictions['forces'],
         forces,
-        atol=1e-4
+        atol=1e-6
     )
 
     with npt.assert_raises(AssertionError):
@@ -55,13 +56,14 @@ def test_molecules(name: str):
 
 def test_water():
     jax.config.update('jax_enable_x64', True)
+    jax.config.update('jax_disable_jit', True)
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
     target_predictions = np.load(package_dir / f'tests/test_data/water_ase.npz')
 
     atoms = read(
-        f'tests/test_data/water_64.xyz'
+        package_dir / f'tests/test_data/water_64.xyz'
     ) * [2, 2, 2]
 
     calc = mlffCalculatorSparse.create_from_ckpt_dir(
@@ -86,7 +88,7 @@ def test_water():
     npt.assert_allclose(
         target_predictions['forces'],
         forces,
-        atol=1e-4
+        atol=1e-6
     )
 
     with npt.assert_raises(AssertionError):
