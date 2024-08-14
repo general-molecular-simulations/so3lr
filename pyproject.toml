@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "sup_gems"
+version = "0.0.1"
+description = "SO3krates Universal Pairwise Force Field for General Molecular Simulation"
+authors = ["Adil Kabdyla, Thorben Frank"]
+license = "MIT"
+
+
+[tool.poetry.dependencies]
+python = ">=3.9"
+numpy = "*"
+ase = "*"
+h5py = "*"
+mlff = { git = "https://github.com/thorben-frank/mlff.git", branch = "v1.0-lrs-gems", optional = false }
+jraph = { git = "https://github.com/kabylda/jraph.git", branch = "master", optional = false }
+jax-md = { git = "https://github.com/kabylda/jax-md.git", branch = "main" , optional = false }
+glp = { git = "https://github.com/kabylda/glp.git", branch = "electrostatics_neighbourlist", optional = false }
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
