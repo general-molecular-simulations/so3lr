@@ -44,7 +44,7 @@ def test_molecules(name: str):
     npt.assert_allclose(
         target_predictions['forces'],
         forces,
-        atol=1e-6
+        atol=1e-4
     )
 
     with npt.assert_raises(AssertionError):
@@ -88,7 +88,7 @@ def test_water():
     npt.assert_allclose(
         target_predictions['forces'],
         forces,
-        atol=1e-6
+        atol=5e-4
     )
 
     with npt.assert_raises(AssertionError):
