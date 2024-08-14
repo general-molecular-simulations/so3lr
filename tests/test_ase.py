@@ -60,7 +60,9 @@ def test_water():
 
     target_predictions = np.load(package_dir / f'tests/test_data/water_ase.npz')
 
-    atoms = read(f'test_data/water_64.xyz') * [2, 2, 2]
+    atoms = read(
+        f'tests/test_data/water_64.xyz'
+    ) * [2, 2, 2]
 
     calc = mlffCalculatorSparse.create_from_ckpt_dir(
         ckpt_dir=package_dir / 'sup_gems' / 'sup_gems_params',
