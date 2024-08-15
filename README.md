@@ -1,4 +1,5 @@
 ![workflow-test-ci](https://github.com/thorben-frank/sup_gems/actions/workflows/CI.yml/badge.svg)
+[![preprint-link](https://img.shields.io/badge/paper-arxiv.org-B31B1B)](https://arxiv.org/)
 ![Logo](./sup-gems-logo.png)
 ## Installation
 First clone the repository and install by doing 
