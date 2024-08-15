@@ -1,3 +1,4 @@
+![workflow-test-ci](https://github.com/thorben-frank/sup_gems/actions/workflows/CI.yml/badge.svg)
 ![Logo](./sup-gems-logo.png)
 ## Installation
 First clone the repository and install by doing 
