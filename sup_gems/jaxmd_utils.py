@@ -1,28 +1,11 @@
 import jax
 import jax.numpy as jnp
 
-from collections import namedtuple
 from functools import partial
 from jax_md import partition
 from jax_md.space import DisplacementOrMetricFn, Box
 
-Graph = namedtuple(
-    "Graph",
-    (
-        "positions",
-        "edges",
-        "nodes",
-        "centers",
-        "others",
-        "mask",
-        "total_charge",
-        "num_unpaired_electrons",
-        "edges_lr",
-        "idx_i_lr",
-        "idx_j_lr",
-        "cell"
-    )
-)
+from sup_gems.graph import Graph
 
 
 def neighbor_list_featurizer(displacement_fn, species):
