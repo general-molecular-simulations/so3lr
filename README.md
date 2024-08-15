@@ -1,5 +1,5 @@
 ![workflow-test-ci](https://github.com/thorben-frank/sup_gems/actions/workflows/CI.yml/badge.svg)
-[![examples-link](https://img.shields.io/badge/usage-examples-4880B8)](./examples)
+[![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
 [![preprint-link](https://img.shields.io/badge/paper-arxiv.org-B31B1B)](https://arxiv.org/)
 ![Logo](./sup-gems-logo.png)
 ## Installation
