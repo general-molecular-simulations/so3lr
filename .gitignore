@@ -4,4 +4,7 @@
 build
 .pytest_cache
 .idea/
+*.pyc
+__pycache__/
+sup_gems/__pycache__
 

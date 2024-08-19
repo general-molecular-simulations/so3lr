@@ -60,7 +60,8 @@ neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
     capacity_multiplier=1.25,
     buffer_size_multiplier_sr=1.25,
     buffer_size_multiplier_lr=1.25,
-    minimum_cell_size_multiplier_sr=1.0
+    minimum_cell_size_multiplier_sr=1.0,
+    disable_cell_list=True
 )
 
 # Energy and force functions.
@@ -70,11 +71,11 @@ force_fn = jax.jit(quantity.force(energy_fn))
 # Initialize the short and long-range neighbor lists.
 nbrs = neighbor_fn.allocate(
     positions, 
-    box=None
+    box=box
 )
 nbrs_lr = neighbor_fn_lr.allocate(
     positions, 
-    box=None
+    box=box
 )
 energy = energy_fn(
     positions, 
