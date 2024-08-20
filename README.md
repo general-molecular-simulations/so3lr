@@ -61,7 +61,8 @@ neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
     buffer_size_multiplier_sr=1.25,
     buffer_size_multiplier_lr=1.25,
     minimum_cell_size_multiplier_sr=1.0,
-    disable_cell_list=True
+    disable_cell_list=True,
+    fractional_coordinates=False
 )
 
 # Energy and force functions.
