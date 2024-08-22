@@ -5,6 +5,7 @@ build
 .pytest_cache
 .idea/
 *.pyc
+hdf5
 __pycache__/
 sup_gems/__pycache__
 
