@@ -1,23 +1,23 @@
-![workflow-test-ci](https://github.com/thorben-frank/sup_gems/actions/workflows/CI.yml/badge.svg)
+![workflow-test-ci](https://github.com/thorben-frank/solar/actions/workflows/CI.yml/badge.svg)
 [![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
 [![preprint-link](https://img.shields.io/badge/paper-arxiv.org-B31B1B)](https://arxiv.org/)
 ![Logo](./logo.png)
 ## Installation
 First clone the repository and install by doing 
 ```shell script
-git clone https://github.com/thorben-frank/sup_gems.git
-cd sup_gems
+git clone https://github.com/thorben-frank/solar.git
+cd solar
 pip install .
 ```
 ## Atomic Simulation Environment
 To get an Atomic Simulation Environment (ASE) calculator with energies and forces predicted
-from SUP-GEMS just do 
+from SO3LR (pronounced "Solar") just do 
 ```python
-from sup_gems import SupGemsCalculator
+from solar import SolarCalculator
 from ase import Atoms
 
 atoms = Atoms(...)
-calc = SupGemsCalculator()
+calc = SolarCalculator()
 atoms.calc = calc
 
 energy = atoms.get_potential_energy()
@@ -40,8 +40,8 @@ from ase import Atoms
 from jax_md import space
 from jax_md import quantity
 
-from sup_gems import to_jax_md
-from sup_gems import SupGemsPotential
+from solar import to_jax_md
+from solar import SolarPotential
 
 atoms = Atoms(...)
 assert atoms.get_pbc().all() is False, "Readme example assumes no box. See `examples/` folder for simulations in box."
@@ -53,7 +53,7 @@ box = None
 displacement, shift = space.free()
 
 neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
-    potential=SupGemsPotential(),
+    potential=SolarPotential(),
     displacement_or_metric=displacement,
     box_size=box,
     species=atoms.get_atomic_numbers(),
@@ -98,19 +98,19 @@ print('Forces = ', np.array(forces))
 To obtain a potential energy function which is not specifally tailored for `jax-md` we provide a convenience 
 interface. You can do  
 ```python
-from sup_gems import SupGemsPotential
-from sup_gems import Graph
+from solar import SolarPotential
+from solar import Graph
 
 graph = Graph(...)
 
-sup_gems_potential = SupGemsPotential()
+solar_potential = SolarPotential()
 
-energy = sup_gems_potential(graph)
+energy = solar_potential(graph)
 ```
 The `Graph` object is a `collections.namedtuple` which abstracts the molecule as a graph common practice in the 
-context of message passing neural networks. The `SupGemsPotential` is a pure `python` function which takes a graph as 
+context of message passing neural networks. The `SolarPotential` is a pure `python` function which takes a graph as 
 an input and returns a potential energy. It is compatible with common `jax` transformations as `jax.jit`, `jax.vmap`, 
-`jax.grad`, `...`. Its use targets developers, interested in integrating SUP-GEMS into their own MD code base. From a 
+`jax.grad`, `...`. Its use targets developers, interested in integrating SO3LR into their own MD code base. From a 
 high-level perspective, all that needs to be done is to define some function `system_to_graph` which transforms 
-whatever input structure one has to a `Graph` object. Passed to `sup_gems_potential` one gets the potential energy of 
+whatever input structure one has to a `Graph` object. Passed to `solar_potential` one gets the potential energy of 
 the system.
