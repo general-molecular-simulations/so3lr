@@ -1,7 +1,7 @@
 ![workflow-test-ci](https://github.com/thorben-frank/sup_gems/actions/workflows/CI.yml/badge.svg)
 [![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
 [![preprint-link](https://img.shields.io/badge/paper-arxiv.org-B31B1B)](https://arxiv.org/)
-![Logo](./sup-gems-logo.png)
+![Logo](./logo.png)
 ## Installation
 First clone the repository and install by doing 
 ```shell script

@@ -12,7 +12,7 @@ def make_potential_fn(
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
     return MLFFPotentialSparse.create_from_workdir(
-        workdir=package_dir / 'sup_gems' / 'sup_gems_params',
+        workdir=package_dir / 'solar' / 'params',
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_energy_lr_cutoff_damping,

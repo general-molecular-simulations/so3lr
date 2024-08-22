@@ -5,7 +5,7 @@ from functools import partial
 from jax_md import partition
 from jax_md.space import DisplacementOrMetricFn, Box
 
-from sup_gems.graph import Graph
+from solar.graph import Graph
 
 
 def neighbor_list_featurizer(displacement_fn, species):
