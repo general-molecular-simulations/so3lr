@@ -34,6 +34,7 @@ give a small example for a structure in vacuum. For realistic simulations with p
 `./examples/` folder.
 ```python
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from ase import Atoms
@@ -44,9 +45,12 @@ from solar import to_jax_md
 from solar import SolarPotential
 
 atoms = Atoms(...)
-assert atoms.get_pbc().all() is False, "Readme example assumes no box. See `examples/` folder for simulations in box."
+assert np.asarray(
+        atoms.get_pbc()
+    ).all().item() is False, "Readme example assumes no box. See `examples/` folder for simulations in box."
 
-positions = atoms.get_positions()
+positions = jnp.array(atoms.get_positions())
+atomic_numbers = jnp.array(atoms.get_atomic_numbers()) 
 
 # We assume there is no box.
 box = None
@@ -56,7 +60,7 @@ neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
     potential=SolarPotential(),
     displacement_or_metric=displacement,
     box_size=box,
-    species=atoms.get_atomic_numbers(),
+    species=atomic_numbers,
     capacity_multiplier=1.25,
     buffer_size_multiplier_sr=1.25,
     buffer_size_multiplier_lr=1.25,

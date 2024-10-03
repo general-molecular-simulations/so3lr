@@ -2,7 +2,6 @@ import numpy as np
 import numpy.testing as npt
 import pathlib
 import pytest
-import jax
 from ase.io import read
 from mlff.md.calculator_sparse import mlffCalculatorSparse
 
@@ -10,9 +9,6 @@ from mlff.md.calculator_sparse import mlffCalculatorSparse
 @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
 def test_molecules(name: str):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
-
-    jax.config.update('jax_enable_x64', True)
-    jax.config.update('jax_disable_jit', True)
 
     target_predictions = np.load(package_dir / f'tests/test_data/{name}_ase.npz')
 
@@ -55,8 +51,6 @@ def test_molecules(name: str):
 
 
 def test_water():
-    jax.config.update('jax_enable_x64', True)
-    jax.config.update('jax_disable_jit', True)
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
@@ -99,13 +93,10 @@ def test_water():
 
 
 @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
-def test_make_ase_calculator(name: str):
+def test_solar_ase_calculator(name: str):
     from solar import SolarCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
-
-    jax.config.update('jax_enable_x64', True)
-    jax.config.update('jax_disable_jit', True)
 
     target_predictions = np.load(package_dir / f'tests/test_data/{name}_ase.npz')
 
