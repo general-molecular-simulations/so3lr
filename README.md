@@ -1,7 +1,12 @@
 ![workflow-test-ci](https://github.com/general-molecular-simulation/so3lr/actions/workflows/CI.yml/badge.svg)
 [![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
 [![preprint-link](https://img.shields.io/badge/paper-arxiv.org-B31B1B)](https://arxiv.org/)
+[![cite-link](https://img.shields.io/badge/how_to-cite-000000)](https://github.com/general-molecular-simulation/so3lr?tab=readme-ov-file#Citation)
 ![Logo](./logo.png)
+## About
+SO3LR - pronounced *Solar* - is a machine learned force field for molecular simulation of all four major types of 
+bio-molecules. It is based on the SO3krates neural network and incorporates universal pairwise force fields 
+designed for short-range repulsion, long-range electrostatics, and dispersion interactions.   
 ## Installation
 First clone the repository and install by doing 
 ```shell script
@@ -11,7 +16,7 @@ pip install .
 ```
 ## Atomic Simulation Environment
 To get an Atomic Simulation Environment (ASE) calculator with energies and forces predicted
-from SO3LR ("Solar") just do 
+from SO3LR just do 
 ```python
 from so3lr import So3lrCalculator
 from ase import Atoms
@@ -118,3 +123,18 @@ an input and returns a potential energy. It is compatible with common `jax` tran
 high-level perspective, all that needs to be done is to define some function `system_to_graph` which transforms 
 whatever input structure one has to a `Graph` object. Passed to `so3lr_potential` one gets the potential energy of 
 the system.
+## Citation
+If you use parts of the code please cite
+```
+@article{preprint}
+
+@article{frank2024euclidean,
+  title={A Euclidean transformer for fast and stable machine learned force fields},
+  author={Frank, Thorben and Unke, Oliver and M{\"u}ller, Klaus-Robert and Chmiela, Stefan},
+  journal={Nature Communications},
+  volume={15},
+  number={1},
+  pages={6539},
+  year={2024}
+}
+```
