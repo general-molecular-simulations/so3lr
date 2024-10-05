@@ -8,7 +8,7 @@ import pytest
 from ase.io import read
 from jax_md import space, quantity
 from mlff.mdx.potential import MLFFPotentialSparse
-from solar import jaxmd_utils
+from so3lr import jaxmd_utils
 
 lr_cutoff = 12.0
 lr_cutoff_damp = 2.0
@@ -46,7 +46,7 @@ def test_molecules_with_box(name: str):
 
     # define mlff potential
     mlff_potential = MLFFPotentialSparse.create_from_ckpt_dir(
-        package_dir / 'solar' / 'params',
+        package_dir / 'so3lr' / 'params',
         from_file=True,
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,  # this controls whether elec and disp modules use force shifting and damping.
@@ -121,7 +121,7 @@ def test_molecules_free(name: str):
 
     # define mlff potential
     mlff_potential = MLFFPotentialSparse.create_from_ckpt_dir(
-        package_dir / 'solar' / 'params',
+        package_dir / 'so3lr' / 'params',
         from_file=True,
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,  # this controls whether elec and disp modules use force shifting and damping.
@@ -197,7 +197,7 @@ def test_water():
 
     # define mlff potential
     mlff_potential = MLFFPotentialSparse.create_from_ckpt_dir(
-        package_dir / 'solar' / 'params',
+        package_dir / 'so3lr' / 'params',
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,  # this controls whether elec and disp modules use force shifting and damping.
             dispersion_energy_cutoff_lr_damping=lr_cutoff_damp,
@@ -254,7 +254,7 @@ def test_water():
 
 @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
 def test_with_solar_potential(name: str):
-    from solar import SolarPotential
+    from so3lr import So3lrPotential
 
     jax.config.update('jax_enable_x64', True)
 
@@ -275,7 +275,7 @@ def test_with_solar_potential(name: str):
     displacement, shift = space.free()
 
     neighbor_fn, neighbor_fn_lr, energy_fn = jaxmd_utils.to_jax_md(
-        potential=SolarPotential(
+        potential=So3lrPotential(
             dtype=np.float64
         ),
         displacement_or_metric=displacement,

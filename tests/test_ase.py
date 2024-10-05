@@ -15,7 +15,7 @@ def test_molecules(name: str):
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
     calc = mlffCalculatorSparse.create_from_ckpt_dir(
-        ckpt_dir=package_dir / 'solar' / 'params',
+        ckpt_dir=package_dir / 'so3lr' / 'params',
         lr_cutoff=12.,
         dispersion_energy_lr_cutoff_damping=2.,
         from_file=True,
@@ -61,7 +61,7 @@ def test_water():
     ) * [2, 2, 2]
 
     calc = mlffCalculatorSparse.create_from_ckpt_dir(
-        ckpt_dir=package_dir / 'solar' / 'params',
+        ckpt_dir=package_dir / 'so3lr' / 'params',
         lr_cutoff=12.,
         dispersion_energy_lr_cutoff_damping=2.,
         from_file=True,
@@ -93,8 +93,8 @@ def test_water():
 
 
 @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
-def test_solar_ase_calculator(name: str):
-    from solar import SolarCalculator
+def test_so3lr_ase_calculator(name: str):
+    from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
@@ -102,7 +102,7 @@ def test_solar_ase_calculator(name: str):
 
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
-    calc = SolarCalculator(
+    calc = So3lrCalculator(
         dtype=np.float64
     )
 

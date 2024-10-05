@@ -1,13 +1,13 @@
 [tool.poetry]
-name = "solar"
+name = "so3lr"
 version = "0.0.1"
-description = "SO3krates Universal Pairwise Force Field with Long Range Interactions (SO3LR) for General Molecular Simulation"
+description = "SO3krates Universal Pairwise Force Field with Long Range Interactions (SO3LR) for Molecular Simulation"
 authors = ["Adil Kabdyla, Thorben Frank"]
 license = "MIT"
 
 
 [tool.poetry.dependencies]
-python = ">=3.9"
+python = ">=3.12"
 numpy = "*"
 ase = "*"
 h5py = "*"

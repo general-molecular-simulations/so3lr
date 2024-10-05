@@ -7,9 +7,9 @@ import jax.numpy as jnp
 from ase.io import read
 from jax_md import space
 from jax_md import quantity
-from solar import to_jax_md
-from solar import SolarCalculator
-from solar import SolarPotential
+from so3lr import to_jax_md
+from so3lr import So3lrPotential
+from so3lr import So3lrCalculator
 
 
 @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
@@ -22,7 +22,7 @@ def test_ase_example(name: str):
     atoms.cell = None
     atoms.pbc = False
 
-    calc = SolarCalculator()
+    calc = So3lrCalculator()
     atoms.calc = calc
 
     energy = atoms.get_potential_energy()
@@ -57,7 +57,7 @@ def test_jax_md_example(name):
     displacement, shift = space.free()
 
     neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
-        potential=SolarPotential(),
+        potential=So3lrPotential(),
         displacement_or_metric=displacement,
         box_size=box,
         species=atomic_numbers,

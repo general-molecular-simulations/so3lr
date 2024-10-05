@@ -12,7 +12,7 @@ def make_ase_calculator(
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
     calc = mlffCalculatorSparse.create_from_ckpt_dir(
-        ckpt_dir=package_dir / 'solar' / 'params',
+        ckpt_dir=package_dir / 'so3lr' / 'params',
         lr_cutoff=lr_cutoff,
         dispersion_energy_lr_cutoff_damping=dispersion_energy_lr_cutoff_damping,
         from_file=True,

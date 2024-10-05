@@ -1,4 +1,4 @@
-from solar.potential import make_potential_fn
+from so3lr.potential import make_potential_fn
 
 
 def test_make_potential_fn():
