@@ -19,6 +19,10 @@ buffer_size_multiplier_lr = 1.25
 minimum_cell_size_multiplier_sr = 1.0
 
 
+def test_jax_md_import():
+    import jax_md
+
+
 @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
 def test_molecules_with_box(name: str):
     jax.config.update('jax_enable_x64', True)
