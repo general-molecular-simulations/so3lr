@@ -4,9 +4,7 @@
 [![cite-link](https://img.shields.io/badge/how_to-cite-000000)](https://github.com/general-molecular-simulation/so3lr?tab=readme-ov-file#Citation)
 ![Logo](./logo.png)
 ## About
-SO3LR - pronounced *Solar* - is a machine learned force field for molecular simulation of all four major types of 
-bio-molecules. It is based on the SO3krates neural network and incorporates universal pairwise force fields 
-designed for short-range repulsion, long-range electrostatics, and dispersion interactions.   
+SO3LR - pronounced *Solar* - is a pretrained machine learned force field for (bio)molecular simulations. It integrates the fast and stable SO3krates neural network for semi-local interactions with universal pairwise force fields designed for short-range repulsion, long-range electrostatics, and dispersion interactions.
 ## Installation
 First clone the repository and install by doing 
 ```shell script
@@ -34,7 +32,7 @@ print('Forces = ', forces)
 
 ```
 ## JAX MD
-Large scale simulations can be performed via Jax-MD which is a molecular dynamics library optimized for GPUs. Here we 
+Large scale simulations can be performed via jax-md which is a molecular dynamics library optimized for GPUs. Here we 
 give a small example for a structure in vacuum. For realistic simulations with periodic water boxes take a look at the 
 `./examples/` folder.
 ```python
