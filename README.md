@@ -8,7 +8,7 @@ SO3LR - pronounced *Solar* - is a pretrained machine-learned force field for (bi
 ## Installation
 First clone the repository and install by doing 
 ```shell script
-git clone https://github.com/general-molecular-simulation/so3lr.git
+git clone https://github.com/general-molecular-simulations/so3lr.git
 cd so3lr
 pip install .
 ```
