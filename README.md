@@ -131,7 +131,8 @@ If you use parts of the code please cite
 ```
 @article{kabylda2024molecular,
   title={Molecular Simulations with a Pretrained Neural Network and Universal Pairwise Force Fields},
-  author={Kabylda, A. and Frank, J. T. and Dou, S. S. and Khabibrakhmanov, A. and Sandonas, L. M. and Unke, O. T. and Chmiela, S. and M{\"u}ller, K.R. and Tkatchenko, A.},
+  author={Kabylda, A. and Frank, J. T. and Dou, S. S. and Khabibrakhmanov, A. and Sandonas, L. M.
+          and Unke, O. T. and Chmiela, S. and M{\"u}ller, K.R. and Tkatchenko, A.},
   journal={ChemRxiv},
   year={2024},
   doi={10.26434/chemrxiv-2024-bdfr0}
