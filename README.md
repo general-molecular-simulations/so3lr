@@ -121,10 +121,22 @@ an input and returns a potential energy. It is compatible with common `jax` tran
 high-level perspective, all that needs to be done is to define some function `system_to_graph` which transforms 
 whatever input structure one has to a `Graph` object. Passed to `so3lr_potential` one gets the potential energy of 
 the system.
+## TODO
+- [ ] Upload the used datasets
+- [ ] Add FHI-aims calculation example
+- [ ] Fix typos in tutorial notebooks
+- [ ] Add functionality to extract observables (dipole moments etc) on a higher level
 ## Citation
 If you use parts of the code please cite
 ```
-@article{preprint}
+@article{kabylda2024molecular,
+  title={Molecular Simulations with a Pretrained Neural Network and Universal Pairwise Force Fields},
+  author={Kabylda, A. and Frank, J. T. and Dou, S. S. and Khabibrakhmanov, A. and Sandonas, L. M.
+          and Unke, O. T. and Chmiela, S. and M{\"u}ller, K.R. and Tkatchenko, A.},
+  journal={ChemRxiv},
+  year={2024},
+  doi={10.26434/chemrxiv-2024-bdfr0}
+}
 
 @article{frank2024euclidean,
   title={A Euclidean transformer for fast and stable machine learned force fields},
