@@ -7,6 +7,7 @@ from jax_md.space import DisplacementOrMetricFn, Box
 
 from so3lr.graph import Graph
 
+from typing import Dict
 
 def neighbor_list_featurizer(displacement_fn, species):
     def featurize(R, neighbor, neighbor_lr, **kwargs):
@@ -100,9 +101,13 @@ def to_jax_md(
             R,
             neighbor,
             neighbor_lr,
+            obs_fn_kwargs: Dict[str, Dict[str, int]] = {},
             **energy_fn_kwargs
-    ):
+    ):  
         graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
-        return potential(graph).sum()
+        if obs_fn_kwargs:
+            return potential(graph,has_aux=[[True]],**obs_fn_kwargs)
+        else:
+            return potential(graph).sum()
 
     return neighbor_fn, neighbor_fn_lr, energy_fn
