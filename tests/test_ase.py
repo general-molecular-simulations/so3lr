@@ -138,3 +138,33 @@ def test_so3lr_ase_calculator(name: str):
             target_predictions['forces'],
             np.zeros_like(forces)
         )
+
+
+@pytest.mark.parametrize('calculate_stress', [True, False])
+def test_so3lr_ase_calculator_stress(calculate_stress: bool):
+    from so3lr import So3lrCalculator
+
+    package_dir = pathlib.Path(__file__).parent.parent.resolve()
+
+    atoms = read(
+        package_dir / f'tests/test_data/water_64.xyz'
+    ) * [2, 2, 2]
+
+    calc = So3lrCalculator(
+        dtype=np.float64,
+        calculate_stress=calculate_stress
+    )
+
+    atoms.calc = calc
+
+    if calculate_stress is True:
+        stress = atoms.get_stress()
+
+        # Stress is in Voigt notation.
+        npt.assert_equal(
+            actual=stress.shape,
+            desired=(6, )
+        )
+    else:
+        with npt.assert_raises(NotImplementedError):
+            atoms.get_stress()

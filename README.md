@@ -16,11 +16,16 @@ pip install .
 To get an Atomic Simulation Environment (ASE) calculator with energies and forces predicted
 from SO3LR just do 
 ```python
+import numpy as np
+
 from so3lr import So3lrCalculator
 from ase import Atoms
 
 atoms = Atoms(...)
-calc = So3lrCalculator()
+calc = So3lrCalculator(
+    calculate_stress=False,
+    dtype=np.float32
+)
 atoms.calc = calc
 
 energy = atoms.get_potential_energy()
