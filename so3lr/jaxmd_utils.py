@@ -103,7 +103,7 @@ def to_jax_md(
             neighbor_lr,
             obs_fn_kwargs: Dict[str, Dict[str, int]] = {},
             **energy_fn_kwargs
-    ):  
+    ):
         graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
         if obs_fn_kwargs:
             return potential(graph,has_aux=[[True]],**obs_fn_kwargs)
