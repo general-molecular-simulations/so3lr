@@ -1,6 +1,6 @@
 ![workflow-test-ci](https://github.com/general-molecular-simulation/so3lr/actions/workflows/CI.yml/badge.svg)
 [![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
-[![preprint-link](https://img.shields.io/badge/paper-arxiv.org-B31B1B)](https://arxiv.org/)
+[![preprint-link](https://img.shields.io/badge/paper-chemRxiv.org-A9A8AD)](https://chemrxiv.org/engage/chemrxiv/article-details/6704263051558a15ef6478b6)
 [![cite-link](https://img.shields.io/badge/how_to-cite-000000)](https://github.com/general-molecular-simulation/so3lr?tab=readme-ov-file#Citation)
 ![Logo](./logo.png)
 ## About
@@ -16,11 +16,16 @@ pip install .
 To get an Atomic Simulation Environment (ASE) calculator with energies and forces predicted
 from SO3LR just do 
 ```python
+import numpy as np
+
 from so3lr import So3lrCalculator
 from ase import Atoms
 
 atoms = Atoms(...)
-calc = So3lrCalculator()
+calc = So3lrCalculator(
+    calculate_stress=False,
+    dtype=np.float32
+)
 atoms.calc = calc
 
 energy = atoms.get_potential_energy()

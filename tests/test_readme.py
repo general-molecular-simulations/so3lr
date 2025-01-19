@@ -22,7 +22,10 @@ def test_ase_example(name: str):
     atoms.cell = None
     atoms.pbc = False
 
-    calc = So3lrCalculator()
+    calc = So3lrCalculator(
+        calculate_stress=False,
+        dtype=np.float32
+    )
     atoms.calc = calc
 
     energy = atoms.get_potential_energy()
