@@ -6,7 +6,23 @@
 ## About
 SO3LR - pronounced *Solar* - is a pretrained machine-learned force field for (bio)molecular simulations. It integrates the fast and stable SO3krates neural network for semi-local interactions with universal pairwise force fields designed for short-range repulsion, long-range electrostatics, and dispersion interactions.
 ## Installation
-First clone the repository and install by doing 
+SO3RL can be either used with CPU or with GPU. If you want to use SO3LR on GPU, you have to install the 
+corresponding JAX installation via 
+```shell script
+# SO3LR on GPU
+pip install --upgrade pip
+pip install "jax[cuda12]"
+```
+If you want to use SO3LR on CPU, e.g. for testing on your local machine which does not have a GPU, you can do
+```shell script
+# SO3LR on CPU
+pip install --upgrade pip
+pip install jax
+```
+Note, that SO3LR will be much fast on GPU than on CPU, so large scale simulations are ideally performed on a GPU. More 
+details about JAX installation can be found [here](https://jax.readthedocs.io/en/latest/installation.html).
+
+Next clone the repository and install by doing 
 ```shell script
 git clone https://github.com/general-molecular-simulations/so3lr.git
 cd so3lr
