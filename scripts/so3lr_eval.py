@@ -27,28 +27,25 @@ def evaluate_so3krates_sparse_on(
 ):
     """
     Loads a so3rkates model from a directory (direcotry where the model
-    was traini)
+    was trained in) and tests it on a given dataset. Results are returned
+    as a dictionary.
 
     Args:
-        workdir (str): _description_
-        filepath (str): _description_
-        length_unit (str, optional): _description_. Defaults to 'Angstrom'.
-        energy_unit (str, optional): _description_. Defaults to 'eV'.
-        max_num_graphs (int, optional): _description_. Defaults to 11.
-        max_num_nodes (Optional[int], optional): _description_. Defaults to None.
-        max_num_edges (Optional[int], optional): _description_. Defaults to None.
-        max_num_pairs (int, optional): _description_. Defaults to 10000.
-        num_test (Optional[int], optional): _description_. Defaults to None.
-        write_batch_metrics_to (Optional[str], optional): _description_. Defaults to None.
-        testing_targets (Optional[Sequence[str]], optional): _description_. Defaults to None.
+        workdir (str): Working directory of the model.
+        filepath (str): Path to the dataset file.
+        length_unit (str, optional): Length unit used in the dataset. Defaults to 'Angstrom'.
+        energy_unit (str, optional): Energy unit used in the dataset.. Defaults to 'eV'.
+        max_num_graphs (int, optional): Maximum number of graphs per batch. Defaults to 11.
+        max_num_nodes (Optional[int], optional): Maximum number of nodes per batch. Defaults to None.
+        max_num_edges (Optional[int], optional): Maximum number of edges per batch. Defaults to None.
+        max_num_pairs (int, optional): Maximum number of pairs per batch. Defaults to 10000.
+        num_test (Optional[int], optional): Number of random structures to test on from the dataset. Defaults to None.
+        write_batch_metrics_to (Optional[str], optional): Path where to save the batch metrics to. Defaults to None.
+        testing_targets (Optional[Sequence[str]], optional): List of target properties to test on. Defaults to None.
 
-    Raises:
-        ValueError: _description_
-        an: _description_
-        ValueError: _description_
 
     Returns:
-        _type_: _description_
+        dict: Dictionary containing the metrics.
     """
 
     if num_test is not None and write_batch_metrics_to is not None:
@@ -58,8 +55,6 @@ def evaluate_so3krates_sparse_on(
             f"random subsampling of data, there is no one-to-one correspondence between the lines in the file the "
             f"metrics are written to and the indices of the data point, so we raise an error here for security."
         )
-
-    #workdir = pathlib.Path(workdir).expanduser().resolve()
 
     with open(workdir / "hyperparameters.json", "r") as fp:
         x = json.load(fp)
