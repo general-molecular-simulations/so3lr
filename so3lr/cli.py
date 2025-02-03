@@ -48,6 +48,7 @@ def evaluate_so3lr_on(
         save_predictions_to: str
 ) -> None:
     click.echo(so3lr_ascii_II)
+    total_time_start = time.time()
 
     # Define the targets.
     targets = (
@@ -117,7 +118,7 @@ def evaluate_so3lr_on(
             n_pairs=n_pairs
         )
 
-        click.echo('Start JIT compilation.')
+        click.echo('\nStart JIT compilation.')
         compile_start = time.time()
 
         _compile_out = jax.block_until_ready(
@@ -128,7 +129,7 @@ def evaluate_so3lr_on(
 
         compile_end = time.time()
         compile_time = compile_end - compile_start
-        click.echo(f'Compilation completed after {compile_time:.3f} s.\n\n')
+        click.echo(f'Compilation completed after {compile_time:.3f} s.\n')
     else:
         compile_time = np.nan
 
@@ -202,7 +203,8 @@ def evaluate_so3lr_on(
 
         i += 1
 
-    click.echo(f'Completed {total_num_structures} / {num_data} structures.\n\n')
+    click.echo(f'Completed {total_num_structures} / {num_data} structures.')
+    click.echo(f'Time for evaluation = {(total_time):.3f} s.\n')
 
     # Post evaluation loop.
     test_metrics = test_metrics.compute()
@@ -225,9 +227,9 @@ def evaluate_so3lr_on(
 
     metrics['datafile'] = str(datafile.as_uri())
 
-    click.echo('Collected metrics (units are eV and Angstrom):\n')
-    pprint.pprint(metrics)
-    click.echo('\n\n')
+    click.echo('Collected metrics (units are eV, Angstrom, and seconds):')
+    pprint.pprint({k: f"{v:.3e}" if isinstance(v, float) else v for k, v in metrics.items()})
+    click.echo()
 
     if save_predictions_bool is True:
         click.echo(f'Start to save predictions to {str(save_predictions_to.as_uri())}.')
@@ -238,8 +240,10 @@ def evaluate_so3lr_on(
             atoms = jraph_to_ase_atoms(predicted_graph)
             write(save_predictions_to, images=atoms, append=True)
 
-        click.echo('Save completed.')
+        click.echo('Save completed.\n')
 
+    total_time_end = time.time()
+    click.echo(f'Total time = {(total_time_end - total_time_start):.3f} s.')
     click.echo('Evaluation completed.')
 
 
