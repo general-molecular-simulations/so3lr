@@ -52,7 +52,7 @@ property = 'forces'
 true = []
 so3lr = []
 for a in iread('predictions.extxyz'):
-    true.append(a.arrays[f'{property}'])
+    true.append(a.get_forces())
     so3lr.append(a.arrays[f'{property}_so3lr'])
 
 rmse = np.sqrt(np.mean(np.square(np.stack(true) - np.stack(so3lr))))
