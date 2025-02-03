@@ -221,7 +221,7 @@ def evaluate_so3lr_on(
         **test_metrics
     )
 
-    metrics = jax.tree_map(lambda x: float(x), metrics)
+    metrics = jax.tree_util.tree_map(lambda x: float(x), metrics)
 
     metrics['datafile'] = str(datafile.as_uri())
 
