@@ -1,6 +1,6 @@
 ![workflow-test-ci](https://github.com/general-molecular-simulation/so3lr/actions/workflows/CI.yml/badge.svg)
 [![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
-[![preprint-link](https://img.shields.io/badge/paper-chemRxiv.org-A9A8AD)](https://chemrxiv.org/engage/chemrxiv/article-details/6704263051558a15ef6478b6)
+[![preprint-link](https://img.shields.io/badge/paper-chemRxiv.org-A9A8AD)](https://doi.org/10.26434/chemrxiv-2024-bdfr0-v2)
 [![cite-link](https://img.shields.io/badge/how_to-cite-000000)](https://github.com/general-molecular-simulation/so3lr?tab=readme-ov-file#Citation)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14779793.svg)](https://doi.org/10.5281/zenodo.14779793)
 ![Logo](./logo.png)
@@ -191,7 +191,7 @@ If you use parts of the code please cite
           and Unke, O. T. and Chmiela, S. and M{\"u}ller, K.R. and Tkatchenko, A.},
   journal={ChemRxiv},
   year={2024},
-  doi={10.26434/chemrxiv-2024-bdfr0}
+  doi={10.26434/chemrxiv-2024-bdfr0-v2}
 }
 
 @article{frank2024euclidean,
