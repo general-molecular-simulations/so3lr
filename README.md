@@ -29,10 +29,10 @@ cd so3lr
 pip install .
 ```
 ## Evaluation
-Evaluating SO3LR can be done via the command line interface (CLI) using the command `evaluate-so3lr`. The input can be any file that is digestible by 
-[`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread). 
-**Please note, that the labels are assumed to be in `eV` and `Angstrom`.** An example for a file saved at `$FILEPATH`
-would be
+Evaluating SO3LR can be done via the command line interface (CLI) using the command `evaluate-so3lr`. The input can 
+be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread). 
+**Please note, that the labels are assumed to be in `eV` and `Angstrom`.** SO3LR can be evaluated on an input file 
+saved at `$FILEPATH` like 
 ```shell script
 evaluate-so3lr --datafile $FILEPATH --batch-size 2 --lr-cutoff 100 --save-predictions-to predictions.extxyz
 ```
