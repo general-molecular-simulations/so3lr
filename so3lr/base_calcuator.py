@@ -33,7 +33,7 @@ def make_so3lr(
             assert graph_mask is None
 
             num_atoms = len(other_inputs['atomic_numbers'])
-            batch_segments = jnp.ones((num_atoms,), dtype=jnp.int32)
+            batch_segments = jnp.zeros((num_atoms, ), dtype=jnp.int32)
             graph_mask = jnp.array([True])
             other_inputs['batch_segments'] = batch_segments
             other_inputs['graph_mask'] = graph_mask

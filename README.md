@@ -28,6 +28,42 @@ git clone https://github.com/general-molecular-simulations/so3lr.git
 cd so3lr
 pip install .
 ```
+## Evaluation
+Evaluating SO3LR can be done via the command line interface (CLI) using the command `evaluate-so3lr`. The input can be any file that is digestible by 
+[`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread). 
+**Please note, that the labels are assumed to be in `eV` and `Angstrom`.** An example for a file saved at `$FILEPATH`
+would be
+```shell script
+evaluate-so3lr --datafile $FILEPATH --batch-size 2 --lr-cutoff 100 --save-predictions-to predictions.extxyz
+```
+For all details use `evaluate-so3lr --help`. The above command will collect and print the metrics on the dataset and 
+save the predictions to `predictions.extxyz`. The predicted properties are `energy`, `forces`, `dipole_vec` 
+and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld
+ratios are optional. If they are not present in the data, the metrics will simply be `NaN`. **On that note, we want to
+stretch that SO3LR has not been trained on energies.** Therefore, errors are not reported in the printed metrics and 
+only relative energies have a meaning. The predictions can be loaded afterwards in `python` as 
+````python
+import numpy as np
+
+from ase.io import iread
+
+
+property = 'forces'
+
+true = []
+so3lr = []
+for a in iread('predictions.extxyz'):
+    true.append(a.arrays[f'{property}_true'])
+    so3lr.append(a.arrays[f'{property}_so3lr'])
+
+
+rmse = np.sqrt(np.mean(np.square(np.stack(true) - np.stack(so3lr))))
+print(rmse)
+
+````
+If you want to do the full evaluation `python` via the `so3lr_base_calculator`, check out the 
+[example notebook](https://github.com/general-molecular-simulations/so3lr/blob/main/examples/evaluate_so3lr_on_dataset.ipynb).
+
 ## Atomic Simulation Environment
 To get an Atomic Simulation Environment (ASE) calculator with energies and forces predicted
 from SO3LR just do 
