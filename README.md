@@ -103,7 +103,7 @@ from jax_md import quantity
 from so3lr import to_jax_md
 from so3lr import So3lrPotential
 
-atoms = Atoms(...)
+atoms = Atoms('H2', positions=[(0, 0, 0), (0, 0, 0.74)])
 assert np.asarray(
         atoms.get_pbc()
     ).all().item() is False, "Readme example assumes no box. See `examples/` folder for simulations in box."
