@@ -72,7 +72,7 @@ import numpy as np
 from so3lr import So3lrCalculator
 from ase import Atoms
 
-atoms = Atoms(...)
+atoms = Atoms('H2', positions=[(0, 0, 0), (0, 0, 0.74)])
 calc = So3lrCalculator(
     calculate_stress=False,
     dtype=np.float32
