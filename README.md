@@ -73,6 +73,8 @@ from so3lr import So3lrCalculator
 from ase import Atoms
 
 atoms = Atoms('H2', positions=[(0, 0, 0), (0, 0, 0.74)])
+atoms.info['charge'] = 0.0
+
 calc = So3lrCalculator(
     calculate_stress=False,
     dtype=np.float32
