@@ -28,8 +28,8 @@ def jraph_to_ase_atoms(graph):
     )
 
     atoms.info['charge'] = int(graph.globals["total_charge"])
-    atoms.info['energy'] = float(f'{float(graph.globals["energy"]):.6g}')
-    atoms.info['energy_so3lr'] = float(f'{float(graph.globals["energy_so3lr"]):.6g}')
+    atoms.info['energy'] = float(f'{float(graph.globals["energy"][0]):.6g}')
+    atoms.info['energy_so3lr'] = float(f'{float(graph.globals["energy_so3lr"][0]):.6g}')
     atoms.arrays['forces'] = graph.nodes['forces']
     atoms.arrays['forces_so3lr'] = graph.nodes['forces_so3lr']
     atoms.arrays['hirshfeld_ratios'] = graph.nodes['hirshfeld_ratios']
