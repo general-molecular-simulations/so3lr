@@ -20,15 +20,24 @@ def neighbor_list_featurizer(displacement_fn, species):
         Ra_lr = R[idx_i_lr]
         Rb_lr = R[idx_j_lr]
 
+        box = None
+        positions = None
+        k_smearing = None
+        k_grid = None
         if 'box' in kwargs:
             box = kwargs.get('box')
+        if 'k_grid' in kwargs:
+            k_grid = kwargs.get('k_grid')
+            positions = R
+        if 'k_smearing' in kwargs:
+            k_smearing = kwargs.get('k_smearing')
 
         d = jax.vmap(partial(displacement_fn, **kwargs))
         dR = d(Ra, Rb)
         dR_lr = d(Ra_lr, Rb_lr)
 
         graph = Graph(
-            positions=None,
+            positions=positions,
             nodes=species,
             edges=dR,
             centers=idx_i,
@@ -39,7 +48,9 @@ def neighbor_list_featurizer(displacement_fn, species):
             edges_lr=dR_lr,
             idx_i_lr=idx_i_lr,
             idx_j_lr=idx_j_lr,
-            cell=box  # will raise an error if box not in kwargs.
+            cell=box,  # will raise an error if box not in kwargs.
+            k_grid=k_grid,
+            k_smearing=k_smearing
         )
 
         return graph

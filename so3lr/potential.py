@@ -18,7 +18,8 @@ def make_potential_fn(
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
-            neighborlist_format_lr='ordered_sparse'
+            neighborlist_format_lr='ordered_sparse',
+            **kwargs
         ),
         dtype=dtype,
         **kwargs
