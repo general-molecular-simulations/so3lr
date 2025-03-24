@@ -1827,7 +1827,7 @@ def load_state(
     else:
         raise NotImplementedError('Only NVT and NPT ensembles are supported')
     
-    box = None if loaded_state['box'].item() is None else loaded_state['box']
+    box = None if np.any(loaded_state['box'] == None) else loaded_state['box']
     cycle = loaded_state['step']
     
     return state, box, cycle
