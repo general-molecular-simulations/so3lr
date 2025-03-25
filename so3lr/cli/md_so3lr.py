@@ -1032,15 +1032,13 @@ def perform_md(
 
     # Model path, settings and precision
     model_path = all_settings.get('model_path')
-    use_so3lr = all_settings.get('use_so3lr', True)
     
-    if model_path is None and not use_so3lr:
-        raise ValueError(
-            'Model path must be defined or use_so3lr must be set to True'
-        )
-    
-    if use_so3lr and model_path is not None:
-        logger.warning('Model path is ignored when use_so3lr is set to True')
+    if model_path is None:
+        use_so3lr = True
+        logger.info('Using pretrained SO3LR model.')
+    else:
+        use_so3lr = False
+        logger.info(f'Using specified model from {model_path}.')
         
     precision = all_settings.get('precision', 'float32')
     precision = jnp.float32 if precision == 'float32' else jnp.float64
@@ -1860,8 +1858,21 @@ def run(
 
     logger = create_logger(settings.get('log_file', "./so3lr_md.log"))
 
+    restart_load_path = settings.get('restart_load_path')
+    if restart_load_path is not None:
+        if os.path.exists(restart_load_path):
+            restart = True
+        else:
+            restart = False
+    else:
+        restart = False 
+
     if relax_before_run:
-        opt_structure = perform_min(settings, logger)
+        if restart:
+            logger.info('Restarting MD, skipping relaxation.')
+            opt_structure = None
+        else:
+            opt_structure = perform_min(settings, logger)
     else:
         opt_structure = None
     perform_md(settings, opt_structure, logger)
