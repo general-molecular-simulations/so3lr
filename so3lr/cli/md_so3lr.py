@@ -1281,8 +1281,7 @@ def perform_md(
 
     velocities, positions, boxs = [], [], []
     total_time = time.time()
-    cycle_md = 1
-    while cycle_md <= md_cycles:
+    while current_cycle < md_cycles:
         old_time = time.time()
         
         if lr:
@@ -1312,7 +1311,7 @@ def perform_md(
             new_box
             )
         if not overflow:
-            cycle_md+=1
+            current_cycle += 1
             state = new_state
             box = new_box
         # Calculate some quantities for printing
@@ -1347,7 +1346,7 @@ def perform_md(
                     np.array(box)
                 )
                 
-            current_cycle += 1
+            
             if (
                 (len(positions) % hdf5_buffer_size == 0 and
                 len(positions) > 0) or
