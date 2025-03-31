@@ -159,6 +159,26 @@ print('Energy and forces in JAX-MD')
 print('Energy = ', np.array(energy))
 print('Forces = ', np.array(forces))
 ```
+
+### CLI
+
+We also include the option to run MD simulations via JAX MD through the CLI. For this all you have to do is run the following command and give the path to a settings file (.yaml).
+
+
+```shell script
+md-so3lr --settings $FILEPATH
+```
+
+By running the following command you can see all settings and their defaults. Additionally, a file containing this info is provided in `so3lr/cli/md_settings.md`.
+
+```shell script
+md-so3lr --help
+```
+
+By only providing an `initial_geometry`, a short NVT simulation is launched.
+Currently, NVT and NPT are supported using the Nosé–Hoover chain thermostat or barostat. For optimization the FIRE algorithm is used as implemented in JAX MD.
+The trajectories will be saved efficiently using `.hdf5` files. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart it if needed. 
+
 ## Potential energy function
 To obtain a potential energy function which is not specifally tailored for `jax-md` we provide a convenience 
 interface. You can do  

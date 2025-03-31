@@ -14,10 +14,10 @@ from mlff.utils import evaluation_utils
 from mlff.data import AseDataLoaderSparse
 from pathlib import Path
 
-from .ascii_string import so3lr_ascii_II
-from .jraph_utils import jraph_to_ase_atoms
-from .jraph_utils import unbatch_np
-from .base_calcuator import make_so3lr
+from ..ascii_string import so3lr_ascii_II
+from ..jraph_utils import jraph_to_ase_atoms
+from ..jraph_utils import unbatch_np
+from ..base_calcuator import make_so3lr
 
 
 @click.command()

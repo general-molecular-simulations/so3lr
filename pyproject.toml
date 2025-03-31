@@ -23,4 +23,5 @@ build-backend = "poetry.core.masonry.api"
 
 
 [tool.poetry.scripts]
-evaluate-so3lr = "so3lr.cli:evaluate_so3lr_on"
+evaluate-so3lr = "so3lr.cli.eval_so3lr:evaluate_so3lr_on"
+md-so3lr = "so3lr.cli.md_so3lr:main"
