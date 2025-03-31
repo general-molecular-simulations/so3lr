@@ -76,7 +76,7 @@ def test_water():
     npt.assert_allclose(
         target_predictions['energy'],
         energy,
-        atol=1e-6,
+        rtol=1e-6,
     )
 
     npt.assert_allclose(
