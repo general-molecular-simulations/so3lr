@@ -1,0 +1,48 @@
+# Molecular Dynamics Settings
+# This document describes the settings for molecular dynamics simulations with SO3LR.
+
+## General Settings
+initial_geometry: "path/to/geometry.xyz"   # Path to the initial geometry file
+model_path: "path/to/model/"               # Path to the custom model directory (optional)
+precision: "float32"                       # Numerical precision: 'float32' or 'float64'
+total_charge: 0                            # Total charge of the system
+
+## Cutoffs and Buffers
+lr_cutoff: 12.0                            # Long-range cutoff distance in Å
+dispersion_energy_cutoff_lr_damping: 2.0   # Damping factor for long-range dispersion interactions
+buffer_size_multiplier_sr: 1.25            # Buffer size multiplier for short-range interactions
+buffer_size_multiplier_lr: 1.25            # Buffer size multiplier for long-range interactions
+hdf5_buffer_size: 50                       # Number of frames to buffer before writing to HDF5
+
+## File Paths
+trajectory_hdf5_file: "trajectory.hdf5"    # Output trajectory file in HDF5 format
+restart_save_path: null                    # Path to save restart data (optional)
+restart_load_path: null                    # Path to load restart data from a previous run (optional)
+log_file: "so3lr_md.log"                   # Log file path
+  
+## Minimization Settings
+min_cycles: 10                             # Number of minimization cycles
+min_steps: 10                              # Number of steps per minimization cycle
+min_start_dt: 0.05                         # Initial timestep for minimization
+min_max_dt: 0.1                            # Maximum timestep for minimization
+min_n_min: 2                               # Number of minimizers to average
+relax_before_run: True                     # Whether to perform geometry relaxation before MD
+
+## Molecular Dynamics Settings
+md_dt: 0.0005                              # MD timestep in picoseconds
+md_T: 300.0                                # Simulation temperature in Kelvin
+md_cycles: 100                             # Number of MD cycles to run
+md_steps: 100                              # Number of steps per MD cycle
+seed: 0                                    # Random seed for MD
+
+## Nose-Hoover Chain (NVT) Settings
+nhc_chain_length: 3                        # Length of the Nose-Hoover thermostat chain
+nhc_steps: 2                               # Number of integration steps per MD step
+nhc_thermo: 100                            # Thermostat timescale in femtoseconds
+nhc_tau: null                              # Thermostat coupling constant (default: md_dt * nhc_thermo)
+
+## Nose-Hoover Chain (NPT) Settings
+md_P: null                                 # Target pressure in atm (set to enable NPT)
+nhc_baro: 1000                             # Barostat timescale
+nhc_sy_steps: 3                            # Number of Suzuki-Yoshida integration steps
+nhc_npt_tau: null                          # Barostat coupling constant (default: md_dt * nhc_baro)

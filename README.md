@@ -160,9 +160,9 @@ print('Energy = ', np.array(energy))
 print('Forces = ', np.array(forces))
 ```
 
-## CLI
+## Command Line Interface
 
-We also include the option to run MD simulations via JAX MD through the CLI. For this all you have to do is run the following command and give the path to a settings file (.yaml).
+We also include the option to run MD simulations via JAX MD through the Command Line Interface. For this all you have to do is run the following command and give the path to a settings file (.yaml).
 
 
 ```shell script

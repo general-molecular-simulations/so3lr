@@ -1,12 +1,11 @@
-"""Command line interfaces."""
-import click
-import clu.metrics as clu_metrics
-import itertools as it
+"""Evaluation utilities for SO3LR models."""
 import jax
 import jraph
 import numpy as np
+import jax.numpy as jnp
 import time
 import pprint
+import click
 
 from ase.io import write
 from mlff.utils import jraph_utils
@@ -14,46 +13,57 @@ from mlff.utils import evaluation_utils
 from mlff.data import AseDataLoaderSparse
 from pathlib import Path
 
-from ..ascii_string import so3lr_ascii_II
 from ..jraph_utils import jraph_to_ase_atoms
 from ..jraph_utils import unbatch_np
 from ..base_calcuator import make_so3lr
+from .md_so3lr import load_model
 
 
-@click.command()
-@click.option(
-    '--datafile', help='Data file to evaluate the model an. Must be ase.io.read digestible.'
-)
-@click.option(
-    '--batch-size', default=1, help='Number of molecules per batch.'
-)
-@click.option(
-    '--lr-cutoff', default=12., help='Long-range cutoff for SO3LR.'
-)
-@click.option(
-    '--dispersion-energy-lr-cutoff-damping', default=2., help='Damping of long-range start at `--lr-cutoff` - $VALUE'
-)
-@click.option(
-    '--jit-compile/--no-jit-compile', default=True, help='JIT compile the calculation.'
-)
-@click.option(
-    '--save-predictions-to', default=None, help='File path where to save the predictions. Is saved as `extxyz`.'
-)
 def evaluate_so3lr_on(
-        datafile: str,
-        batch_size: int,
-        lr_cutoff: float,
-        dispersion_energy_lr_cutoff_damping: float,
-        jit_compile: bool,
-        save_predictions_to: str
-) -> None:
-    click.echo(so3lr_ascii_II)
+        datafile,
+        batch_size=1,
+        lr_cutoff=12.0,
+        dispersion_energy_lr_cutoff_damping=2.0,
+        jit_compile=True,
+        save_predictions_to=None,
+        model_path=None,
+        precision='float32',
+        targets='forces'
+):
+    """
+    Evaluate SO3LR model on a dataset.
+    
+    Parameters:
+    -----------
+    datafile : str
+        Data file to evaluate the model on. Must be readable by ase.io.read.
+    batch_size : int
+        Number of molecules per batch.
+    lr_cutoff : float
+        Long-range cutoff for SO3LR in Å.
+    dispersion_energy_lr_cutoff_damping : float
+        Damping of long-range start at lr_cutoff - this value.
+    jit_compile : bool
+        Whether to JIT compile the calculation.
+    save_predictions_to : str or None
+        File path where to save the predictions (.extxyz format). If None, predictions are not saved.
+    model_path : str or None
+        Path to the model to evaluate. If None, the default SO3LR model is used.
+    precision : str
+        Precision to use for the calculation.
+    targets : list or None
+        Targets to evaluate. If None, all targets are evaluated.
+        
+    Returns:
+    --------
+    dict
+        Dictionary containing evaluation metrics and timing information.
+    """
+
     total_time_start = time.time()
 
     # Define the targets.
-    targets = (
-        'forces', 'dipole_vec', 'hirshfeld_ratios'
-    )
+    targets = targets.split(',')
 
     datafile = Path(datafile).resolve().expanduser()
 
@@ -71,12 +81,24 @@ def evaluate_so3lr_on(
                 f"datafile must have suffix `.extxyz`. "
                 f"Received {save_predictions_to.name} with {save_predictions_to.suffix}."
             )
-
-    so3lr_calc = make_so3lr(
-        lr_cutoff=lr_cutoff,
-        dispersion_energy_lr_cutoff_damping=dispersion_energy_lr_cutoff_damping,
-        calculate_forces=True
-    )
+    # Loading the model
+    if model_path is None:
+        print("Using default SO3LR potential.")
+        so3lr_calc = make_so3lr(
+            # dtype=precision,
+            lr_cutoff=lr_cutoff,
+            dispersion_energy_lr_cutoff_damping=dispersion_energy_lr_cutoff_damping,
+            calculate_forces=True
+        )
+    else:
+        print(f"Using custom MLFF potential from: {model_path}")
+        so3lr_calc = load_model(
+            model_path,
+            precision= jnp.float64 if precision == 'float64' else jnp.float32,
+            lr_cutoff=lr_cutoff,
+            dispersion_energy_cutoff_lr_damping=dispersion_energy_lr_cutoff_damping,
+            # calculate_forces=True
+            )
 
     loader = AseDataLoaderSparse(
         datafile
@@ -118,7 +140,7 @@ def evaluate_so3lr_on(
             n_pairs=n_pairs
         )
 
-        click.echo('\nStart JIT compilation.')
+        click.echo('Start JIT compilation.')
         compile_start = time.time()
 
         _compile_out = jax.block_until_ready(
@@ -129,31 +151,28 @@ def evaluate_so3lr_on(
 
         compile_end = time.time()
         compile_time = compile_end - compile_start
-        click.echo(f'Compilation completed after {compile_time:.3f} s.\n')
+        click.echo(f'Compilation completed after {compile_time:.3f} s.')
     else:
         compile_time = np.nan
 
-    # Create a collections object for the test targets.
-    test_collection = clu_metrics.Collection.create(
-        **{
-            f'{t}_{m}': clu_metrics.Average.from_output(f'{t}_{m}') for (t, m) in
-            it.product(targets, ('mae', 'mse'))}
-    )
+    # Create a dictionary to track metrics
+    test_metrics = {}
+    for t in targets:
+        for m in ('mae', 'mse'):
+            test_metrics[f'{t}_{m}'] = []
 
     i = 0
     total_time = 0.
     total_num_structures = 0
     predicted = []
 
-    log_every_t = num_data // 10
+    log_every_t = max(1, num_data // 10)
 
     click.echo(f'Start evaluation on {num_data} structures.')
     for graph_batch in batched_graphs:
 
         if total_num_structures % log_every_t == 0:
             click.echo(f'Completed {total_num_structures} / {num_data} structures.')
-
-        first_iteration_bool = i == 0
 
         # Transform the batched graph to inputs dict.
         inputs = jraph_utils.graph_to_batch_fn(
@@ -171,22 +190,19 @@ def evaluate_so3lr_on(
 
         total_time += end - start
 
-        metrics_dict = {}
         # Compute mean absolute error (MAE) and mean squared error (MSE).
         for t in targets:
             msk = assign_mask(t, inputs=inputs)
 
-            metrics_dict[f"{t}_mae"] = evaluation_utils.calculate_mae(
+            mae = evaluation_utils.calculate_mae(
                 y_predicted=output_prediction[t], y_true=inputs[t], msk=msk
             )
-            metrics_dict[f"{t}_mse"] = evaluation_utils.calculate_mse(
+            mse = evaluation_utils.calculate_mse(
                 y_predicted=output_prediction[t], y_true=inputs[t], msk=msk
             )
-
-        if first_iteration_bool is True:
-            test_metrics = test_collection.single_from_model_output(**metrics_dict)
-        else:
-            test_metrics = test_metrics.merge(test_collection.single_from_model_output(**metrics_dict))
+            
+            test_metrics[f"{t}_mae"].append(mae)
+            test_metrics[f"{t}_mse"].append(mse)
 
         # Only executed if predictions are saved.
         if save_predictions_bool is True:
@@ -204,11 +220,13 @@ def evaluate_so3lr_on(
         i += 1
 
     click.echo(f'Completed {total_num_structures} / {num_data} structures.')
-    click.echo(f'Time for evaluation = {(total_time):.3f} s.\n')
+    click.echo(f'Time for evaluation = {(total_time):.3f} s.')
 
-    # Post evaluation loop.
-    test_metrics = test_metrics.compute()
-
+    # Compute final metrics
+    for key in list(test_metrics.keys()):
+        test_metrics[key] = np.mean(test_metrics[key])
+    
+    # Calculate RMSE from MSE
     for t in targets:
         test_metrics[f'{t}_rmse'] = np.sqrt(test_metrics[f'{t}_mse'])
 
@@ -228,8 +246,8 @@ def evaluate_so3lr_on(
     metrics['datafile'] = str(datafile.as_uri())
 
     click.echo('Collected metrics (units are eV, Angstrom, and seconds):')
-    pprint.pprint({k: f"{v:.3e}" if isinstance(v, float) else v for k, v in metrics.items()})
-    click.echo()
+    formatted_metrics = {k: f"{v:.3e}" if isinstance(v, float) else v for k, v in metrics.items()}
+    click.echo(pprint.pformat(formatted_metrics))
 
     if save_predictions_bool is True:
         click.echo(f'Start to save predictions to {str(save_predictions_to.as_uri())}.')
@@ -240,17 +258,31 @@ def evaluate_so3lr_on(
             atoms = jraph_to_ase_atoms(predicted_graph)
             write(save_predictions_to, images=atoms, append=True)
 
-        click.echo('Save completed.\n')
+        click.echo('Save completed.')
 
     total_time_end = time.time()
     click.echo(f'Total time = {(total_time_end - total_time_start):.3f} s.')
     click.echo('Evaluation completed.')
-
+    
+    return metrics
 
 
 def assign_mask(x, inputs):
-    # Assign the mask to the outputs.
-
+    """
+    Assign the mask to the outputs.
+    
+    Parameters:
+    -----------
+    x : str
+        Name of the output to mask.
+    inputs : dict
+        Input dictionary containing masks.
+        
+    Returns:
+    --------
+    msk : ndarray
+        Mask for the specified output.
+    """
     node_mask = inputs['node_mask']
     graph_mask = inputs['graph_mask']
 
@@ -270,7 +302,3 @@ def assign_mask(x, inputs):
         )
 
     return msk
-
-
-if __name__ == '__main__':
-    evaluate_so3lr_on()
