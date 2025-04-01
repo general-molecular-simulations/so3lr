@@ -8,7 +8,7 @@ import jax
 import time
 from ase.io import read, write
 
-from ..ascii_string import so3lr_ascii_II
+from ..ascii_string import so3lr_ascii
 from .so3lr_eval import evaluate_so3lr_on
 from .so3lr_md import (
     perform_min,
@@ -251,7 +251,7 @@ class CustomCommandClass(click.Group):
     
     def format_help(self, ctx, formatter):
         # Display ascii art at the top
-        formatter.write(so3lr_ascii_II)# + "\n")
+        formatter.write(so3lr_ascii)# + "\n")
         
         # For basic help, show the basic help string
         if not ctx.params.get('help_full', False):
@@ -393,7 +393,7 @@ def cli(ctx,
     
     # No arguments provided shows help
     if ctx.invoked_subcommand is None and not any([settings, input_file]):
-        click.echo(so3lr_ascii_II)
+        click.echo(so3lr_ascii)
         click.echo(BASIC_HELP_STRING)
         return
     
@@ -547,7 +547,7 @@ class SubcommandHelpGroup(click.Group):
     def get_help(self, ctx):
         # Set short help mode for top-level options
         formatted_help = click.formatting.HelpFormatter()
-        formatted_help.write(so3lr_ascii_II)# + "\n\n")
+        formatted_help.write(so3lr_ascii)# + "\n\n")
         self.format_usage(ctx, formatted_help)
         self.format_help_text(ctx, formatted_help)
         self.format_options(ctx, formatted_help)
@@ -602,7 +602,7 @@ def fire_optimization(
     Example:
         so3lr opt --input geometry.xyz
     """
-    click.echo(so3lr_ascii_II)
+    click.echo(so3lr_ascii)
     
     if not input_file or help:
         click.echo(fire_optimization.get_help(click.get_current_context()))
@@ -727,7 +727,7 @@ def nvt_md(
         so3lr nvt --input geometry.xyz --temperature 300
     """
     # Print ASCII art at the beginning
-    click.echo(so3lr_ascii_II)
+    click.echo(so3lr_ascii)
     
     # Print possible arguments if no arguments are provided
     if not input_file or help:
@@ -826,7 +826,7 @@ def npt_md(
         so3lr npt --input geometry.xyz --temperature 300 --pressure 1
     """
     # Print ASCII art at the beginning
-    click.echo(so3lr_ascii_II)
+    click.echo(so3lr_ascii)
     
     # Print possible arguments if no arguments are provided
     if not input_file or help:
@@ -899,7 +899,7 @@ def eval_model(
         so3lr eval --datafile data.extxyz --save-predictions-to predictions.extxyz
     """
     # Print ASCII art at the beginning
-    click.echo(so3lr_ascii_II)
+    click.echo(so3lr_ascii)
 
     if not datafile or help:
         click.echo(eval_model.get_help(click.get_current_context()))
