@@ -9,10 +9,8 @@ import time
 from ase.io import read, write
 
 from ..ascii_string import so3lr_ascii_II
-# from .so3lr_eval import evaluate_so3lr_on
-# from .so3lr_md import (
-from .eval_so3lr import evaluate_so3lr_on
-from .md_so3lr import (
+from .so3lr_eval import evaluate_so3lr_on
+from .so3lr_md import (
     perform_min,
     perform_md,
     run,

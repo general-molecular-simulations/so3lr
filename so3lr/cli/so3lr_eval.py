@@ -15,8 +15,8 @@ from pathlib import Path
 
 from ..jraph_utils import jraph_to_ase_atoms
 from ..jraph_utils import unbatch_np
-from ..base_calcuator import make_so3lr
-from .md_so3lr import load_model
+from ..base_calculator import make_so3lr
+from .so3lr_md import load_model
 
 
 def evaluate_so3lr_on(
