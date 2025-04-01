@@ -8,7 +8,6 @@ import jax
 import time
 from ase.io import read, write
 
-from ..ascii_string import so3lr_ascii
 from .so3lr_eval import evaluate_so3lr_on
 from .so3lr_md import (
     perform_min,
@@ -16,6 +15,15 @@ from .so3lr_md import (
     run,
     write_to_extxyz
 )
+
+so3lr_ascii = """
+  ███████╗ ██████╗ ██████╗ ██╗     ██████╗ 
+  ██╔════╝██╔═══██╗╚════██╗██║     ██╔══██╗
+  ███████╗██║   ██║ █████╔╝██║     ██████╔╝
+  ╚════██║██║   ██║ ╚═══██╗██║     ██╔══██╗
+  ███████║╚██████╔╝██████╔╝███████╗██║  ██║
+  ╚══════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
+"""
 
 FULL_HELP_STRING = """
 Run simulations using SO3LR Machine Learned Force Field.
