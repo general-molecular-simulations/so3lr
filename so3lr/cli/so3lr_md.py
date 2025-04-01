@@ -17,6 +17,7 @@ import time
 import os
 import yaml
 import pathlib
+from pathlib import Path
 import click
 import numpy as np
 import ase
@@ -27,7 +28,7 @@ import jax_md.quantity
 
 from ase.io import read
 from functools import partial
-from typing import Dict, Tuple, Union, List, Optional
+from typing import Dict, Tuple, Union, List, Optional, Any, Callable
 from jax_md import units
 from jax_md import partition
 from jax_md.space import Box, DisplacementOrMetricFn, raw_transform
@@ -36,7 +37,7 @@ from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
 
-# At the top of the file
+# Constants for default parameters
 DEFAULT_PRECISION = 'float64'
 DEFAULT_LR_CUTOFF = 12.0
 DEFAULT_DISPERSION_DAMPING = 2.0
@@ -49,130 +50,154 @@ DEFAULT_MD_CYCLES = 100
 DEFAULT_MD_STEPS_PER_CYCLE = 100
 DEFAULT_NHC_CHAIN_LENGTH = 3
 DEFAULT_NHC_INTEGRATION_STEPS = 2
-DEFAULT_NHC_THERMO_TIMESCALE = 100  # femtoseconds
-DEFAULT_NHC_BARO_TIMESCALE = 1000  # femtoseconds
+DEFAULT_NHC_THERMO = 100.0  # thermostat timescale in fs
+DEFAULT_NHC_BARO = 1000.0  # barostat timescale
 DEFAULT_SUZUKI_YOSHIDA_STEPS = 3
+DEFAULT_MIN_CYCLES = 10
+DEFAULT_MIN_STEPS = 10
+DEFAULT_SEED = 52
+DEFAULT_TOTAL_CHARGE = 0
+
 
 def handle_units(
-    unit_system: callable,
+    unit_system: Callable[[], Dict[str, float]],
     dt: float,
-    T: float = None,
-    P: float = None
-)-> dict:
+    T: Optional[float] = None,
+    P: Optional[float] = None
+) -> Dict[str, Optional[float]]:
     """
-    Applies the units to the timestep, temperature and pressure.
+    Apply unit conversions to timestep, temperature, and pressure.
+    
     The unit_system is a function that returns a dictionary of the units
     with the keys 'time', 'temperature' and 'pressure'.
 
     Args:
-        unit_system (callable): Function that returns a dictionary of units.
-        dt (float): Timestep.
-        T (float, optional): Target temperature. Defaults to None.
-        P (float, optional): Target pressure. Defaults to None.
+        unit_system: Function that returns a dictionary of units.
+        dt: Timestep in picoseconds.
+        T: Target temperature in Kelvin. Defaults to None.
+        P: Target pressure in atmospheres. Defaults to None.
 
     Returns:
-        dict: Dictionary containing the timestep, temperature and pressure
-                in the correct units.
+        Dictionary containing the timestep, temperature and pressure
+        in the correct units for JAX MD.
     """
-    
-    unit = unit_system()
-    dt *= unit['time']
-    if T is not None:
-        T *= unit['temperature']
-    if P is not None:
-        P *= unit['pressure']
-    
-    return {
-        'dt': dt,
-        'T': T,
-        'P': P
-    }  
+    try:
+        unit = unit_system()
+        dt *= unit['time']
+        
+        if T is not None:
+            T *= unit['temperature']
+            
+        if P is not None:
+            P *= unit['pressure']
+        
+        return {
+            'dt': dt,
+            'T': T,
+            'P': P
+        }
+    except Exception as e:
+        raise ValueError(f"Error converting units: {str(e)}")
+
 
 def handle_box(
     shift_displacement: str,
     positions: jnp.ndarray,
-    cell: jnp.ndarray = None
-)-> Tuple[jnp.ndarray, jnp.ndarray, callable, callable, bool]:
+    cell: Optional[jnp.ndarray] = None
+) -> Tuple[jnp.ndarray, jnp.ndarray, Callable, Callable, bool]:
     """
-    Handle the box and the displacement functions. 
+    Set up box and displacement functions for simulation.
     
     If the system is periodic, periodic boundary conditions are applied and the
-    positions are divided by the box vector. Also fractional coordinates are
-    then applied.
+    positions are divided by the box vector. Fractional coordinates are used
+    for periodic systems.
 
     Args:
-        shift_displacement (str): Type of boundary conditions.
-        positions (jnp.ndarray): Positions of the atoms.
-        cell (jnp.ndarray, optional): Cell of the system. Defaults to None.
+        shift_displacement: Type of boundary conditions ('free' or 'periodic').
+        positions: Positions of the atoms.
+        cell: Unit cell vectors for periodic systems. Required if shift_displacement is 'periodic'.
 
     Raises:
-        NotImplementedError: If the shift_displacement is not 'free' or 'periodic'.
+        ValueError: If cell is not provided for periodic boundary conditions or
+                   if an unsupported boundary condition is specified.
 
     Returns:
-        Tuple[jnp.ndarray, jnp.ndarray, callable, callable, bool]: 
-            Positions, box, displacement function, shift function and
-            whether fractional coordinates are used.
+        Tuple containing:
+        - positions: Possibly transformed positions (fractional for periodic)
+        - box: Box vector or 0.0 for free boundary conditions
+        - displacement: Function to compute displacements
+        - shift: Function to shift positions
+        - fractional_coordinates: Whether positions are in fractional coordinates
     """
-    
     if shift_displacement == 'periodic':
-        assert cell is not None, 'Cell must be defined for periodic boundary conditions'
+        if cell is None:
+            raise ValueError('Cell must be defined for periodic boundary conditions')
+        
         box = jnp.array(np.diag(np.array(cell)))
         fractional_coordinates = True
+        
+        # Create displacement and shift functions for periodic boundary conditions
         displacement, shift = jax_md.space.periodic_general(
             box=box,
             fractional_coordinates=fractional_coordinates
-            )
+        )
+        
         # Convert positions to fractional coordinates
         inv_box = 1/box
         positions = raw_transform(inv_box, positions)
     
     elif shift_displacement == 'free':
+        # Create displacement and shift functions for free boundary conditions
         displacement, shift = jax_md.space.free()
         box = jnp.array(0.0)
         fractional_coordinates = False
         
     else:
-        raise NotImplementedError(
-            "Only 'free' or 'perodic' boundary conditions are supported"
+        raise ValueError(
+            f"Unsupported boundary condition: '{shift_displacement}'. "
+            "Only 'free' or 'periodic' boundary conditions are supported."
         )
 
     return positions, box, displacement, shift, fractional_coordinates
 
+
 def init_hdf5_store(
-    save_to: str, 
+    save_to: Union[str, Path], 
     batch_size: int, 
     num_atoms: int,
     num_box_entries: int,
     exist_ok: bool = False
-)-> HDF5Store:
+) -> HDF5Store:
     """
-    Initialize the HDF5 storage object.
+    Initialize an HDF5 storage object for trajectory data.
 
     Args:
-        save_to (str): Path to save the HDF5 file.
-        batch_size (int): Batch size for the storage.
-        num_atoms (int): Number of atoms in the system.
-        num_box_entries (int): Number of entries in the box vector.
-        exist_ok (bool, optional): Whether to overwrite the file if it exists.
-                                    Defaults to False.
+        save_to: Path to save the HDF5 file.
+        batch_size: Batch size for the storage.
+        num_atoms: Number of atoms in the system.
+        num_box_entries: Number of entries in the box vector (typically 3).
+        exist_ok: Whether to overwrite the file if it exists.
 
     Raises:
         RuntimeError: If the file exists and exist_ok is set to False.
 
     Returns:
-        HDF5Store: _description_
+        HDF5Store: Initialized HDF5 storage object.
     """
-    parent_dir = pathlib.Path(save_to).expanduser().resolve().parent
-    parent_dir.mkdir(exist_ok=True)
+    # Convert to Path object and resolve path
+    save_path = Path(save_to).expanduser().resolve()
     
-    _save_to = pathlib.Path(save_to)
-    if _save_to.exists():
-        if exist_ok is False:
-            raise RuntimeError(
-                f'File exists save_to={_save_to}. '
-                f'Set exists_ok=True to override file.'
-            )
+    # Create parent directory if it doesn't exist
+    save_path.parent.mkdir(parents=True, exist_ok=True)
     
+    # Check if file exists
+    if save_path.exists() and not exist_ok:
+        raise RuntimeError(
+            f'File exists: {save_path}. '
+            f'Set exist_ok=True to override file.'
+        )
+    
+    # Define dataset structure
     dataset = {
         'positions': DataSetEntry(
             chunk_length=1, 
@@ -186,341 +211,146 @@ def init_hdf5_store(
         ),
         'box': DataSetEntry(
             chunk_length=1, 
-            shape=(batch_size, 3), 
+            shape=(batch_size, num_box_entries), 
             dtype=np.float32
         )
     }
 
-    return HDF5Store(_save_to, datasets=dataset, mode='w')
+    return HDF5Store(save_path, datasets=dataset, mode='w')
+
 
 def write_to_hdf5(
     hdf5_store: HDF5Store,
-    momenta: list,
-    positions: list,
-    boxs: list,
-)-> Tuple[list, list, list]:
+    momenta: List[jnp.ndarray],
+    positions: List[jnp.ndarray],
+    boxes: List[jnp.ndarray],
+) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray]]:
     """
-    Write the positions, momenta and box to the hdf5 file.
-    Returns empty lists for the positions, momenta and boxs in order
-    to store the next batch of data.
+    Write trajectory data to an HDF5 file.
     
+    Writes the accumulated trajectory data to HDF5 storage and clears
+    the input lists to free memory.
+
     Args:
-        hdf5_store (HDF5Store): HDF5 storage object.
-        momenta (list): List of momenta.
-        positions (list): List of positions.
-        boxs (list): List of box vectors.
+        hdf5_store: HDF5 storage object.
+        momenta: List of momenta arrays for each frame.
+        positions: List of position arrays for each frame.
+        boxes: List of box arrays for each frame.
 
     Returns:
-        Tuple[list, list, list]: Empty lists for the positions, momenta and boxs.
+        Tuple of empty lists for momenta, positions, and boxes.
     """
-    
-    step_data = {
-        'positions': jnp.stack(positions, axis=0),
-        'momenta': jnp.stack(momenta, axis=0),
-        'box': jnp.stack(boxs, axis=0) if len(boxs) > 0 else None
-    }
-    
-    step_data = jax.tree.map(
-        lambda u: np.asarray(u), step_data
-        )
-    
-    hdf5_store.append(step_data)
-    
-    return [], [], []
+    try:
+        # Convert lists to numpy arrays
+        momenta_np = np.array(momenta)
+        positions_np = np.array(positions)
+        boxes_np = np.array(boxes)
+        
+        # Write to HDF5 file
+        hdf5_store.extend('momenta', momenta_np)
+        hdf5_store.extend('positions', positions_np)
+        hdf5_store.extend('box', boxes_np)
+        
+        # Clear the lists to free memory
+        return [], [], []
+        
+    except Exception as e:
+        click.echo(f"Warning: Failed to write to HDF5 file: {str(e)}")
+        # Return the original lists in case of failure
+        return momenta, positions, boxes
 
 def write_to_extxyz(
-    output_file: str,
+    output_file: Union[str, Path],
     atoms: ase.Atoms,
-    boxs: Union[float, jnp.ndarray, List, None],
+    boxes: Union[float, jnp.ndarray, List, None],
     momenta: List,
     positions: List
 ) -> Tuple[List, List, List]:
-
-    positions = np.asarray(positions)
-    atoms_list = []
-    for i in range(len(positions)):
-        atoms_copy = atoms.copy()
-        if isinstance(boxs, float):
-            if boxs == 0:
-                atoms_copy.set_positions(positions[i])
-            else:
-                atoms_copy.set_cell(boxs)
-                atoms_copy.set_positions(positions[i] * boxs)
-        elif isinstance(boxs, jnp.ndarray):
-            if np.any(boxs == 0):
-                atoms_copy.set_positions(positions[i])
-            else:
-                atoms_copy.set_cell(boxs)
-                atoms_copy.set_positions(positions[i] * boxs)
-        elif isinstance(boxs, list):
-            if np.any(boxs[0] == 0):
-                atoms_copy.set_positions(positions[i])
-            else:
-                atoms_copy.set_cell(boxs[i])
-                atoms_copy.set_positions(positions[i] * boxs[i])
-        else:
-            atoms_copy.set_positions(positions[i])
-
-        atoms_list.append(atoms_copy)
-    
-    ase.io.write(output_file, atoms_list, format='extxyz', append=True)
-    
-    return [], [], []
-
-class Featurizer:
     """
-    Featurizer class that creates the graph for the given model. 
-    When called returns a function that creates the graph for the 
-    short-range or long-range interactions.
-    """
-    def __init__(
-        self,
-        displacement_fn: callable,
-        species: jnp.ndarray,
-        total_charge: float = 0,
-        precision: jnp.dtype = jnp.float32,
-        lr_bool: bool = False
-    )-> None:
+    Write trajectory data to an extended XYZ file.
     
-        self.displacement_fn = displacement_fn
-        self.species = species
-        self.lr_bool = lr_bool
-        self.total_charge = total_charge
-        self.precision = precision
-        
-    def featurize_lr(
-        self,
-        R: jnp.ndarray,
-        neighbor: Tuple[jnp.ndarray, jnp.ndarray],
-        neighbor_lr: Tuple[jnp.ndarray, jnp.ndarray],
-        **kwargs
-    )-> Graph:
-        """
-        Create the graph for the long-range interactions.
-
-        Args:
-            R (jnp.ndarray): Positions of the atoms.
-            neighbor (Tuple[jnp.ndarray, jnp.ndarray]): Senders and receivers
-                                                of the short-range interactions.
-            neighbor_lr (Tuple[jnp.ndarray, jnp.ndarray]): Senders and receivers
-                                                of the long-range interactions.
-            **kwargs: Additional keyword arguments.
-
-        Returns:
-            Graph: Graph object containing all information for the MLFF.
-        """
-        
-        idx_i = neighbor[0]  # shape: P
-        idx_j = neighbor[1]  # shape: P
-        idx_i_lr = neighbor_lr[0]  # shape: P
-        idx_j_lr = neighbor_lr[1]  # shape: P
-
-        Ra = R[idx_i]
-        Rb = R[idx_j]
-        Ra_lr = R[idx_i_lr]
-        Rb_lr = R[idx_j_lr]
-
-        if 'box' in kwargs:
-            box = kwargs.get('box')
-
-        # Edges
-        d = jax.vmap(partial(self.displacement_fn, **kwargs))
-        dR = d(Ra, Rb)
-        dR_lr = d(Ra_lr, Rb_lr)
-
-        graph = Graph(
-            positions=None,
-            nodes=self.species,
-            edges=dR,
-            centers=idx_i,
-            others=idx_j,
-            mask=None,
-            total_charge=jnp.array([self.total_charge], dtype=jnp.int32),
-            num_unpaired_electrons=jnp.array([0.]),
-            edges_lr=dR_lr,
-            idx_i_lr=idx_i_lr,
-            idx_j_lr=idx_j_lr,
-            cell=box  # will raise an error if box not in kwargs.
-        )
-        return graph
+    Creates a copy of the atoms object for each frame and appends it to the
+    output file with the corresponding positions, momenta, and box.
+    Handles different box formats and applies appropriate scaling to positions.
     
-    def featurize(
-        self,
-        R: jnp.ndarray,
-        neighbor: Tuple[jnp.ndarray, jnp.ndarray],
-        **kwargs
-    )-> Graph:
-        """
-        Create the graph for the short-range interactions.
-
-        Args:
-            R (jnp.ndarray): Positions of the atoms.
-            neighbor (Tuple[jnp.ndarray, jnp.ndarray]): Senders and receivers
-                                                of the short-range interactions.
-
-        Returns:
-            Graph: Graph object containing all information for the MLFF.
-        """
-        idx_i = neighbor[0]
-        idx_j = neighbor[1]
-        
-        Ra = R[idx_i]
-        Rb = R[idx_j]
-        
-        if 'box' in kwargs:
-            box = kwargs.get('box')
-        
-        d = jax.vmap(partial(self.displacement_fn, **kwargs))
-        dR = d(Ra, Rb)
-        
-        graph = Graph(
-            positions=None,
-            nodes=self.species,
-            edges=dR,
-            centers=idx_i,
-            others=idx_j,
-            mask=None,
-            total_charge=jnp.array([self.total_charge], dtype=self.precision),
-            num_unpaired_electrons=jnp.array([0.]),
-            edges_lr=None,
-            idx_i_lr=None,
-            idx_j_lr=None,
-            cell=box
-        )
-        
-        return graph
-    
-    def __call__(
-        self
-    ):
-        if self.lr_bool:
-            return self.featurize_lr
-        else:
-            return self.featurize
-
-def to_jax_md_custom(
-        potential: MLFFPotentialSparse,  
-        displacement_or_metric: DisplacementOrMetricFn,
-        box: Box,  
-        species: jnp.ndarray = None, 
-        total_charge: float = 0., 
-        precision: jnp.dtype = jnp.float32,
-        dr_threshold: float = 0., 
-        capacity_multiplier: float = 1.25,
-        buffer_size_multiplier_sr: float = 1.25,
-        buffer_size_multiplier_lr: float = 1.25,
-        minimum_cell_size_multiplier_sr: float = 1.0,
-        minimum_cell_size_multiplier_lr: float = 1.0,
-        disable_cell_list: bool = False,
-        fractional_coordinates: bool = True,
-        **neighbor_kwargs
-)-> Tuple[callable, callable, callable]:
-    """
-    Create the neighbor functions and energy function for the given potential
-    and displacement function.
-
     Args:
-        potential (MLFFPotentialSparse): Force field model.
-        displacement_or_metric (DisplacementOrMetricFn): Displacement function.
-        box (Box): Box of the system.
-        species (jnp.ndarray, optional): Array of atomic species. Defaults to None.
-        total_charge (float, optional): Charge of the system. Defaults to 0..
-        precision (jnp.dtype, optional): Floating point precision. Defaults to jnp.float32.
-        dr_threshold (float, optional): . Defaults to 0..
-        capacity_multiplier (float, optional): Memory multiplier for neighborlist.
-                                            Defaults to 1.25.
-        buffer_size_multiplier_sr (float, optional): Buffer for short-range
-                                            neighborlist. Defaults to 1.25.
-        buffer_size_multiplier_lr (float, optional): Buffer for long-range
-                                            neighborlist. Defaults to 1.25.
-        minimum_cell_size_multiplier_sr (float, optional): Memory mutliplier for
-                                            the short-range cell. Defaults to 1.0.
-        minimum_cell_size_multiplier_lr (float, optional): Memory mutliplier for
-                                            the long-range cell. Defaults to 1.0.
-        disable_cell_list (bool, optional): If set to `True` then the neighbor
-                    list is constructed using only distances. Defaults to False.
-        fractional_coordinates (bool, optional): Whether to use fractional 
-                                                    coordinates. Defaults to True.
-
-    Returns:
-        Tuple[callable, callable, callable]: Neighbor functions and energy function.
-    """
-    # create the neighbor_fn
-    neighbor_fn = partition.neighbor_list(
-        displacement_or_metric,
-        box,
-        potential.cutoff,  
-        dr_threshold,
-        capacity_multiplier,
-        buffer_size_multiplier_sr,  
-        minimum_cell_size_multiplier_sr,
-        fractional_coordinates=fractional_coordinates,
-        format=partition.NeighborListFormat(1),  # only sparse is supported in mlff
-        disable_cell_list=disable_cell_list,
-        **neighbor_kwargs)
-
-    if potential.long_range_cutoff is not None:
-    # create the neighbor_fn for long-range cutoff
-        neighbor_fn_lr = partition.neighbor_list(
-            displacement_or_metric,
-            box,
-            potential.long_range_cutoff,
-            dr_threshold,
-            capacity_multiplier,
-            buffer_size_multiplier_lr,  # as buffer_size_multiplier
-            minimum_cell_size_multiplier_lr,
-            fractional_coordinates=fractional_coordinates,
-            format=partition.NeighborListFormat(2),  # long-range modules can handle OrderedSparse.
-            disable_cell_list=disable_cell_list,
-            **neighbor_kwargs)
-
-        # function that constructs the graph
-        featurizer = Featurizer(
-            displacement_fn=displacement_or_metric,
-            species=species,
-            lr_bool=True,
-            total_charge=total_charge,
-            precision=precision
-            )()
-
-        # create an energy_fn that is compatible with jax_md
-        def energy_fn(
-                R,
-                neighbor,
-                neighbor_lr,
-                **energy_fn_kwargs
-        ):
-            graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
-            return potential(graph).sum()
-
-        return neighbor_fn, neighbor_fn_lr, energy_fn
+        output_file: Path to the output file.
+        atoms: ASE Atoms object template.
+        boxes: Box vectors for each frame or single box for all frames.
+             Can be float, array, or list of arrays.
+        momenta: List of momenta arrays for each frame.
+        positions: List of position arrays for each frame.
     
-    else:
-        featurizer = Featurizer(
-            displacement_fn=displacement_or_metric,
-            species=species,
-            lr_bool=False,
-            total_charge=total_charge,
-            precision=precision
-        )()
+    Returns:
+        Tuple of empty lists (momenta, positions, boxes) to clear memory on success.
+        On failure, returns the original lists.
+    """
+    try:
+        # Ensure output_file is a Path object
+        output_path = Path(output_file) if isinstance(output_file, str) else output_file
+        
+        # Create parent directory if it doesn't exist
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Check if we have data to write
+        if not positions:
+            click.echo('No positions to write to extxyz file')
+            return momenta, positions, boxes
+            
+        # Convert positions to numpy array
+        positions = np.asarray(positions)
+        
+        # Create a list of atoms objects for each frame
+        atoms_list = []
+        for i in range(len(positions)):
+            atoms_copy = atoms.copy()
+            
+            # Handle different box types and set positions accordingly
+            if isinstance(boxes, float):
+                if boxes == 0:
+                    atoms_copy.set_positions(positions[i])
+                else:
+                    atoms_copy.set_cell(boxes)
+                    atoms_copy.set_positions(positions[i] * boxes)
+            elif isinstance(boxes, (jnp.ndarray, np.ndarray)):
+                if np.any(boxes == 0):
+                    atoms_copy.set_positions(positions[i])
+                else:
+                    atoms_copy.set_cell(boxes)
+                    atoms_copy.set_positions(positions[i] * boxes)
+            elif isinstance(boxes, list):
+                if np.any(boxes[0] == 0):
+                    atoms_copy.set_positions(positions[i])
+                else:
+                    atoms_copy.set_cell(boxes[i])
+                    atoms_copy.set_positions(positions[i] * boxes[i])
+            else:
+                atoms_copy.set_positions(positions[i])
+            
+            # Set momenta if available
+            if momenta and i < len(momenta):
+                atoms_copy.set_momenta(momenta[i])
+                
+            atoms_list.append(atoms_copy)
+        
+        # Write all atoms to file at once
+        file_exists = output_path.exists()
+        ase.io.write(output_path, atoms_list, format='extxyz', append=file_exists)
+        
+        # Clear lists to free memory
+        return [], [], []
+        
+    except Exception as e:
+        click.echo(f"Warning: Failed to write to extxyz file: {str(e)}")
+        # Return the original lists in case of failure
+        return [], [], []
 
-        # create an energy_fn that is compatible with jax_md
-        def energy_fn(
-                R,
-                neighbor,
-                **energy_fn_kwargs
-        ):
-            graph = featurizer(R, neighbor, **energy_fn_kwargs)
-            return potential(graph).sum()
-
-        return neighbor_fn, None, energy_fn
 
 def atoms_to_jnp(
     atoms: ase.Atoms,
     precision: jnp.dtype = jnp.float32
-)-> dict:
+) -> dict:
     """
-    
     Transform the ASE atoms object to a dictionary of jax numpy arrays.
 
     Args:
@@ -541,37 +371,185 @@ def atoms_to_jnp(
         'masses': masses
     }
 
+
 def load_model(
     model_path: str,
     precision: jnp.dtype,
     lr_cutoff: float = 12.0,
     dispersion_energy_cutoff_lr_damping: float = 2.
-)-> MLFFPotentialSparse:
+) -> MLFFPotentialSparse:
     """
-    Load the model from the given path and return the potential.
+    Load a trained MLFF model from a checkpoint directory.
 
     Args:
-        model_path (str): Path to the model.
-        precision (jnp.dtype): Floating point precision.
-        lr_cutoff (float, optional): Long-range cutoff radius. Defaults to 12.0.
+        model_path (str): Path to the model checkpoint directory.
+        precision (jnp.dtype): Precision to use for the calculation.
+        lr_cutoff (float, optional): Long-range cutoff for SO3LR in Å. Defaults to 12.0.
         dispersion_energy_cutoff_lr_damping (float, optional): Cutoff for dispersion
-                                        potential damping function. Defaults to 2..
+                                energy damping in Å. Defaults to 2.0.
 
     Returns:
-        MLFFPotentialSparse: Force field model.
+        MLFFPotentialSparse: The loaded MLFF model.
     """
-    long_range_kwargs = {
-        'cutoff_lr': lr_cutoff,
-        'dispersion_energy_cutoff_lr_damping': dispersion_energy_cutoff_lr_damping,
-        'neighborlist_format_lr': 'ordered_sparse'
-    }
-
-    potential = MLFFPotentialSparse.create_from_workdir(
-        workdir=model_path,
-        dtype=jnp.float64 if precision == 'float64' else jnp.float32,
-        long_range_kwargs=long_range_kwargs
+    click.echo(f'Loading model from {model_path}')
+    
+    # Verify model path exists
+    model_dir = Path(model_path).expanduser().resolve()
+    if not model_dir.exists():
+        raise FileNotFoundError(f"Model path not found: {model_path}")
+    
+    # Load from ckpt directory path
+    potential = MLFFPotentialSparse.create_from_ckpt_dir(
+        model_dir,
+        from_file=True,
+        long_range_kwargs=dict(
+            cutoff_lr=lr_cutoff,
+            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
+            neighborlist_format_lr='ordered_sparse'
+        ),
+        dtype=precision
     )
+    
     return potential
+
+
+def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., precision=jnp.float32):
+    """
+    Create a function that builds a graph from positions and neighbors.
+    
+    Args:
+        displacement_fn: Function to compute displacements.
+        species: Array of atomic species.
+        total_charge: Total charge of the system.
+        precision: Precision to use for calculations.
+        
+    Returns:
+        Function that creates a graph from positions and neighbors.
+    """
+    def featurize(R, neighbor, neighbor_lr, **kwargs):
+        idx_i = neighbor[0]  # shape: P
+        idx_j = neighbor[1]  # shape: P
+        idx_i_lr = neighbor_lr[0]  # shape: P
+        idx_j_lr = neighbor_lr[1]  # shape: P
+
+        Ra = R[idx_i]
+        Rb = R[idx_j]
+        Ra_lr = R[idx_i_lr]
+        Rb_lr = R[idx_j_lr]
+
+        box = kwargs.get('box', None)
+
+        d = jax.vmap(partial(displacement_fn, **kwargs))
+        dR = d(Ra, Rb)
+        dR_lr = d(Ra_lr, Rb_lr)
+
+        graph = Graph(
+            positions=None,
+            nodes=species,
+            edges=dR,
+            centers=idx_i,
+            others=idx_j,
+            mask=None,
+            total_charge=jnp.array([total_charge], dtype=precision),
+            num_unpaired_electrons=jnp.array([0.]),
+            edges_lr=dR_lr,
+            idx_i_lr=idx_i_lr,
+            idx_j_lr=idx_j_lr,
+            cell=box  # Will be None for free boundary conditions
+        )
+
+        return graph
+
+    return featurize
+
+
+def to_jax_md_custom(
+        potential,  # the mlff potential
+        species: jnp.ndarray,
+        displacement_or_metric: DisplacementOrMetricFn,
+        box,  # box if it exists, check jax_md documentation for conventions
+        dr_threshold: float = 0.,  # currently dr_threshold > 0 is experimental
+        capacity_multiplier: float = 1.25,
+        buffer_size_multiplier_sr: float = 1.25,
+        buffer_size_multiplier_lr: float = 1.25,
+        minimum_cell_size_multiplier_sr: float = 1.0,
+        minimum_cell_size_multiplier_lr: float = 1.0,
+        disable_cell_list: bool = False,
+        fractional_coordinates: bool = True,
+        total_charge: float = 0.,
+        precision: jnp.dtype = jnp.float32,
+        **neighbor_kwargs
+):
+    """
+    Create neighbor functions and energy function for JAX MD.
+    
+    Args:
+        potential: The MLFF potential object.
+        species: Array of atomic species.
+        displacement_or_metric: Function to compute displacements.
+        box: Box definition for periodic systems.
+        dr_threshold: Threshold for neighborhood cutoff.
+        capacity_multiplier: Capacity multiplier for neighbor lists.
+        buffer_size_multiplier_sr: Buffer size multiplier for short-range interactions.
+        buffer_size_multiplier_lr: Buffer size multiplier for long-range interactions.
+        minimum_cell_size_multiplier_sr: Minimum cell size multiplier for short-range.
+        minimum_cell_size_multiplier_lr: Minimum cell size multiplier for long-range.
+        disable_cell_list: Whether to disable cell lists.
+        fractional_coordinates: Whether to use fractional coordinates.
+        total_charge: Total charge of the system.
+        precision: Precision to use for calculations.
+        **neighbor_kwargs: Additional keyword arguments for neighbor functions.
+        
+    Returns:
+        Tuple of neighbor function, long-range neighbor function, and energy function.
+    """
+    # Create the neighbor_fn
+    neighbor_fn = partition.neighbor_list(
+        displacement_or_metric,
+        box,
+        potential.cutoff,  # load the cutoff of the model from the MLFFPotential
+        dr_threshold,
+        capacity_multiplier,
+        buffer_size_multiplier_sr,  # as buffer_size_multiplier
+        minimum_cell_size_multiplier_sr,
+        fractional_coordinates=fractional_coordinates,
+        format=partition.NeighborListFormat(1),  # only sparse is supported in mlff
+        disable_cell_list=disable_cell_list,
+        **neighbor_kwargs)
+
+    # Create the neighbor_fn for long-range cutoff
+    neighbor_fn_lr = partition.neighbor_list(
+        displacement_or_metric,
+        box,
+        potential.long_range_cutoff,
+        dr_threshold,
+        capacity_multiplier,
+        buffer_size_multiplier_lr,  # as buffer_size_multiplier
+        minimum_cell_size_multiplier_lr,
+        fractional_coordinates=fractional_coordinates,
+        format=partition.NeighborListFormat(2),  # long-range modules can handle OrderedSparse.
+        disable_cell_list=disable_cell_list,
+        **neighbor_kwargs)
+
+    featurizer = neighbor_list_featurizer_custom(
+        displacement_or_metric,
+        species,
+        total_charge,
+        precision
+    )
+
+    # Create an energy_fn that is compatible with jax_md
+    def energy_fn(
+            R,
+            neighbor,
+            neighbor_lr,
+            **energy_fn_kwargs
+    ):
+        graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
+        return potential(graph).sum()
+
+    return neighbor_fn, neighbor_fn_lr, energy_fn
+
 
 def process_model(
     potential: MLFFPotentialSparse,
@@ -583,9 +561,8 @@ def process_model(
     buffer_size_multiplier_sr: float = 1.25,
     precision: jnp.dtype = jnp.float32,
     fractional_coordinates: bool = False
-)-> Tuple[callable, callable, callable]:
+) -> Tuple[callable, callable, callable]:
     """
-    
     Process the model and create the neighbor functions and energy function.
 
     Args:
@@ -624,6 +601,7 @@ def process_model(
     
     return neighbor_fn, neighbor_fn_lr, energy_fn
 
+
 def check_overflow(
     neighbor_fn: callable,
     neighbor_fn_lr: callable,
@@ -631,7 +609,7 @@ def check_overflow(
     nbrs_lr: jax_md.partition.NeighborList,
     state,
     box: jnp.ndarray,
-    )-> Tuple[jax_md.partition.NeighborList, jax_md.partition.NeighborList, bool]:
+) -> Tuple[jax_md.partition.NeighborList, jax_md.partition.NeighborList, bool]:
     """
     
     Check if the neighbor lists have overflowed and reallocate them if needed.
@@ -667,6 +645,7 @@ def check_overflow(
             )
     return nbrs, nbrs_lr, overflown
 
+
 def compute_quantities(
     energy_fn: callable,
     state,
@@ -676,7 +655,7 @@ def compute_quantities(
     unit: dict,
     T: float = None,
     P:float = None
-)-> Tuple[float, float, float, float, float]:
+) -> Tuple[float, float, float, float, float]:
     """
     Compute the kinetic energy, potential energy, Hamiltonian, temperature
     and pressure of the system.
@@ -787,6 +766,7 @@ def compute_quantities(
     
     return KE, PE, H, current_T, current_P
 
+
 def create_nhc_fn(
     energy_fn: callable,
     shift: callable,
@@ -795,7 +775,7 @@ def create_nhc_fn(
     box: jnp.ndarray,
     nhc_kwargs: dict,
     lr: bool
-)-> Tuple[callable, callable]:
+) -> Tuple[callable, callable]:
     """
     Create the NHC thermostat functions.
 
@@ -822,9 +802,10 @@ def create_nhc_fn(
     init_fn = jax.jit(init_fn)
     apply_fn = jax.jit(apply_fn)
 
-    step_md_fn = create_md_fn('nvt',lr,apply_fn, T)
+    step_md_fn = create_md_fn('nvt', lr, apply_fn, T)
     
     return init_fn, step_md_fn
+
 
 def create_npt_nhc_fn(
     energy_fn,
@@ -848,15 +829,16 @@ def create_npt_nhc_fn(
     init_fn = jax.jit(init_fn)
     apply_fn = jax.jit(apply_fn)
 
-    step_md_fn = create_md_fn("npt", lr,apply_fn, T, P)
+    step_md_fn = create_md_fn("npt", lr, apply_fn, T, P)
     
     return init_fn, step_md_fn
+
 
 def create_nvt_step_fn(
     lr: bool,
     apply_fn: callable,
     T: float,
-)-> callable:
+) -> callable:
     """
     Create the NVT step function.
 
@@ -915,12 +897,13 @@ def create_nvt_step_fn(
             return state, nbrs, box  
         return step_nvt_fn
 
+
 def create_npt_step_fn(
     lr: bool,
     apply_fn: callable,
     T: float,
     P: float
-)-> callable:
+) -> callable:
     """
     Create the NPT step function.
 
@@ -986,13 +969,14 @@ def create_npt_step_fn(
             return state, nbrs, box
         return step_npt_fn
 
+
 def create_md_fn(
     ensemble: str,
     lr: bool,
     apply_fn: callable,
     T: float = None,
     P: float = None
-)-> callable:
+) -> callable:
     """
     Create the MD step function for the given ensemble.
 
@@ -1017,6 +1001,7 @@ def create_md_fn(
     else:
         raise NotImplementedError(f'Ensemble "{ensemble}" is not supported. Only NVT and NPT ensembles are currently implemented.')
     
+
 def infer_output_format(output_file):
     """Determine output format based on file extension."""
     if output_file.endswith('.hdf5'):
@@ -1027,96 +1012,66 @@ def infer_output_format(output_file):
         click.echo(f"Unknown output extension for {output_file}, defaulting to extxyz format")
         return 'extxyz'
 
+
 def perform_md(
     all_settings: Dict,
     opt_structure: Optional[jnp.ndarray] = None,
 ) -> None:
     """
-    Performs MD simulation using the settings provided in all_settings.
-    If opt_structure is provided, the simulation will start from this 
-    geometry e.g. an optimized structure. This is only an array with
-    the coordinates of the atoms. Thus, it still expects a geometry file
-    to read from in order to get the cell and species information.
-
+    Perform molecular dynamics simulation with the given settings.
+    
     Args:
-        all_settings (Dict): Dictionary containing the settings for the
-                            MD simulation.
-        opt_structure (jnp.ndarray, optional): Structure to start the MD
-                                                from. If not provided starts 
-                                                from geometry that is read from
-                                                the path given in the settings.
-                                                Defaults to None.
+        all_settings (Dict): Settings for the MD simulation.
+        opt_structure (Optional[jnp.ndarray], optional): Optimized structure, if 
+                                    already available. Defaults to None.
     """
-
-    # Model path, settings and precision
+    # Extract settings with defaults
+    input_file = all_settings.get('initial_geometry')
+    output_file = all_settings.get('output_file')
+    restart_save_path = all_settings.get('restart_save_path')
+    restart_load_path = all_settings.get('restart_load_path')
+    
+    # Model parameters
     model_path = all_settings.get('model_path')
     precision = all_settings.get('precision', DEFAULT_PRECISION)
-    precision = jnp.float64 if precision == 'float64' else jnp.float32
     lr_cutoff = all_settings.get('lr_cutoff', DEFAULT_LR_CUTOFF)
-    dispersion_energy_cutoff = all_settings.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)
-    
-    # Seed for the thermostat
-    seed = all_settings.get('seed', 0)
-    
-    # Buffer for the neighbor lists
-    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)
+    dispersion_energy_cutoff_lr_damping = all_settings.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)
-
-    # Settings for saving the output
+    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)
+    total_charge = all_settings.get('total_charge', DEFAULT_TOTAL_CHARGE)
+    
+    # MD parameters
+    md_dt = all_settings.get('md_dt', DEFAULT_TIMESTEP)
+    md_T = all_settings.get('md_T', DEFAULT_TEMPERATURE)
+    md_P = all_settings.get('md_P', None)
+    md_cycles = all_settings.get('md_cycles', DEFAULT_MD_CYCLES)
+    md_steps = all_settings.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)
+    
+    # Thermostat parameters
+    nhc_chain_length = all_settings.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)
+    nhc_steps = all_settings.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)
+    nhc_thermo = all_settings.get('nhc_thermo', DEFAULT_NHC_THERMO)
+    nhc_baro = all_settings.get('nhc_baro', DEFAULT_NHC_BARO)
+    nhc_sy_steps = all_settings.get('nhc_sy_steps', DEFAULT_SUZUKI_YOSHIDA_STEPS)
+    
+    # Format control
+    output_format = all_settings.get('output_format')
     hdf5_buffer_size = all_settings.get('hdf5_buffer_size', DEFAULT_HDF5_BUFFER_SIZE)
-    output_file = all_settings.get('output_file', 'trajectory.hdf5')
-    output_format = all_settings.get('output_format', DEFAULT_OUTPUT_FORMAT)
-    if output_format is None:
-        output_format = infer_output_format(output_file)
-                
-    click.echo(f"Saving output in {output_format} format to {output_file}")
-    
-    # Initialize HDF5 storage if needed
-    # hdf5_store = None
-    # if output_format == 'hdf5':
-    #     hdf5_store = init_hdf5_store(
-    #         save_to=output_file,
-    #         batch_size=hdf5_buffer_size,
-    #         num_atoms=0,  # Will be set later when position is known
-    #         num_box_entries=1,
-    #         exist_ok=True
-    #     )
-    
+    seed = all_settings.get('seed', DEFAULT_SEED)
+    relax_before_run = all_settings.get('relax_before_run', False)
+    force_convergence = all_settings.get('force_convergence')
+    min_cycles = all_settings.get('min_cycles', DEFAULT_MIN_CYCLES)
+    min_steps = all_settings.get('min_steps', DEFAULT_MIN_STEPS)
+
     # Handling of restart
-    restart_save_path = all_settings.get('restart_save_path')
     if restart_save_path is not None:
         create_restart = True
     else:
         create_restart = False
         
-    restart_load_path = all_settings.get('restart_load_path')
-    if restart_load_path is not None:
-        if os.path.exists(restart_load_path):
-            restart = True
-        else:
-            click.echo('Restart file does not exist, starting from scratch')
-            restart = False
-    else:
-        restart = False  
-    
-    # Settings for the MD simulation
-    md_dt = all_settings.get('md_dt', DEFAULT_TIMESTEP)
-    md_T = all_settings.get('md_T', DEFAULT_TEMPERATURE)
-    md_cycles = all_settings.get('md_cycles', DEFAULT_MD_CYCLES)
-    md_steps = all_settings.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)
-    
-    # Thermostat settings
-    nhc_chain_length = all_settings.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)
-    nhc_steps = all_settings.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)
-    nhc_thermo = all_settings.get('nhc_thermo', DEFAULT_NHC_THERMO_TIMESCALE)
-    nhc_baro = all_settings.get('nhc_baro', DEFAULT_NHC_BARO_TIMESCALE)
-    nhc_sy_steps = all_settings.get('nhc_sy_steps', DEFAULT_SUZUKI_YOSHIDA_STEPS)
-    
-    # Barostat settings
-    md_P = all_settings.get('md_P')
+    restart = False  
     
     # Geometry, cell and charge
-    total_charge = all_settings.get('total_charge', 0.)
     initial_geometry_path = all_settings.get('initial_geometry')
     if initial_geometry_path is None:
         raise ValueError('Initial geometry file path must be provided in settings')
@@ -1179,7 +1134,7 @@ def perform_md(
         potential = So3lrPotential(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_lr_cutoff_damping=dispersion_energy_cutoff
+            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping
         )
     else:
         # Verify model path exists
@@ -1190,7 +1145,7 @@ def perform_md(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff
+            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping
             )
     
     # Setting up the model
@@ -1250,7 +1205,8 @@ def perform_md(
     
     if md_P is not None:
         nhc_barostat_kwargs = nhc_kwargs.copy()
-        nhc_barostat_kwargs['tau'] = nhc_npt_tau
+        if nhc_npt_tau is not None:
+            nhc_barostat_kwargs['tau'] = nhc_npt_tau
         
     rng_key = jax.random.PRNGKey(seed)
 
@@ -1298,7 +1254,7 @@ def perform_md(
             )
 
     # Running the MD
-    click.echo('Starting MD simulation')
+    click.echo('Starting MD simulation...')
     if md_T is not None:
         click.echo('Step\tKE (eV)\tPE (eV)\tTotal Energy (eV)\tTemperature (K)\tH (eV)\ttime/step (s)')
     else:
@@ -1311,7 +1267,6 @@ def perform_md(
     
     while cycle_md <= md_cycles:
         old_time = time.time()
-        before_time = time.time()
         if lr:
             new_state, nbrs, nbrs_lr, new_box = jax.lax.fori_loop(
                 0,
@@ -1326,11 +1281,9 @@ def perform_md(
                 step_md_fn,
                 (state, nbrs, box)
             )
-        
         new_time = time.time()
         cycle_time = new_time - old_time
         time_per_step = cycle_time / md_steps
-        
         # Checking if the neighbor lists overflowed
         nbrs, nbrs_lr, overflow = check_overflow(
             neighbor_fn,
@@ -1365,7 +1318,6 @@ def perform_md(
             momenta.append(np.array(state.momentum))
             if box is not None:
                 boxs.append(np.array(box))
-            
             if ((len(positions) % hdf5_buffer_size == 0 and len(positions) > 0) or (len(positions) == md_cycles)):
                 # Saving the output 
                 if output_format == 'hdf5': #TODO: check that hdf5 is saving things correctly
@@ -1391,13 +1343,14 @@ def perform_md(
                         current_cycle,
                         restart_save_path,
                         ensemble='nvt' if md_P is None else 'npt'
-                    )
-        
+                    )            
     total_runtime = time.time() - total_time
+    click.echo('Results saved to: ' + output_file)
     click.echo('=' * 60)
     click.echo('Simulation completed successfully!')
     click.echo(f'Total runtime: {total_runtime:.2f} seconds ({total_runtime/3600:.2f} hours)')
-
+    
+    
 def create_min_fn(
     lr: bool,
     min_apply: callable,
@@ -1448,6 +1401,7 @@ def create_min_fn(
             return state, nbrs
         return step_min_fn
 
+
 def create_fire_fn(
     energy_fn: callable,
     shift: callable,
@@ -1456,7 +1410,7 @@ def create_fire_fn(
     min_n_min: int,
     lr: bool,
     box: jnp.ndarray,
-)-> Tuple[callable, callable]:
+) -> Tuple[callable, callable]:
     """
     Create the FIRE minimization functions.
     Returns the init and apply functions.
@@ -1488,51 +1442,42 @@ def create_fire_fn(
 
     return fire_init, step_min_fn
 
+
 def perform_min(
     all_settings: Dict,
-    )-> Union[jnp.ndarray, List[jnp.ndarray]]:
+) -> Union[jnp.ndarray, List[jnp.ndarray]]:
     """
+    Perform energy minimization (geometry optimization) with the given settings.
     
-    Reads the settings and performs a minimization using the FIRE algorithm.
-    Can return either the final optimized positions or a trajectory of positions from each cycle.
-    If output_file is provided, it writes the result directly to file.
-
     Args:
-        all_settings (Dict): Dictionary containing the settings for the 
-                                minimization.
-    
+        all_settings (Dict): Settings for the minimization.
+        
     Returns:
-        Union[jnp.ndarray, List[jnp.ndarray]]: 
-            If save_trajectory is True, returns a list of positions from each cycle.
-            Otherwise, returns only the final relaxed geometry.
-            If output_file is provided, nothing is returned.
+        Union[jnp.ndarray, List[jnp.ndarray]]: Optimized structure or trajectory.
     """
-    
-    # Model path, settings and precision
-    model_path = all_settings.get('model_path')
-    save_trajectory = all_settings.get('save_optimization_trajectory', True)
+    # Extract settings with defaults
+    input_file = all_settings.get('initial_geometry')
     output_file = all_settings.get('output_file')
-    #TODO: print whether model path is used or not?
-
+    save_optimization_trajectory = all_settings.get('save_optimization_trajectory', True)
+    
+    # Model parameters
+    model_path = all_settings.get('model_path')
     precision = all_settings.get('precision', DEFAULT_PRECISION)
-    precision = jnp.float64 if precision == 'float64' else jnp.float32
     lr_cutoff = all_settings.get('lr_cutoff', DEFAULT_LR_CUTOFF)
-    dispersion_energy_cutoff = all_settings.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)
-    
-    # Buffer for the neighbor lists
-    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)
+    dispersion_energy_cutoff_lr_damping = all_settings.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)
-    
+    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)
+    total_charge = all_settings.get('total_charge', 0)
+
     # Settings for the minimization
     min_cycles = all_settings.get('min_cycles', 100)
     min_steps = all_settings.get('min_steps', 100)
-    min_start_dt = all_settings.get('dt_start', 0.05)
-    min_max_dt = all_settings.get('dt_max', 0.1)
-    min_n_min = all_settings.get('n_min', 2)
-    force_convergence = all_settings.get('force_conv', None) # eV/A, can be None
+    min_start_dt = all_settings.get('min_start_dt', 0.05)
+    min_max_dt = all_settings.get('min_max_dt', 0.1)
+    min_n_min = all_settings.get('min_n_min', 2)
+    force_convergence = all_settings.get('force_convergence', None) # eV/A, can be None
 
     # Geometry, cell and charge
-    total_charge = all_settings.get('total_charge', 0.)
     initial_geometry_path = all_settings.get('initial_geometry')
     if initial_geometry_path is None:
         raise ValueError('Initial geometry file path must be provided in settings')
@@ -1567,7 +1512,7 @@ def perform_min(
         potential = So3lrPotential(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_lr_cutoff_damping=dispersion_energy_cutoff
+            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping
         )
     else:
         # Load custom MLFF
@@ -1576,7 +1521,7 @@ def perform_min(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff
+            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping
             )
 
     # Setting up the model
@@ -1658,7 +1603,7 @@ def perform_min(
     
     # If tracking trajectory, store all positions
     minimization_trajectory = []
-    if save_trajectory:
+    if save_optimization_trajectory:
         minimization_trajectory.append(np.array(initial_geometry_dict['positions']))
     
     num_cycles = 0
@@ -1708,7 +1653,7 @@ def perform_min(
         f_max = np.abs(F).max()
         click.echo('{}\t{:.3f}\t{:.3f}'.format(i*min_steps, E, f_max))
         # Save the current positions to the trajectory if requested
-        if save_trajectory:
+        if save_optimization_trajectory:
             minimization_trajectory.append(np.array(min_state.position))
         
         # Check if force convergence criterion is met
@@ -1716,7 +1661,7 @@ def perform_min(
             if f_max > force_convergence:
                 num_cycles -= 1
             else:
-                click.echo(f"Convergence criterion met at step {i*min_steps}: Fmax = {f_max:.5f} eV/Å")
+                click.echo(f"Convergence criterion met at step {i*min_steps}: Fmax = {f_max:.3f} eV/Å")
                 break
 
         num_cycles += 1
@@ -1725,13 +1670,13 @@ def perform_min(
     # If output_file is provided, write directly to file
     if output_file:
         # atoms = read(all_settings['initial_geometry'])
-        if save_trajectory:
-            write_to_extxyz(output_file, initial_geometry, boxs = box, momenta=None, positions=minimization_trajectory)
+        if save_optimization_trajectory:
+            write_to_extxyz(output_file, initial_geometry, boxes = box, momenta=None, positions=minimization_trajectory)
             click.echo(f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
         else:
             # Write the final optimized structure to file
             # atoms.set_positions(np.array(min_state.position))
-            write_to_extxyz(output_file, initial_geometry, boxs = box, momenta=None, positions=min_state.position)
+            write_to_extxyz(output_file, initial_geometry, boxes = box, momenta=None, positions=min_state.position)
             click.echo(f"Final optimized structure saved to {output_file}")
     
     if box is None or np.any(box == 0):
@@ -1739,13 +1684,14 @@ def perform_min(
     else:
         return min_state.position * box
 
+
 def save_state(
     state,
     box: jnp.array,
     cycle: int,
     path_to_save: str,
     ensemble: str = 'nvt'
-)-> None:
+) -> None:
     """
     Save the state of the simulation to a .npz file.
 
@@ -1799,10 +1745,11 @@ def save_state(
         )
     np.savez(path_to_save, **state_dict)
 
+
 def load_state(
     path_to_load: str,
     ensemble: str = 'nvt'
-)-> Tuple:
+) -> Tuple:
     """
     
     Loads the state of the simulation from a .npz file and returns the state,
@@ -1871,9 +1818,10 @@ def load_state(
     
     return state, box, cycle
 
+
 def run(
     settings: dict
-    ) -> None:
+) -> None:
     """
     Run the MD simulation using the provided settings. Relaxation before the
     MD run is optional. Sets the precision of the simulation.

@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import time
 import pprint
 import click
+from typing import Dict, List, Tuple, Union, Optional, Any
 
 from ase.io import write
 from mlff.utils import jraph_utils
@@ -19,17 +20,131 @@ from ..base_calculator import make_so3lr
 from .so3lr_md import load_model
 
 
+def process_predictions(
+    save_predictions_to: Optional[str],
+    graph_batch: jraph.GraphsTuple,
+    inputs: Dict[str, Any],
+    output_prediction: Dict[str, Any]
+) -> List:
+    """
+    Process predictions and prepare for saving to file.
+    
+    Parameters:
+    -----------
+    save_predictions_to : str or None
+        File path where to save the predictions
+    graph_batch : jraph.GraphsTuple
+        The batch of graphs to process
+    inputs : dict
+        Input dictionary containing masks and data
+    output_prediction : dict
+        Model predictions
+        
+    Returns:
+    --------
+    List
+        List of processed unbatched graphs
+    """
+    if save_predictions_to is None:
+        return []
+        
+    # Add predictions to graph nodes and globals
+    graph_batch.nodes['forces_so3lr'] = output_prediction['forces']
+    graph_batch.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
+    graph_batch.globals['energy_so3lr'] = output_prediction['energy']
+    graph_batch.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
+
+    # Unbatch the graphs and filter out padding
+    unbatched_graphs = unbatch_np(graph_batch)
+    graph_mask = np.array(inputs['graph_mask'])
+    return [x for x, cond in zip(unbatched_graphs, graph_mask) if (cond == True).all()]
+
+
+def calculate_metrics(
+    output_prediction: Dict[str, Any],
+    inputs: Dict[str, Any],
+    targets: List[str]
+) -> Dict[str, float]:
+    """
+    Calculate MAE and MSE metrics for the specified targets.
+    
+    Parameters:
+    -----------
+    output_prediction : dict
+        Model predictions
+    inputs : dict
+        Input dictionary containing masks and true values
+    targets : list
+        List of target names to evaluate
+        
+    Returns:
+    --------
+    dict
+        Dictionary of calculated metrics
+    """
+    metrics = {}
+    
+    for target in targets:
+        mask = assign_mask(target, inputs=inputs)
+
+        mae = evaluation_utils.calculate_mae(
+            y_predicted=output_prediction[target], 
+            y_true=inputs[target], 
+            msk=mask
+        )
+        mse = evaluation_utils.calculate_mse(
+            y_predicted=output_prediction[target], 
+            y_true=inputs[target], 
+            msk=mask
+        )
+        
+        metrics[f"{target}_mae"] = mae
+        metrics[f"{target}_mse"] = mse
+    
+    return metrics
+
+
+def save_predictions_to_file(
+    predicted_graphs: List,
+    save_predictions_to: str, 
+    num_data: int
+) -> None:
+    """
+    Save predictions to an extxyz file.
+    
+    Parameters:
+    -----------
+    predicted_graphs : list
+        List of predicted graphs to save
+    save_predictions_to : str
+        File path to save predictions to
+    num_data : int
+        Total number of data points for progress reporting
+    """
+    click.echo(f'Saving predictions to {str(save_predictions_to)}')
+    
+    log_every = max(1, len(predicted_graphs) // 10)
+    
+    for n, predicted_graph in enumerate(predicted_graphs):
+        if n % log_every == 0:
+            click.echo(f'Saving: {n} / {len(predicted_graphs)} structures')
+        atoms = jraph_to_ase_atoms(predicted_graph)
+        write(save_predictions_to, images=atoms, append=True)
+    
+    click.echo(f'Successfully saved predictions for {len(predicted_graphs)} structures')
+
+
 def evaluate_so3lr_on(
-        datafile,
-        batch_size=1,
-        lr_cutoff=12.0,
-        dispersion_energy_lr_cutoff_damping=2.0,
-        jit_compile=True,
-        save_predictions_to=None,
-        model_path=None,
-        precision='float32',
-        targets='forces'
-):
+        datafile: str,
+        batch_size: int = 1,
+        lr_cutoff: float = 12.0,
+        dispersion_energy_cutoff_lr_damping: float = 2.0,
+        jit_compile: bool = True,
+        save_predictions_to: Optional[str] = None,
+        model_path: Optional[str] = None,
+        precision: str = 'float32',
+        targets: str = 'forces'
+) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset.
     
@@ -41,7 +156,7 @@ def evaluate_so3lr_on(
         Number of molecules per batch.
     lr_cutoff : float
         Long-range cutoff for SO3LR in Å.
-    dispersion_energy_lr_cutoff_damping : float
+    dispersion_energy_cutoff_lr_damping : float
         Damping of long-range start at lr_cutoff - this value.
     jit_compile : bool
         Whether to JIT compile the calculation.
@@ -51,75 +166,79 @@ def evaluate_so3lr_on(
         Path to the model to evaluate. If None, the default SO3LR model is used.
     precision : str
         Precision to use for the calculation.
-    targets : list or None
-        Targets to evaluate. If None, all targets are evaluated.
+    targets : str
+        Comma-separated list of targets to evaluate.
         
     Returns:
     --------
     dict
         Dictionary containing evaluation metrics and timing information.
     """
-
     total_time_start = time.time()
 
-    # Define the targets.
-    targets = targets.split(',')
+    # Parse targets into a list
+    target_list = targets.split(',')
+    click.echo(f"Evaluating targets: {', '.join(target_list)}")
 
+    # Process input file path
     datafile = Path(datafile).resolve().expanduser()
+    if not datafile.exists():
+        raise FileNotFoundError(f"Data file not found: {datafile}")
 
+    # Validate and process output file
     save_predictions_bool = save_predictions_to is not None
-
-    if save_predictions_bool is True:
+    if save_predictions_bool:
         save_predictions_to = Path(save_predictions_to).resolve().expanduser()
         if save_predictions_to.exists():
-            raise RuntimeError(
-                f'{save_predictions_to} already exists.'
-            )
-
+            raise RuntimeError(f'Output file already exists: {save_predictions_to}')
+        
         if save_predictions_to.suffix != '.extxyz':
-            raise ValueError(
-                f"datafile must have suffix `.extxyz`. "
-                f"Received {save_predictions_to.name} with {save_predictions_to.suffix}."
-            )
-    # Loading the model
+            raise ValueError(f"Output file must have suffix `.extxyz`. Received: {save_predictions_to.suffix}")
+        
+        # Create parent directory if it doesn't exist
+        save_predictions_to.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize the model
     if model_path is None:
-        print("Using default SO3LR potential.")
+        click.echo("Using default SO3LR potential")
         so3lr_calc = make_so3lr(
-            # dtype=precision,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_lr_cutoff_damping=dispersion_energy_lr_cutoff_damping,
+            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
             calculate_forces=True
         )
     else:
-        print(f"Using custom MLFF potential from: {model_path}")
+        click.echo(f"Using custom MLFF potential from: {model_path}")
         so3lr_calc = load_model(
             model_path,
-            precision= jnp.float64 if precision == 'float64' else jnp.float32,
+            precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_lr_cutoff_damping,
-            # calculate_forces=True
-            )
+            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
+        )
 
-    loader = AseDataLoaderSparse(
-        datafile
-    )
-
+    # Load the data
+    click.echo(f"Loading data from {datafile}")
+    loader = AseDataLoaderSparse(datafile)
     num_data = loader.cardinality()
+    click.echo(f"Found {num_data} structures in dataset")
 
-    data, stats = loader.load(
-        cutoff=4.5,
-        cutoff_lr=lr_cutoff,
-        calculate_neighbors_lr=True if lr_cutoff is not None else False,
-        pick_idx=np.arange(num_data)
-    )
+    # Load the data with neighbor calculation
+    try:
+        data, stats = loader.load(
+            cutoff=4.5,
+            cutoff_lr=lr_cutoff,
+            calculate_neighbors_lr=True if lr_cutoff is not None else False,
+            pick_idx=np.arange(num_data)
+        )
+    except Exception as e:
+        raise RuntimeError(f"Error loading data: {str(e)}")
 
-    # Determine the padding sizes from batch size.
+    # Determine padding sizes
     n_node = stats['max_num_of_nodes'] * batch_size + 1
     n_edge = stats['max_num_of_edges'] * batch_size + 1
     n_graph = batch_size + 1
     n_pairs = stats['max_num_of_nodes'] * (stats['max_num_of_nodes'] - 1) * batch_size + 1
 
-    # Batch the graphs.
+    # Batch the graphs
     batched_graphs = jraph.dynamically_batch(
         data,
         n_node=n_node,
@@ -128,10 +247,11 @@ def evaluate_so3lr_on(
         n_pairs=n_pairs
     )
 
-    if jit_compile is True:
+    # JIT compilation if requested
+    if jit_compile:
         so3lr_calc = jax.jit(so3lr_calc)
 
-        # Create a dummy batch for jit compile.
+        # Create a dummy batch for compilation
         dummy_batched_graphs = jraph.dynamically_batch(
             data[:n_graph],
             n_node=n_node,
@@ -140,136 +260,118 @@ def evaluate_so3lr_on(
             n_pairs=n_pairs
         )
 
-        click.echo('Start JIT compilation.')
+        click.echo('Starting JIT compilation...')
         compile_start = time.time()
 
-        _compile_out = jax.block_until_ready(
-            so3lr_calc(
-                jraph_utils.graph_to_batch_fn(next(dummy_batched_graphs))
+        try:
+            _compile_out = jax.block_until_ready(
+                so3lr_calc(jraph_utils.graph_to_batch_fn(next(dummy_batched_graphs)))
             )
-        )
-
-        compile_end = time.time()
-        compile_time = compile_end - compile_start
-        click.echo(f'Compilation completed after {compile_time:.3f} s.')
+            compile_end = time.time()
+            compile_time = compile_end - compile_start
+            click.echo(f'Compilation completed in {compile_time:.3f} seconds')
+        except Exception as e:
+            raise RuntimeError(f"JIT compilation failed: {str(e)}")
     else:
         compile_time = np.nan
 
-    # Create a dictionary to track metrics
+    # Create metric tracking dictionaries
     test_metrics = {}
-    for t in targets:
+    for t in target_list:
         for m in ('mae', 'mse'):
             test_metrics[f'{t}_{m}'] = []
 
     i = 0
-    total_time = 0.
+    total_time = 0.0
     total_num_structures = 0
     predicted = []
 
-    log_every_t = max(1, num_data // 10)
+    log_every = max(1, num_data // 10)
 
-    click.echo(f'Start evaluation on {num_data} structures.')
-    for graph_batch in batched_graphs:
-
-        if total_num_structures % log_every_t == 0:
-            click.echo(f'Completed {total_num_structures} / {num_data} structures.')
-
-        # Transform the batched graph to inputs dict.
-        inputs = jraph_utils.graph_to_batch_fn(
-            graph_batch
-        )
-        total_num_structures += inputs['num_of_non_padded_graphs']
-
-        start = time.time()
-
-        output_prediction = jax.block_until_ready(
-            so3lr_calc(inputs)
-        )
-
-        end = time.time()
-
-        total_time += end - start
-
-        # Compute mean absolute error (MAE) and mean squared error (MSE).
-        for t in targets:
-            msk = assign_mask(t, inputs=inputs)
-
-            mae = evaluation_utils.calculate_mae(
-                y_predicted=output_prediction[t], y_true=inputs[t], msk=msk
-            )
-            mse = evaluation_utils.calculate_mse(
-                y_predicted=output_prediction[t], y_true=inputs[t], msk=msk
-            )
-            
-            test_metrics[f"{t}_mae"].append(mae)
-            test_metrics[f"{t}_mse"].append(mse)
-
-        # Only executed if predictions are saved.
-        if save_predictions_bool is True:
-            graph_batch.nodes['forces_so3lr'] = output_prediction['forces']
-            graph_batch.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
-            graph_batch.globals['energy_so3lr'] = output_prediction['energy']
-            graph_batch.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
-
-            unbatched_graphs = unbatch_np(graph_batch)
-            graph_mask = np.array(inputs['graph_mask'])
-            unbatched_graphs = [x for x, cond in zip(unbatched_graphs, graph_mask) if (cond == True).all()]
-
-            predicted += unbatched_graphs
-
-        i += 1
-
-    click.echo(f'Completed {total_num_structures} / {num_data} structures.')
-    click.echo(f'Time for evaluation = {(total_time):.3f} s.')
-
-    # Compute final metrics
-    for key in list(test_metrics.keys()):
-        test_metrics[key] = np.mean(test_metrics[key])
+    click.echo(f'Starting evaluation on {num_data} structures')
+    click.echo('-' * 50)
     
-    # Calculate RMSE from MSE
-    for t in targets:
-        test_metrics[f'{t}_rmse'] = np.sqrt(test_metrics[f'{t}_mse'])
+    try:
+        for graph_batch in batched_graphs:
+            # Transform the batched graph to inputs dict
+            inputs = jraph_utils.graph_to_batch_fn(graph_batch)
+            batch_size = inputs['num_of_non_padded_graphs']
+            total_num_structures += batch_size
 
-    time_per_batch = total_time / i
-    time_per_structure = total_time / total_num_structures
+            if total_num_structures % log_every == 0:
+                click.echo(f'Processing: {total_num_structures} / {num_data} structures')
 
-    metrics = dict(
-        time_per_batch=time_per_batch,
-        time_per_structure=time_per_structure,
-        time_evaluation=total_time,
-        time_compile=compile_time,
-        **test_metrics
-    )
+            # Run the model
+            start = time.time()
+            output_prediction = jax.block_until_ready(so3lr_calc(inputs))
+            end = time.time()
+            total_time += end - start
 
-    metrics = jax.tree_util.tree_map(lambda x: float(x), metrics)
+            # Calculate metrics
+            batch_metrics = calculate_metrics(output_prediction, inputs, target_list)
+            for key, value in batch_metrics.items():
+                test_metrics[key].append(value)
 
-    metrics['datafile'] = str(datafile.as_uri())
+            # Process predictions if saving is enabled
+            if save_predictions_bool:
+                predicted.extend(process_predictions(
+                    save_predictions_to, graph_batch, inputs, output_prediction
+                ))
 
-    click.echo('Collected metrics (units are eV, Angstrom, and seconds):')
-    formatted_metrics = {k: f"{v:.3e}" if isinstance(v, float) else v for k, v in metrics.items()}
-    click.echo(pprint.pformat(formatted_metrics))
+            i += 1
 
-    if save_predictions_bool is True:
-        click.echo(f'Start to save predictions to {str(save_predictions_to.as_uri())}.')
+        click.echo(f'Completed evaluation on {total_num_structures} / {num_data} structures')
+        click.echo(f'Evaluation time: {total_time:.3f} seconds')
+        click.echo('-' * 50)
 
-        for n, predicted_graph in enumerate(predicted):
-            if n % log_every_t == 0:
-                click.echo(f'Completed {n} / {len(predicted)}.')
-            atoms = jraph_to_ase_atoms(predicted_graph)
-            write(save_predictions_to, images=atoms, append=True)
+        # Compute final metrics
+        for key in list(test_metrics.keys()):
+            test_metrics[key] = np.mean(test_metrics[key])
+        
+        # Calculate RMSE from MSE
+        for t in target_list:
+            test_metrics[f'{t}_rmse'] = np.sqrt(test_metrics[f'{t}_mse'])
 
-        click.echo('Save completed.')
+        # Compile timing metrics
+        time_per_batch = total_time / i if i > 0 else 0
+        time_per_structure = total_time / total_num_structures if total_num_structures > 0 else 0
 
-    total_time_end = time.time()
-    click.echo(f'Total time = {(total_time_end - total_time_start):.3f} s.')
-    click.echo('Evaluation completed.')
-    
-    return metrics
+        metrics = {
+            'time_per_batch': time_per_batch,
+            'time_per_structure': time_per_structure,
+            'time_evaluation': total_time,
+            'time_compile': compile_time,
+            **test_metrics
+        }
+
+        # Convert numpy types to Python types for serialization
+        metrics = jax.tree_util.tree_map(lambda x: float(x), metrics)
+        metrics['datafile'] = str(datafile.as_uri())
+
+        # Display results
+        click.echo('Evaluation metrics (units are eV, Angstrom, and seconds):')
+        formatted_metrics = {k: f"{v:.3e}" if isinstance(v, float) else v for k, v in metrics.items()}
+        click.echo(pprint.pformat(formatted_metrics))
+        click.echo('-' * 50)
+
+        # Save predictions if requested
+        if save_predictions_bool:
+            save_predictions_to_file(predicted, str(save_predictions_to), num_data)
+
+        total_time_end = time.time()
+        click.echo(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
+        click.echo('Evaluation completed successfully')
+        
+        return metrics
+        
+    except Exception as e:
+        click.echo(f"Error during evaluation: {str(e)}")
+        raise
 
 
-def assign_mask(x, inputs):
+def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:
     """
-    Assign the mask to the outputs.
+    Assign the appropriate mask to the outputs based on the target.
     
     Parameters:
     -----------
@@ -280,25 +382,21 @@ def assign_mask(x, inputs):
         
     Returns:
     --------
-    msk : ndarray
+    np.ndarray
         Mask for the specified output.
     """
     node_mask = inputs['node_mask']
     graph_mask = inputs['graph_mask']
 
     if x == 'energy':
-        msk = graph_mask
+        return graph_mask
     elif x == 'forces':
-        msk = node_mask
+        return node_mask
     elif x == 'stress':
-        msk = graph_mask
+        return graph_mask
     elif x == 'dipole_vec':
-        msk = graph_mask
+        return graph_mask
     elif x == 'hirshfeld_ratios':
-        msk = node_mask
+        return node_mask
     else:
-        raise ValueError(
-            f"Evaluate not implemented for target={x}."
-        )
-
-    return msk
+        raise ValueError(f"Evaluation not implemented for target='{x}'")
