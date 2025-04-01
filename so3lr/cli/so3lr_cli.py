@@ -314,6 +314,8 @@ class NVTNPTGroup(CustomCommandClass):
 @click.option('--pressure', default=None, type=float, help='Simulation pressure in atmospheres (enables NPT) [default: None].')
 @click.option('--cycles', default=100, type=int, help='Number of MD cycles to run [default: 100].')
 @click.option('--steps', default=100, type=int, help='Number of steps per MD cycle [default: 100].')
+@click.option('--opt_cycles', default=10, type=int, help='Number of minimization cycles to perform. [default: 10]')
+@click.option('--opt_steps', default=10, type=int, help='Number of steps per minimization cycle. [default: 10]')
 @click.option('--nhc-chain', default=3, type=int, help='Length of the Nose-Hoover thermostat chain [default: 3].')
 @click.option('--nhc-steps', default=2, type=int, help='Number of integration steps per MD step [default: 2].')
 @click.option('--nhc-thermo', default=None, type=float, help='Thermostat timescale in femtoseconds [default: None].')
@@ -350,6 +352,8 @@ def cli(ctx,
     pressure,
     cycles,
     steps,
+    opt_cycles,
+    opt_steps,
     nhc_chain,
     nhc_steps,
     nhc_thermo,
@@ -444,6 +448,10 @@ def cli(ctx,
         settings_dict['md_cycles'] = cycles
     if steps is not None:
         settings_dict['md_steps'] = steps
+    if opt_cycles is not None:
+        settings_dict['opt_cycles'] = opt_cycles
+    if opt_steps is not None:
+        settings_dict['opt_steps'] = opt_steps
     if nhc_chain is not None:
         settings_dict['nhc_chain_length'] = nhc_chain
     if nhc_steps is not None:
@@ -515,6 +523,10 @@ def cli(ctx,
         click.echo(f"Geometry relaxation:    True")
     else:
         click.echo(f"Geometry relaxation:    False")
+    if force_conv is not None:
+        click.echo(f"Force convergence:       {force_conv} eV/Å")
+    else:
+        click.echo(f"Force convergence:       {settings_dict.get('opt_cycles', 100)} cycles, each {settings_dict.get('opt_steps', 100)} steps")
         
     # click.echo("Starting simulation...")
     click.echo("=" * 60)
@@ -551,8 +563,8 @@ class SubcommandHelpGroup(click.Group):
 @click.option('--save-trajectory/--no-save-trajectory', 'save_optimization_trajectory', default=True, help='Save some optimization steps in the output file, not just the final structure. [default: True]')
 @click.option('--model', '--model_path', 'model_path', default=None, help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
 @click.option('--total-charge', default=0, type=int, help='Total charge of the system. [default: 0]')
-@click.option('--cycles', default=10, type=int, help='Number of minimization cycles to perform. [default: 10]')
-@click.option('--steps', default=10, type=int, help='Number of steps per minimization cycle. [default: 10]')
+@click.option('--opt_cycles', default=10, type=int, help='Number of minimization cycles to perform. [default: 10]')
+@click.option('--opt_steps', default=10, type=int, help='Number of steps per minimization cycle. [default: 10]')
 @click.option('--dt-start', default=0.05, type=float, help='The initial step size during minimization as a float. [default: 0.05]')
 @click.option('--dt-max', default=0.1, type=float, help='The maximum step size during minimization as a float. [default: 0.1]')
 @click.option('--n-min', default=2, type=int, help='An integer specifying the minimum number of steps moving in the correct direction before dt and f_alpha should be updated. [default: 2]')
@@ -569,8 +581,8 @@ def fire_optimization(
     save_optimization_trajectory,
     model_path,
     total_charge,
-    cycles,
-    steps,
+    opt_cycles,
+    opt_steps,
     dt_start,
     dt_max,
     n_min,
@@ -617,7 +629,7 @@ def fire_optimization(
     if force_conv is not None:
         click.echo(f"Force convergence:                {force_conv} eV/Å")
     else:
-        click.echo(f"Force convergence:                {cycles} cycles, each {steps} steps")
+        click.echo(f"Force convergence:                {opt_cycles} cycles, each {opt_steps} steps")
     click.echo(f"Initial step size:                {dt_start} Å")
     click.echo(f"Maximum step size:                {dt_max} Å")
     click.echo(f"Steps between step size updates:  {n_min}")
@@ -634,8 +646,8 @@ def fire_optimization(
         'output_file': output_file,
         'save_optimization_trajectory': save_optimization_trajectory,
         'model_path': model_path,
-        'min_cycles': cycles,
-        'min_steps': steps,
+        'min_cycles': opt_cycles,
+        'min_steps': opt_steps,
         'dt_start': dt_start,
         'dt_max': dt_max,
         'n_min': n_min,

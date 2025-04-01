@@ -27,7 +27,7 @@ import jax_md.quantity
 
 from ase.io import read
 from functools import partial
-from typing import Dict, Tuple, Union, List
+from typing import Dict, Tuple, Union, List, Optional
 from jax_md import units
 from jax_md import partition
 from jax_md.space import Box, DisplacementOrMetricFn, raw_transform
@@ -35,6 +35,23 @@ from mlff.mdx.potential import MLFFPotentialSparse
 from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
+
+# At the top of the file
+DEFAULT_PRECISION = 'float64'
+DEFAULT_LR_CUTOFF = 12.0
+DEFAULT_DISPERSION_DAMPING = 2.0
+DEFAULT_BUFFER_MULTIPLIER = 1.25
+DEFAULT_HDF5_BUFFER_SIZE = 50
+DEFAULT_OUTPUT_FORMAT = 'extxyz'
+DEFAULT_TIMESTEP = 0.0005  # picoseconds
+DEFAULT_TEMPERATURE = 300  # Kelvin
+DEFAULT_MD_CYCLES = 100
+DEFAULT_MD_STEPS_PER_CYCLE = 100
+DEFAULT_NHC_CHAIN_LENGTH = 3
+DEFAULT_NHC_INTEGRATION_STEPS = 2
+DEFAULT_NHC_THERMO_TIMESCALE = 100  # femtoseconds
+DEFAULT_NHC_BARO_TIMESCALE = 1000  # femtoseconds
+DEFAULT_SUZUKI_YOSHIDA_STEPS = 3
 
 def handle_units(
     unit_system: callable,
@@ -214,10 +231,10 @@ def write_to_hdf5(
 def write_to_extxyz(
     output_file: str,
     atoms: ase.Atoms,
-    boxs: float or jnp.ndarray or list or None,
-    momenta: list,
-    positions: list
-)-> Tuple[list, list, list]:
+    boxs: Union[float, jnp.ndarray, List, None],
+    momenta: List,
+    positions: List
+) -> Tuple[List, List, List]:
 
     positions = np.asarray(positions)
     atoms_list = []
@@ -998,12 +1015,22 @@ def create_md_fn(
     elif ensemble == 'npt':
         return create_npt_step_fn(lr, apply_fn, T, P)
     else:
-        raise NotImplementedError('Only NVT and NPT ensembles are supported')
+        raise NotImplementedError(f'Ensemble "{ensemble}" is not supported. Only NVT and NPT ensembles are currently implemented.')
     
+def infer_output_format(output_file):
+    """Determine output format based on file extension."""
+    if output_file.endswith('.hdf5'):
+        return 'hdf5'
+    elif output_file.endswith('.xyz') or output_file.endswith('.extxyz'):
+        return 'extxyz'
+    else:
+        click.echo(f"Unknown output extension for {output_file}, defaulting to extxyz format")
+        return 'extxyz'
+
 def perform_md(
     all_settings: Dict,
-    opt_structure: jnp.ndarray = None,
-)-> None:
+    opt_structure: Optional[jnp.ndarray] = None,
+) -> None:
     """
     Performs MD simulation using the settings provided in all_settings.
     If opt_structure is provided, the simulation will start from this 
@@ -1023,46 +1050,37 @@ def perform_md(
 
     # Model path, settings and precision
     model_path = all_settings.get('model_path')
-    precision = all_settings.get('precision', 'float64')
+    precision = all_settings.get('precision', DEFAULT_PRECISION)
     precision = jnp.float64 if precision == 'float64' else jnp.float32
-    lr_cutoff = all_settings.get('lr_cutoff', 12.0)
-    dispersion_energy_cutoff = all_settings.get('dispersion_energy_cutoff_lr_damping', 2.0)
+    lr_cutoff = all_settings.get('lr_cutoff', DEFAULT_LR_CUTOFF)
+    dispersion_energy_cutoff = all_settings.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)
     
     # Seed for the thermostat
     seed = all_settings.get('seed', 0)
     
     # Buffer for the neighbor lists
-    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr', 1.25)
-    buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr', 1.25)
+    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)
+    buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)
 
     # Settings for saving the output
-    hdf5_buffer_size = all_settings.get('hdf5_buffer_size', 50)
+    hdf5_buffer_size = all_settings.get('hdf5_buffer_size', DEFAULT_HDF5_BUFFER_SIZE)
     output_file = all_settings.get('output_file', 'trajectory.hdf5')
-    output_format = all_settings.get('output_format', 'extxyz')
-    
-    # Determine format based on extension if not explicitly provided
+    output_format = all_settings.get('output_format', DEFAULT_OUTPUT_FORMAT)
     if output_format is None:
-        if output_file.endswith('.hdf5'):
-            output_format = 'hdf5'
-        elif output_file.endswith('.xyz') or output_file.endswith('.extxyz'):
-            output_format = 'extxyz'
-        else:
-            # Default to hdf5 for unknown extensions
-            output_format = 'extxyz'
-            click.echo(f"Unknown output extension, defaulting to {output_format} format")
+        output_format = infer_output_format(output_file)
                 
     click.echo(f"Saving output in {output_format} format to {output_file}")
     
     # Initialize HDF5 storage if needed
-    hdf5_store = None
-    if output_format == 'hdf5':
-        hdf5_store = init_hdf5_store(
-            save_to=output_file,
-            batch_size=hdf5_buffer_size,
-            num_atoms=0,  # Will be set later when position is known
-            num_box_entries=1,
-            exist_ok=True
-        )
+    # hdf5_store = None
+    # if output_format == 'hdf5':
+    #     hdf5_store = init_hdf5_store(
+    #         save_to=output_file,
+    #         batch_size=hdf5_buffer_size,
+    #         num_atoms=0,  # Will be set later when position is known
+    #         num_box_entries=1,
+    #         exist_ok=True
+    #     )
     
     # Handling of restart
     restart_save_path = all_settings.get('restart_save_path')
@@ -1082,29 +1100,32 @@ def perform_md(
         restart = False  
     
     # Settings for the MD simulation
-    md_dt = all_settings.get('md_dt', 0.0005)
-    md_T = all_settings.get('md_T', 300)
-    md_cycles = all_settings.get('md_cycles',100)
-    md_steps = all_settings.get('md_steps',100)
+    md_dt = all_settings.get('md_dt', DEFAULT_TIMESTEP)
+    md_T = all_settings.get('md_T', DEFAULT_TEMPERATURE)
+    md_cycles = all_settings.get('md_cycles', DEFAULT_MD_CYCLES)
+    md_steps = all_settings.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)
     
     # Thermostat settings
-    nhc_chain_length = all_settings.get('nhc_chain_length', 3)
-    nhc_steps = all_settings.get('nhc_steps', 2)
-    nhc_tau = all_settings.get('nhc_tau')
-    nhc_thermo = all_settings.get('nhc_thermo', 100)
+    nhc_chain_length = all_settings.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)
+    nhc_steps = all_settings.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)
+    nhc_thermo = all_settings.get('nhc_thermo', DEFAULT_NHC_THERMO_TIMESCALE)
+    nhc_baro = all_settings.get('nhc_baro', DEFAULT_NHC_BARO_TIMESCALE)
+    nhc_sy_steps = all_settings.get('nhc_sy_steps', DEFAULT_SUZUKI_YOSHIDA_STEPS)
     
     # Barostat settings
     md_P = all_settings.get('md_P')
-    nhc_baro = all_settings.get('nhc_baro', 1000)
-    nhc_sy_steps = all_settings.get('nhc_sy_steps', 3)
-    nhc_npt_tau = all_settings.get('nhc_npt_tau')
     
     # Geometry, cell and charge
     total_charge = all_settings.get('total_charge', 0.)
-    initial_geometry = all_settings.get('initial_geometry')
-    if initial_geometry is None:
-        raise ValueError('Initial geometry must be defined')
-    initial_geometry = read(initial_geometry)
+    initial_geometry_path = all_settings.get('initial_geometry')
+    if initial_geometry_path is None:
+        raise ValueError('Initial geometry file path must be provided in settings')
+    try:
+        initial_geometry = read(initial_geometry_path)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Cannot find initial geometry file: {initial_geometry_path}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to read geometry file {initial_geometry_path}: {e}")
 
     if opt_structure is not None:
         initial_geometry.set_positions(opt_structure)
@@ -1114,7 +1135,7 @@ def perform_md(
         cell = None
     
     if md_P is not None and cell is None:
-        raise ValueError('Cell must be defined for NPT simulations.')
+        raise ValueError('Cell must be defined for NPT simulations. The input geometry does not contain cell information.')
     
     if cell is not None:
         shift_displacement = 'periodic'
@@ -1127,7 +1148,8 @@ def perform_md(
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell)
 
-    # Re-initialize HDF5 storage now that we know the number of atoms
+    # Initialize HDF5 storage
+    hdf5_store = None
     if output_format == 'hdf5':
         hdf5_store = init_hdf5_store(
             save_to=output_file,
@@ -1141,10 +1163,13 @@ def perform_md(
     # Loading restart 
     if restart:
         click.echo(f'Loading state from {restart_load_path}.')
-        state, box, current_cycle = load_state(
-            path_to_load=restart_load_path,
-            ensemble='nvt' if md_P is None else 'npt'
-        )
+        try:
+            state, box, current_cycle = load_state(
+                path_to_load=restart_load_path,
+                ensemble='nvt' if md_P is None else 'npt'
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
         position = state.position
     
     # Loading the model
@@ -1157,7 +1182,9 @@ def perform_md(
             dispersion_energy_lr_cutoff_damping=dispersion_energy_cutoff
         )
     else:
-        # Load custom MLFF
+        # Verify model path exists
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Custom model path not found: {model_path}")
         print(f"Using custom MLFF potential from: {model_path}")
         potential = load_model(
             model_path,
@@ -1211,10 +1238,8 @@ def perform_md(
     md_P = unit_dict['P']
     
     # Setting up the thermostat and/or barostat
-    if nhc_tau is None:
-        nhc_tau = md_dt * nhc_thermo
-    if nhc_npt_tau is None:
-        nhc_npt_tau = md_dt * nhc_baro
+    nhc_tau = md_dt * nhc_thermo
+    nhc_npt_tau = md_dt * nhc_baro
         
     nhc_kwargs = {
         'chain_length': nhc_chain_length,
@@ -1282,13 +1307,11 @@ def perform_md(
     momenta, positions, boxs = [], [], []
     total_time = time.time()
     cycle_md = 1
-    current_cycle = 0  # Initialize current_cycle
-    cumulative_step_time = 0.0
-    total_steps_completed = 0
+    current_cycle = 0
     
     while cycle_md <= md_cycles:
         old_time = time.time()
-        
+        before_time = time.time()
         if lr:
             new_state, nbrs, nbrs_lr, new_box = jax.lax.fori_loop(
                 0,
@@ -1320,9 +1343,6 @@ def perform_md(
         if not overflow:
             cycle_md += 1
             current_cycle += 1
-            total_steps_completed += md_steps
-            cumulative_step_time += cycle_time
-            avg_time_per_step = cumulative_step_time / total_steps_completed
             
             state = new_state
             box = new_box
@@ -1341,24 +1361,12 @@ def perform_md(
                 click.echo(f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{current_T:.1f}\t{H:.3f}\t{time_per_step:.6f}')    
             else:
                 click.echo(f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{time_per_step:.6f}')
-                
-                # Log performance every 10 cycles
-                if cycle_md % 10 == 0:
-                    elapsed = time.time() - total_time
-                    estimated_total = (elapsed / current_cycle) * md_cycles
-                    remaining = estimated_total - elapsed
-                    click.echo(f'Performance: {time_per_step:.6f} s/step (avg: {avg_time_per_step:.6f} s/step) - Est. remaining: {remaining/60:.1f} min')
-                    
             positions.append(np.array(state.position))
             momenta.append(np.array(state.momentum))
-            if box is not None or np.an:
-                boxs.append(
-                    np.array(box)
-                )
-
-            if (
-                (len(positions) % hdf5_buffer_size == 0 and len(positions) > 0) or (len(positions) == md_cycles)
-            ):
+            if box is not None:
+                boxs.append(np.array(box))
+            
+            if ((len(positions) % hdf5_buffer_size == 0 and len(positions) > 0) or (len(positions) == md_cycles)):
                 # Saving the output 
                 if output_format == 'hdf5': #TODO: check that hdf5 is saving things correctly
                     positions, momenta, boxs = write_to_hdf5(
@@ -1368,14 +1376,12 @@ def perform_md(
                         boxs,
                     )
                 elif output_format == 'extxyz':
-                    # append = current_cycle > hdf5_buffer_size
                     positions, momenta, boxs = write_to_extxyz(
                         output_file,
                         initial_geometry,  # Template atoms
                         boxs,
                         momenta,
                         positions,
-                        # append=append
                     )
                 # Saving the state for restart
                 if create_restart:
@@ -1388,12 +1394,9 @@ def perform_md(
                     )
         
     total_runtime = time.time() - total_time
-    avg_step_time = cumulative_step_time / total_steps_completed if total_steps_completed > 0 else 0
     click.echo('=' * 60)
     click.echo('Simulation completed successfully!')
-    click.echo(f'Total runtime: {total_runtime:.2f} seconds ({total_runtime/60:.2f} minutes)')
-    click.echo(f'Estimated cost for 1ns simulation: {1e6*avg_step_time/3600:.2f} hours')
-    click.echo(f'Ideal cost for 1ns simulation: {3.25e-6*len(position)*2e6/3600:.2f} hours')
+    click.echo(f'Total runtime: {total_runtime:.2f} seconds ({total_runtime/3600:.2f} hours)')
 
 def create_min_fn(
     lr: bool,
@@ -1511,30 +1514,34 @@ def perform_min(
     output_file = all_settings.get('output_file')
     #TODO: print whether model path is used or not?
 
-    precision = all_settings.get('precision', 'float32')
+    precision = all_settings.get('precision', DEFAULT_PRECISION)
     precision = jnp.float64 if precision == 'float64' else jnp.float32
-    lr_cutoff = all_settings.get('lr_cutoff', 12.0)
-    dispersion_energy_cutoff = all_settings.get('dispersion_energy_cutoff_lr_damping', 2.0)
+    lr_cutoff = all_settings.get('lr_cutoff', DEFAULT_LR_CUTOFF)
+    dispersion_energy_cutoff = all_settings.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)
     
     # Buffer for the neighbor lists
-    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr', 1.25)
-    buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr', 1.25)
+    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)
+    buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)
     
     # Settings for the minimization
-    min_cycles = all_settings.get('min_cycles', 10)
-    min_steps = all_settings.get('min_steps', 10)
+    min_cycles = all_settings.get('min_cycles', 100)
+    min_steps = all_settings.get('min_steps', 100)
     min_start_dt = all_settings.get('dt_start', 0.05)
     min_max_dt = all_settings.get('dt_max', 0.1)
     min_n_min = all_settings.get('n_min', 2)
-    force_convergence_eV_A = all_settings.get('force_convergence', None) # eV/A, can be None
-    force_convergence_eV_A = float(force_convergence_eV_A) if force_convergence_eV_A is not None else None
+    force_convergence = all_settings.get('force_conv', None) # eV/A, can be None
 
     # Geometry, cell and charge
     total_charge = all_settings.get('total_charge', 0.)
-    initial_geometry = all_settings.get('initial_geometry')
-    if initial_geometry is None:
-        raise ValueError('Initial geometry must be defined')
-    initial_geometry = read(initial_geometry)
+    initial_geometry_path = all_settings.get('initial_geometry')
+    if initial_geometry_path is None:
+        raise ValueError('Initial geometry file path must be provided in settings')
+    try:
+        initial_geometry = read(initial_geometry_path)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Cannot find initial geometry file: {initial_geometry_path}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to read geometry file {initial_geometry_path}: {e}")
     cell = initial_geometry.get_cell()
     if np.all(cell == 0):
         cell = None
