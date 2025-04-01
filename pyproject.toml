@@ -21,3 +21,8 @@ glp = { git = "https://github.com/kabylda/glp.git", branch = "electrostatics_nei
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+
+[tool.poetry.scripts]
+evaluate-so3lr = "so3lr.cli.eval_so3lr:evaluate_so3lr_on"
+md-so3lr = "so3lr.cli.md_so3lr:main"
