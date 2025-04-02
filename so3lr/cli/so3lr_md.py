@@ -13,30 +13,31 @@ It includes functionality for:
 
 The module works with both the built-in SO3LR potential and custom MLFF models.
 """
-import time
 import os
 import sys
-import yaml
+import time
+import logging
+from logging.handlers import RotatingFileHandler
 import pathlib
 from pathlib import Path
+from functools import partial
+from typing import Dict, Tuple, Union, List, Optional, Any, Callable
+
+import yaml
 import click
 import numpy as np
 import ase
+from ase.io import read
 import jax
 import jax.numpy as jnp
 import jax_md
 import jax_md.quantity
-import logging
-from logging.handlers import RotatingFileHandler
-
-from ase.io import read
-from functools import partial
-from typing import Dict, Tuple, Union, List, Optional, Any, Callable
 from jax_md import units
 from jax_md import partition
 from jax_md.space import Box, DisplacementOrMetricFn, raw_transform
 from mlff.mdx.potential import MLFFPotentialSparse
 from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
+
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
 
@@ -1201,26 +1202,16 @@ def perform_md(
         lr = True
     else:
         lr = False
-        
-    nbrs = neighbor_fn.allocate(
-        position,
-        box=box
-    )
 
-    if lr:
-        nbrs_lr = neighbor_fn_lr.allocate(
-            position,
-            box=box
-        )
-    else:
-        nbrs_lr = None
-    
+    nbrs = neighbor_fn.allocate(position, box=box)
+    nbrs_lr = neighbor_fn_lr.allocate(position, box=box) if lr else None
+
     # Apply units
     unit_dict = handle_units(
         units.metal_unit_system,
         md_dt,
         md_T,
-        md_P
+        md_P,
     )
     
     md_dt = unit_dict['dt']
@@ -1397,6 +1388,7 @@ def perform_md(
         logger.warn('and/or increasing the number of steps in each jax.lax.fori_loop (--steps 1000)')
         if output_format == 'extxyz':
             logger.warn('and/or saving the trajectory in HDF5 format (--output-format hdf5)')
+
 def create_min_fn(
     lr: bool,
     min_apply: callable,

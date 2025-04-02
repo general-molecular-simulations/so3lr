@@ -866,7 +866,7 @@ def fire_optimization(
               help=f'Length of the Nose-Hoover thermostat chain. [default: {DEFAULT_NHC_CHAIN_LENGTH}]')
 @click.option('--nhc-steps', default=DEFAULT_NHC_INTEGRATION_STEPS, type=int,
               help=f'Number of integration steps per MD step. [default: {DEFAULT_NHC_INTEGRATION_STEPS}]')
-@click.option('--nhc-thermo', default=DEFAULT_NHC_THERMO, type=float,
+@click.option('--nhc-thermo', 'nhc_thermo', default=DEFAULT_NHC_THERMO, type=float,
               help=f'Thermostat timescale in femtoseconds. [default: {DEFAULT_NHC_THERMO}]')
 @click.option('--restart-save', type=click.Path(), default=None, 
               help='Path to save restart data.')
@@ -1040,7 +1040,7 @@ def nvt_md(
         sys.exit(1)
 
 # Define the 'npt' subcommand with clear help
-@cli.command(name='npt', help="Run NPT molecular dynamics simulation.")
+@cli.command(name='npt', help="Run NPT molecular dynamics simulation with `so3lr npt --input geometry.xyz`.")
 @click.option('--input', '--input_file', 'input_file', type=click.Path(exists=False),
               help='Input geometry file (any ASE-readable format). [default: None]')
 @click.option('--output', '--output_file', 'output_file', type=click.Path(),
