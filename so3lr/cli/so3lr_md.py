@@ -25,6 +25,8 @@ import jax
 import jax.numpy as jnp
 import jax_md
 import jax_md.quantity
+import logging
+from logging.handlers import RotatingFileHandler
 
 from ase.io import read
 from functools import partial
@@ -37,27 +39,66 @@ from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
 
-# Constants for default parameters
-DEFAULT_PRECISION = 'float64'
-DEFAULT_LR_CUTOFF = 12.0
-DEFAULT_DISPERSION_DAMPING = 2.0
-DEFAULT_BUFFER_MULTIPLIER = 1.25
-DEFAULT_HDF5_BUFFER_SIZE = 50
-DEFAULT_OUTPUT_FORMAT = 'extxyz'
-DEFAULT_TIMESTEP = 0.0005  # picoseconds
-DEFAULT_TEMPERATURE = 300  # Kelvin
-DEFAULT_MD_CYCLES = 100
-DEFAULT_MD_STEPS_PER_CYCLE = 100
-DEFAULT_NHC_CHAIN_LENGTH = 3
-DEFAULT_NHC_INTEGRATION_STEPS = 2
-DEFAULT_NHC_THERMO = 100.0  # thermostat timescale in fs
-DEFAULT_NHC_BARO = 1000.0  # barostat timescale
-DEFAULT_SUZUKI_YOSHIDA_STEPS = 3
-DEFAULT_MIN_CYCLES = 10
-DEFAULT_MIN_STEPS = 10
-DEFAULT_SEED = 52
-DEFAULT_TOTAL_CHARGE = 0
+# Setup logging
+logger = logging.getLogger("so3lr")
 
+def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.INFO):
+    """
+    Set up the logger with file and console handlers.
+    
+    Parameters:
+    -----------
+    log_file : str or None
+        Path to the log file. If None, logging only goes to console.
+    log_level : int
+        Logging level for the file handler (default: INFO)
+    console_level : int
+        Logging level for the console handler (default: INFO)
+    """
+    # Get the existing logger (defined at the module level)
+    global logger
+    
+    # Clear any existing handlers to avoid duplicate output
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    
+    # Set the global logger level to the lowest of the two levels
+    logger.setLevel(min(log_level, console_level))
+    
+    # Create formatter for the file output - includes timestamps and level names
+    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # Create formatter for console output - just the message, no prefix
+    console_formatter = logging.Formatter('%(message)s')
+    
+    # Add the console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(console_level)
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # Add the file handler if a log file is specified
+    if log_file:
+        try:
+            # Make sure parent directory exists
+            log_path = Path(log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Create a rotating file handler (10MB max size, keep 5 backups)
+            file_handler = RotatingFileHandler(
+                log_file, maxBytes=10*1024*1024, backupCount=5
+            )
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(file_formatter)
+            logger.addHandler(file_handler)
+        except Exception as e:
+            # Fall back to console only logging
+            logger.warning(f"Could not set up file logging to {log_file}: {e}")
+    
+    # Prevent propagation to the root logger to avoid duplicate messages
+    logger.propagate = False
+    
+    return logger
 
 def handle_units(
     unit_system: Callable[[], Dict[str, float]],
@@ -255,7 +296,7 @@ def write_to_hdf5(
         return [], [], []
         
     except Exception as e:
-        click.echo(f"Warning: Failed to write to HDF5 file: {str(e)}")
+        logger.warning(f"Failed to write to HDF5 file: {str(e)}")
         # Return the original lists in case of failure
         return momenta, positions, boxes
 
@@ -294,7 +335,7 @@ def write_to_extxyz(
         
         # Check if we have data to write
         if not positions:
-            click.echo('No positions to write to extxyz file')
+            logger.info('No positions to write to extxyz file')
             return momenta, positions, boxes
             
         # Convert positions to numpy array
@@ -341,7 +382,7 @@ def write_to_extxyz(
         return [], [], []
         
     except Exception as e:
-        click.echo(f"Warning: Failed to write to extxyz file: {str(e)}")
+        logger.warning(f"Failed to write to extxyz file: {str(e)}")
         # Return the original lists in case of failure
         return [], [], []
 
@@ -391,7 +432,7 @@ def load_model(
     Returns:
         MLFFPotentialSparse: The loaded MLFF model.
     """
-    click.echo(f'Loading model from {model_path}')
+    logger.info(f'Loading model from {model_path}')
     
     # Verify model path exists
     model_dir = Path(model_path).expanduser().resolve()
@@ -630,7 +671,7 @@ def check_overflow(
     overflown = False
     if nbrs.did_buffer_overflow:
         overflown = True
-        click.echo('Neighbor list overflowed, reallocating.')
+        logger.info('Neighbor list overflowed, reallocating.')
         nbrs = neighbor_fn.allocate(
             state.position,
             box=box
@@ -638,7 +679,7 @@ def check_overflow(
     if nbrs_lr is not None:
         if nbrs_lr.did_buffer_overflow:
             overflown = True
-            click.echo('Long-range neighbor list overflowed, reallocating.')
+            logger.info('Long-range neighbor list overflowed, reallocating.')
             nbrs_lr = neighbor_fn_lr.allocate(
                 state.position,
                 box=box
@@ -1009,7 +1050,7 @@ def infer_output_format(output_file):
     elif output_file.endswith('.xyz') or output_file.endswith('.extxyz'):
         return 'extxyz'
     else:
-        click.echo(f"Unknown output extension for {output_file}, defaulting to extxyz format")
+        logger.warning(f"Unknown output extension for {output_file}, defaulting to extxyz format")
         return 'extxyz'
 
 
@@ -1025,6 +1066,10 @@ def perform_md(
         opt_structure (Optional[jnp.ndarray], optional): Optimized structure, if 
                                     already available. Defaults to None.
     """
+    # Setup logger
+    log_file = all_settings.get('log_file')
+    setup_logger(log_file)
+    
     # Extract settings with defaults
     input_file = all_settings.get('initial_geometry')
     output_file = all_settings.get('output_file')
@@ -1033,35 +1078,35 @@ def perform_md(
     
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = all_settings.get('precision', DEFAULT_PRECISION)
-    lr_cutoff = all_settings.get('lr_cutoff', DEFAULT_LR_CUTOFF)
-    dispersion_energy_cutoff_lr_damping = all_settings.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)
-    buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)
-    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)
-    total_charge = all_settings.get('total_charge', DEFAULT_TOTAL_CHARGE)
+    precision = all_settings.get('precision')
+    lr_cutoff = all_settings.get('lr_cutoff')
+    dispersion_energy_cutoff_lr_damping = all_settings.get('dispersion_energy_cutoff_lr_damping')
+    buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
+    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
+    total_charge = all_settings.get('total_charge')
     
     # MD parameters
-    md_dt = all_settings.get('md_dt', DEFAULT_TIMESTEP)
-    md_T = all_settings.get('md_T', DEFAULT_TEMPERATURE)
-    md_P = all_settings.get('md_P', None)
-    md_cycles = all_settings.get('md_cycles', DEFAULT_MD_CYCLES)
-    md_steps = all_settings.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)
+    md_dt = all_settings.get('md_dt')
+    md_T = all_settings.get('md_T')
+    md_P = all_settings.get('md_P')
+    md_cycles = all_settings.get('md_cycles')
+    md_steps = all_settings.get('md_steps')
     
     # Thermostat parameters
-    nhc_chain_length = all_settings.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)
-    nhc_steps = all_settings.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)
-    nhc_thermo = all_settings.get('nhc_thermo', DEFAULT_NHC_THERMO)
-    nhc_baro = all_settings.get('nhc_baro', DEFAULT_NHC_BARO)
-    nhc_sy_steps = all_settings.get('nhc_sy_steps', DEFAULT_SUZUKI_YOSHIDA_STEPS)
+    nhc_chain_length = all_settings.get('nhc_chain_length')
+    nhc_steps = all_settings.get('nhc_steps')
+    nhc_thermo = all_settings.get('nhc_thermo')
+    nhc_baro = all_settings.get('nhc_baro')
+    nhc_sy_steps = all_settings.get('nhc_sy_steps')
     
     # Format control
     output_format = all_settings.get('output_format')
-    hdf5_buffer_size = all_settings.get('hdf5_buffer_size', DEFAULT_HDF5_BUFFER_SIZE)
-    seed = all_settings.get('seed', DEFAULT_SEED)
-    relax_before_run = all_settings.get('relax_before_run', False)
+    hdf5_buffer_size = all_settings.get('hdf5_buffer_size')
+    seed = all_settings.get('seed')
+    relax_before_run = all_settings.get('relax_before_run')
     force_convergence = all_settings.get('force_convergence')
-    min_cycles = all_settings.get('min_cycles', DEFAULT_MIN_CYCLES)
-    min_steps = all_settings.get('min_steps', DEFAULT_MIN_STEPS)
+    min_cycles = all_settings.get('min_cycles')
+    min_steps_per_cycle = all_settings.get('min_steps_per_cycle')
 
     # Handling of restart
     if restart_save_path is not None:
@@ -1117,7 +1162,7 @@ def perform_md(
     current_cycle = 0
     # Loading restart 
     if restart:
-        click.echo(f'Loading state from {restart_load_path}.')
+        logger.info(f'Loading state from {restart_load_path}.')
         try:
             state, box, current_cycle = load_state(
                 path_to_load=restart_load_path,
@@ -1130,7 +1175,7 @@ def perform_md(
     # Loading the model
     if model_path is None:
         # Load default SO3LR
-        print("Using default SO3LR potential.")
+        logger.info("Using default SO3LR potential.")
         potential = So3lrPotential(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
@@ -1140,7 +1185,7 @@ def perform_md(
         # Verify model path exists
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Custom model path not found: {model_path}")
-        print(f"Using custom MLFF potential from: {model_path}")
+        logger.info(f"Using custom MLFF potential from: {model_path}")
         potential = load_model(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
@@ -1194,8 +1239,6 @@ def perform_md(
     
     # Setting up the thermostat and/or barostat
     nhc_tau = md_dt * nhc_thermo
-    nhc_npt_tau = md_dt * nhc_baro
-        
     nhc_kwargs = {
         'chain_length': nhc_chain_length,
         'chain_steps': nhc_steps,
@@ -1205,8 +1248,7 @@ def perform_md(
     
     if md_P is not None:
         nhc_barostat_kwargs = nhc_kwargs.copy()
-        if nhc_npt_tau is not None:
-            nhc_barostat_kwargs['tau'] = nhc_npt_tau
+        nhc_barostat_kwargs['tau'] = md_dt * nhc_baro
         
     rng_key = jax.random.PRNGKey(seed)
 
@@ -1254,11 +1296,11 @@ def perform_md(
             )
 
     # Running the MD
-    click.echo('Starting MD simulation...')
+    logger.info('Starting MD simulation...')
     if md_T is not None:
-        click.echo('Step\tKE (eV)\tPE (eV)\tTotal Energy (eV)\tTemperature (K)\tH (eV)\ttime/step (s)')
+        logger.info('Step\tKE (eV)\tPE (eV)\tTotal Energy (eV)\tTemperature (K)\tH (eV)\ttime/step (s)')
     else:
-        click.echo('Step\tKE (eV)\tPE (eV)\tTotal Energy (eV)\ttime/step (s)')
+        logger.info('Step\tKE (eV)\tPE (eV)\tTotal Energy (eV)\ttime/step (s)')
 
     momenta, positions, boxs = [], [], []
     total_time = time.time()
@@ -1281,9 +1323,8 @@ def perform_md(
                 step_md_fn,
                 (state, nbrs, box)
             )
-        new_time = time.time()
-        cycle_time = new_time - old_time
-        time_per_step = cycle_time / md_steps
+
+        time_per_step = (time.time() - old_time) / md_steps
         # Checking if the neighbor lists overflowed
         nbrs, nbrs_lr, overflow = check_overflow(
             neighbor_fn,
@@ -1311,9 +1352,9 @@ def perform_md(
                 md_P
             )
             if current_T is not None:
-                click.echo(f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{current_T:.1f}\t{H:.3f}\t{time_per_step:.6f}')    
+                logger.info(f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{current_T:.1f}\t{H:.3f}\t{time_per_step:.6f}')    
             else:
-                click.echo(f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{time_per_step:.6f}')
+                logger.info(f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{time_per_step:.6f}')
             positions.append(np.array(state.position))
             momenta.append(np.array(state.momentum))
             if box is not None:
@@ -1345,10 +1386,10 @@ def perform_md(
                         ensemble='nvt' if md_P is None else 'npt'
                     )            
     total_runtime = time.time() - total_time
-    click.echo('Results saved to: ' + output_file)
-    click.echo('=' * 60)
-    click.echo('Simulation completed successfully!')
-    click.echo(f'Total runtime: {total_runtime:.2f} seconds ({total_runtime/3600:.2f} hours)')
+    logger.info('Results saved to: ' + output_file)
+    logger.info('=' * 60)
+    logger.info('Simulation completed successfully!')
+    logger.info(f'Total runtime: {total_runtime:.2f} seconds ({total_runtime/3600:.2f} hours)')
     
     
 def create_min_fn(
@@ -1462,20 +1503,20 @@ def perform_min(
     
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = all_settings.get('precision', DEFAULT_PRECISION)
-    lr_cutoff = all_settings.get('lr_cutoff', DEFAULT_LR_CUTOFF)
-    dispersion_energy_cutoff_lr_damping = all_settings.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)
-    buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)
-    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)
-    total_charge = all_settings.get('total_charge', 0)
+    precision = all_settings.get('precision')
+    lr_cutoff = all_settings.get('lr_cutoff')
+    dispersion_energy_cutoff_lr_damping = all_settings.get('dispersion_energy_cutoff_lr_damping')
+    buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
+    buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
+    total_charge = all_settings.get('total_charge')
 
     # Settings for the minimization
-    min_cycles = all_settings.get('min_cycles', 100)
-    min_steps = all_settings.get('min_steps', 100)
-    min_start_dt = all_settings.get('min_start_dt', 0.05)
-    min_max_dt = all_settings.get('min_max_dt', 0.1)
-    min_n_min = all_settings.get('min_n_min', 2)
-    force_convergence = all_settings.get('force_convergence', None) # eV/A, can be None
+    min_cycles = all_settings.get('min_cycles')
+    min_steps = all_settings.get('min_steps')
+    min_start_dt = all_settings.get('min_start_dt')
+    min_max_dt = all_settings.get('min_max_dt')
+    min_n_min = all_settings.get('min_n_min')
+    force_convergence = all_settings.get('force_convergence') # eV/A, can be None
 
     # Geometry, cell and charge
     initial_geometry_path = all_settings.get('initial_geometry')
@@ -1485,8 +1526,6 @@ def perform_min(
         initial_geometry = read(initial_geometry_path)
     except FileNotFoundError:
         raise FileNotFoundError(f"Cannot find initial geometry file: {initial_geometry_path}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to read geometry file {initial_geometry_path}: {e}")
     cell = initial_geometry.get_cell()
     if np.all(cell == 0):
         cell = None
@@ -1508,7 +1547,7 @@ def perform_min(
     # Loading the model
     if model_path is None:
         # Load default SO3LR
-        print("Using default SO3LR potential.")
+        logger.info("Using default SO3LR potential.")
         potential = So3lrPotential(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
@@ -1516,7 +1555,7 @@ def perform_min(
         )
     else:
         # Load custom MLFF
-        print(f"Using custom MLFF potential from: {model_path}")
+        logger.info(f"Using custom MLFF potential from: {model_path}")
         potential = load_model(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
@@ -1582,8 +1621,8 @@ def perform_min(
             neighbor=nbrs.idx
         )
 
-    click.echo('Starting minimization...')
-    click.echo('Step\tE [eV]\tF_max [eV/Å]')
+    logger.info('Starting minimization...')
+    logger.info('Step\tE [eV]\tF_max [eV/Å]')
     
     # Initial energy and force
     E = energy_fn(
@@ -1599,7 +1638,7 @@ def perform_min(
         box=box
     )
     f_max = np.abs(F).max()
-    click.echo('{}\t{:.3f}\t{:.3f}'.format(0, E, f_max))
+    logger.info('{}\t{:.3f}\t{:.3f}'.format(0, E, f_max))
     
     # If tracking trajectory, store all positions
     minimization_trajectory = []
@@ -1651,7 +1690,7 @@ def perform_min(
             )
         
         f_max = np.abs(F).max()
-        click.echo('{}\t{:.3f}\t{:.3f}'.format(i*min_steps, E, f_max))
+        logger.info('{}\t{:.3f}\t{:.3f}'.format(i*min_steps, E, f_max))
         # Save the current positions to the trajectory if requested
         if save_optimization_trajectory:
             minimization_trajectory.append(np.array(min_state.position))
@@ -1661,7 +1700,7 @@ def perform_min(
             if f_max > force_convergence:
                 num_cycles -= 1
             else:
-                click.echo(f"Convergence criterion met at step {i*min_steps}: Fmax = {f_max:.3f} eV/Å")
+                logger.info(f"Convergence criterion met at step {i*min_steps}: Fmax = {f_max:.3f} eV/Å")
                 break
 
         num_cycles += 1
@@ -1672,12 +1711,14 @@ def perform_min(
         # atoms = read(all_settings['initial_geometry'])
         if save_optimization_trajectory:
             write_to_extxyz(output_file, initial_geometry, boxes = box, momenta=None, positions=minimization_trajectory)
-            click.echo(f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
+            logger.info(f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
+            logger.info("=" * 60)
         else:
             # Write the final optimized structure to file
             # atoms.set_positions(np.array(min_state.position))
             write_to_extxyz(output_file, initial_geometry, boxes = box, momenta=None, positions=min_state.position)
-            click.echo(f"Final optimized structure saved to {output_file}")
+            logger.info(f"Final optimized structure saved to {output_file}")
+            logger.info("=" * 60)
     
     if box is None or np.any(box == 0):
         return min_state.position
@@ -1856,7 +1897,7 @@ def run(
 
     if relax_before_run:
         if restart:
-            click.echo('Restarting MD, skipping relaxation.')
+            logger.info('Restarting MD, skipping relaxation.')
             opt_structure = None
         else:
             opt_structure = perform_min(settings)

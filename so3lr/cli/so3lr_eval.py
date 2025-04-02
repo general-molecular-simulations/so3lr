@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import time
 import pprint
 import click
+import logging
 from typing import Dict, List, Tuple, Union, Optional, Any
 
 from ase.io import write
@@ -17,7 +18,10 @@ from pathlib import Path
 from ..jraph_utils import jraph_to_ase_atoms
 from ..jraph_utils import unbatch_np
 from ..base_calculator import make_so3lr
-from .so3lr_md import load_model
+from .so3lr_md import load_model, setup_logger
+
+# Get logger
+logger = logging.getLogger("so3lr")
 
 
 def process_predictions(
@@ -121,17 +125,17 @@ def save_predictions_to_file(
     num_data : int
         Total number of data points for progress reporting
     """
-    click.echo(f'Saving predictions to {str(save_predictions_to)}')
+    logger.info(f'Saving predictions to {str(save_predictions_to)}')
     
     log_every = max(1, len(predicted_graphs) // 10)
     
     for n, predicted_graph in enumerate(predicted_graphs):
         if n % log_every == 0:
-            click.echo(f'Saving: {n} / {len(predicted_graphs)} structures')
+            logger.info(f'Saving: {n} / {len(predicted_graphs)} structures')
         atoms = jraph_to_ase_atoms(predicted_graph)
         write(save_predictions_to, images=atoms, append=True)
     
-    click.echo(f'Successfully saved predictions for {len(predicted_graphs)} structures')
+    logger.info(f'Successfully saved predictions for {len(predicted_graphs)} structures')
 
 
 def evaluate_so3lr_on(
@@ -143,7 +147,8 @@ def evaluate_so3lr_on(
         save_predictions_to: Optional[str] = None,
         model_path: Optional[str] = None,
         precision: str = 'float32',
-        targets: str = 'forces'
+        targets: str = 'forces,dipole_vec,hirshfeld_ratios',
+        log_file: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset.
@@ -168,17 +173,22 @@ def evaluate_so3lr_on(
         Precision to use for the calculation.
     targets : str
         Comma-separated list of targets to evaluate.
+    log_file : str or None
+        Path to log file. If None, logging only goes to console.
         
     Returns:
     --------
     dict
         Dictionary containing evaluation metrics and timing information.
     """
+    # Setup logging
+    setup_logger(log_file)
+    
     total_time_start = time.time()
 
     # Parse targets into a list
     target_list = targets.split(',')
-    click.echo(f"Evaluating targets: {', '.join(target_list)}")
+    logger.info(f"Evaluating targets: {', '.join(target_list)}")
 
     # Process input file path
     datafile = Path(datafile).resolve().expanduser()
@@ -200,14 +210,14 @@ def evaluate_so3lr_on(
     
     # Initialize the model
     if model_path is None:
-        click.echo("Using default SO3LR potential")
+        logger.info("Using default SO3LR potential")
         so3lr_calc = make_so3lr(
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
             calculate_forces=True
         )
     else:
-        click.echo(f"Using custom MLFF potential from: {model_path}")
+        logger.info(f"Using custom MLFF potential from: {model_path}")
         so3lr_calc = load_model(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
@@ -216,10 +226,10 @@ def evaluate_so3lr_on(
         )
 
     # Load the data
-    click.echo(f"Loading data from {datafile}")
+    logger.info(f"Loading data from {datafile}")
     loader = AseDataLoaderSparse(datafile)
     num_data = loader.cardinality()
-    click.echo(f"Found {num_data} structures in dataset")
+    logger.info(f"Found {num_data} structures in dataset")
 
     # Load the data with neighbor calculation
     try:
@@ -260,7 +270,7 @@ def evaluate_so3lr_on(
             n_pairs=n_pairs
         )
 
-        click.echo('Starting JIT compilation...')
+        logger.info('Starting JIT compilation...')
         compile_start = time.time()
 
         try:
@@ -269,7 +279,7 @@ def evaluate_so3lr_on(
             )
             compile_end = time.time()
             compile_time = compile_end - compile_start
-            click.echo(f'Compilation completed in {compile_time:.3f} seconds')
+            logger.info(f'Compilation completed in {compile_time:.3f} seconds')
         except Exception as e:
             raise RuntimeError(f"JIT compilation failed: {str(e)}")
     else:
@@ -288,8 +298,8 @@ def evaluate_so3lr_on(
 
     log_every = max(1, num_data // 10)
 
-    click.echo(f'Starting evaluation on {num_data} structures')
-    click.echo('-' * 50)
+    logger.info(f'Starting evaluation on {num_data} structures')
+    logger.info('-' * 50)
     
     try:
         for graph_batch in batched_graphs:
@@ -299,7 +309,7 @@ def evaluate_so3lr_on(
             total_num_structures += batch_size
 
             if total_num_structures % log_every == 0:
-                click.echo(f'Processing: {total_num_structures} / {num_data} structures')
+                logger.info(f'Processing: {total_num_structures} / {num_data} structures')
 
             # Run the model
             start = time.time()
@@ -320,9 +330,9 @@ def evaluate_so3lr_on(
 
             i += 1
 
-        click.echo(f'Completed evaluation on {total_num_structures} / {num_data} structures')
-        click.echo(f'Evaluation time: {total_time:.3f} seconds')
-        click.echo('-' * 50)
+        logger.info(f'Completed evaluation on {total_num_structures} / {num_data} structures')
+        logger.info(f'Evaluation time: {total_time:.3f} seconds')
+        logger.info('-' * 50)
 
         # Compute final metrics
         for key in list(test_metrics.keys()):
@@ -349,23 +359,23 @@ def evaluate_so3lr_on(
         metrics['datafile'] = str(datafile.as_uri())
 
         # Display results
-        click.echo('Evaluation metrics (units are eV, Angstrom, and seconds):')
+        logger.info('Evaluation metrics (units are eV, Angstrom, and seconds):')
         formatted_metrics = {k: f"{v:.3e}" if isinstance(v, float) else v for k, v in metrics.items()}
-        click.echo(pprint.pformat(formatted_metrics))
-        click.echo('-' * 50)
+        logger.info(pprint.pformat(formatted_metrics))
+        logger.info('-' * 50)
 
         # Save predictions if requested
         if save_predictions_bool:
             save_predictions_to_file(predicted, str(save_predictions_to), num_data)
 
         total_time_end = time.time()
-        click.echo(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
-        click.echo('Evaluation completed successfully')
+        logger.info(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
+        logger.info('Evaluation completed successfully')
         
         return metrics
         
     except Exception as e:
-        click.echo(f"Error during evaluation: {str(e)}")
+        logger.error(f"Error during evaluation: {str(e)}")
         raise
 
 

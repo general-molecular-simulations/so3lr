@@ -7,6 +7,7 @@ import numpy as np
 import ase
 import jax
 import time
+import logging
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 from ase.io import read, write
@@ -15,8 +16,12 @@ from .so3lr_eval import evaluate_so3lr_on
 from .so3lr_md import (
     perform_min,
     perform_md,
-    run
+    run,
+    setup_logger
 )
+
+# Get logger
+logger = logging.getLogger("so3lr")
 
 # ASCII art banner
 SO3LR_ASCII = """
@@ -29,29 +34,34 @@ SO3LR_ASCII = """
 """
 
 # Default settings
-DEFAULT_TEMPERATURE = 300.0  # Kelvin
-DEFAULT_PRESSURE = 1.0  # atmospheres
+DEFAULT_PRECISION = 'float32'
+DEFAULT_LR_CUTOFF = 12.0  # Angstrom
+DEFAULT_SEED = 52
+DEFAULT_TOTAL_CHARGE = 0
+DEFAULT_DISPERSION_DAMPING = 2.0 # Angstrom
+DEFAULT_BUFFER_MULTIPLIER = 1.25
+DEFAULT_HDF5_BUFFER = 50
+DEFAULT_OUTPUT_FORMAT = 'extxyz'
 DEFAULT_TIMESTEP = 0.0005  # picoseconds
+DEFAULT_TEMPERATURE = 300  # Kelvin
+DEFAULT_PRESSURE = 1.0  # atmospheres
+
+# Nose-Hoover chain parameters
 DEFAULT_CYCLES = 100
 DEFAULT_STEPS_PER_CYCLE = 100
-DEFAULT_LR_CUTOFF = 12.0  # Angstrom
-DEFAULT_DISPERSION_DAMPING = 2.0
-DEFAULT_BUFFER_MULTIPLIER = 1.25
-DEFAULT_PRECISION = "float32"
 DEFAULT_NHC_CHAIN_LENGTH = 3
-DEFAULT_NHC_STEPS = 2
 DEFAULT_NHC_INTEGRATION_STEPS = 2
-DEFAULT_NHC_TAU = 100.0
-DEFAULT_NHC_THERMO = 100.0
-DEFAULT_NHC_BARO = 1000.0
-DEFAULT_SUZUKI_YOSHIDA_STEPS = 3
-DEFAULT_NHC_NPT_TAU = 1000.0
-DEFAULT_HDF5_BUFFER = 50
-DEFAULT_SEED = 42
-DEFAULT_LOG_FILE = "so3lr_md.log"
-DEFAULT_TOTAL_CHARGE = 0
+DEFAULT_NHC_THERMO = 100.0  # thermostat timescale in fs
+DEFAULT_NHC_BARO = 1000.0  # barostat timescale
+
+# Geometry optimization parameters with FIRE
+# More details here: https://jax-md.readthedocs.io/en/main/jax_md.minimize.html#jax_md.minimize.fire_descent
 DEFAULT_MIN_CYCLES = 10
 DEFAULT_MIN_STEPS = 10
+DEFAULT_MIN_START_DT = 0.05
+DEFAULT_MIN_MAX_DT = 0.1
+DEFAULT_MIN_N_MIN = 2
+DEFAULT_SUZUKI_YOSHIDA_STEPS = 3
 
 # Help strings for CLI
 FULL_HELP_STRING = """
@@ -93,7 +103,7 @@ Run NPT simulation with all options:
   so3lr npt --input geometry.xyz --trajectory npt_traj.hdf5 --temperature 300
       --pressure 1.0 --model /path/to/model --dt 0.0005
       --cycles 100 --steps 100 --nhc-chain 3 --nhc-steps 2 --nhc-tau 100.0
-      --nhc-baro 100.0 --nhc-npt-tau 1000.0 --relax --seed 42
+      --nhc-baro 100.0 --relax --seed 42
       --log-file npt_md.log --precision float32 --lr-cutoff 12.0
       --disp-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25 --total-charge 0
 
@@ -108,8 +118,8 @@ Run with all command line options:
       --hdf5-buffer 100 --restart-save restart.npz --restart-load previous.npz
       --dt 0.0005 --temperature 300.0 --pressure 1.0 --cycles 100 --steps 100
       --nhc-chain 3 --nhc-steps 2 --nhc-thermo 100.0 --nhc-tau 100.0
-      --nhc-baro 100.0 --nhc-sy-steps 3 --nhc-npt-tau 1000.0
-      --total-charge 0 --seed 42 --log-file md.log --relax
+      --nhc-baro 100.0 --nhc-sy-steps 3 --total-charge 0 --seed 42
+      --log-file md.log --relax
 
 ### Settings File Examples
 Example settings file for NVT simulation (nvt_settings.yaml):
@@ -171,7 +181,6 @@ nhc_steps: 2                                 # Number of integration steps per M
 nhc_thermo: 100.0                            # Thermostat timescale in femtoseconds
 nhc_baro: 1000.0                             # Barostat timescale
 nhc_sy_steps: 3                              # Number of Suzuki-Yoshida integration steps
-nhc_npt_tau: 1000.0                          # Barostat coupling constant
 
 # Additional settings
 total_charge: 0                              # Total charge of the system
@@ -337,14 +346,12 @@ class NVTNPTGroup(CustomCommandClass):
               help=f'Barostat timescale [default: {DEFAULT_NHC_BARO}].')
 @click.option('--nhc-sy-steps', default=DEFAULT_SUZUKI_YOSHIDA_STEPS, type=int, 
               help=f'Number of Suzuki-Yoshida integration steps [default: {DEFAULT_SUZUKI_YOSHIDA_STEPS}].')
-@click.option('--nhc-npt-tau', default=DEFAULT_NHC_NPT_TAU, type=float, 
-              help=f'Barostat coupling constant [default: {DEFAULT_NHC_NPT_TAU}].')
 @click.option('--total-charge', default=DEFAULT_TOTAL_CHARGE, type=int, 
               help=f'Total charge of the system [default: {DEFAULT_TOTAL_CHARGE}].')
 @click.option('--seed', default=DEFAULT_SEED, type=int, 
               help=f'Random seed for MD [default: {DEFAULT_SEED}].')
-@click.option('--log-file', default=DEFAULT_LOG_FILE, type=click.Path(), 
-              help=f'File to write logs to [default: {DEFAULT_LOG_FILE}].')
+@click.option('--log-file', default=None, type=click.Path(), 
+              help=f'File to write logs to [default: None].')
 @click.option('--relax/--no-relax', default=True, 
               help='Perform geometry relaxation before MD [default: enabled].')
 @click.option('--force-conv', default=None, type=float, 
@@ -384,10 +391,9 @@ def cli(ctx: click.Context,
     nhc_thermo: float,
     nhc_baro: float,
     nhc_sy_steps: int,
-    nhc_npt_tau: float,
     total_charge: int,
     seed: int,
-    log_file: str,
+    log_file: Optional[str],
     relax: bool,
     force_conv: Optional[float],
     help_full: bool,
@@ -419,14 +425,13 @@ def cli(ctx: click.Context,
     
     # No arguments provided shows help
     if ctx.invoked_subcommand is None and not any([settings, input_file]):
-        click.echo(SO3LR_ASCII)
-        click.echo(BASIC_HELP_STRING)
+        click.echo(ctx.get_help())
         return
-    
+        
     # Skip execution if used in a command group context
     if ctx.invoked_subcommand is not None:
         return
-        
+    
     # Load settings from file if provided
     settings_dict: Dict[str, Any] = {}
     if settings is not None:
@@ -438,9 +443,10 @@ def cli(ctx: click.Context,
             with open(settings_path, 'r') as f:
                 settings_dict = yaml.safe_load(f)
                 
-            click.echo(f"Loading settings from {settings}")
+            # Use standard logging initially for any errors
+            logger.info(f"Loading settings from {settings}")
         except (FileNotFoundError, yaml.YAMLError) as e:
-            click.echo(f"Error loading settings file: {str(e)}")
+            logger.error(f"Error loading settings file: {str(e)}")
             sys.exit(1)
     
     # Override settings with command line arguments if provided
@@ -487,19 +493,15 @@ def cli(ctx: click.Context,
     if nhc_steps is not None:
         settings_dict['nhc_steps'] = nhc_steps
     if nhc_thermo is not None:
-        settings_dict['nhc_thermo'] = nhc_thermo
+        settings_dict['nhc_thermo'] = nhc_thermo 
     if nhc_baro is not None:
-        settings_dict['nhc_baro'] = nhc_baro
+        settings_dict['nhc_baro'] = nhc_baro 
     if nhc_sy_steps is not None:
         settings_dict['nhc_sy_steps'] = nhc_sy_steps
-    if nhc_npt_tau is not None:
-        settings_dict['nhc_npt_tau'] = nhc_npt_tau
     if total_charge is not None:
         settings_dict['total_charge'] = total_charge
     if seed is not None:
         settings_dict['seed'] = seed
-    if log_file is not None:
-        settings_dict['log_file'] = log_file
     if relax is not None:
         settings_dict['relax_before_run'] = relax
     if force_conv is not None:
@@ -507,71 +509,83 @@ def cli(ctx: click.Context,
     
     # Validate required settings
     if 'initial_geometry' not in settings_dict:
-        click.echo("Error: Initial geometry file must be specified either in settings file or with --input")
+        logger.error("Error: Initial geometry file must be specified either in settings file or with --input")
         sys.exit(1)
     
     # Set default output file if not specified
     if 'output_file' not in settings_dict:
         input_name = Path(settings_dict['initial_geometry']).stem
         settings_dict['output_file'] = f'{input_name}_trajectory.xyz'
-        click.echo(f"No output file specified, using default: {settings_dict['output_file']}")
+        logger.info(f"No output file specified, using default: {settings_dict['output_file']}")
+    
+    # Set default log file based on output file if not explicitly provided
+    if log_file is None:
+        output_path = Path(settings_dict['output_file'])
+        log_file = f"{output_path.stem}.log"
+    
+    # Add log settings to the settings dictionary
+    settings_dict['log_file'] = log_file
+    
+    # Setup logging with default levels
+    setup_logger(log_file)
+    
+    # Log the ASCII art to the log file
+    logger.info(SO3LR_ASCII)
+    
+    # Log that we loaded settings from file
+    if settings is not None:
+        logger.info(f"Loading settings from {settings}")
     
     # Print simulation details
-    click.echo("=" * 60)
-    click.echo(f"SO3LR Molecular Dynamics Simulation")
-    click.echo("=" * 60)
-    click.echo(f"Initial geometry:       {settings_dict['initial_geometry']}")
-    click.echo(f"Output file:            {settings_dict['output_file']}")
-    click.echo(f"Force field:            {'Custom MLFF' if model_path else 'SO3LR'}")
+    logger.info("=" * 60)
+    logger.info(f"SO3LR Molecular Dynamics Simulation")
+    logger.info("=" * 60)
+    logger.info(f"Initial geometry:       {settings_dict['initial_geometry']}")
+    logger.info(f"Output file:            {settings_dict['output_file']}")
+    logger.info(f"Log file:               {log_file}")
+    logger.info(f"Force field:            {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
-        click.echo(f"Model path:             {settings_dict['model_path']}")
-    click.echo(f"Long-range cutoff:      {settings_dict.get('lr_cutoff', DEFAULT_LR_CUTOFF)} Å")
-    click.echo(f"Dispersion damping:     {settings_dict.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)} Å")
-    click.echo(f"Short-range buffer:     {settings_dict.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)}")
-    click.echo(f"Long-range buffer:      {settings_dict.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)}")
-    click.echo(f"Total charge:           {settings_dict.get('total_charge', DEFAULT_TOTAL_CHARGE)}")
-    click.echo(f"Precision:              {settings_dict.get('precision', DEFAULT_PRECISION)}")
+        logger.info(f"Model path:             {settings_dict['model_path']}")
+    logger.info(f"Long-range cutoff:      {settings_dict.get('lr_cutoff', DEFAULT_LR_CUTOFF)} Å")
+    logger.info(f"Dispersion damping:     {settings_dict.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)} Å")
+    logger.info(f"Short-range buffer:     {settings_dict.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)}")
+    logger.info(f"Long-range buffer:      {settings_dict.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)}")
+    logger.info(f"Total charge:           {settings_dict.get('total_charge', DEFAULT_TOTAL_CHARGE)}")
+    logger.info(f"Precision:              {settings_dict.get('precision', DEFAULT_PRECISION)}")
     
-    click.echo(f"Temperature:            {settings_dict.get('md_T', DEFAULT_TEMPERATURE)} K")
+    logger.info(f"Temperature:            {settings_dict.get('md_T', DEFAULT_TEMPERATURE)} K")
     
     if settings_dict.get('md_P') is not None:
-        click.echo(f"Pressure:               {settings_dict.get('md_P')} atm")
-        click.echo(f"Ensemble:               NPT")
+        logger.info(f"Pressure:               {settings_dict.get('md_P')} atm")
+        logger.info(f"Ensemble:               NPT")
     else:
-        click.echo(f"Ensemble:               NVT")
+        logger.info(f"Ensemble:               NVT")
     
     total_steps = settings_dict.get('md_cycles', DEFAULT_CYCLES) * settings_dict.get('md_steps', DEFAULT_STEPS_PER_CYCLE)
     simulation_time = total_steps * settings_dict.get('md_dt', DEFAULT_TIMESTEP)  # in ps
     
-    click.echo(f"Simulation length:      {total_steps} steps ({simulation_time:.2f} ps)")
-    click.echo(f"MD cycles:              {settings_dict.get('md_cycles', DEFAULT_CYCLES)}")
-    click.echo(f"Steps per cycle:        {settings_dict.get('md_steps', DEFAULT_STEPS_PER_CYCLE)}")
-    click.echo(f"Timestep:               {settings_dict.get('md_dt', DEFAULT_TIMESTEP)*1000} fs")
-    click.echo(f"NHC length:             {settings_dict.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)}")
-    click.echo(f"Nose-Hoover steps:      {settings_dict.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)}")
-    click.echo(f"Nose-Hoover thermo:     {settings_dict.get('nhc_thermo', DEFAULT_NHC_THERMO)}")
-    click.echo(f"Seed:                   {settings_dict.get('seed', DEFAULT_SEED)}")
+    logger.info(f"Simulation length:      {total_steps} steps ({simulation_time:.2f} ps)")
+    logger.info(f"MD cycles:              {settings_dict.get('md_cycles', DEFAULT_CYCLES)}")
+    logger.info(f"Steps per cycle:        {settings_dict.get('md_steps', DEFAULT_STEPS_PER_CYCLE)}")
+    logger.info(f"Timestep:               {settings_dict.get('md_dt', DEFAULT_TIMESTEP)*1000} fs")
+    logger.info(f"NHC length:             {settings_dict.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)}")
+    logger.info(f"Nose-Hoover steps:      {settings_dict.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)}")
+    logger.info(f"Nose-Hoover thermo:     {settings_dict.get('nhc_thermo', DEFAULT_NHC_THERMO)}")
+    logger.info(f"Seed:                   {settings_dict.get('seed', DEFAULT_SEED)}")
     
     if settings_dict.get('relax_before_run', False):
-        click.echo(f"Geometry relaxation:    Enabled")
+        logger.info(f"Geometry relaxation:    Enabled")
         if force_conv is not None:
-            click.echo(f"Force convergence:      {force_conv} eV/Å")
+            logger.info(f"Force convergence:      {force_conv} eV/Å")
         else:
-            click.echo(f"Optimization cycles:   {settings_dict.get('min_cycles', DEFAULT_MIN_CYCLES)} cycles, each {settings_dict.get('min_steps', DEFAULT_MIN_STEPS)} steps")
+            logger.info(f"Optimization cycles:   {settings_dict.get('min_cycles', DEFAULT_MIN_CYCLES)} cycles, each {settings_dict.get('min_steps', DEFAULT_MIN_STEPS)} steps")
     else:
-        click.echo(f"Geometry relaxation:    Disabled")
+        logger.info(f"Geometry relaxation:    Disabled")
         
-    click.echo("=" * 60)
+    logger.info("=" * 60)
     
     # Run the simulation
     run(settings_dict)
-    # try:
-    #     run(settings_dict)
-    #     # click.echo(f"Results saved to: {settings_dict['output_file']}")
-    # except Exception as e:
-    #     click.echo("=" * 60)
-    #     click.echo(f"Error during simulation: {str(e)}")
-    #     sys.exit(1)
 
 
 class SubcommandHelpGroup(click.Group):
@@ -604,11 +618,11 @@ class SubcommandHelpGroup(click.Group):
               help=f'Number of minimization cycles to perform. [default: {DEFAULT_MIN_CYCLES}]')
 @click.option('--opt-steps', '--opt_steps', 'opt_steps', default=DEFAULT_MIN_STEPS, type=int,
               help=f'Number of steps per minimization cycle. [default: {DEFAULT_MIN_STEPS}]')
-@click.option('--min-start-dt', '--dt-start', 'min_start_dt', default=0.05, type=float,
+@click.option('--min-start-dt', '--dt-start', 'min_start_dt', default=DEFAULT_MIN_START_DT, type=float,
               help='The initial step size during minimization. [default: 0.05]')
-@click.option('--min-max-dt', '--dt-max', 'min_max_dt', default=0.1, type=float,
+@click.option('--min-max-dt', '--dt-max', 'min_max_dt', default=DEFAULT_MIN_MAX_DT, type=float,
               help='The maximum step size during minimization. [default: 0.1]')
-@click.option('--n-min', default=2, type=int,
+@click.option('--n-min', 'min_n_min', default=DEFAULT_MIN_N_MIN, type=int,
               help='Minimum number of steps moving in the correct direction before dt is updated. [default: 2]')
 @click.option('--force-conv', default=None, type=float,
               help='Force convergence criterion in eV/Å, overrides --cycles and --steps. [default: None]')
@@ -622,6 +636,8 @@ class SubcommandHelpGroup(click.Group):
               help=f'Buffer size multiplier for short-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
 @click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
+@click.option('--log-file', default=None, type=click.Path(), 
+              help=f'File to write logs to [default: None].')
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def fire_optimization(
     input_file: Optional[str],
@@ -633,13 +649,14 @@ def fire_optimization(
     opt_steps: int,
     min_start_dt: float,
     min_max_dt: float,
-    n_min: int,
+    min_n_min: int,
     force_conv: Optional[float],
     precision: str,
     lr_cutoff: float,
     dispersion_damping: float,
     buffer_sr: float,
     buffer_lr: float,
+    log_file: Optional[str],
     help: bool
 ) -> None:
     """
@@ -652,9 +669,8 @@ def fire_optimization(
     Example:
         so3lr opt --input geometry.xyz
     """
-    click.echo(SO3LR_ASCII)
-    
     if not input_file or help:
+        click.echo(SO3LR_ASCII)
         click.echo(fire_optimization.get_help(click.get_current_context()))
         return
 
@@ -663,29 +679,40 @@ def fire_optimization(
         input_path = Path(input_file)
         output_file = f"{input_path.stem}_opt{input_path.suffix}"
     
-    click.echo("=" * 60)
-    click.echo(f"SO3LR Geometry Optimization")
-    click.echo("=" * 60)
-    click.echo(f"Initial geometry:                 {input_file}")
-    click.echo(f"Output geometry:                  {output_file}")
-    click.echo(f"Save trajectory:                  {'Yes' if save_optimization_trajectory else 'No'}")
-    click.echo(f"Total charge:                     {total_charge}")
-    click.echo(f"Force field:                      {'Custom MLFF' if model_path else 'SO3LR'}")
+    # Generate default log file name based on output file if not explicitly provided
+    if log_file is None:
+        log_file = f"{Path(output_file).stem}.log"
+    
+    # Setup logging with default levels
+    setup_logger(log_file)
+    
+    # Log the ASCII art
+    logger.info(SO3LR_ASCII)
+    
+    logger.info("=" * 60)
+    logger.info(f"SO3LR Geometry Optimization")
+    logger.info("=" * 60)
+    logger.info(f"Initial geometry:                 {input_file}")
+    logger.info(f"Output geometry:                  {output_file}")
+    logger.info(f"Log file:                         {log_file}")
+    logger.info(f"Save trajectory:                  {'Yes' if save_optimization_trajectory else 'No'}")
+    logger.info(f"Total charge:                     {total_charge}")
+    logger.info(f"Force field:                      {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
-        click.echo(f"Model path:                      {model_path}")
-    click.echo(f"Long-range cutoff:                {lr_cutoff} Å")
+        logger.info(f"Model path:                      {model_path}")
+    logger.info(f"Long-range cutoff:                {lr_cutoff} Å")
     if force_conv is not None:
-        click.echo(f"Force convergence:                {force_conv} eV/Å")
+        logger.info(f"Force convergence:                {force_conv} eV/Å")
     else:
-        click.echo(f"Optimization cycles:               {opt_cycles} cycles, each {opt_steps} steps")
-    click.echo(f"Initial step size:                {min_start_dt} Å")
-    click.echo(f"Maximum step size:                {min_max_dt} Å")
-    click.echo(f"Steps between step size updates:  {n_min}")
-    click.echo(f"Precision:                        {precision}")
-    click.echo(f"Dispersion damping:               {dispersion_damping} Å")
-    click.echo(f"Short-range buffer:               {buffer_sr}")
-    click.echo(f"Long-range buffer:                {buffer_lr}")
-    click.echo("=" * 60)
+        logger.info(f"Optimization cycles:               {opt_cycles} cycles, each {opt_steps} steps")
+    logger.info(f"Initial step size:                {min_start_dt} Å")
+    logger.info(f"Maximum step size:                {min_max_dt} Å")
+    logger.info(f"Steps between step size updates:  {min_n_min}")
+    logger.info(f"Precision:                        {precision}")
+    logger.info(f"Dispersion damping:               {dispersion_damping} Å")
+    logger.info(f"Short-range buffer:               {buffer_sr}")
+    logger.info(f"Long-range buffer:                {buffer_lr}")
+    logger.info("=" * 60)
     
     # Create settings dictionary
     settings = {
@@ -697,7 +724,7 @@ def fire_optimization(
         'min_steps': opt_steps,
         'min_start_dt': min_start_dt,
         'min_max_dt': min_max_dt,
-        'min_n_min': n_min,
+        'min_n_min': min_n_min,
         'force_convergence': force_conv,
         'precision': precision,
         'lr_cutoff': lr_cutoff,
@@ -707,16 +734,19 @@ def fire_optimization(
         'total_charge': total_charge,
     }
     
+    # Add log settings to the settings dictionary
+    settings['log_file'] = log_file
+    
     time_start = time.time()
     try:
         # Run optimization - result will be written directly to output_file
         perform_min(settings)
         time_end = time.time()
-        click.echo(f"Optimization completed in {time_end - time_start:.1f} seconds")
-        click.echo("=" * 60)
+        logger.info(f"Optimization completed in {time_end - time_start:.1f} seconds")
+        logger.info("=" * 60)
     except Exception as e:
-        click.echo("=" * 60)
-        click.echo(f"Error during optimization: {str(e)}")
+        logger.error("=" * 60)
+        logger.error(f"Error during optimization: {str(e)}")
         sys.exit(1)
 
 # Define the 'nvt' subcommand with clear help
@@ -741,6 +771,8 @@ def fire_optimization(
               help=f'Buffer size multiplier for short-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
 @click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
+@click.option('--hdf5-buffer', default=DEFAULT_HDF5_BUFFER, type=int,
+              help=f'Number of frames to buffer before writing to HDF5 file. [default: {DEFAULT_HDF5_BUFFER}]')
 @click.option('--temperature', default=DEFAULT_TEMPERATURE, type=float,
               help=f'Simulation temperature in Kelvin. [default: {DEFAULT_TEMPERATURE}]')
 @click.option('--dt', default=DEFAULT_TIMESTEP, type=float,
@@ -755,12 +787,18 @@ def fire_optimization(
               help=f'Number of integration steps per MD step. [default: {DEFAULT_NHC_INTEGRATION_STEPS}]')
 @click.option('--nhc-thermo', default=DEFAULT_NHC_THERMO, type=float,
               help=f'Thermostat timescale in femtoseconds. [default: {DEFAULT_NHC_THERMO}]')
+@click.option('--restart-save', type=click.Path(), default=None, 
+              help='Path to save restart data.')
+@click.option('--restart-load', type=click.Path(exists=False), default=None, 
+              help='Path to load restart data from a previous run.')
 @click.option('--relax/--no-relax', default=True,
               help='Perform geometry relaxation before MD. [default: enabled]')
 @click.option('--force-conv', default=None, type=float,
               help='Force convergence criterion in eV/Å for initial relaxation. [default: None]')
 @click.option('--seed', default=DEFAULT_SEED, type=int,
               help=f'Random seed for MD. [default: {DEFAULT_SEED}]')
+@click.option('--log-file', default=None, type=click.Path(), 
+              help=f'File to write logs to [default: None].')
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def nvt_md(
     input_file: Optional[str], 
@@ -773,6 +811,7 @@ def nvt_md(
     dispersion_damping: float,
     buffer_sr: float,
     buffer_lr: float,
+    hdf5_buffer: int,
     temperature: float,
     dt: float,
     cycles: int,
@@ -780,9 +819,12 @@ def nvt_md(
     nhc_chain: int,
     nhc_steps: int,
     nhc_thermo: float,
+    restart_save: Optional[str],
+    restart_load: Optional[str],
     relax: bool,
     force_conv: Optional[float],
     seed: int,
+    log_file: Optional[str],
     help: bool
 ) -> None:
     """
@@ -795,42 +837,116 @@ def nvt_md(
     Example:
         so3lr nvt --input geometry.xyz --temperature 300
     """
-    # Print ASCII art at the beginning
-    click.echo(SO3LR_ASCII)
-    
-    # Print possible arguments if no arguments are provided
+    # Print help if needed
     if not input_file or help:
+        click.echo(SO3LR_ASCII)
         click.echo(nvt_md.get_help(click.get_current_context()))
         return
 
     # Generate default output file name if not provided
-    if output_file is None:
+    if input_file is not None and output_file is None:
         input_path = Path(input_file)
         output_file = f"{input_path.stem}_nvt.xyz"
+    
+    # Generate default log file name based on output file if not explicitly provided
+    if log_file is None:
+        log_file = f"{Path(output_file).stem}.log"
+    
+    # Setup logging with default levels
+    setup_logger(log_file)
+    
+    # Log the ASCII art to the log file
+    logger.info(SO3LR_ASCII)
 
-    # Forward to the main command with appropriate options
-    ctx = click.get_current_context()
-    ctx.forward(cli, 
-                input_file=input_file,
-                output_file=output_file,
-                output_format=output_format,
-                total_charge=total_charge,
-                model_path=model_path,
-                precision=precision,
-                lr_cutoff=lr_cutoff,
-                dispersion_damping=dispersion_damping,
-                buffer_sr=buffer_sr,
-                buffer_lr=buffer_lr,
-                temperature=temperature,
-                dt=dt,
-                cycles=cycles,
-                steps=steps,
-                nhc_chain=nhc_chain,
-                nhc_steps=nhc_steps,
-                nhc_thermo=nhc_thermo,
-                relax=relax,
-                force_conv=force_conv,
-                seed=seed)
+    # Override settings with command line arguments
+    settings = {
+        'initial_geometry': input_file,
+        'output_file': output_file,
+        'model_path': model_path,
+        'precision': precision,
+        'md_dt': dt,
+        'md_T': temperature,
+        'md_cycles': cycles,
+        'md_steps': steps,
+        'lr_cutoff': lr_cutoff,
+        'dispersion_energy_cutoff_lr_damping': dispersion_damping,
+        'buffer_size_multiplier_sr': buffer_sr,
+        'buffer_size_multiplier_lr': buffer_lr,
+        'hdf5_buffer_size': hdf5_buffer,
+        'total_charge': total_charge,
+        'seed': seed,
+        'restart_load_path': restart_load,
+        'restart_save_path': restart_save,
+        'relax_before_run': relax,
+        'force_convergence': force_conv,
+        # Additional MD settings
+        'nhc_chain_length': nhc_chain,
+        'nhc_steps': nhc_steps,
+        'nhc_thermo': nhc_thermo,
+        'min_n_min': DEFAULT_MIN_N_MIN,
+        'min_start_dt': DEFAULT_MIN_START_DT,
+        'min_max_dt': DEFAULT_MIN_MAX_DT,
+        'min_cycles': DEFAULT_MIN_CYCLES,
+        'min_steps': DEFAULT_MIN_STEPS,
+
+    }
+    
+    # Log all settings
+    total_steps = cycles * steps
+    simulation_time = total_steps * dt  # in ps
+    
+    logger.info("=" * 60)
+    logger.info(f"SO3LR NVT Molecular Dynamics Simulation")
+    logger.info("=" * 60)
+    logger.info(f"Initial geometry:          {input_file}")
+    logger.info(f"Output file:               {output_file}")
+    logger.info(f"Log file:                  {log_file}")
+    logger.info(f"Output format:             {output_format}")
+    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
+    if model_path is not None:
+        logger.info(f"Model path:                {model_path}")
+    logger.info(f"Precision:                 {precision}")
+    logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
+    logger.info(f"Dispersion damping:        {dispersion_damping} Å")
+    logger.info(f"Short-range buffer:        {buffer_sr}")
+    logger.info(f"Long-range buffer:         {buffer_lr}")
+    logger.info(f"Total charge:              {total_charge}")
+    
+    logger.info(f"Temperature:               {temperature} K")
+    logger.info(f"Ensemble:                  NVT")
+    
+    logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
+    logger.info(f"MD cycles:                 {cycles}")
+    logger.info(f"Steps per cycle:           {steps}")
+    logger.info(f"Timestep:                  {dt*1000} fs")
+    logger.info(f"Saving buffer size:          {hdf5_buffer}")
+    logger.info(f"NHC chain length:          {nhc_chain}")
+    logger.info(f"Nose-Hoover steps:         {nhc_steps}")
+    logger.info(f"Nose-Hoover thermo:        {nhc_thermo} fs")
+    logger.info(f"Random seed:               {seed}")
+    
+    if restart_load:
+        logger.info(f"Restart from:              {restart_load}")
+    if restart_save:
+        logger.info(f"Save restart to:            {restart_save}")
+    
+    if relax:
+        logger.info(f"Geometry relaxation:       Enabled")
+        if force_conv is not None:
+            logger.info(f"Force convergence:         {force_conv} eV/Å")
+    else:
+        logger.info(f"Geometry relaxation:       Disabled")
+    
+    logger.info("=" * 60)
+    
+    # Add log settings to the settings dictionary
+    settings['log_file'] = log_file
+    
+    # Determine output format based on file extension
+    settings['output_format'] = 'hdf5' if output_file.endswith('.hdf5') else 'extxyz'
+    
+    # Run NVT simulation
+    run(settings)
 
 # Define the 'npt' subcommand with clear help
 @cli.command(name='npt', help="Run NPT molecular dynamics simulation.")
@@ -854,6 +970,8 @@ def nvt_md(
               help=f'Buffer size multiplier for short-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
 @click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
+@click.option('--hdf5-buffer', default=DEFAULT_HDF5_BUFFER, type=int,
+              help=f'Number of frames to buffer before writing to HDF5 file. [default: {DEFAULT_HDF5_BUFFER}]')
 @click.option('--temperature', default=DEFAULT_TEMPERATURE, type=float,
               help=f'Simulation temperature in Kelvin. [default: {DEFAULT_TEMPERATURE}]')
 @click.option('--pressure', default=DEFAULT_PRESSURE, type=float,
@@ -872,14 +990,18 @@ def nvt_md(
               help=f'Thermostat timescale in femtoseconds. [default: {DEFAULT_NHC_THERMO}]')
 @click.option('--nhc-baro', default=DEFAULT_NHC_BARO, type=float,
               help=f'Barostat timescale. [default: {DEFAULT_NHC_BARO}]')
-@click.option('--nhc-npt-tau', default=DEFAULT_NHC_NPT_TAU, type=float,
-              help=f'Barostat coupling constant. [default: {DEFAULT_NHC_NPT_TAU}]')
+@click.option('--restart-save', type=click.Path(), default=None, 
+              help='Path to save restart data.')
+@click.option('--restart-load', type=click.Path(exists=False), default=None, 
+              help='Path to load restart data from a previous run.')
 @click.option('--relax/--no-relax', default=True,
               help='Perform geometry relaxation before MD. [default: enabled]')
 @click.option('--force-conv', default=None, type=float,
               help='Force convergence criterion in eV/Å for initial relaxation. [default: None]')
 @click.option('--seed', default=DEFAULT_SEED, type=int,
               help=f'Random seed for MD. [default: {DEFAULT_SEED}]')
+@click.option('--log-file', default=None, type=click.Path(), 
+              help=f'File to write logs to [default: None].')
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def npt_md(
     input_file: Optional[str], 
@@ -892,6 +1014,7 @@ def npt_md(
     dispersion_damping: float,
     buffer_sr: float,
     buffer_lr: float,
+    hdf5_buffer: int,
     temperature: float,
     pressure: float,
     dt: float,
@@ -901,10 +1024,12 @@ def npt_md(
     nhc_steps: int,
     nhc_thermo: float,
     nhc_baro: float,
-    nhc_npt_tau: float,
+    restart_save: Optional[str],
+    restart_load: Optional[str],
     relax: bool,
     force_conv: Optional[float],
     seed: int,
+    log_file: Optional[str],
     help: bool
 ) -> None:
     """
@@ -919,45 +1044,119 @@ def npt_md(
     Example:
         so3lr npt --input geometry.xyz --temperature 300 --pressure 1
     """
-    # Print ASCII art at the beginning
-    click.echo(SO3LR_ASCII)
-    
-    # Print possible arguments if no arguments are provided
+    # Print help if needed
     if not input_file or help:
+        click.echo(SO3LR_ASCII)
         click.echo(npt_md.get_help(click.get_current_context()))
         return
     
     # Generate default output file name if not provided
-    if output_file is None:
+    if input_file is not None and output_file is None:
         input_path = Path(input_file)
         output_file = f"{input_path.stem}_npt.xyz"
+    
+    # Generate default log file name based on output file if not explicitly provided
+    if log_file is None:
+        log_file = f"{Path(output_file).stem}.log"
+    
+    # Setup logging with default levels
+    setup_logger(log_file)
+    
+    # Log the ASCII art to the log file
+    logger.info(SO3LR_ASCII)
 
-    # Forward to the main command with appropriate options
-    ctx = click.get_current_context()
-    ctx.forward(cli, 
-                input_file=input_file,
-                output_file=output_file,
-                output_format=output_format,
-                total_charge=total_charge,
-                model_path=model_path,
-                precision=precision,
-                lr_cutoff=lr_cutoff,
-                dispersion_damping=dispersion_damping,
-                buffer_sr=buffer_sr,
-                buffer_lr=buffer_lr,
-                temperature=temperature,
-                pressure=pressure,
-                dt=dt,
-                cycles=cycles,
-                steps=steps,
-                nhc_chain=nhc_chain,
-                nhc_steps=nhc_steps,
-                nhc_thermo=nhc_thermo,
-                nhc_baro=nhc_baro,
-                nhc_npt_tau=nhc_npt_tau,
-                relax=relax,
-                force_conv=force_conv,
-                seed=seed)
+    # Override settings with command line arguments
+    settings = {
+        'initial_geometry': input_file,
+        'output_file': output_file,
+        'model_path': model_path,
+        'precision': precision,
+        'md_dt': dt,
+        'md_T': temperature,
+        'md_P': pressure,
+        'md_cycles': cycles,
+        'md_steps': steps,
+        'lr_cutoff': lr_cutoff,
+        'dispersion_energy_cutoff_lr_damping': dispersion_damping,
+        'buffer_size_multiplier_sr': buffer_sr,
+        'buffer_size_multiplier_lr': buffer_lr,
+        'hdf5_buffer_size': hdf5_buffer,
+        'total_charge': total_charge,
+        'seed': seed,
+        'restart_load_path': restart_load,
+        'restart_save_path': restart_save,
+        'relax_before_run': relax,
+        'force_convergence': force_conv,
+        # Additional MD settings
+        'nhc_chain_length': nhc_chain,
+        'nhc_steps': nhc_steps,
+        'nhc_thermo': nhc_thermo,
+        'nhc_baro': nhc_baro,
+        'min_n_min': DEFAULT_MIN_N_MIN,
+        'min_start_dt': DEFAULT_MIN_START_DT,
+        'min_max_dt': DEFAULT_MIN_MAX_DT,
+        'min_cycles': DEFAULT_MIN_CYCLES,
+        'min_steps': DEFAULT_MIN_STEPS,
+        'nhc_sy_steps': DEFAULT_SUZUKI_YOSHIDA_STEPS,
+    }
+    
+    # Log all settings
+    total_steps = cycles * steps
+    simulation_time = total_steps * dt  # in ps
+    
+    logger.info("=" * 60)
+    logger.info(f"SO3LR NPT Molecular Dynamics Simulation")
+    logger.info("=" * 60)
+    logger.info(f"Initial geometry:          {input_file}")
+    logger.info(f"Output file:               {output_file}")
+    logger.info(f"Log file:                  {log_file}")
+    logger.info(f"Output format:             {output_format}")
+    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
+    if model_path is not None:
+        logger.info(f"Model path:                {model_path}")
+    logger.info(f"Precision:                 {precision}")
+    logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
+    logger.info(f"Dispersion damping:        {dispersion_damping} Å")
+    logger.info(f"Short-range buffer:        {buffer_sr}")
+    logger.info(f"Long-range buffer:         {buffer_lr}")
+    logger.info(f"Total charge:              {total_charge}")
+    
+    logger.info(f"Temperature:               {temperature} K")
+    logger.info(f"Pressure:                  {pressure} atm")
+    logger.info(f"Ensemble:                  NPT")
+    
+    logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
+    logger.info(f"MD cycles:                 {cycles}")
+    logger.info(f"Steps per cycle:           {steps}")
+    logger.info(f"Timestep:                  {dt*1000} fs")
+    logger.info(f"NHC chain length:          {nhc_chain}")
+    logger.info(f"Nose-Hoover steps:         {nhc_steps}")
+    logger.info(f"Nose-Hoover thermo:        {nhc_thermo} fs")
+    logger.info(f"Nose-Hoover baro:          {nhc_baro} fs")
+    logger.info(f"Random seed:               {seed}")
+    
+    if restart_load:
+        logger.info(f"Restart from:              {restart_load}")
+    if restart_save:
+        logger.info(f"Save restart to:            {restart_save}")
+    
+    if relax:
+        logger.info(f"Geometry relaxation:       Enabled")
+        if force_conv is not None:
+            logger.info(f"Force convergence:         {force_conv} eV/Å")
+    else:
+        logger.info(f"Geometry relaxation:       Disabled")
+    
+    logger.info("=" * 60)
+    
+    # Add log settings to the settings dictionary
+    settings['log_file'] = log_file
+    
+    # Determine output format based on file extension
+    settings['output_format'] = 'hdf5' if output_file.endswith('.hdf5') else 'extxyz'
+    
+    # Run NPT simulation
+    run(settings)
 
 
 @cli.command(name='eval', help="Evaluate SO3LR model on a dataset.")
@@ -977,8 +1176,10 @@ def npt_md(
               help='JIT compile the calculation. [default: enabled]')
 @click.option('--save-predictions-to', type=click.Path(),
               help='File path where to save the predictions (.extxyz format). [default: None]')
-@click.option('--targets', default='forces',
-              help='Targets to evaluate, separated by commas (e.g. "forces,dipole_vec,hirshfeld_ratios"). [default: forces]')
+@click.option('--targets', default='forces,dipole_vec,hirshfeld_ratios',
+              help='Targets to evaluate, separated by commas (e.g. "forces,dipole_vec,hirshfeld_ratios"). [default: forces,dipole_vec,hirshfeld_ratios]')
+@click.option('--log-file', default=None, type=click.Path(), 
+              help=f'File to write logs to [default: None].')
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def eval_model(
     datafile: Optional[str],
@@ -990,6 +1191,7 @@ def eval_model(
     targets: str,
     model_path: Optional[str],
     precision: str,
+    log_file: Optional[str],
     help: bool
 ) -> None:
     """
@@ -1003,41 +1205,55 @@ def eval_model(
     Example:
         so3lr eval --datafile data.extxyz --save-predictions-to predictions.extxyz
     """
-    # Print ASCII art at the beginning
-    click.echo(SO3LR_ASCII)
-
+    # Print help if needed
     if not datafile or help:
+        click.echo(SO3LR_ASCII)
         click.echo(eval_model.get_help(click.get_current_context()))
         return
     
-    click.echo("=" * 60)
-    click.echo(f"SO3LR Model Evaluation")
-    click.echo("=" * 60)
-    click.echo(f"Dataset file:           {datafile}")
-    click.echo(f"Batch size:             {batch_size}")
-    click.echo(f"Long-range cutoff:      {lr_cutoff} Å")
-    click.echo(f"Dispersion damping:     {dispersion_damping}")
-    click.echo(f"JIT compilation:        {'Enabled' if jit_compile else 'Disabled'}")
-    if save_predictions_to:
-        click.echo(f"Saving predictions to:  {save_predictions_to}")
-    click.echo(f"Targets:                {targets}")
-    if model_path:
-        click.echo(f"Model path:             {model_path}")
-    click.echo(f"Precision:              {precision}")
+    # Set default output file name if needed
+    output_file = save_predictions_to if save_predictions_to else f"{Path(datafile).stem}_eval.extxyz"
     
-    click.echo("Starting evaluation...")
-    click.echo("=" * 60)
+    # Generate default log file name based on output file if not explicitly provided
+    if log_file is None:
+        log_file = f"{Path(output_file).stem}.log"
+    
+    # Setup logging with default levels
+    setup_logger(log_file)
+    
+    # Log ASCII art
+    logger.info(SO3LR_ASCII)
+    
+    # Log all settings
+    logger.info("=" * 60)
+    logger.info(f"SO3LR Model Evaluation")
+    logger.info("=" * 60)
+    logger.info(f"Dataset file:              {datafile}")
+    logger.info(f"Output file:               {output_file if save_predictions_to else 'Not saving'}")
+    logger.info(f"Log file:                  {log_file}")
+    logger.info(f"Batch size:                {batch_size}")
+    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
+    if model_path is not None:
+        logger.info(f"Model path:                {model_path}")
+    logger.info(f"Precision:                 {precision}")
+    logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
+    logger.info(f"Dispersion damping:        {dispersion_damping} Å")
+    logger.info(f"JIT compilation:           {'Enabled' if jit_compile else 'Disabled'}")
+    if save_predictions_to:
+        logger.info(f"Saving predictions to:     {save_predictions_to}")
+    logger.info(f"Targets:                   {targets}")
+    logger.info("=" * 60)
     
     # Validate file existence
     if not Path(datafile).exists():
-        click.echo(f"Error: Dataset file not found: {datafile}")
+        logger.error(f"Error: Dataset file not found: {datafile}")
         sys.exit(1)
     
     # Validate output path
     if save_predictions_to:
         save_path = Path(save_predictions_to)
         if save_path.exists():
-            click.echo(f"Error: Output file already exists: {save_predictions_to}")
+            logger.error(f"Error: Output file already exists: {save_predictions_to}")
             sys.exit(1)
         # Create parent directory if it doesn't exist
         save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1053,43 +1269,24 @@ def eval_model(
             save_predictions_to=save_predictions_to,
             model_path=model_path,
             precision=precision,
-            targets=targets
+            targets=targets,
+            log_file=log_file
         )
-        click.echo("=" * 60)
-        click.echo("Evaluation completed successfully!")
+        logger.info("=" * 60)
+        logger.info("Evaluation completed successfully!")
         
         if save_predictions_to:
-            click.echo(f"Predictions saved to: {save_predictions_to}")
+            logger.info(f"Predictions saved to: {save_predictions_to}")
             
     except Exception as e:
-        click.echo("=" * 60)
-        click.echo(f"Error during evaluation: {str(e)}")
+        logger.error("=" * 60)
+        logger.error(f"Error during evaluation: {str(e)}")
         sys.exit(1)
 
 
 def main() -> None:
     """Entry point for the command line interface."""
     cli(standalone_mode=False)
-    # try:
-    #     cli(standalone_mode=False)
-    # except click.exceptions.Abort:
-    #     # Handle --help flags gracefully
-    #     pass
-    # except click.exceptions.UsageError as e:
-    #     # Handle usage errors
-    #     click.echo(f"Usage error: {str(e)}")
-    #     sys.exit(1)
-    # except click.exceptions.FileError as e:
-    #     # Handle file errors
-    #     click.echo(f"File error: {str(e)}")
-    #     sys.exit(1)
-    # except Exception as e:
-    #     # Handle unexpected errors
-    #     click.echo(f"Error: {str(e)}")
-    #     if os.environ.get('SO3LR_DEBUG', '0') == '1':
-    #         import traceback
-    #         click.echo(traceback.format_exc())
-    #     sys.exit(1)
 
 
 if __name__ == '__main__':
