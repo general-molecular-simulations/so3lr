@@ -32,7 +32,7 @@ def process_predictions(
 ) -> List:
     """
     Process predictions and prepare for saving to file.
-    
+
     Parameters:
     -----------
     save_predictions_to : str or None
@@ -43,7 +43,7 @@ def process_predictions(
         Input dictionary containing masks and data
     output_prediction : dict
         Model predictions
-        
+
     Returns:
     --------
     List
@@ -51,7 +51,7 @@ def process_predictions(
     """
     if save_predictions_to is None:
         return []
-        
+
     # Add predictions to graph nodes and globals
     graph_batch.nodes['forces_so3lr'] = output_prediction['forces']
     graph_batch.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
@@ -71,7 +71,7 @@ def calculate_metrics(
 ) -> Dict[str, float]:
     """
     Calculate MAE and MSE metrics for the specified targets.
-    
+
     Parameters:
     -----------
     output_prediction : dict
@@ -80,42 +80,42 @@ def calculate_metrics(
         Input dictionary containing masks and true values
     targets : list
         List of target names to evaluate
-        
+
     Returns:
     --------
     dict
         Dictionary of calculated metrics
     """
     metrics = {}
-    
+
     for target in targets:
         mask = assign_mask(target, inputs=inputs)
 
         mae = evaluation_utils.calculate_mae(
-            y_predicted=output_prediction[target], 
-            y_true=inputs[target], 
+            y_predicted=output_prediction[target],
+            y_true=inputs[target],
             msk=mask
         )
         mse = evaluation_utils.calculate_mse(
-            y_predicted=output_prediction[target], 
-            y_true=inputs[target], 
+            y_predicted=output_prediction[target],
+            y_true=inputs[target],
             msk=mask
         )
-        
+
         metrics[f"{target}_mae"] = mae
         metrics[f"{target}_mse"] = mse
-    
+
     return metrics
 
 
 def save_predictions_to_file(
     predicted_graphs: List,
-    save_predictions_to: str, 
+    save_predictions_to: str,
     num_data: int
 ) -> None:
     """
     Save predictions to an extxyz file.
-    
+
     Parameters:
     -----------
     predicted_graphs : list
@@ -126,16 +126,17 @@ def save_predictions_to_file(
         Total number of data points for progress reporting
     """
     logger.info(f'Saving predictions to {str(save_predictions_to)}')
-    
+
     log_every = max(1, len(predicted_graphs) // 10)
-    
+
     for n, predicted_graph in enumerate(predicted_graphs):
         if n % log_every == 0:
             logger.info(f'Saving: {n} / {len(predicted_graphs)} structures')
         atoms = jraph_to_ase_atoms(predicted_graph)
         write(save_predictions_to, images=atoms, append=True)
-    
-    logger.info(f'Successfully saved predictions for {len(predicted_graphs)} structures')
+
+    logger.info(
+        f'Successfully saved predictions for {len(predicted_graphs)} structures')
 
 
 def evaluate_so3lr_on(
@@ -152,7 +153,7 @@ def evaluate_so3lr_on(
 ) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset.
-    
+
     Parameters:
     -----------
     datafile : str
@@ -175,7 +176,7 @@ def evaluate_so3lr_on(
         Comma-separated list of targets to evaluate.
     log_file : str or None
         Path to log file. If None, logging only goes to console.
-        
+
     Returns:
     --------
     dict
@@ -183,7 +184,7 @@ def evaluate_so3lr_on(
     """
     # Setup logging
     setup_logger(log_file)
-    
+
     total_time_start = time.time()
 
     # Parse targets into a list
@@ -200,14 +201,16 @@ def evaluate_so3lr_on(
     if save_predictions_bool:
         save_predictions_to = Path(save_predictions_to).resolve().expanduser()
         if save_predictions_to.exists():
-            raise RuntimeError(f'Output file already exists: {save_predictions_to}')
-        
+            raise RuntimeError(
+                f'Output file already exists: {save_predictions_to}')
+
         if save_predictions_to.suffix != '.extxyz':
-            raise ValueError(f"Output file must have suffix `.extxyz`. Received: {save_predictions_to.suffix}")
-        
+            raise ValueError(
+                f"Output file must have suffix `.extxyz`. Received: {save_predictions_to.suffix}")
+
         # Create parent directory if it doesn't exist
         save_predictions_to.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Initialize the model
     if model_path is None:
         logger.info("Using default SO3LR potential")
@@ -246,7 +249,8 @@ def evaluate_so3lr_on(
     n_node = stats['max_num_of_nodes'] * batch_size + 1
     n_edge = stats['max_num_of_edges'] * batch_size + 1
     n_graph = batch_size + 1
-    n_pairs = stats['max_num_of_nodes'] * (stats['max_num_of_nodes'] - 1) * batch_size + 1
+    n_pairs = stats['max_num_of_nodes'] * \
+        (stats['max_num_of_nodes'] - 1) * batch_size + 1
 
     # Batch the graphs
     batched_graphs = jraph.dynamically_batch(
@@ -275,7 +279,8 @@ def evaluate_so3lr_on(
 
         try:
             _compile_out = jax.block_until_ready(
-                so3lr_calc(jraph_utils.graph_to_batch_fn(next(dummy_batched_graphs)))
+                so3lr_calc(jraph_utils.graph_to_batch_fn(
+                    next(dummy_batched_graphs)))
             )
             compile_end = time.time()
             compile_time = compile_end - compile_start
@@ -300,7 +305,7 @@ def evaluate_so3lr_on(
 
     logger.info(f'Starting evaluation on {num_data} structures')
     logger.info('-' * 50)
-    
+
     try:
         for graph_batch in batched_graphs:
             # Transform the batched graph to inputs dict
@@ -309,7 +314,8 @@ def evaluate_so3lr_on(
             total_num_structures += batch_size
 
             if total_num_structures % log_every == 0:
-                logger.info(f'Processing: {total_num_structures} / {num_data} structures')
+                logger.info(
+                    f'Processing: {total_num_structures} / {num_data} structures')
 
             # Run the model
             start = time.time()
@@ -318,7 +324,8 @@ def evaluate_so3lr_on(
             total_time += end - start
 
             # Calculate metrics
-            batch_metrics = calculate_metrics(output_prediction, inputs, target_list)
+            batch_metrics = calculate_metrics(
+                output_prediction, inputs, target_list)
             for key, value in batch_metrics.items():
                 test_metrics[key].append(value)
 
@@ -330,21 +337,23 @@ def evaluate_so3lr_on(
 
             i += 1
 
-        logger.info(f'Completed evaluation on {total_num_structures} / {num_data} structures')
+        logger.info(
+            f'Completed evaluation on {total_num_structures} / {num_data} structures')
         logger.info(f'Evaluation time: {total_time:.3f} seconds')
         logger.info('-' * 50)
 
         # Compute final metrics
         for key in list(test_metrics.keys()):
             test_metrics[key] = np.mean(test_metrics[key])
-        
+
         # Calculate RMSE from MSE
         for t in target_list:
             test_metrics[f'{t}_rmse'] = np.sqrt(test_metrics[f'{t}_mse'])
 
         # Compile timing metrics
         time_per_batch = total_time / i if i > 0 else 0
-        time_per_structure = total_time / total_num_structures if total_num_structures > 0 else 0
+        time_per_structure = total_time / \
+            total_num_structures if total_num_structures > 0 else 0
 
         metrics = {
             'time_per_batch': time_per_batch,
@@ -360,20 +369,23 @@ def evaluate_so3lr_on(
 
         # Display results
         logger.info('Evaluation metrics (units are eV, Angstrom, and seconds):')
-        formatted_metrics = {k: f"{v:.3e}" if isinstance(v, float) else v for k, v in metrics.items()}
+        formatted_metrics = {k: f"{v:.3e}" if isinstance(
+            v, float) else v for k, v in metrics.items()}
         logger.info(pprint.pformat(formatted_metrics))
         logger.info('-' * 50)
 
         # Save predictions if requested
         if save_predictions_bool:
-            save_predictions_to_file(predicted, str(save_predictions_to), num_data)
+            save_predictions_to_file(
+                predicted, str(save_predictions_to), num_data)
 
         total_time_end = time.time()
-        logger.info(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
+        logger.info(
+            f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
         logger.info('Evaluation completed successfully')
-        
+
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error during evaluation: {str(e)}")
         raise
@@ -382,14 +394,14 @@ def evaluate_so3lr_on(
 def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:
     """
     Assign the appropriate mask to the outputs based on the target.
-    
+
     Parameters:
     -----------
     x : str
         Name of the output to mask.
     inputs : dict
         Input dictionary containing masks.
-        
+
     Returns:
     --------
     np.ndarray
