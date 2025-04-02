@@ -94,7 +94,7 @@ DEFAULT_DISPERSION_DAMPING = 2.0  # Angstrom
 DEFAULT_BUFFER_MULTIPLIER = 1.25
 DEFAULT_HDF5_BUFFER = 50
 DEFAULT_OUTPUT_FORMAT = 'extxyz'
-DEFAULT_TIMESTEP = 0.0005  # picoseconds
+DEFAULT_TIMESTEP = 0.5  # femtoseconds
 DEFAULT_TEMPERATURE = 300  # Kelvin
 DEFAULT_PRESSURE = 1.0  # atmospheres
 
@@ -388,7 +388,7 @@ class NVTNPTGroup(CustomCommandClass):
 @click.option('--restart-load', type=click.Path(exists=False), default=None,
               help='Path to load restart data from a previous run.')
 @click.option('--dt', default=DEFAULT_TIMESTEP, type=float,
-              help=f'MD timestep in picoseconds [default: {DEFAULT_TIMESTEP} ps].')
+              help=f'MD timestep in femtoseconds [default: {DEFAULT_TIMESTEP} fs].')
 @click.option('--temperature', default=DEFAULT_TEMPERATURE, type=float,
               help=f'Simulation temperature in Kelvin [default: {DEFAULT_TEMPERATURE} K].')
 @click.option('--pressure', default=None, type=float,
@@ -540,7 +540,7 @@ def cli(ctx: click.Context,
     if restart_load is not None:
         settings_dict['restart_load_path'] = restart_load
     if dt is not None:
-        settings_dict['md_dt'] = dt
+        settings_dict['md_dt'] = dt/1000
     if temperature is not None:
         settings_dict['md_T'] = temperature
     if pressure is not None:
@@ -861,7 +861,7 @@ def fire_optimization(
 @click.option('--temperature', default=DEFAULT_TEMPERATURE, type=float,
               help=f'Simulation temperature in Kelvin. [default: {DEFAULT_TEMPERATURE}]')
 @click.option('--dt', default=DEFAULT_TIMESTEP, type=float,
-              help=f'MD timestep in picoseconds. [default: {DEFAULT_TIMESTEP}]')
+              help=f'MD timestep in femtoseconds. [default: {DEFAULT_TIMESTEP}]')
 @click.option('--cycles', default=DEFAULT_CYCLES, type=int,
               help=f'Number of MD cycles to run. [default: {DEFAULT_CYCLES}]')
 @click.option('--steps', default=DEFAULT_STEPS_PER_CYCLE, type=int,
@@ -945,7 +945,7 @@ def nvt_md(
 
     # Log all settings
     total_steps = cycles * steps
-    simulation_time = total_steps * dt  # in ps
+    simulation_time = total_steps * dt/1000  # in ps
 
     logger.info("=" * 60)
     logger.info(f"SO3LR NVT Molecular Dynamics Simulation (v{__version__})")
@@ -968,7 +968,7 @@ def nvt_md(
     logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
     logger.info(f"MD cycles:                 {cycles}")
     logger.info(f"Steps per cycle:           {steps}")
-    logger.info(f"Timestep:                  {dt*1000} fs")
+    logger.info(f"Timestep:                  {dt} fs")
     logger.info(f"Saving buffer size:        {hdf5_buffer}")
     logger.info(f"NHC chain length:          {nhc_chain}")
     logger.info(f"Nose-Hoover steps:         {nhc_steps}")
@@ -996,7 +996,7 @@ def nvt_md(
         'output_file': output_file,
         'model_path': model_path,
         'precision': precision,
-        'md_dt': dt,
+        'md_dt': dt/1000,
         'md_T': temperature,
         'md_cycles': cycles,
         'md_steps': steps,
@@ -1074,7 +1074,7 @@ def nvt_md(
 @click.option('--pressure', default=DEFAULT_PRESSURE, type=float,
               help=f'Simulation pressure in atmospheres. [default: {DEFAULT_PRESSURE}]')
 @click.option('--dt', default=DEFAULT_TIMESTEP, type=float,
-              help=f'MD timestep in picoseconds. [default: {DEFAULT_TIMESTEP}]')
+              help=f'MD timestep in femtoseconds. [default: {DEFAULT_TIMESTEP}]')
 @click.option('--cycles', default=DEFAULT_CYCLES, type=int,
               help=f'Number of MD cycles to run. [default: {DEFAULT_CYCLES}]')
 @click.option('--steps', default=DEFAULT_STEPS_PER_CYCLE, type=int,
@@ -1168,7 +1168,7 @@ def npt_md(
         'output_file': output_file,
         'model_path': model_path,
         'precision': precision,
-        'md_dt': dt,
+        'md_dt': dt/1000,
         'md_T': temperature,
         'md_P': pressure,
         'md_cycles': cycles,
@@ -1199,7 +1199,7 @@ def npt_md(
 
     # Log all settings
     total_steps = cycles * steps
-    simulation_time = total_steps * dt  # in ps
+    simulation_time = total_steps * dt/1000  # in ps
 
     logger.info("=" * 60)
     logger.info(f"SO3LR NPT Molecular Dynamics Simulation (v{__version__})")
@@ -1225,7 +1225,7 @@ def npt_md(
     logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
     logger.info(f"MD cycles:                 {cycles}")
     logger.info(f"Steps per cycle:           {steps}")
-    logger.info(f"Timestep:                  {dt*1000} fs")
+    logger.info(f"Timestep:                  {dt} fs")
     logger.info(f"NHC chain length:          {nhc_chain}")
     logger.info(f"Nose-Hoover steps:         {nhc_steps}")
     logger.info(f"Nose-Hoover thermo:        {nhc_thermo} fs")
