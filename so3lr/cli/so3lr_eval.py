@@ -21,7 +21,7 @@ from ..base_calculator import make_so3lr
 from .so3lr_md import load_model, setup_logger
 
 # Get logger
-logger = logging.getLogger("so3lr")
+logger = logging.getLogger("SO3LR")
 
 
 def process_predictions(

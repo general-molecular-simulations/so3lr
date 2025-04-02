@@ -15,6 +15,7 @@ The module works with both the built-in SO3LR potential and custom MLFF models.
 """
 import time
 import os
+import sys
 import yaml
 import pathlib
 from pathlib import Path
@@ -40,7 +41,7 @@ from so3lr.graph import Graph
 from so3lr import So3lrPotential
 
 # Setup logging
-logger = logging.getLogger("so3lr")
+logger = logging.getLogger("SO3LR")
 
 def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.INFO):
     """
@@ -66,7 +67,7 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
     logger.setLevel(min(log_level, console_level))
     
     # Create formatter for the file output - includes timestamps and level names
-    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
     
     # Create formatter for console output - just the message, no prefix
     console_formatter = logging.Formatter('%(message)s')
@@ -1041,17 +1042,6 @@ def create_md_fn(
         return create_npt_step_fn(lr, apply_fn, T, P)
     else:
         raise NotImplementedError(f'Ensemble "{ensemble}" is not supported. Only NVT and NPT ensembles are currently implemented.')
-    
-
-def infer_output_format(output_file):
-    """Determine output format based on file extension."""
-    if output_file.endswith('.hdf5'):
-        return 'hdf5'
-    elif output_file.endswith('.xyz') or output_file.endswith('.extxyz'):
-        return 'extxyz'
-    else:
-        logger.warning(f"Unknown output extension for {output_file}, defaulting to extxyz format")
-        return 'extxyz'
 
 
 def perform_md(
@@ -1303,28 +1293,40 @@ def perform_md(
         logger.info('Step\tKE (eV)\tPE (eV)\tTotal Energy (eV)\ttime/step (s)')
 
     momenta, positions, boxs = [], [], []
-    total_time = time.time()
-    cycle_md = 1
+    cycle_md = 0
     current_cycle = 0
-    
-    while cycle_md <= md_cycles:
+    total_time_for_steps = 0
+    first_loop = True
+
+    while cycle_md < md_cycles:
         old_time = time.time()
         if lr:
-            new_state, nbrs, nbrs_lr, new_box = jax.lax.fori_loop(
+            new_state, nbrs, nbrs_lr, new_box = jax.block_until_ready(
+                jax.lax.fori_loop(
                 0,
                 md_steps,
                 step_md_fn,
                 (state, nbrs, nbrs_lr, box)
+                )
             )
         else:
-            new_state, nbrs, new_box = jax.lax.fori_loop(
+            new_state, nbrs, new_box = jax.block_until_ready(
+                jax.lax.fori_loop(
                 0,
                 md_steps,
                 step_md_fn,
                 (state, nbrs, box)
+                )
             )
 
         time_per_step = (time.time() - old_time) / md_steps
+
+        # Do not count first `allocation` loop for time_per_step calculation
+        if not first_loop:
+            total_time_for_steps += time_per_step
+        else:
+            first_loop = False
+            
         # Checking if the neighbor lists overflowed
         nbrs, nbrs_lr, overflow = check_overflow(
             neighbor_fn,
@@ -1384,14 +1386,17 @@ def perform_md(
                         current_cycle,
                         restart_save_path,
                         ensemble='nvt' if md_P is None else 'npt'
-                    )            
-    total_runtime = time.time() - total_time
+                    )   
     logger.info('Results saved to: ' + output_file)
-    logger.info('=' * 60)
-    logger.info('Simulation completed successfully!')
-    logger.info(f'Total runtime: {total_runtime:.2f} seconds ({total_runtime/3600:.2f} hours)')
-    
-    
+    average_time_per_step = total_time_for_steps / (cycle_md - 1)
+    logger.info(f'Average time per step: {average_time_per_step:.2e} seconds')
+    # if jax.default_backend() in ["gpu", "cuda", "rocm"]:
+    if average_time_per_step > 1.2 * 3.25e-6 * len(initial_geometry):
+        logger.warn('Ideally, the average time per step should be close to {:.2e} seconds (measured on an A100 GPU)'.format(3.25e-6 * len(initial_geometry)))
+        logger.warn('Consider decreasing the buffer sizes if the system has equilibrated (--buffer-sr 1.15, --buffer-lr 1.1)')
+        logger.warn('and/or increasing the number of steps in each jax.lax.fori_loop (--steps 1000)')
+        if output_format == 'extxyz':
+            logger.warn('and/or saving the trajectory in HDF5 format (--output-format hdf5)')
 def create_min_fn(
     lr: bool,
     min_apply: callable,
@@ -1712,13 +1717,11 @@ def perform_min(
         if save_optimization_trajectory:
             write_to_extxyz(output_file, initial_geometry, boxes = box, momenta=None, positions=minimization_trajectory)
             logger.info(f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
-            logger.info("=" * 60)
         else:
             # Write the final optimized structure to file
             # atoms.set_positions(np.array(min_state.position))
             write_to_extxyz(output_file, initial_geometry, boxes = box, momenta=None, positions=min_state.position)
             logger.info(f"Final optimized structure saved to {output_file}")
-            logger.info("=" * 60)
     
     if box is None or np.any(box == 0):
         return min_state.position
@@ -1900,8 +1903,16 @@ def run(
             logger.info('Restarting MD, skipping relaxation.')
             opt_structure = None
         else:
-            opt_structure = perform_min(settings)
+            try:
+                opt_structure = perform_min(settings)
+                logger.info("=" * 60)
+            except Exception as e:
+                logger.error(f"Error during optimization: {str(e)}")
+                sys.exit(1)
     else:
         opt_structure = None
-    perform_md(settings, opt_structure)
-
+    try:
+        perform_md(settings, opt_structure)
+    except Exception as e:
+        logger.error(f"Error during MD simulation: {str(e)}")
+        sys.exit(1)

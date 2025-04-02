@@ -1,3 +1,5 @@
+__version__ = "0.0.1"
+
 from .ase_utils import make_ase_calculator as So3lrCalculator
 from .graph import Graph
 from .jaxmd_utils import to_jax_md

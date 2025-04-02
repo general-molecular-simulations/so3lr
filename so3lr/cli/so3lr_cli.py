@@ -8,10 +8,12 @@ import ase
 import jax
 import time
 import logging
+import platform
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 from ase.io import read, write
 
+from .. import __version__
 from .so3lr_eval import evaluate_so3lr_on
 from .so3lr_md import (
     perform_min,
@@ -21,7 +23,7 @@ from .so3lr_md import (
 )
 
 # Get logger
-logger = logging.getLogger("so3lr")
+logger = logging.getLogger("SO3LR")
 
 # ASCII art banner
 SO3LR_ASCII = """
@@ -32,6 +34,59 @@ SO3LR_ASCII = """
   ███████║╚██████╔╝██████╔╝███████╗██║  ██║
   ╚══════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
 """
+
+
+def get_hardware_info():
+    """Detect and print information about the computing hardware being used.
+    
+    Checks if JAX is using GPU or CPU and prints relevant device properties.
+    """
+    devices = jax.devices()
+    backend = jax.default_backend()
+    
+    # logger.info("Hardware information")
+    logger.info(f"JAX default backend:       {backend}")
+    logger.info(f"Number of devices:         {len(devices)}")
+    
+    if backend == "cpu":
+        # Get CPU info
+        logger.info(f"Processor:                 {platform.processor()}")
+        logger.info(f"CPU cores:                 {os.cpu_count()}")
+        
+        # XLA CPU devices
+        for i, device in enumerate(devices):
+            logger.info(f"Device {i}:                  {device}")
+    
+    elif backend in ["gpu", "cuda", "rocm"]:
+        # Running on GPU
+        # Check all devices
+        for i, device in enumerate(devices):
+            # Get device memory
+            try:
+                mem_info = jax.devices()[i].memory_stats()
+                mem_available = mem_info.get('bytes_available', 'unknown')
+                mem_total = mem_info.get('bytes_total', 'unknown')
+                
+                if mem_total != 'unknown' and mem_available != 'unknown':
+                    mem_used = mem_total - mem_available
+                    mem_used_gb = mem_used / (1024**3)
+                    mem_total_gb = mem_total / (1024**3)
+                    mem_str = f"{mem_used_gb:.2f}GB / {mem_total_gb:.2f}GB"
+                else:
+                    mem_str = "unknown"
+                
+                logger.info(f"Device {i}:                {device}")
+                logger.info(f"Memory usage:              {mem_str}")
+            except:
+                logger.info(f"Device {i}:                {device}")
+                logger.info("Memory usage:               Unable to retrieve memory info")
+    
+    else:
+        # Other backends like TPU
+        logger.info(f"Running on {backend} devices:")
+        for i, device in enumerate(devices):
+            logger.info(f"Device {i}:                {device}")
+    logger.info("=" * 60)
 
 # Default settings
 DEFAULT_PRECISION = 'float32'
@@ -244,6 +299,16 @@ Evaluate on a dataset:
 
 Use --help-full to see all available options.
 """
+
+def infer_output_format(output_file):
+    """Determine output format based on file extension."""
+    if output_file.endswith('.hdf5'):
+        return 'hdf5'
+    elif output_file.endswith('.xyz') or output_file.endswith('.extxyz'):
+        return 'extxyz'
+    else:
+        logger.warning(f"Unknown output extension for {output_file}, defaulting to extxyz format")
+        return 'extxyz'
 
 class CustomCommandClass(click.Group):
     """Custom Group class that displays the correct help based on flags."""
@@ -529,7 +594,7 @@ def cli(ctx: click.Context,
     # Setup logging with default levels
     setup_logger(log_file)
     
-    # Log the ASCII art to the log file
+    # Log the ASCII art
     logger.info(SO3LR_ASCII)
     
     # Log that we loaded settings from file
@@ -538,7 +603,7 @@ def cli(ctx: click.Context,
     
     # Print simulation details
     logger.info("=" * 60)
-    logger.info(f"SO3LR Molecular Dynamics Simulation")
+    logger.info(f"SO3LR Molecular Dynamics Simulation (v{__version__})")
     logger.info("=" * 60)
     logger.info(f"Initial geometry:       {settings_dict['initial_geometry']}")
     logger.info(f"Output file:            {settings_dict['output_file']}")
@@ -583,9 +648,22 @@ def cli(ctx: click.Context,
         logger.info(f"Geometry relaxation:    Disabled")
         
     logger.info("=" * 60)
+
+    # Log hardware info
+    get_hardware_info()
     
     # Run the simulation
-    run(settings_dict)
+    time_start = time.time()
+    try:
+        # Run optimization - result will be written directly to output_file
+        run(settings_dict)
+        time_end = time.time()
+        logger.info("=" * 60)
+        logger.info('Simulation completed successfully!')
+        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+    except Exception as e:
+        logger.error(f"Error during simulation: {str(e)}")
+        sys.exit(1)
 
 
 class SubcommandHelpGroup(click.Group):
@@ -690,7 +768,7 @@ def fire_optimization(
     logger.info(SO3LR_ASCII)
     
     logger.info("=" * 60)
-    logger.info(f"SO3LR Geometry Optimization")
+    logger.info(f"SO3LR Geometry Optimization (v{__version__})")
     logger.info("=" * 60)
     logger.info(f"Initial geometry:                 {input_file}")
     logger.info(f"Output geometry:                  {output_file}")
@@ -713,6 +791,9 @@ def fire_optimization(
     logger.info(f"Short-range buffer:               {buffer_sr}")
     logger.info(f"Long-range buffer:                {buffer_lr}")
     logger.info("=" * 60)
+
+    # Log hardware info
+    get_hardware_info()
     
     # Create settings dictionary
     settings = {
@@ -742,10 +823,10 @@ def fire_optimization(
         # Run optimization - result will be written directly to output_file
         perform_min(settings)
         time_end = time.time()
-        logger.info(f"Optimization completed in {time_end - time_start:.1f} seconds")
         logger.info("=" * 60)
+        logger.info('Optimization completed successfully!')
+        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
     except Exception as e:
-        logger.error("=" * 60)
         logger.error(f"Error during optimization: {str(e)}")
         sys.exit(1)
 
@@ -855,8 +936,55 @@ def nvt_md(
     # Setup logging with default levels
     setup_logger(log_file)
     
-    # Log the ASCII art to the log file
+    # Log the ASCII art
     logger.info(SO3LR_ASCII)
+    
+    # Log all settings
+    total_steps = cycles * steps
+    simulation_time = total_steps * dt  # in ps
+    
+    logger.info("=" * 60)
+    logger.info(f"SO3LR NVT Molecular Dynamics Simulation (v{__version__})")
+    logger.info("=" * 60)
+    logger.info(f"Initial geometry:          {input_file}")
+    logger.info(f"Output file:               {output_file}")
+    logger.info(f"Log file:                  {log_file}")
+    logger.info(f"Output format:             {output_format}")
+    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
+    if model_path is not None:
+        logger.info(f"Model path:                {model_path}")
+    logger.info(f"Precision:                 {precision}")
+    logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
+    logger.info(f"Dispersion damping:        {dispersion_damping} Å")
+    logger.info(f"Short-range buffer:        {buffer_sr}")
+    logger.info(f"Long-range buffer:         {buffer_lr}")
+    logger.info(f"Total charge:              {total_charge}")
+    logger.info(f"Temperature:               {temperature} K")
+    logger.info(f"Ensemble:                  NVT")
+    logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
+    logger.info(f"MD cycles:                 {cycles}")
+    logger.info(f"Steps per cycle:           {steps}")
+    logger.info(f"Timestep:                  {dt*1000} fs")
+    logger.info(f"Saving buffer size:        {hdf5_buffer}")
+    logger.info(f"NHC chain length:          {nhc_chain}")
+    logger.info(f"Nose-Hoover steps:         {nhc_steps}")
+    logger.info(f"Nose-Hoover thermo:        {nhc_thermo} fs")
+    logger.info(f"Random seed:               {seed}")
+    if restart_load:
+        logger.info(f"Restart from:              {restart_load}")
+    if restart_save:
+        logger.info(f"Save restart to:            {restart_save}")
+    
+    if relax:
+        logger.info(f"Geometry relaxation:       Enabled")
+        if force_conv is not None:
+            logger.info(f"Force convergence:         {force_conv} eV/Å")
+    else:
+        logger.info(f"Geometry relaxation:       Disabled")
+    logger.info("=" * 60)
+
+    # Log hardware info
+    get_hardware_info()
 
     # Override settings with command line arguments
     settings = {
@@ -891,62 +1019,25 @@ def nvt_md(
 
     }
     
-    # Log all settings
-    total_steps = cycles * steps
-    simulation_time = total_steps * dt  # in ps
-    
-    logger.info("=" * 60)
-    logger.info(f"SO3LR NVT Molecular Dynamics Simulation")
-    logger.info("=" * 60)
-    logger.info(f"Initial geometry:          {input_file}")
-    logger.info(f"Output file:               {output_file}")
-    logger.info(f"Log file:                  {log_file}")
-    logger.info(f"Output format:             {output_format}")
-    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
-    if model_path is not None:
-        logger.info(f"Model path:                {model_path}")
-    logger.info(f"Precision:                 {precision}")
-    logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
-    logger.info(f"Dispersion damping:        {dispersion_damping} Å")
-    logger.info(f"Short-range buffer:        {buffer_sr}")
-    logger.info(f"Long-range buffer:         {buffer_lr}")
-    logger.info(f"Total charge:              {total_charge}")
-    
-    logger.info(f"Temperature:               {temperature} K")
-    logger.info(f"Ensemble:                  NVT")
-    
-    logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
-    logger.info(f"MD cycles:                 {cycles}")
-    logger.info(f"Steps per cycle:           {steps}")
-    logger.info(f"Timestep:                  {dt*1000} fs")
-    logger.info(f"Saving buffer size:          {hdf5_buffer}")
-    logger.info(f"NHC chain length:          {nhc_chain}")
-    logger.info(f"Nose-Hoover steps:         {nhc_steps}")
-    logger.info(f"Nose-Hoover thermo:        {nhc_thermo} fs")
-    logger.info(f"Random seed:               {seed}")
-    
-    if restart_load:
-        logger.info(f"Restart from:              {restart_load}")
-    if restart_save:
-        logger.info(f"Save restart to:            {restart_save}")
-    
-    if relax:
-        logger.info(f"Geometry relaxation:       Enabled")
-        if force_conv is not None:
-            logger.info(f"Force convergence:         {force_conv} eV/Å")
-    else:
-        logger.info(f"Geometry relaxation:       Disabled")
-    
-    logger.info("=" * 60)
-    
     # Add log settings to the settings dictionary
     settings['log_file'] = log_file
     
     # Determine output format based on file extension
-    settings['output_format'] = 'hdf5' if output_file.endswith('.hdf5') else 'extxyz'
+    settings['output_format'] = infer_output_format(output_file)
     
     # Run NVT simulation
-    run(settings)
+    time_start = time.time()
+    try:
+        # Run optimization - result will be written directly to output_file
+        run(settings)
+        time_end = time.time()
+        logger.info("=" * 60)
+        logger.info('Simulation completed successfully!')
+        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+
+    except Exception as e:
+        logger.error(f"Error during simulation: {str(e)}")
+        sys.exit(1)
 
 # Define the 'npt' subcommand with clear help
 @cli.command(name='npt', help="Run NPT molecular dynamics simulation.")
@@ -1062,7 +1153,7 @@ def npt_md(
     # Setup logging with default levels
     setup_logger(log_file)
     
-    # Log the ASCII art to the log file
+    # Log the ASCII art
     logger.info(SO3LR_ASCII)
 
     # Override settings with command line arguments
@@ -1105,7 +1196,7 @@ def npt_md(
     simulation_time = total_steps * dt  # in ps
     
     logger.info("=" * 60)
-    logger.info(f"SO3LR NPT Molecular Dynamics Simulation")
+    logger.info(f"SO3LR NPT Molecular Dynamics Simulation (v{__version__})")
     logger.info("=" * 60)
     logger.info(f"Initial geometry:          {input_file}")
     logger.info(f"Output file:               {output_file}")
@@ -1148,16 +1239,29 @@ def npt_md(
         logger.info(f"Geometry relaxation:       Disabled")
     
     logger.info("=" * 60)
+
+    # Log hardware info
+    get_hardware_info()
     
     # Add log settings to the settings dictionary
     settings['log_file'] = log_file
     
     # Determine output format based on file extension
-    settings['output_format'] = 'hdf5' if output_file.endswith('.hdf5') else 'extxyz'
-    
-    # Run NPT simulation
-    run(settings)
+    settings['output_format'] = infer_output_format(output_file)
 
+    # Run NPT simulation
+    time_start = time.time()
+    try:
+        # Run optimization - result will be written directly to output_file
+        run(settings)
+        time_end = time.time()
+        logger.info("=" * 60)
+        logger.info('Simulation completed successfully!')
+        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+
+    except Exception as e:
+        logger.error(f"Error during simulation: {str(e)}")
+        sys.exit(1)
 
 @cli.command(name='eval', help="Evaluate SO3LR model on a dataset.")
 @click.option('--datafile', type=click.Path(exists=False),
@@ -1226,7 +1330,7 @@ def eval_model(
     
     # Log all settings
     logger.info("=" * 60)
-    logger.info(f"SO3LR Model Evaluation")
+    logger.info(f"SO3LR Model Evaluation (v{__version__})")
     logger.info("=" * 60)
     logger.info(f"Dataset file:              {datafile}")
     logger.info(f"Output file:               {output_file if save_predictions_to else 'Not saving'}")
@@ -1243,7 +1347,10 @@ def eval_model(
         logger.info(f"Saving predictions to:     {save_predictions_to}")
     logger.info(f"Targets:                   {targets}")
     logger.info("=" * 60)
-    
+
+    # Log hardware info
+    get_hardware_info()
+
     # Validate file existence
     if not Path(datafile).exists():
         logger.error(f"Error: Dataset file not found: {datafile}")
@@ -1279,7 +1386,6 @@ def eval_model(
             logger.info(f"Predictions saved to: {save_predictions_to}")
             
     except Exception as e:
-        logger.error("=" * 60)
         logger.error(f"Error during evaluation: {str(e)}")
         sys.exit(1)
 
