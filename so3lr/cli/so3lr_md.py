@@ -1,23 +1,20 @@
 """
 SO3LR Molecular Dynamics Module
 
-This module provides functions for running molecular dynamics (MD) simulations
+This module provides functions for running molecular dynamics simulations
 with the SO3LR Machine Learned Force Field.
 It includes functionality for:
-- NVT (constant number, volume, temperature) simulations
-- NPT (constant number, pressure, temperature) simulations
+- NVT simulations
+- NPT simulations
 - Geometry optimization
-- Trajectory output in HDF5 and extxyz formats
+- Trajectory output in hdf5 and extxyz formats
 - Restart capabilities
-- Logging and performance monitoring
 
-The module works with both the built-in SO3LR potential and custom MLFF models.
 """
 import os
 import sys
 import time
 import logging
-from logging.handlers import RotatingFileHandler
 import pathlib
 from pathlib import Path
 from functools import partial
@@ -31,10 +28,8 @@ from ase.io import read
 import jax
 import jax.numpy as jnp
 import jax_md
-import jax_md.quantity
-from jax_md import units
-from jax_md import partition
-from jax_md.space import Box, DisplacementOrMetricFn, raw_transform
+from jax_md import units, partition
+from jax_md.space import DisplacementOrMetricFn, raw_transform
 from mlff.mdx.potential import MLFFPotentialSparse
 from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
 
@@ -89,7 +84,7 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
             log_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Create a rotating file handler (10MB max size, keep 5 backups)
-            file_handler = RotatingFileHandler(
+            file_handler = logging.handlers.RotatingFileHandler(
                 log_file, maxBytes=10*1024*1024, backupCount=5
             )
             file_handler.setLevel(log_level)
@@ -177,8 +172,7 @@ def handle_box(
     """
     if shift_displacement == 'periodic':
         if cell is None:
-            raise ValueError(
-                'Cell must be defined for periodic boundary conditions')
+            raise ValueError('Cell must be defined for periodic boundary conditions')
 
         box = jnp.array(np.diag(np.array(cell)))
         fractional_coordinates = True
@@ -842,6 +836,7 @@ def create_nhc_fn(
     Returns:
         Tuple[callable, callable]: Init and apply functions.
     """
+
     init_fn, apply_fn = jax_md.simulate.nvt_nose_hoover(
         energy_fn,
         shift,
@@ -927,7 +922,6 @@ def create_nvt_step_fn(
             )
             return state, nbrs, nbrs_lr, box
         return step_nvt_fn_lr
-
     else:
         @jax.jit
         def step_nvt_fn(
@@ -1080,8 +1074,7 @@ def perform_md(
     model_path = all_settings.get('model_path')
     precision = all_settings.get('precision')
     lr_cutoff = all_settings.get('lr_cutoff')
-    dispersion_energy_cutoff_lr_damping = all_settings.get(
-        'dispersion_energy_cutoff_lr_damping')
+    dispersion_energy_cutoff_lr_damping = all_settings.get('dispersion_energy_cutoff_lr_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
     total_charge = all_settings.get('total_charge')
@@ -1120,16 +1113,13 @@ def perform_md(
     # Geometry, cell and charge
     initial_geometry_path = all_settings.get('initial_geometry')
     if initial_geometry_path is None:
-        raise ValueError(
-            'Initial geometry file path must be provided in settings')
+        raise ValueError('Initial geometry file path must be provided in settings')
     try:
         initial_geometry = read(initial_geometry_path)
     except FileNotFoundError:
-        raise FileNotFoundError(
-            f"Cannot find initial geometry file: {initial_geometry_path}")
+        raise FileNotFoundError(f"Cannot find initial geometry file: {initial_geometry_path}")
     except Exception as e:
-        raise RuntimeError(
-            f"Failed to read geometry file {initial_geometry_path}: {e}")
+        raise RuntimeError(f"Failed to read geometry file {initial_geometry_path}: {e}")
 
     if opt_structure is not None:
         initial_geometry.set_positions(opt_structure)
@@ -1174,8 +1164,7 @@ def perform_md(
                 ensemble='nvt' if md_P is None else 'npt'
             )
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to load restart state from {restart_load_path}: {str(e)}")
+            raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
         position = state.position
 
     # Loading the model
@@ -1190,8 +1179,7 @@ def perform_md(
     else:
         # Verify model path exists
         if not os.path.exists(model_path):
-            raise FileNotFoundError(
-                f"Custom model path not found: {model_path}")
+            raise FileNotFoundError(f"Custom model path not found: {model_path}")
         logger.info(f"Using custom MLFF potential from: {model_path}")
         potential = load_model(
             model_path,
@@ -1350,6 +1338,7 @@ def perform_md(
 
             state = new_state
             box = new_box
+
             # Calculate some quantities for printing
             KE, PE, H, current_T, _ = compute_quantities(
                 energy_fn,
@@ -1361,16 +1350,19 @@ def perform_md(
                 md_T,
                 md_P
             )
+
             if current_T is not None:
                 logger.info(
                     f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{current_T:.1f}\t{H:.3f}\t{time_per_step:.6f}')
             else:
                 logger.info(
                     f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{time_per_step:.6f}')
+
             positions.append(np.array(state.position))
             momenta.append(np.array(state.momentum))
             if box is not None:
                 boxs.append(np.array(box))
+
             if ((len(positions) % hdf5_buffer_size == 0 and len(positions) > 0) or (len(positions) == md_cycles)):
                 # Saving the output
                 if output_format == 'hdf5':  # TODO: check that hdf5 is saving things correctly
@@ -1397,20 +1389,18 @@ def perform_md(
                         restart_save_path,
                         ensemble='nvt' if md_P is None else 'npt'
                     )
+
     logger.info('Results saved to: ' + output_file)
     average_time_per_step = total_time_for_steps / (cycle_md - 1)
     logger.info(f'Average time per step: {average_time_per_step:.2e} seconds')
-    # if jax.default_backend() in ["gpu", "cuda", "rocm"]:
-    if average_time_per_step > 1.2 * 3.25e-6 * len(initial_geometry):
-        logger.warn('Ideally, the average time per step should be close to {:.2e} seconds (measured on an A100 GPU)'.format(
-            3.25e-6 * len(initial_geometry)))
-        logger.warn(
-            'Consider decreasing the buffer sizes if the system has equilibrated (--buffer-sr 1.15, --buffer-lr 1.1)')
-        logger.warn(
-            'and/or increasing the number of steps in each jax.lax.fori_loop (--steps 1000)')
-        if output_format == 'extxyz':
-            logger.warn(
-                'and/or saving the trajectory in HDF5 format (--output-format hdf5)')
+    if jax.default_backend() in ["gpu", "cuda", "rocm"]:
+        if average_time_per_step > 1.2 * 3.25e-6 * len(initial_geometry):
+            logger.warn('Ideally, the average time per step should be close to {:.2e} seconds (measured on an A100 GPU)'.format(
+                3.25e-6 * len(initial_geometry)))
+            logger.warn('Consider decreasing the buffer sizes if the system has equilibrated (--buffer-sr 1.15, --buffer-lr 1.1)')
+            logger.warn('and/or increasing the number of steps in each jax.lax.fori_loop (--steps 1000)')
+            if output_format == 'extxyz':
+                logger.warn('and/or saving the trajectory in HDF5 format (--output-format hdf5)')
 
 
 def create_min_fn(
@@ -1520,15 +1510,13 @@ def perform_min(
     # Extract settings with defaults
     input_file = all_settings.get('initial_geometry')
     output_file = all_settings.get('output_file')
-    save_optimization_trajectory = all_settings.get(
-        'save_optimization_trajectory', True)
+    save_optimization_trajectory = all_settings.get('save_optimization_trajectory', True)
 
     # Model parameters
     model_path = all_settings.get('model_path')
     precision = all_settings.get('precision')
     lr_cutoff = all_settings.get('lr_cutoff')
-    dispersion_energy_cutoff_lr_damping = all_settings.get(
-        'dispersion_energy_cutoff_lr_damping')
+    dispersion_energy_cutoff_lr_damping = all_settings.get('dispersion_energy_cutoff_lr_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
     total_charge = all_settings.get('total_charge')
@@ -1539,19 +1527,16 @@ def perform_min(
     min_start_dt = all_settings.get('min_start_dt')
     min_max_dt = all_settings.get('min_max_dt')
     min_n_min = all_settings.get('min_n_min')
-    force_convergence = all_settings.get(
-        'force_convergence')  # eV/A, can be None
+    force_convergence = all_settings.get('force_convergence')  # eV/A, can be None
 
     # Geometry, cell and charge
     initial_geometry_path = all_settings.get('initial_geometry')
     if initial_geometry_path is None:
-        raise ValueError(
-            'Initial geometry file path must be provided in settings')
+        raise ValueError('Initial geometry file path must be provided in settings')
     try:
         initial_geometry = read(initial_geometry_path)
     except FileNotFoundError:
-        raise FileNotFoundError(
-            f"Cannot find initial geometry file: {initial_geometry_path}")
+        raise FileNotFoundError(f"Cannot find initial geometry file: {initial_geometry_path}")
     cell = initial_geometry.get_cell()
     if np.all(cell == 0):
         cell = None
@@ -1609,18 +1594,9 @@ def perform_min(
     else:
         lr = False
 
-    nbrs = neighbor_fn.allocate(
-        initial_geometry_dict['positions'],
-        box=box
-    )
-
-    if lr:
-        nbrs_lr = neighbor_fn_lr.allocate(
-            initial_geometry_dict['positions'],
-            box=box
-        )
-    else:
-        nbrs_lr = None
+    nbrs = neighbor_fn.allocate(initial_geometry_dict['positions'], box=box)
+    nbrs_lr = neighbor_fn_lr.allocate(
+        initial_geometry_dict['positions'], box=box) if lr else None
 
     # Setting up the minimization functions
     min_init_fn, min_step_fn = create_fire_fn(
@@ -1718,6 +1694,7 @@ def perform_min(
 
         f_max = np.abs(F).max()
         logger.info('{}\t{:.3f}\t{:.3f}'.format(i*min_steps, E, f_max))
+
         # Save the current positions to the trajectory if requested
         if save_optimization_trajectory:
             minimization_trajectory.append(np.array(min_state.position))
@@ -1736,7 +1713,6 @@ def perform_min(
 
     # If output_file is provided, write directly to file
     if output_file:
-        # atoms = read(all_settings['initial_geometry'])
         if save_optimization_trajectory:
             write_to_extxyz(output_file, initial_geometry, boxes=box,
                             momenta=None, positions=minimization_trajectory)
@@ -1914,7 +1890,7 @@ def run(
         jax.config.update("jax_enable_x64", True)
     else:
         jax.config.update("jax_enable_x64", False)
-    # jax.config.update("jax_enable_x64", True)
+
     restart_load_path = settings.get('restart_load_path')
     if restart_load_path is not None:
         if os.path.exists(restart_load_path):
@@ -1937,6 +1913,7 @@ def run(
                 sys.exit(1)
     else:
         opt_structure = None
+
     try:
         perform_md(settings, opt_structure)
     except Exception as e:

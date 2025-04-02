@@ -15,12 +15,7 @@ from ase.io import read, write
 
 from .. import __version__
 from .so3lr_eval import evaluate_so3lr_on
-from .so3lr_md import (
-    perform_min,
-    perform_md,
-    run,
-    setup_logger
-)
+from .so3lr_md import perform_min, run, setup_logger
 
 # Get logger
 logger = logging.getLogger("SO3LR")
@@ -310,8 +305,7 @@ def infer_output_format(output_file):
     elif output_file.endswith('.xyz') or output_file.endswith('.extxyz'):
         return 'extxyz'
     else:
-        logger.warning(
-            f"Unknown output extension for {output_file}, defaulting to extxyz format")
+        logger.warning(f"Unknown output extension for {output_file}, defaulting to extxyz format")
         return 'extxyz'
 
 
@@ -580,16 +574,14 @@ def cli(ctx: click.Context,
 
     # Validate required settings
     if 'initial_geometry' not in settings_dict:
-        logger.error(
-            "Error: Initial geometry file must be specified either in settings file or with --input")
+        logger.error("Error: Initial geometry file must be specified either in settings file or with --input")
         sys.exit(1)
 
     # Set default output file if not specified
     if 'output_file' not in settings_dict:
         input_name = Path(settings_dict['initial_geometry']).stem
         settings_dict['output_file'] = f'{input_name}_trajectory.xyz'
-        logger.info(
-            f"No output file specified, using default: {settings_dict['output_file']}")
+        logger.info(f"No output file specified, using default: {settings_dict['output_file']}")
 
     # Set default log file based on output file if not explicitly provided
     if log_file is None:
@@ -616,25 +608,17 @@ def cli(ctx: click.Context,
     logger.info(f"Initial geometry:       {settings_dict['initial_geometry']}")
     logger.info(f"Output file:            {settings_dict['output_file']}")
     logger.info(f"Log file:               {log_file}")
-    logger.info(
-        f"Force field:            {'Custom MLFF' if model_path else 'SO3LR'}")
+    logger.info(f"Force field:            {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
         logger.info(f"Model path:             {settings_dict['model_path']}")
-    logger.info(
-        f"Long-range cutoff:      {settings_dict.get('lr_cutoff', DEFAULT_LR_CUTOFF)} Å")
-    logger.info(
-        f"Dispersion damping:     {settings_dict.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)} Å")
-    logger.info(
-        f"Short-range buffer:     {settings_dict.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)}")
-    logger.info(
-        f"Long-range buffer:      {settings_dict.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)}")
-    logger.info(
-        f"Total charge:           {settings_dict.get('total_charge', DEFAULT_TOTAL_CHARGE)}")
-    logger.info(
-        f"Precision:              {settings_dict.get('precision', DEFAULT_PRECISION)}")
+    logger.info(f"Long-range cutoff:      {settings_dict.get('lr_cutoff', DEFAULT_LR_CUTOFF)} Å")
+    logger.info(f"Dispersion damping:     {settings_dict.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)} Å")
+    logger.info(f"Short-range buffer:     {settings_dict.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)}")
+    logger.info(f"Long-range buffer:      {settings_dict.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)}")
+    logger.info(f"Total charge:           {settings_dict.get('total_charge', DEFAULT_TOTAL_CHARGE)}")
+    logger.info(f"Precision:              {settings_dict.get('precision', DEFAULT_PRECISION)}")
 
-    logger.info(
-        f"Temperature:            {settings_dict.get('md_T', DEFAULT_TEMPERATURE)} K")
+    logger.info(f"Temperature:            {settings_dict.get('md_T', DEFAULT_TEMPERATURE)} K")
 
     if settings_dict.get('md_P') is not None:
         logger.info(f"Pressure:               {settings_dict.get('md_P')} atm")
@@ -642,35 +626,24 @@ def cli(ctx: click.Context,
     else:
         logger.info(f"Ensemble:               NVT")
 
-    total_steps = settings_dict.get(
-        'md_cycles', DEFAULT_CYCLES) * settings_dict.get('md_steps', DEFAULT_STEPS_PER_CYCLE)
-    simulation_time = total_steps * \
-        settings_dict.get('md_dt', DEFAULT_TIMESTEP)  # in ps
+    total_steps = settings_dict.get('md_cycles', DEFAULT_CYCLES) * settings_dict.get('md_steps', DEFAULT_STEPS_PER_CYCLE)
+    simulation_time = total_steps * settings_dict.get('md_dt', DEFAULT_TIMESTEP)  # in ps
 
-    logger.info(
-        f"Simulation length:      {total_steps} steps ({simulation_time:.2f} ps)")
-    logger.info(
-        f"MD cycles:              {settings_dict.get('md_cycles', DEFAULT_CYCLES)}")
-    logger.info(
-        f"Steps per cycle:        {settings_dict.get('md_steps', DEFAULT_STEPS_PER_CYCLE)}")
-    logger.info(
-        f"Timestep:               {settings_dict.get('md_dt', DEFAULT_TIMESTEP)*1000} fs")
-    logger.info(
-        f"NHC length:             {settings_dict.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)}")
-    logger.info(
-        f"Nose-Hoover steps:      {settings_dict.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)}")
-    logger.info(
-        f"Nose-Hoover thermo:     {settings_dict.get('nhc_thermo', DEFAULT_NHC_THERMO)}")
-    logger.info(
-        f"Seed:                   {settings_dict.get('seed', DEFAULT_SEED)}")
+    logger.info(f"Simulation length:      {total_steps} steps ({simulation_time:.2f} ps)")
+    logger.info(f"MD cycles:              {settings_dict.get('md_cycles', DEFAULT_CYCLES)}")
+    logger.info(f"Steps per cycle:        {settings_dict.get('md_steps', DEFAULT_STEPS_PER_CYCLE)}")
+    logger.info(f"Timestep:               {settings_dict.get('md_dt', DEFAULT_TIMESTEP)*1000} fs")
+    logger.info(f"NHC length:             {settings_dict.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)}")
+    logger.info(f"Nose-Hoover steps:      {settings_dict.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)}")
+    logger.info(f"Nose-Hoover thermo:     {settings_dict.get('nhc_thermo', DEFAULT_NHC_THERMO)}")
+    logger.info(f"Seed:                   {settings_dict.get('seed', DEFAULT_SEED)}")
 
     if settings_dict.get('relax_before_run', False):
         logger.info(f"Geometry relaxation:    Enabled")
         if force_conv is not None:
             logger.info(f"Force convergence:      {force_conv} eV/Å")
         else:
-            logger.info(
-                f"Optimization cycles:   {settings_dict.get('min_cycles', DEFAULT_MIN_CYCLES)} cycles, each {settings_dict.get('min_steps', DEFAULT_MIN_STEPS)} steps")
+            logger.info(f"Optimization cycles:   {settings_dict.get('min_cycles', DEFAULT_MIN_CYCLES)} cycles, each {settings_dict.get('min_steps', DEFAULT_MIN_STEPS)} steps")
     else:
         logger.info(f"Geometry relaxation:    Disabled")
 
@@ -687,8 +660,7 @@ def cli(ctx: click.Context,
         time_end = time.time()
         logger.info("=" * 60)
         logger.info('Simulation completed successfully!')
-        logger.info(
-            f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
     except Exception as e:
         logger.error(f"Error during simulation: {str(e)}")
         sys.exit(1)
@@ -803,19 +775,16 @@ def fire_optimization(
     logger.info(f"Initial geometry:                 {input_file}")
     logger.info(f"Output geometry:                  {output_file}")
     logger.info(f"Log file:                         {log_file}")
-    logger.info(
-        f"Save trajectory:                  {'Yes' if save_optimization_trajectory else 'No'}")
+    logger.info(f"Save trajectory:                  {'Yes' if save_optimization_trajectory else 'No'}")
     logger.info(f"Total charge:                     {total_charge}")
-    logger.info(
-        f"Force field:                      {'Custom MLFF' if model_path else 'SO3LR'}")
+    logger.info(f"Force field:                      {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
         logger.info(f"Model path:                      {model_path}")
     logger.info(f"Long-range cutoff:                {lr_cutoff} Å")
     if force_conv is not None:
         logger.info(f"Force convergence:                {force_conv} eV/Å")
     else:
-        logger.info(
-            f"Optimization cycles:               {opt_cycles} cycles, each {opt_steps} steps")
+        logger.info(f"Optimization cycles:               {opt_cycles} cycles, each {opt_steps} steps")
     logger.info(f"Initial step size:                {min_start_dt} Å")
     logger.info(f"Maximum step size:                {min_max_dt} Å")
     logger.info(f"Steps between step size updates:  {min_n_min}")
@@ -858,8 +827,7 @@ def fire_optimization(
         time_end = time.time()
         logger.info("=" * 60)
         logger.info('Optimization completed successfully!')
-        logger.info(
-            f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
     except Exception as e:
         logger.error(f"Error during optimization: {str(e)}")
         sys.exit(1)
@@ -986,8 +954,7 @@ def nvt_md(
     logger.info(f"Output file:               {output_file}")
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Output format:             {output_format}")
-    logger.info(
-        f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
+    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
         logger.info(f"Model path:                {model_path}")
     logger.info(f"Precision:                 {precision}")
@@ -998,8 +965,7 @@ def nvt_md(
     logger.info(f"Total charge:              {total_charge}")
     logger.info(f"Temperature:               {temperature} K")
     logger.info(f"Ensemble:                  NVT")
-    logger.info(
-        f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
+    logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
     logger.info(f"MD cycles:                 {cycles}")
     logger.info(f"Steps per cycle:           {steps}")
     logger.info(f"Timestep:                  {dt*1000} fs")
@@ -1071,8 +1037,7 @@ def nvt_md(
         time_end = time.time()
         logger.info("=" * 60)
         logger.info('Simulation completed successfully!')
-        logger.info(
-            f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
 
     except Exception as e:
         logger.error(f"Error during simulation: {str(e)}")
@@ -1243,8 +1208,7 @@ def npt_md(
     logger.info(f"Output file:               {output_file}")
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Output format:             {output_format}")
-    logger.info(
-        f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
+    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
         logger.info(f"Model path:                {model_path}")
     logger.info(f"Precision:                 {precision}")
@@ -1258,8 +1222,7 @@ def npt_md(
     logger.info(f"Pressure:                  {pressure} atm")
     logger.info(f"Ensemble:                  NPT")
 
-    logger.info(
-        f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
+    logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
     logger.info(f"MD cycles:                 {cycles}")
     logger.info(f"Steps per cycle:           {steps}")
     logger.info(f"Timestep:                  {dt*1000} fs")
@@ -1300,8 +1263,7 @@ def npt_md(
         time_end = time.time()
         logger.info("=" * 60)
         logger.info('Simulation completed successfully!')
-        logger.info(
-            f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
 
     except Exception as e:
         logger.error(f"Error during simulation: {str(e)}")
@@ -1378,19 +1340,16 @@ def eval_model(
     logger.info(f"SO3LR Model Evaluation (v{__version__})")
     logger.info("=" * 60)
     logger.info(f"Dataset file:              {datafile}")
-    logger.info(
-        f"Output file:               {output_file if save_predictions_to else 'Not saving'}")
+    logger.info(f"Output file:               {output_file if save_predictions_to else 'Not saving'}")
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Batch size:                {batch_size}")
-    logger.info(
-        f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
+    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
         logger.info(f"Model path:                {model_path}")
     logger.info(f"Precision:                 {precision}")
     logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
     logger.info(f"Dispersion damping:        {dispersion_damping} Å")
-    logger.info(
-        f"JIT compilation:           {'Enabled' if jit_compile else 'Disabled'}")
+    logger.info(f"JIT compilation:           {'Enabled' if jit_compile else 'Disabled'}")
     if save_predictions_to:
         logger.info(f"Saving predictions to:     {save_predictions_to}")
     logger.info(f"Targets:                   {targets}")
@@ -1408,8 +1367,7 @@ def eval_model(
     if save_predictions_to:
         save_path = Path(save_predictions_to)
         if save_path.exists():
-            logger.error(
-                f"Error: Output file already exists: {save_predictions_to}")
+            logger.error(f"Error: Output file already exists: {save_predictions_to}")
             sys.exit(1)
         # Create parent directory if it doesn't exist
         save_path.parent.mkdir(parents=True, exist_ok=True)

@@ -5,18 +5,15 @@ import numpy as np
 import jax.numpy as jnp
 import time
 import pprint
-import click
 import logging
 from typing import Dict, List, Tuple, Union, Optional, Any
 
 from ase.io import write
-from mlff.utils import jraph_utils
-from mlff.utils import evaluation_utils
+from mlff.utils import jraph_utils, evaluation_utils
 from mlff.data import AseDataLoaderSparse
 from pathlib import Path
 
-from ..jraph_utils import jraph_to_ase_atoms
-from ..jraph_utils import unbatch_np
+from ..jraph_utils import jraph_to_ase_atoms, unbatch_np
 from ..base_calculator import make_so3lr
 from .so3lr_md import load_model, setup_logger
 
@@ -135,8 +132,7 @@ def save_predictions_to_file(
         atoms = jraph_to_ase_atoms(predicted_graph)
         write(save_predictions_to, images=atoms, append=True)
 
-    logger.info(
-        f'Successfully saved predictions for {len(predicted_graphs)} structures')
+    logger.info(f'Successfully saved predictions for {len(predicted_graphs)} structures')
 
 
 def evaluate_so3lr_on(
@@ -249,8 +245,7 @@ def evaluate_so3lr_on(
     n_node = stats['max_num_of_nodes'] * batch_size + 1
     n_edge = stats['max_num_of_edges'] * batch_size + 1
     n_graph = batch_size + 1
-    n_pairs = stats['max_num_of_nodes'] * \
-        (stats['max_num_of_nodes'] - 1) * batch_size + 1
+    n_pairs = stats['max_num_of_nodes'] * (stats['max_num_of_nodes'] - 1) * batch_size + 1
 
     # Batch the graphs
     batched_graphs = jraph.dynamically_batch(
@@ -314,8 +309,7 @@ def evaluate_so3lr_on(
             total_num_structures += batch_size
 
             if total_num_structures % log_every == 0:
-                logger.info(
-                    f'Processing: {total_num_structures} / {num_data} structures')
+                logger.info(f'Processing: {total_num_structures} / {num_data} structures')
 
             # Run the model
             start = time.time()
@@ -337,8 +331,7 @@ def evaluate_so3lr_on(
 
             i += 1
 
-        logger.info(
-            f'Completed evaluation on {total_num_structures} / {num_data} structures')
+        logger.info(f'Completed evaluation on {total_num_structures} / {num_data} structures')
         logger.info(f'Evaluation time: {total_time:.3f} seconds')
         logger.info('-' * 50)
 
@@ -352,8 +345,7 @@ def evaluate_so3lr_on(
 
         # Compile timing metrics
         time_per_batch = total_time / i if i > 0 else 0
-        time_per_structure = total_time / \
-            total_num_structures if total_num_structures > 0 else 0
+        time_per_structure = total_time / total_num_structures if total_num_structures > 0 else 0
 
         metrics = {
             'time_per_batch': time_per_batch,
@@ -369,19 +361,16 @@ def evaluate_so3lr_on(
 
         # Display results
         logger.info('Evaluation metrics (units are eV, Angstrom, and seconds):')
-        formatted_metrics = {k: f"{v:.3e}" if isinstance(
-            v, float) else v for k, v in metrics.items()}
+        formatted_metrics = {k: f"{v:.3e}" if isinstance(v, float) else v for k, v in metrics.items()}
         logger.info(pprint.pformat(formatted_metrics))
         logger.info('-' * 50)
 
         # Save predictions if requested
         if save_predictions_bool:
-            save_predictions_to_file(
-                predicted, str(save_predictions_to), num_data)
+            save_predictions_to_file(predicted, str(save_predictions_to), num_data)
 
         total_time_end = time.time()
-        logger.info(
-            f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
+        logger.info(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
         logger.info('Evaluation completed successfully')
 
         return metrics
