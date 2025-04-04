@@ -7,8 +7,6 @@
   Path to the initial geometry file.
 - **`model_path`** (`str`):  
   Path to the model directory.
-- **`use_so3lr`** (`bool`, default: `True`):  
-  Whether to use SO3LR.
 - **`precision`** (`str`, default: `'float32'`):  
   Numerical precision.
 

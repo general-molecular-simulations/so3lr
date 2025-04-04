@@ -27,7 +27,6 @@ HELP_STRING = """
 # === General settings ===\n
 initial_geometry: "path/to/geometry.xyz"         # (str) Path to the initial geometry file\n
 model_path: "path/to/model/"                     # (str) Path to the model directory\n
-use_so3lr: True                                  # (bool) Whether to use SO3LR \n
 precision: "float32"                             # (str) Numerical precision, e.g., 'float32' or 'float64'\n
 
 # === Cutoffs and Buffers ===\n
