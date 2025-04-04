@@ -7,8 +7,6 @@
   Path to the initial geometry file.
 - **`model_path`** (`str`):  
   Path to the model directory.
-- **`use_so3lr`** (`bool`, default: `True`):  
-  Whether to use SO3LR.
 - **`precision`** (`str`, default: `'float32'`):  
   Numerical precision.
 
@@ -29,8 +27,10 @@
   File name for trajectory output.
 - **`restart_save_path`** (`str`, default: `None`):  
   Path to save restart file.
-- **`restart_load_path`** (`str`, default: `None`):  
+- **`restart_load_path`** (`str`, default: `None`):
   Path to load restart file.
+- **`save_exist_ok`** (`bool`, default: `False`):
+  Whether to overwrite existing files.
 
 ### Molecular Dynamics (MD)
 - **`md_dt`** (`float`, default: 0.0005):  
