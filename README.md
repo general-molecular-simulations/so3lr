@@ -177,7 +177,8 @@ md-so3lr --help
 
 By only providing an `initial_geometry`, a short NVT simulation is launched.
 Currently, NVT and NPT are supported using the Nosé–Hoover chain thermostat or barostat. For optimization the FIRE algorithm is used as implemented in JAX MD.
-The trajectories will be saved efficiently using `.hdf5` files. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart it if needed. 
+The trajectories will be saved efficiently using `.hdf5` files. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart it if needed.
+SO3LR is used by default. In case you want to use your own model you have to specify the path in the settings at `model_path`.
 
 ## Potential energy function
 To obtain a potential energy function which is not specifally tailored for `jax-md` we provide a convenience 
