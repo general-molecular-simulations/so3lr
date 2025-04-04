@@ -40,6 +40,7 @@ hdf5_buffer_size: 5                              # (int) Number of frames to buf
 trajectory_hdf5_file: "trajectory.hdf5"          # (str) Output file for trajectory data in HDF5 format\n
 restart_save_path: null                          # (str) Optional path to save restart data from a previous run\n
 restart_load_path: null                          # (str) Optional path to load restart data from a previous run\n
+save_exist_ok: False                             # (bool) Whether to overwrite existing files when saving trajectory\n
 
 # === Minimization settings ===\n
 min_cycles: 10                                   # (int) Number of minimization cycles to perform\n
@@ -184,7 +185,7 @@ def init_hdf5_store(
         HDF5Store: _description_
     """
     parent_dir = pathlib.Path(save_to).expanduser().resolve().parent
-    parent_dir.mkdir(exist_ok=True)
+    parent_dir.mkdir(exist_ok=exist_ok)
     
     _save_to = pathlib.Path(save_to)
     if _save_to.exists():
@@ -1056,6 +1057,7 @@ def perform_md(
     trajectory_hdf5_file = all_settings.get('trajectory_hdf5_file', 'trajectory.hdf5')
     
     # Handling of restart
+    save_exist_ok = all_settings.get('save_exist_ok', False)
     restart_save_path = all_settings.get('restart_save_path')
     if restart_save_path is not None:
         create_restart = True
@@ -1142,7 +1144,7 @@ def perform_md(
         batch_size=hdf5_buffer_size,
         num_atoms=position.shape[0],
         num_box_entries=1,
-        exist_ok=True
+        exist_ok=save_exist_ok
     )
 
     # Loading the model
