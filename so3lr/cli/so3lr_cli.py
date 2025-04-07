@@ -1315,13 +1315,13 @@ def npt_md(
 @click.option('--datafile', type=click.Path(exists=False),
               help='Data file to evaluate the model on. Must be readable by ase.io.read. [default: None]')
 @click.option('--batch-size', default=1, type=int,
-              help='Number of molecules per batch. [default: 1]')
+              help='Number of molecules per batch. Larger batches can improve performance. [default: 1]')
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
               help=f'Long-range cutoff for SO3LR in Å. [default: {DEFAULT_LR_CUTOFF} Å]')
 @click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--model', 'model_path', type=click.Path(exists=False),
-              help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
+              help='Path to MLFF model directory. If not provided, default SO3LR model is used. [default: None]')
 @click.option('--dispersion_damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
               help=f'Damping factor for long-range dispersion interactions. [default: {DEFAULT_DISPERSION_DAMPING}]')
 @click.option('--jit-compile/--no-jit-compile', default=True,

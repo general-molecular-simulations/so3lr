@@ -7,6 +7,7 @@ import time
 import pprint
 import logging
 from typing import Dict, List, Tuple, Union, Optional, Any
+from tqdm import tqdm
 
 from ase.io import write
 from mlff.utils import jraph_utils, evaluation_utils
@@ -123,23 +124,23 @@ def save_to_file(
         Total number of data points for progress reporting
     """
     logger.info(f'Saving predictions to {str(save_to)}')
-
-    log_every = max(1, len(predicted_graphs) // 10)
-
-    for n, predicted_graph in enumerate(predicted_graphs):
-        if n % log_every == 0:
-            logger.info(f'Saving: {n} / {len(predicted_graphs)} structures')
+    
+    # Convert the length to Python int to avoid JAX array issues with tqdm
+    total = len(predicted_graphs)
+    
+    # Use tqdm for progress reporting
+    for predicted_graph in tqdm(predicted_graphs, desc="Saving predictions"):
         atoms = jraph_to_ase_atoms(predicted_graph)
         write(save_to, images=atoms, append=True)
 
-    logger.info(f'Successfully saved predictions for {len(predicted_graphs)} structures')
+    logger.info(f'Successfully saved predictions for {total} structures')
 
 
 def evaluate_so3lr_on(
         datafile: str,
         batch_size: int = 1,
         lr_cutoff: float = 12.0,
-        dispersion_energy_cutoff_lr_damping: float = 2.0,
+        dispersion_damping: float = 2.0,
         jit_compile: bool = True,
         save_to: Optional[str] = None,
         model_path: Optional[str] = None,
@@ -148,7 +149,11 @@ def evaluate_so3lr_on(
         log_file: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Evaluate SO3LR model on a dataset.
+    Evaluate SO3LR model on a dataset and calculate error metrics.
+
+    This function loads a dataset, processes it in batches, runs the SO3LR model,
+    and calculates metrics for the specified targets. It can optionally save the
+    predictions to a file in the extxyz format.
 
     Parameters:
     -----------
@@ -158,8 +163,9 @@ def evaluate_so3lr_on(
         Number of molecules per batch.
     lr_cutoff : float
         Long-range cutoff for SO3LR in Å.
-    dispersion_energy_cutoff_lr_damping : float
-        Damping of long-range start at lr_cutoff - this value.
+    dispersion_damping : float
+        Damping of long-range interactions. Dispersion starts to switch off
+        at (lr_cutoff - this value) Å.
     jit_compile : bool
         Whether to JIT compile the calculation.
     save_to : str or None
@@ -167,16 +173,18 @@ def evaluate_so3lr_on(
     model_path : str or None
         Path to the model to evaluate. If None, the default SO3LR model is used.
     precision : str
-        Precision to use for the calculation.
+        Precision to use for the calculation ('float32' or 'float64').
     targets : str
-        Comma-separated list of targets to evaluate.
+        Comma-separated list of targets to evaluate (forces, energy, dipole_vec,
+        hirshfeld_ratios).
     log_file : str or None
         Path to log file. If None, logging only goes to console.
 
     Returns:
     --------
     dict
-        Dictionary containing evaluation metrics and timing information.
+        Dictionary containing evaluation metrics (MAE, MSE, RMSE for each target)
+        and timing information.
     """
     # Setup logging
     setup_logger(log_file)
@@ -212,7 +220,7 @@ def evaluate_so3lr_on(
         logger.info("Using default SO3LR potential")
         so3lr_calc = make_so3lr(
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
+            dispersion_energy_cutoff_lr_damping=dispersion_damping,
             calculate_forces=True
         )
     else:
@@ -221,7 +229,7 @@ def evaluate_so3lr_on(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
+            dispersion_energy_cutoff_lr_damping=dispersion_damping,
         )
 
     # Load the data
@@ -296,20 +304,21 @@ def evaluate_so3lr_on(
     total_num_structures = 0
     predicted = []
 
-    log_every = max(1, num_data // 10)
-
     logger.info(f'Starting evaluation on {num_data} structures')
     logger.info('-' * 50)
 
     try:
+        # Create a progress bar that shows structures processed instead of batches
+        progress_bar = tqdm(total=num_data, desc="Processing structures", unit="structure")
+        
         for graph_batch in batched_graphs:
             # Transform the batched graph to inputs dict
             inputs = jraph_utils.graph_to_batch_fn(graph_batch)
             batch_size = inputs['num_of_non_padded_graphs']
+            
+            # Update progress bar with actual batch size
+            progress_bar.update(int(batch_size))
             total_num_structures += batch_size
-
-            if total_num_structures % log_every == 0:
-                logger.info(f'Processing: {total_num_structures} / {num_data} structures')
 
             # Run the model
             start = time.time()
@@ -330,7 +339,10 @@ def evaluate_so3lr_on(
                 ))
 
             i += 1
-
+        
+        # Close the progress bar
+        progress_bar.close()
+        
         logger.info(f'Completed evaluation on {total_num_structures} / {num_data} structures')
         logger.info(f'Evaluation time: {total_time:.3f} seconds')
         logger.info('-' * 50)
