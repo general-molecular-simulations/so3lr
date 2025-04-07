@@ -139,10 +139,10 @@ Run with settings file:
 
 Optimize a structure with all options:
   so3lr opt --input geometry.xyz --output so3lr_opt.xyz 
-      --min-cycles 10 --min-steps 10 --n-min 2
-      --min-start-dt 0.05 --min-max-dt 0.1 --force-conv 0.05
-      --precision float32 --lr-cutoff 12.0 --disp-damping 2.0 
-      --buffer-sr 1.25 --buffer-lr 1.25 --total-charge 0
+      --total-charge 0 --min-cycles 10 --min-steps 10
+      --min-start-dt 0.05 --min-max-dt 0.1 --n-min 2
+      --force-conv 0.05 --precision float32 --lr-cutoff 12.0 
+      --disp-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25 
       --log-file so3lr_opt.log --model /path/to/model
 
 Run NVT simulation with all options:
@@ -1391,7 +1391,7 @@ def eval_model(
     logger.info(f"Dispersion damping:        {dispersion_damping} Å")
     logger.info(f"JIT compilation:           {'Enabled' if jit_compile else 'Disabled'}")
     if save_to:
-        logger.info(f"Saving to:     {save_to}")
+        logger.info(f"Saving to:                 {save_to}")
     logger.info(f"Targets:                   {targets}")
     logger.info("=" * 60)
 

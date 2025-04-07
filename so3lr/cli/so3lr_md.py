@@ -1550,7 +1550,7 @@ def perform_min(
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
     total_charge = all_settings.get('total_charge')
-
+    
     # Settings for the minimization
     min_cycles = all_settings.get('min_cycles')
     min_steps = all_settings.get('min_steps')
@@ -1578,11 +1578,8 @@ def perform_min(
 
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
 
-    (initial_geometry_dict['positions'], box, displacement, shift, fractional_coordinates) = handle_box(
-        shift_displacement,
-        initial_geometry_dict['positions'],
-        cell
-    )
+    (position, box, displacement, shift, fractional_coordinates) = handle_box(
+        shift_displacement, initial_geometry_dict['positions'], cell)
 
     # Loading the model
     if model_path is None:
@@ -1623,9 +1620,8 @@ def perform_min(
     else:
         lr = False
 
-    nbrs = neighbor_fn.allocate(initial_geometry_dict['positions'], box=box)
-    nbrs_lr = neighbor_fn_lr.allocate(
-        initial_geometry_dict['positions'], box=box) if lr else None
+    nbrs = neighbor_fn.allocate(position, box=box)
+    nbrs_lr = neighbor_fn_lr.allocate(position, box=box) if lr else None
 
     # Setting up the minimization functions
     min_init_fn, min_step_fn = create_fire_fn(
@@ -1640,14 +1636,14 @@ def perform_min(
 
     if lr:
         min_state = min_init_fn(
-            initial_geometry_dict['positions'],
+            position,
             box=box,
             neighbor=nbrs.idx,
             neighbor_lr=nbrs_lr.idx
         )
     else:
         min_state = min_init_fn(
-            initial_geometry_dict['positions'],
+            position,
             box=box,
             neighbor=nbrs.idx
         )
@@ -1657,13 +1653,13 @@ def perform_min(
 
     # Initial energy and force
     E = energy_fn(
-        initial_geometry_dict['positions'],
+        position,
         neighbor=nbrs.idx,
         neighbor_lr=nbrs_lr.idx if lr else None,
         box=box
     )
     F = force_fn(
-        initial_geometry_dict['positions'],
+        position,
         neighbor=nbrs.idx,
         neighbor_lr=nbrs_lr.idx if lr else None,
         box=box
@@ -1673,8 +1669,7 @@ def perform_min(
 
     # If tracking trajectory, store all positions
     minimization_trajectory = []
-    minimization_trajectory.append(
-        np.array(initial_geometry_dict['positions']))
+    minimization_trajectory.append(np.array(position))
 
     num_cycles = 0
     i = 1
@@ -1739,15 +1734,16 @@ def perform_min(
         i += 1
 
     # Save optimization result and return optimized geometry
-    if output_file:
-        positions = minimization_trajectory
-        if output_format == 'extxyz':
-            write_to_extxyz(output_file, initial_geometry, boxes=box, momenta=None, positions=positions)
-            
-        elif output_format == 'hdf5':
-            write_to_hdf5(hdf5_store, momenta=None, positions=positions, boxes=box)
-        
-        logger.info(f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
+    positions = minimization_trajectory
+    if output_format == 'extxyz':
+        write_to_extxyz(output_file, initial_geometry, boxes=box, momenta=None, positions=positions)
+    elif output_format == 'hdf5':
+        logger.warn(f"Output format is 'hdf5', changing output file extension to 'xyz' for minimization.") #TODO: Saving in xyz for simplicity for now, add hdf5 support
+        output_file = output_file.rsplit('.', 1)[0] + '_opt.xyz'
+        write_to_extxyz(output_file, initial_geometry, boxes=box, momenta=None, positions=positions)
+        # write_to_hdf5(hdf5_store, momenta=None, positions=positions, boxes=box)
+    
+    logger.info(f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
 
     if box is None or np.any(box == 0):
         return min_state.position
