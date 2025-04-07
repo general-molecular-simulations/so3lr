@@ -1289,7 +1289,7 @@ def npt_md(
     if restart_load:
         logger.info(f"Restart from:              {restart_load}")
     if restart_save:
-        logger.info(f"Save restart to:            {restart_save}")
+        logger.info(f"Save restart to:           {restart_save}")
 
     if relax:
         logger.info(f"Geometry relaxation:       Enabled")

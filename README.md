@@ -30,14 +30,14 @@ cd so3lr
 pip install .
 ```
 
-## Command Line Interface
+## Command Line Interface (CLI)
 
-SO3LR can be used via a unified command line interface (CLI) that provides several functionalities through subcommands:
+SO3LR provides a unified command line interface that leverages JAX-MD's performance optimization under the hood (detailed in the JAX-MD section below). This allows you to perform optimizations and MD simulations with simple commands. The CLI supports several key functionalities:
 
-- `so3lr opt`: Geometry optimization using the FIRE algorithm
-- `so3lr nvt`: NVT molecular dynamics (constant volume and temperature)
-- `so3lr npt`: NPT molecular dynamics (constant pressure and temperature)
-- `so3lr eval`: Model evaluation on datasets
+- `so3lr opt`: Geometry optimization
+- `so3lr nvt`: NVT molecular dynamics
+- `so3lr npt`: NPT molecular dynamics
+- `so3lr eval`: Model evaluation on a dataset
 
 Each subcommand has its own set of options and can be run with `--help` to see all available parameters.
 
@@ -45,7 +45,7 @@ Each subcommand has its own set of options and can be run with `--help` to see a
 # Show basic help
 so3lr opt --help
 
-# Show detailed help with all options
+# Show detailed documentation of all available settings
 so3lr --help-full
 ```
 
@@ -67,7 +67,7 @@ Run NPT (constant pressure and temperature) simulation:
 so3lr npt --input geometry.xyz --output trajectory.hdf5 --temperature 300 --pressure 1.0 --dt 0.5 --md-cycles 100 --md-steps 100
 ```
 
-Both NVT and NPT ensembles are supported using the Nosé–Hoover chain thermostat or barostat. The trajectories can be saved in `.hdf5` or `.xyz` format. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart it if needed.
+Both NVT and NPT ensembles are supported using the Nosé–Hoover chain thermostat/barostat. The trajectories can be saved in `.hdf5` or `.xyz` format. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart it if needed.
 
 Example with additional parameters for NVT:
 
@@ -79,10 +79,24 @@ so3lr nvt --input geometry.xyz --output trajectory.hdf5 --temperature 300 \
     --restart-save checkpoint.npz
 ```
 
+MD simulations can be restarted from a previously saved checkpoint. This is useful for extending simulations or recovering from interruptions. To enable restart:
+
+1. First save a checkpoint (updated every `save_buffer` cycles) during your simulation:
+```shell script
+so3lr nvt --input geometry.xyz --output trajectory.hdf5 --temperature 300 --md-cycles 100 --restart-save checkpoint.npz
+```
+
+2. Then restart from this checkpoint to continue the simulation:
+```shell script
+so3lr nvt --input geometry.xyz --output trajectory_continued.hdf5 --temperature 300 --md-cycles 100 --restart-load checkpoint.npz --restart-save checkpoint_1.npz
+```
+
+The restart will continue the simulation from the exact state where it was saved, preserving atom positions, velocities, thermostat/barostat state, and simulation timestep.
+
 Evaluate the SO3LR model on a dataset:
 
 ```shell script
-so3lr eval --datafile dataset.extxyz --batch-size 2 --lr-cutoff 12.0 --save-to predictions.extxyz
+so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 12.0 --save-to predictions.extxyz
 ```
 
 The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread). **Please note, that the labels are assumed to be in `eV` and `Angstrom`.** 
@@ -108,8 +122,6 @@ print(rmse)
 ```
 
 For more in-depth evaluation using Python, check out the [example notebook](https://github.com/general-molecular-simulations/so3lr/blob/main/examples/evaluate_so3lr_on_dataset.ipynb).
-
-A detailed documentation of all available settings is accessible via `so3lr --help-full`.
 
 ## Atomic Simulation Environment
 To get an Atomic Simulation Environment (ASE) calculator with energies and forces predicted

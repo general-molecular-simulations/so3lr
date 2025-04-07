@@ -1085,6 +1085,7 @@ def create_md_fn(
 def perform_md(
     all_settings: Dict,
     opt_structure: Optional[jnp.ndarray] = None,
+    restart: Optional[bool] = False,
 ) -> None:
     """
     Perform molecular dynamics simulation with the given settings.
@@ -1139,8 +1140,6 @@ def perform_md(
     else:
         create_restart = False
 
-    restart = False
-
     # Geometry, cell and charge
     input_file_path = all_settings.get('input_file')
     if input_file_path is None:
@@ -1194,9 +1193,10 @@ def perform_md(
                 path_to_load=restart_load_path,
                 ensemble='nvt' if md_P is None else 'npt'
             )
+            position = state.position
         except Exception as e:
             raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
-        position = state.position
+        
 
     # Loading the model
     if model_path is None:
@@ -1914,7 +1914,8 @@ def run(
         if os.path.exists(restart_load_path):
             restart = True
         else:
-            restart = False
+            logger.error(f"Restart load path does not exist.")
+            sys.exit(1)
     else:
         restart = False
 
@@ -1934,7 +1935,7 @@ def run(
         opt_structure = None
 
     # Perform MD with relaxed structure
-    perform_md(settings, opt_structure)
+    perform_md(settings, opt_structure, restart)
     # try:
     #     perform_md(settings, opt_structure)
     # except Exception as e:
