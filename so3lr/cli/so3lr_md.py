@@ -18,12 +18,13 @@ import logging
 import pathlib
 from pathlib import Path
 from functools import partial
+from logging.handlers import RotatingFileHandler
 from typing import Dict, Tuple, Union, List, Optional, Any, Callable
 
+import ase
 import yaml
 import click
 import numpy as np
-import ase
 from ase.io import read
 import jax
 import jax.numpy as jnp
@@ -84,7 +85,7 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
             log_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Create a rotating file handler (10MB max size, keep 5 backups)
-            file_handler = logging.handlers.RotatingFileHandler(
+            file_handler = RotatingFileHandler(
                 log_file, maxBytes=10*1024*1024, backupCount=5
             )
             file_handler.setLevel(log_level)
@@ -126,8 +127,7 @@ def handle_units(
         unit = unit_system()
         dt *= unit['time']
 
-        if T is not None:
-            T *= unit['temperature']
+        T *= unit['temperature']
 
         if P is not None:
             P *= unit['pressure']
@@ -138,7 +138,7 @@ def handle_units(
             'P': P
         }
     except Exception as e:
-        raise ValueError(f"Error converting units: {str(e)}")
+        raise ValueError(f"Error converting units: {str(e)}.")
 
 
 def handle_box(
@@ -172,7 +172,7 @@ def handle_box(
     """
     if shift_displacement == 'periodic':
         if cell is None:
-            raise ValueError('Cell must be defined for periodic boundary conditions')
+            raise ValueError('Cell must be defined for periodic boundary conditions.')
 
         box = jnp.array(np.diag(np.array(cell)))
         fractional_coordinates = True
@@ -262,43 +262,54 @@ def init_hdf5_store(
 
 def write_to_hdf5(
     hdf5_store: HDF5Store,
-    momenta: List[jnp.ndarray],
+    momenta: Optional[List[jnp.ndarray]],
     positions: List[jnp.ndarray],
-    boxes: List[jnp.ndarray],
+    boxes: Union[float, jnp.ndarray, List[jnp.ndarray], None],
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray]]:
     """
     Write trajectory data to an HDF5 file.
 
-    Writes the accumulated trajectory data to HDF5 storage and clears
-    the input lists to free memory.
+    Writes the accumulated trajectory data to HDF5 storage.
 
     Args:
         hdf5_store: HDF5 storage object.
-        momenta: List of momenta arrays for each frame.
+        momenta: List of momenta arrays for each frame, or None.
         positions: List of position arrays for each frame.
-        boxes: List of box arrays for each frame.
+        boxes: Box vectors for each frame. Can be float, array, list of arrays, or None.
 
     Returns:
         Tuple of empty lists for momenta, positions, and boxes.
     """
     try:
-        # Convert lists to numpy arrays
-        momenta_np = np.array(momenta)
-        positions_np = np.array(positions)
-        boxes_np = np.array(boxes)
-
-        # Write to HDF5 file
-        hdf5_store.extend('momenta', momenta_np)
-        hdf5_store.extend('positions', positions_np)
-        hdf5_store.extend('box', boxes_np)
-
-        # Clear the lists to free memory
-        return [], [], []
+        step_data = {
+            'positions': jnp.stack(positions, axis=0),
+        }
+        
+        # Handle different box types
+        if boxes is not None:
+            if isinstance(boxes, list) and len(boxes) > 0:
+                step_data['box'] = jnp.stack(boxes, axis=0)
+            elif isinstance(boxes, (float, jnp.ndarray)):
+                # Single box for all frames
+                step_data['box'] = jnp.array([boxes] * len(positions))
+            else:
+                step_data['box'] = None
+        else:
+            step_data['box'] = None
+    
+        # Include momenta if it's not None
+        if momenta is not None:
+            step_data['momenta'] = jnp.stack(momenta, axis=0)
+        
+        step_data = jax.tree.map(
+            lambda u: np.asarray(u), step_data
+            )
+        
+        hdf5_store.append(step_data)
 
     except Exception as e:
-        logger.warning(f"Failed to write to HDF5 file: {str(e)}")
-        # Return the original lists in case of failure
-        return momenta, positions, boxes
+        logger.error(f"Failed to write to HDF5 file: {str(e)}")
+        sys.exit(1)
 
 
 def write_to_extxyz(
@@ -415,6 +426,32 @@ def atoms_to_jnp(
         'masses': masses
     }
 
+def check_cell(cell: np.ndarray, lr_cutoff: float) -> np.ndarray:
+    """
+    Validate the provided cell matrix for compatibility with JAX-MD requirements.
+
+    Args:
+        cell (np.ndarray): The cell matrix to be validated.
+        lr_cutoff (float): The long-range cutoff distance.
+
+    Returns:
+        np.ndarray: The validated cell matrix if all checks pass, or None if the cell is zero.
+    """
+    if np.all(cell == 0):
+        return None
+    
+    # Create a mask with True only on the diagonal
+    mask = np.eye(cell.shape[0], dtype=bool)
+    if np.any(cell[~mask] != 0):
+        raise ValueError(f'JAX-MD currently supports only orthogonal cells. Provided cell: {cell}') 
+
+    if np.any(np.diag(cell) < lr_cutoff * 2):
+        raise ValueError(f'Each dimension of the cell {np.diag(cell)} must be at least twice the long-range cutoff distance [{lr_cutoff} Å].')
+        
+    if lr_cutoff < 10:
+        raise ValueError(f'Long-range cutoff below 10 Å is not supported yet. Provided cutoff: {lr_cutoff} Å.')
+
+    return cell
 
 def load_model(
     model_path: str,
@@ -699,7 +736,7 @@ def compute_quantities(
     nbrs_lr: jax_md.partition.NeighborList,
     box: jnp.ndarray,
     unit: dict,
-    T: float = None,
+    T: float,
     P: float = None
 ) -> Tuple[float, float, float, float, float]:
     """
@@ -737,7 +774,7 @@ def compute_quantities(
             box=box
         )
 
-        if T is not None and P is None:
+        if P is None:
             H = jax_md.simulate.nvt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -746,8 +783,7 @@ def compute_quantities(
                 neighbor_lr=nbrs_lr.idx,
                 box=box
             ) / unit['energy']
-
-        if T is not None and P is not None:
+        else:
             H = jax_md.simulate.npt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -763,7 +799,7 @@ def compute_quantities(
             neighbor=nbrs.idx,
             box=box
         )
-        if T is not None and P is None:
+        if P is None:
             H = jax_md.simulate.nvt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -771,7 +807,7 @@ def compute_quantities(
                 neighbor=nbrs.idx,
                 box=box
             ) / unit['energy']
-        if T is not None and P is not None:
+        else:
             H = jax_md.simulate.npt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -1065,7 +1101,7 @@ def perform_md(
     setup_logger(log_file)
 
     # Extract settings with defaults
-    input_file = all_settings.get('initial_geometry')
+    input_file = all_settings.get('input_file')
     output_file = all_settings.get('output_file')
     restart_save_path = all_settings.get('restart_save_path')
     restart_load_path = all_settings.get('restart_load_path')
@@ -1111,22 +1147,21 @@ def perform_md(
     restart = False
 
     # Geometry, cell and charge
-    initial_geometry_path = all_settings.get('initial_geometry')
-    if initial_geometry_path is None:
-        raise ValueError('Initial geometry file path must be provided in settings')
+    input_file_path = all_settings.get('input_file')
+    if input_file_path is None:
+        raise ValueError('Initial geometry file path must be provided in settings.')
     try:
-        initial_geometry = read(initial_geometry_path)
+        initial_geometry = read(input_file_path)
     except FileNotFoundError:
-        raise FileNotFoundError(f"Cannot find initial geometry file: {initial_geometry_path}")
+        raise FileNotFoundError(f"Cannot find initial geometry file: {input_file_path}")
     except Exception as e:
-        raise RuntimeError(f"Failed to read geometry file {initial_geometry_path}: {e}")
+        raise RuntimeError(f"Failed to read geometry file {input_file_path}: {e}")
 
     if opt_structure is not None:
         initial_geometry.set_positions(opt_structure)
 
     cell = initial_geometry.get_cell()
-    if np.all(cell == 0):
-        cell = None
+    cell = check_cell(cell, lr_cutoff)        
 
     if md_P is not None and cell is None:
         raise ValueError(
@@ -1282,13 +1317,9 @@ def perform_md(
 
     # Running the MD
     logger.info('Starting MD simulation...')
-    if md_T is not None:
-        logger.info(
-            'Step\tKE (eV)\tPE (eV)\tTotal Energy (eV)\tTemperature (K)\tH (eV)\ttime/step (s)')
-    else:
-        logger.info('Step\tKE (eV)\tPE (eV)\tTotal Energy (eV)\ttime/step (s)')
+    logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\ttime/step [s]')
 
-    momenta, positions, boxs = [], [], []
+    momenta, positions, boxes = [], [], []
     cycle_md = 0
     current_cycle = 0
     total_time_for_steps = 0
@@ -1351,32 +1382,27 @@ def perform_md(
                 md_P
             )
 
-            if current_T is not None:
-                logger.info(
-                    f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{current_T:.1f}\t{H:.3f}\t{time_per_step:.6f}')
-            else:
-                logger.info(
-                    f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{time_per_step:.6f}')
+            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{H:.3f}\t{current_T:.1f}\t{time_per_step:.2e}')
 
             positions.append(np.array(state.position))
             momenta.append(np.array(state.momentum))
             if box is not None:
-                boxs.append(np.array(box))
+                boxes.append(np.array(box))
 
             if ((len(positions) % hdf5_buffer_size == 0 and len(positions) > 0) or (len(positions) == md_cycles)):
                 # Saving the output
-                if output_format == 'hdf5':  # TODO: check that hdf5 is saving things correctly
-                    positions, momenta, boxs = write_to_hdf5(
+                if output_format == 'hdf5':
+                    positions, momenta, boxes = write_to_hdf5(
                         hdf5_store,
                         momenta,
                         positions,
-                        boxs,
+                        boxes,
                     )
                 elif output_format == 'extxyz':
-                    positions, momenta, boxs = write_to_extxyz(
+                    positions, momenta, boxes = write_to_extxyz(
                         output_file,
                         initial_geometry,  # Template atoms
-                        boxs,
+                        boxes,
                         momenta,
                         positions,
                     )
@@ -1393,6 +1419,10 @@ def perform_md(
     logger.info('Results saved to: ' + output_file)
     average_time_per_step = total_time_for_steps / (cycle_md - 1)
     logger.info(f'Average time per step: {average_time_per_step:.2e} seconds')
+
+    if output_format == 'extxyz':
+        logger.warn('Consider saving the trajectory in HDF5 format for long runs (--output traj_name.hdf5)')
+
     if jax.default_backend() in ["gpu", "cuda", "rocm"]:
         if average_time_per_step > 1.2 * 3.25e-6 * len(initial_geometry):
             logger.warn('Ideally, the average time per step should be close to {:.2e} seconds (measured on an A100 GPU)'.format(
@@ -1508,9 +1538,9 @@ def perform_min(
         Union[jnp.ndarray, List[jnp.ndarray]]: Optimized structure or trajectory.
     """
     # Extract settings with defaults
-    input_file = all_settings.get('initial_geometry')
+    input_file = all_settings.get('input_file')
     output_file = all_settings.get('output_file')
-    save_optimization_trajectory = all_settings.get('save_optimization_trajectory', True)
+    output_format = all_settings.get('output_format')
 
     # Model parameters
     model_path = all_settings.get('model_path')
@@ -1530,16 +1560,15 @@ def perform_min(
     force_convergence = all_settings.get('force_convergence')  # eV/A, can be None
 
     # Geometry, cell and charge
-    initial_geometry_path = all_settings.get('initial_geometry')
-    if initial_geometry_path is None:
-        raise ValueError('Initial geometry file path must be provided in settings')
+    input_file_path = all_settings.get('input_file')
+    if input_file_path is None:
+        raise ValueError('Initial geometry file path must be provided')
     try:
-        initial_geometry = read(initial_geometry_path)
+        initial_geometry = read(input_file_path)
     except FileNotFoundError:
-        raise FileNotFoundError(f"Cannot find initial geometry file: {initial_geometry_path}")
+        raise FileNotFoundError(f"Cannot find initial geometry file: {input_file_path}")
     cell = initial_geometry.get_cell()
-    if np.all(cell == 0):
-        cell = None
+    cell = check_cell(cell, lr_cutoff)        
 
     if cell is not None:
         shift_displacement = 'periodic'
@@ -1640,13 +1669,12 @@ def perform_min(
         box=box
     )
     f_max = np.abs(F).max()
-    logger.info('{}\t{:.3f}\t{:.3f}'.format(0, E, f_max))
+    logger.info('{}\t {:.3f}\t {:.3f}'.format(0, E, f_max))
 
     # If tracking trajectory, store all positions
     minimization_trajectory = []
-    if save_optimization_trajectory:
-        minimization_trajectory.append(
-            np.array(initial_geometry_dict['positions']))
+    minimization_trajectory.append(
+        np.array(initial_geometry_dict['positions']))
 
     num_cycles = 0
     i = 1
@@ -1693,11 +1721,10 @@ def perform_min(
             )
 
         f_max = np.abs(F).max()
-        logger.info('{}\t{:.3f}\t{:.3f}'.format(i*min_steps, E, f_max))
+        logger.info('{}\t {:.3f}\t {:.3f}'.format(i*min_steps, E, f_max))
 
-        # Save the current positions to the trajectory if requested
-        if save_optimization_trajectory:
-            minimization_trajectory.append(np.array(min_state.position))
+        # Save the current positions to the trajectory
+        minimization_trajectory.append(np.array(min_state.position))
 
         # Check if force convergence criterion is met
         if force_convergence is not None:
@@ -1711,19 +1738,16 @@ def perform_min(
         num_cycles += 1
         i += 1
 
-    # If output_file is provided, write directly to file
+    # Save optimization result and return optimized geometry
     if output_file:
-        if save_optimization_trajectory:
-            write_to_extxyz(output_file, initial_geometry, boxes=box,
-                            momenta=None, positions=minimization_trajectory)
-            logger.info(
-                f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
-        else:
-            # Write the final optimized structure to file
-            # atoms.set_positions(np.array(min_state.position))
-            write_to_extxyz(output_file, initial_geometry, boxes=box,
-                            momenta=None, positions=min_state.position)
-            logger.info(f"Final optimized structure saved to {output_file}")
+        positions = minimization_trajectory
+        if output_format == 'extxyz':
+            write_to_extxyz(output_file, initial_geometry, boxes=box, momenta=None, positions=positions)
+            
+        elif output_format == 'hdf5':
+            write_to_hdf5(hdf5_store, momenta=None, positions=positions, boxes=box)
+        
+        logger.info(f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
 
     if box is None or np.any(box == 0):
         return min_state.position
@@ -1886,11 +1910,13 @@ def run(
 
     relax_before_run = settings.get('relax_before_run', True)
 
+    # Set the precision
     if settings.get('precision', "float32").lower() == 'float64':
         jax.config.update("jax_enable_x64", True)
     else:
         jax.config.update("jax_enable_x64", False)
 
+    # Load restart file if needed
     restart_load_path = settings.get('restart_load_path')
     if restart_load_path is not None:
         if os.path.exists(restart_load_path):
@@ -1900,6 +1926,7 @@ def run(
     else:
         restart = False
 
+    # Relax the geometry
     if relax_before_run:
         if restart:
             logger.info('Restarting MD, skipping relaxation.')
@@ -1914,6 +1941,7 @@ def run(
     else:
         opt_structure = None
 
+    # Perform MD with relaxed structure
     try:
         perform_md(settings, opt_structure)
     except Exception as e:

@@ -22,7 +22,7 @@ logger = logging.getLogger("SO3LR")
 
 
 def process_predictions(
-    save_predictions_to: Optional[str],
+    save_to: Optional[str],
     graph_batch: jraph.GraphsTuple,
     inputs: Dict[str, Any],
     output_prediction: Dict[str, Any]
@@ -32,7 +32,7 @@ def process_predictions(
 
     Parameters:
     -----------
-    save_predictions_to : str or None
+    save_to : str or None
         File path where to save the predictions
     graph_batch : jraph.GraphsTuple
         The batch of graphs to process
@@ -46,7 +46,7 @@ def process_predictions(
     List
         List of processed unbatched graphs
     """
-    if save_predictions_to is None:
+    if save_to is None:
         return []
 
     # Add predictions to graph nodes and globals
@@ -105,9 +105,9 @@ def calculate_metrics(
     return metrics
 
 
-def save_predictions_to_file(
+def save_to_file(
     predicted_graphs: List,
-    save_predictions_to: str,
+    save_to: str,
     num_data: int
 ) -> None:
     """
@@ -117,12 +117,12 @@ def save_predictions_to_file(
     -----------
     predicted_graphs : list
         List of predicted graphs to save
-    save_predictions_to : str
+    save_to : str
         File path to save predictions to
     num_data : int
         Total number of data points for progress reporting
     """
-    logger.info(f'Saving predictions to {str(save_predictions_to)}')
+    logger.info(f'Saving predictions to {str(save_to)}')
 
     log_every = max(1, len(predicted_graphs) // 10)
 
@@ -130,7 +130,7 @@ def save_predictions_to_file(
         if n % log_every == 0:
             logger.info(f'Saving: {n} / {len(predicted_graphs)} structures')
         atoms = jraph_to_ase_atoms(predicted_graph)
-        write(save_predictions_to, images=atoms, append=True)
+        write(save_to, images=atoms, append=True)
 
     logger.info(f'Successfully saved predictions for {len(predicted_graphs)} structures')
 
@@ -141,7 +141,7 @@ def evaluate_so3lr_on(
         lr_cutoff: float = 12.0,
         dispersion_energy_cutoff_lr_damping: float = 2.0,
         jit_compile: bool = True,
-        save_predictions_to: Optional[str] = None,
+        save_to: Optional[str] = None,
         model_path: Optional[str] = None,
         precision: str = 'float32',
         targets: str = 'forces,dipole_vec,hirshfeld_ratios',
@@ -162,7 +162,7 @@ def evaluate_so3lr_on(
         Damping of long-range start at lr_cutoff - this value.
     jit_compile : bool
         Whether to JIT compile the calculation.
-    save_predictions_to : str or None
+    save_to : str or None
         File path where to save the predictions (.extxyz format). If None, predictions are not saved.
     model_path : str or None
         Path to the model to evaluate. If None, the default SO3LR model is used.
@@ -193,19 +193,19 @@ def evaluate_so3lr_on(
         raise FileNotFoundError(f"Data file not found: {datafile}")
 
     # Validate and process output file
-    save_predictions_bool = save_predictions_to is not None
+    save_predictions_bool = save_to is not None
     if save_predictions_bool:
-        save_predictions_to = Path(save_predictions_to).resolve().expanduser()
-        if save_predictions_to.exists():
+        save_to = Path(save_to).resolve().expanduser()
+        if save_to.exists():
             raise RuntimeError(
-                f'Output file already exists: {save_predictions_to}')
+                f'Output file already exists: {save_to}')
 
-        if save_predictions_to.suffix != '.extxyz':
+        if save_to.suffix != '.extxyz':
             raise ValueError(
-                f"Output file must have suffix `.extxyz`. Received: {save_predictions_to.suffix}")
+                f"Output file must have suffix `.extxyz`. Received: {save_to.suffix}.")
 
         # Create parent directory if it doesn't exist
-        save_predictions_to.parent.mkdir(parents=True, exist_ok=True)
+        save_to.parent.mkdir(parents=True, exist_ok=True)
 
     # Initialize the model
     if model_path is None:
@@ -326,7 +326,7 @@ def evaluate_so3lr_on(
             # Process predictions if saving is enabled
             if save_predictions_bool:
                 predicted.extend(process_predictions(
-                    save_predictions_to, graph_batch, inputs, output_prediction
+                    save_to, graph_batch, inputs, output_prediction
                 ))
 
             i += 1
@@ -367,7 +367,7 @@ def evaluate_so3lr_on(
 
         # Save predictions if requested
         if save_predictions_bool:
-            save_predictions_to_file(predicted, str(save_predictions_to), num_data)
+            save_to_file(predicted, str(save_to), num_data)
 
         total_time_end = time.time()
         logger.info(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
@@ -410,4 +410,4 @@ def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:
     elif x == 'hirshfeld_ratios':
         return node_mask
     else:
-        raise ValueError(f"Evaluation not implemented for target='{x}'")
+        raise ValueError(f"Evaluation not implemented for target='{x}'.")
