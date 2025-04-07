@@ -412,7 +412,7 @@ class NVTNPTGroup(CustomCommandClass):
               help=f'Buffer size multiplier for short-range interactions [default: {DEFAULT_BUFFER_MULTIPLIER}].')
 @click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for long-range interactions [default: {DEFAULT_BUFFER_MULTIPLIER}].')
-@click.option('--write-buffer', default=DEFAULT_SAVE_BUFFER, type=int,
+@click.option('--save-buffer', default=DEFAULT_SAVE_BUFFER, type=int,
               help=f'Number of frames to buffer before writing [default: {DEFAULT_SAVE_BUFFER}].')
 @click.option('--restart-save', type=click.Path(), default=None,
               help='Path to save restart data.')
@@ -1013,7 +1013,7 @@ def nvt_md(
     logger.info(f"Saving buffer size:        {save_buffer}")
     logger.info(f"NHC chain length:          {nhc_chain}")
     logger.info(f"Nose-Hoover steps:         {nhc_steps}")
-    logger.info(f"Nose-Hoover thermo:        {nhc_thermo} fs")
+    logger.info(f"Nose-Hoover Tdamp:         {nhc_thermo}*timestep")
     logger.info(f"Random seed:               {seed}")
 
     if restart_load:
@@ -1269,8 +1269,8 @@ def npt_md(
     logger.info(f"Timestep:                  {dt} fs")
     logger.info(f"NHC chain length:          {nhc_chain}")
     logger.info(f"Nose-Hoover steps:         {nhc_steps}")
-    logger.info(f"Nose-Hoover thermo:        {nhc_thermo} fs")
-    logger.info(f"Nose-Hoover baro:          {nhc_baro} fs")
+    logger.info(f"Nose-Hoover Tdamp:         {nhc_thermo}*timestep")
+    logger.info(f"Nose-Hoover Pdamp:         {nhc_baro}*timestep")
     logger.info(f"Random seed:               {seed}")
 
     if restart_load:
@@ -1322,7 +1322,7 @@ def npt_md(
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--model', 'model_path', type=click.Path(exists=False),
               help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
-@click.option('dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
+@click.option('--dispersion_damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
               help=f'Damping factor for long-range dispersion interactions. [default: {DEFAULT_DISPERSION_DAMPING}]')
 @click.option('--jit-compile/--no-jit-compile', default=True,
               help='JIT compile the calculation. [default: enabled]')
@@ -1483,7 +1483,6 @@ def main() -> None:
         sys.exit(1)
     except Exception as e:
         print(f"Error: {str(e)}")
-        print("Try running `so3lr --help` to see available options.")
         sys.exit(1)
 
 

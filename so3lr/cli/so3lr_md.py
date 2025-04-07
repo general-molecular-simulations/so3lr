@@ -284,20 +284,10 @@ def write_to_hdf5(
         step_data = {
             'positions': jnp.stack(positions, axis=0),
         }
-        
-        # Handle different box types
-        if boxes is not None:
-            if isinstance(boxes, list) and len(boxes) > 0:
-                step_data['box'] = jnp.stack(boxes, axis=0)
-            elif isinstance(boxes, (float, jnp.ndarray)):
-                # Single box for all frames
-                step_data['box'] = jnp.array([boxes] * len(positions))
-            else:
-                step_data['box'] = None
-        else:
-            step_data['box'] = None
+
+        if boxes[0] != 0:
+            step_data['box'] = jnp.stack(boxes, axis=0)
     
-        # Include momenta if it's not None
         if momenta is not None:
             step_data['momenta'] = jnp.stack(momenta, axis=0)
         
@@ -306,6 +296,8 @@ def write_to_hdf5(
             )
         
         hdf5_store.append(step_data)
+        
+        return [], [], []
 
     except Exception as e:
         logger.error(f"Failed to write to HDF5 file: {str(e)}")
@@ -359,6 +351,7 @@ def write_to_extxyz(
         for i in range(len(positions)):
             atoms_copy = atoms.copy()
 
+            # TODO: replace with raw_transform(box, positions)
             # Handle different box types and set positions accordingly
             if isinstance(boxes, float):
                 if boxes == 0:
@@ -1178,6 +1171,7 @@ def perform_md(
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell)
 
+    save_buffer = min(md_cycles, save_buffer)
     # Initialize HDF5 storage
     hdf5_store = None
     if output_format == 'hdf5':
@@ -1938,8 +1932,9 @@ def run(
         opt_structure = None
 
     # Perform MD with relaxed structure
-    try:
-        perform_md(settings, opt_structure)
-    except Exception as e:
-        logger.error(f"Error during MD simulation: {str(e)}")
-        sys.exit(1)
+    perform_md(settings, opt_structure)
+    # try:
+    #     perform_md(settings, opt_structure)
+    # except Exception as e:
+    #     logger.error(f"Error during MD simulation: {str(e)}")
+    #     sys.exit(1)
