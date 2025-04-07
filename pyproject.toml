@@ -2,7 +2,7 @@
 name = "so3lr"
 version = "0.0.1"
 description = "SO3krates Universal Pairwise Force Field with Long Range Interactions (SO3LR) for Molecular Simulation"
-authors = ["Adil Kabdyla, Thorben Frank"]
+authors = ["Adil Kabylda, Thorben Frank"]
 license = "MIT"
 
 
@@ -11,7 +11,7 @@ python = ">=3.12"
 numpy = "*"
 ase = "*"
 h5py = "*"
-mlff = { git = "https://github.com/thorben-frank/mlff.git", branch = "v1.0-lrs-gems", optional = false }
+mlff = { git = "https://github.com/kabylda/mlff.git", branch = "v1.0", optional = false }
 jraph = { git = "https://github.com/kabylda/jraph.git", branch = "master", optional = false }
 jax-md = { git = "https://github.com/kabylda/jax-md.git", branch = "main" , optional = false }
 glp = { git = "https://github.com/kabylda/glp.git", branch = "electrostatics_neighbourlist", optional = false }
@@ -23,5 +23,4 @@ build-backend = "poetry.core.masonry.api"
 
 
 [tool.poetry.scripts]
-evaluate-so3lr = "so3lr.cli.eval_so3lr:evaluate_so3lr_on"
-md-so3lr = "so3lr.cli.md_so3lr:main"
+so3lr = "so3lr.cli.so3lr_cli:main"

@@ -1,0 +1,56 @@
+# Molecular Dynamics Settings for SO3LR
+# This document describes the settings for molecular dynamics (MD) simulations
+# and geometry optimization using the SO3LR command-line interface.
+# Settings specified via command-line flags will override values in this file.
+
+## General Settings
+total_charge: 0                            # Total charge of the system [Default: 0]
+seed: 52                                   # Random seed for MD and thermostat initialization [Default: 52]
+precision: "float32"                       # Numerical precision: 'float32' or 'float64' [Default: 'float32']
+
+## Input/Output Settings
+input_file: "path/to/geometry.xyz"         # Path to the initial geometry file (Required, e.g., .xyz, .extxyz)
+output_file: null                          # Output trajectory/geometry file path (e.g., trajectory.hdf5, optimized.xyz). Format inferred from extension. [Default: <input_stem>_opt/nvt/npt.xyz]
+log_file: null                             # Log file path [Default: <output_stem>.log]
+save_buffer: 50                            # Number of frames to buffer before writing to HDF5/extxyz [Default: 50]
+restart_save_path: null                    # Path to save simulation state for restarting [Default: null]
+restart_load_path: null                    # Path to load simulation state from a previous run [Default: null]
+
+## Model Settings
+model_path: null                           # Path to a custom MLFF model directory. If null, uses built-in SO3LR. [Default: null]
+lr_cutoff: 12.0                            # Long-range cutoff distance in Å [Default: 12.0]
+dispersion_damping: 2.0                    # Dispersion interactions start damping at (lr_cutoff - dispersion_damping) Å [Default: 2.0]
+buffer-sr: 1.25                            # Buffer size multiplier for short-range neighbor list [Default: 1.25]
+buffer-lr: 1.25                            # Buffer size multiplier for long-range neighbor list [Default: 1.25]
+
+## Minimization Settings
+relax_before_run: true                     # Perform geometry relaxation before MD run [Default: true]
+min_cycles: 10                             # Number of minimization cycles [Default: 10]
+min_steps: 10                              # Number of minimization steps per cycle [Default: 10]
+min_start_dt: 0.05                         # Initial timestep factor for FIRE minimizer [Default: 0.05]
+min_max_dt: 0.1                            # Maximum timestep factor for FIRE minimizer [Default: 0.1]
+min_n_min: 2                               # FIRE parameter: Min steps in correct direction before dt update [Default: 2]
+force_convergence: null                    # Force convergence criterion in eV/Å. If set, overrides min_cycles/min_steps. [Default: null]
+
+## Molecular Dynamics Settings
+md_dt: 0.5                                 # MD timestep in femtoseconds (fs). [Default: 0.5]
+md_cycles: 100                             # Number of MD cycles to run [Default: 100]
+md_steps: 100                              # Number of steps per MD cycle [Default: 100]
+
+## NVT Ensemble Settings (Thermostat)
+md_T: 300.0                                # Simulation target temperature in Kelvin [Default: 300.0 K]
+nhc_chain_length: 3                        # Length of the Nose-Hoover thermostat chain [Default: 3]
+nhc_steps: 2                               # Number of Nose-Hoover integration steps per MD step [Default: 2]
+nhc_thermo: 100.0                          # Thermostat damping timescale factor (tau = md_dt * nhc_thermo) [Default: 100.0]
+
+## NPT Ensemble Settings (Thermostat + Barostat)
+md_P: null                                 # Target pressure in atm. Setting this enables NPT. [Default: null for NVT, 1.0 for 'npt' command]
+nhc_baro: 1000.0                           # Barostat damping timescale factor (tau = md_dt * nhc_baro) [Default: 1000.0]
+nhc_sy_steps: 3                            # Number of Suzuki-Yoshida integration steps for NPT [Default: 3]
+
+## Evaluation Settings (for so3lr eval)
+datafile: "path/to/dataset.extxyz"         # Path to dataset file for evaluation [Required]
+save_to: null                              # Output file to save predictions (.extxyz format). If null, predictions are not saved. [Default: null]
+jit_compile: true                          # Use JIT compilation for speed. [Default: true]
+batch_size: 1                              # Number of molecules per batch for evaluation [Default: 1]
+targets: "forces,dipole_vec,hirshfeld_ratios" # Comma-separated list of targets to evaluate [Default: forces,dipole_vec,hirshfeld_ratios]
