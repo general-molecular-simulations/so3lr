@@ -53,6 +53,11 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
         Logging level for the file handler (default: INFO)
     console_level : int
         Logging level for the console handler (default: INFO)
+    
+    Raises:
+    -------
+    RuntimeError
+        If unable to set up file logging to the specified log file
     """
     # Get the existing logger (defined at the module level)
     global logger
@@ -92,8 +97,8 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
             file_handler.setFormatter(file_formatter)
             logger.addHandler(file_handler)
         except Exception as e:
-            # Fall back to console only logging
-            logger.warning(f"Could not set up file logging to {log_file}: {e}")
+            # Raise an exception instead of falling back to console logging
+            raise RuntimeError(f"Could not set up file logging to {log_file}: {e}")
 
     # Prevent propagation to the root logger to avoid duplicate messages
     logger.propagate = False

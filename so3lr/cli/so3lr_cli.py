@@ -186,7 +186,7 @@ lr_cutoff: 12.0                              # Long-range cutoff distance in Å
 dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
 buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
 buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
-write_buffer: 50                             # Number of frames to buffer before writing
+save_buffer: 50                              # Number of frames to buffer before writing
 
 # MD settings
 md_dt: 0.5                                   # MD timestep in femtoseconds
@@ -409,7 +409,7 @@ class NVTNPTGroup(CustomCommandClass):
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
               help=f'Long-range cutoff distance in Å [default: {DEFAULT_LR_CUTOFF} Å].')
 @click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
-              help=f'Dispersion interactions starts to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}].')
+              help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}].')
 @click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for short-range interactions [default: {DEFAULT_BUFFER_MULTIPLIER}].')
 @click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
@@ -918,7 +918,7 @@ def fire_optimization(
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
               help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')
 @click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
-              help=f'Dispersion interactions starts to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}].')
+              help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}].')
 @click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for short-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
 @click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
@@ -1142,7 +1142,7 @@ def nvt_md(
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
               help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')
 @click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
-              help=f'Dispersion interactions starts to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}]')
+              help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}]')
 @click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for short-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
 @click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
