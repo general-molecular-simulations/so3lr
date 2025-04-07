@@ -1417,7 +1417,7 @@ def perform_md(
     logger.info(f'Average time per step: {average_time_per_step:.2e} seconds')
 
     if output_format == 'extxyz':
-        logger.warn('Consider saving the trajectory in HDF5 format for long runs (--output traj_name.hdf5)')
+        logger.info('Consider saving the trajectory in HDF5 format for long runs (--output traj_name.hdf5)')
 
     if jax.default_backend() in ["gpu", "cuda", "rocm"]:
         if average_time_per_step > 1.2 * 3.25e-6 * len(initial_geometry):

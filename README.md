@@ -29,23 +29,70 @@ git clone https://github.com/general-molecular-simulations/so3lr.git
 cd so3lr
 pip install .
 ```
-## Evaluation
-Evaluating SO3LR can be done via the command line interface (CLI) using the command `evaluate-so3lr`. The input can 
-be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread). 
-**Please note, that the labels are assumed to be in `eV` and `Angstrom`.** SO3LR can be evaluated on an input file 
-saved at `$FILEPATH` like 
-```shell script
-evaluate-so3lr --datafile $FILEPATH --batch-size 2 --lr-cutoff 100 --save-predictions-to predictions.extxyz
-```
-For all details use `evaluate-so3lr --help`. The above command will collect and print the metrics on the dataset and 
-save the predictions to `predictions.extxyz`. The predicted properties are `energy`, `forces`, `dipole_vec` 
-and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld
-ratios are optional. If they are not present in the data, the metrics will simply be `NaN`. **On that note, we want to
-stretch that SO3LR has not been trained on energies.** Therefore, errors are not reported in the printed metrics and 
-only relative energies have a meaning. The predictions can be loaded afterwards in `python` as 
-````python
-import numpy as np
 
+## Command Line Interface
+
+SO3LR can be used via a unified command line interface (CLI) that provides several functionalities through subcommands:
+
+- `so3lr opt`: Geometry optimization using the FIRE algorithm
+- `so3lr nvt`: NVT molecular dynamics (constant volume and temperature)
+- `so3lr npt`: NPT molecular dynamics (constant pressure and temperature)
+- `so3lr eval`: Model evaluation on datasets
+
+Each subcommand has its own set of options and can be run with `--help` to see all available parameters.
+
+```shell script
+# Show basic help
+so3lr opt --help
+
+# Show detailed help with all options
+so3lr --help-full
+```
+
+Optimize a molecule structure using the FIRE algorithm:
+
+```shell script
+so3lr opt --input geometry.xyz --output optimized.xyz --force-conv 0.05 --lr-cutoff 12.0
+```
+
+Run NVT (constant volume and temperature) simulation:
+
+```shell script
+so3lr nvt --input geometry.xyz --output trajectory.hdf5 --temperature 300 --dt 0.5 --md-cycles 100 --md-steps 100
+```
+
+Run NPT (constant pressure and temperature) simulation:
+
+```shell script
+so3lr npt --input geometry.xyz --output trajectory.hdf5 --temperature 300 --pressure 1.0 --dt 0.5 --md-cycles 100 --md-steps 100
+```
+
+Both NVT and NPT ensembles are supported using the Nosé–Hoover chain thermostat or barostat. The trajectories can be saved in `.hdf5` or `.xyz` format. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart it if needed.
+
+Example with additional parameters for NVT:
+
+```shell script
+so3lr nvt --input geometry.xyz --output trajectory.hdf5 --temperature 300 \
+    --dt 0.5 --md-cycles 100 --md-steps 100 \
+    --nhc-chain 3 --nhc-steps 2 --nhc-thermo 100.0 \
+    --relax --force-conv 0.05 --seed 42 \
+    --restart-save checkpoint.npz
+```
+
+Evaluate the SO3LR model on a dataset:
+
+```shell script
+so3lr eval --datafile dataset.extxyz --batch-size 2 --lr-cutoff 12.0 --save-to predictions.extxyz
+```
+
+The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread). **Please note, that the labels are assumed to be in `eV` and `Angstrom`.** 
+
+The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld ratios are optional. If they are not present in the data, the metrics will simply be `NaN`. **On that note, we want to stress that SO3LR has not been trained on energies.** Therefore, errors are not reported in the printed metrics and only relative energies have a meaning.
+
+The predictions can be analyzed in Python:
+
+```python
+import numpy as np
 from ase.io import iread
 
 property = 'forces'
@@ -58,10 +105,11 @@ for a in iread('predictions.extxyz'):
 
 rmse = np.sqrt(np.mean(np.square(np.stack(true) - np.stack(so3lr))))
 print(rmse)
+```
 
-````
-If you want to do the full evaluation `python` via the `so3lr_base_calculator`, check out the 
-[example notebook](https://github.com/general-molecular-simulations/so3lr/blob/main/examples/evaluate_so3lr_on_dataset.ipynb).
+For more in-depth evaluation using Python, check out the [example notebook](https://github.com/general-molecular-simulations/so3lr/blob/main/examples/evaluate_so3lr_on_dataset.ipynb).
+
+A detailed documentation of all available settings is accessible via `so3lr --help-full`.
 
 ## Atomic Simulation Environment
 To get an Atomic Simulation Environment (ASE) calculator with energies and forces predicted
@@ -159,25 +207,6 @@ print('Energy and forces in JAX-MD')
 print('Energy = ', np.array(energy))
 print('Forces = ', np.array(forces))
 ```
-
-## Command Line Interface
-
-We also include the option to run MD simulations via JAX MD through the Command Line Interface. For this all you have to do is run the following command and give the path to a settings file (.yaml).
-
-
-```shell script
-md-so3lr --settings $FILEPATH
-```
-
-By running the following command you can see all settings and their defaults. Additionally, a file containing this info is provided in `so3lr/cli/md_settings.md`.
-
-```shell script
-md-so3lr --help
-```
-
-By only providing an `initial_geometry`, a short NVT simulation is launched.
-Currently, NVT and NPT are supported using the Nosé–Hoover chain thermostat or barostat. For optimization the FIRE algorithm is used as implemented in JAX MD.
-The trajectories will be saved efficiently using `.hdf5` files. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart it if needed. 
 
 ## Potential energy function
 To obtain a potential energy function which is not specifally tailored for `jax-md` we provide a convenience 

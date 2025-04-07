@@ -1049,7 +1049,7 @@ def nvt_md(
     logger.info(f"Saving buffer size:        {save_buffer}")
     logger.info(f"NHC chain length:          {nhc_chain}")
     logger.info(f"Nose-Hoover steps:         {nhc_steps}")
-    logger.info(f"Nose-Hoover Tdamp:         {nhc_thermo}*timestep")
+    logger.info(f"Nose-Hoover Tdamp:         {nhc_thermo*dt} fs")
     logger.info(f"Random seed:               {seed}")
 
     if restart_load:
@@ -1282,8 +1282,8 @@ def npt_md(
     logger.info(f"Saving buffer size:        {save_buffer}")
     logger.info(f"NHC chain length:          {nhc_chain}")
     logger.info(f"Nose-Hoover steps:         {nhc_steps}")
-    logger.info(f"Nose-Hoover Tdamp:         {nhc_thermo}*timestep")
-    logger.info(f"Nose-Hoover Pdamp:         {nhc_baro}*timestep")
+    logger.info(f"Nose-Hoover Tdamp:         {nhc_thermo*dt} fs")
+    logger.info(f"Nose-Hoover Pdamp:         {nhc_baro*dt} fs")
     logger.info(f"Random seed:               {seed}")
 
     if restart_load:
