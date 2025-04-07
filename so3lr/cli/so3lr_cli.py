@@ -1455,28 +1455,23 @@ def eval_model(
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Call the evaluate_so3lr_on function from so3lr_eval.py
-    try:
-        evaluate_so3lr_on(
-            datafile=datafile,
-            batch_size=batch_size,
-            lr_cutoff=lr_cutoff,
-            dispersion_damping=dispersion_damping,
-            jit_compile=jit_compile,
-            save_to=save_to,
-            model_path=model_path,
-            precision=precision,
-            targets=targets,
-            log_file=log_file
-        )
-        logger.info("=" * 60)
-        logger.info("Evaluation completed successfully!")
+    evaluate_so3lr_on(
+        datafile=datafile,
+        batch_size=batch_size,
+        lr_cutoff=lr_cutoff,
+        dispersion_damping=dispersion_damping,
+        jit_compile=jit_compile,
+        save_to=save_to,
+        model_path=model_path,
+        precision=precision,
+        targets=targets,
+        log_file=log_file
+    )
+    logger.info("=" * 60)
+    logger.info("Evaluation completed successfully!")
 
-        if save_to:
-            logger.info(f"Predictions saved to: {save_to}")
-
-    except Exception as e:
-        logger.error(f"Error during evaluation: {str(e)}")
-        sys.exit(1)
+    if save_to:
+        logger.info(f"Predictions saved to: {save_to}")
 
 
 def main() -> None:
