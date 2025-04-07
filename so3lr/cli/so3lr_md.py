@@ -933,9 +933,7 @@ def create_nvt_step_fn(
 
     if lr:
         @jax.jit
-        def step_nvt_fn_lr(
-                i: int,
-                state):
+        def step_nvt_fn_lr(i: int, state):
             state, nbrs, nbrs_lr, box = state
             state = apply_fn(
                 state,
@@ -958,9 +956,7 @@ def create_nvt_step_fn(
         return step_nvt_fn_lr
     else:
         @jax.jit
-        def step_nvt_fn(
-                i: int,
-                state):
+        def step_nvt_fn(i: int, state):
             state, nbrs, box, = state
             state = apply_fn(
                 state,
@@ -1417,7 +1413,7 @@ def perform_md(
     logger.info(f'Average time per step: {average_time_per_step:.2e} seconds')
 
     if output_format == 'extxyz':
-        logger.info('Consider saving the trajectory in HDF5 format for long runs (--output traj_name.hdf5)')
+        logger.info('Consider saving the trajectory in HDF5 format, which has no overhead for long runs (--output traj_name.hdf5).')
 
     if jax.default_backend() in ["gpu", "cuda", "rocm"]:
         if average_time_per_step > 1.2 * 3.25e-6 * len(initial_geometry):
@@ -1925,19 +1921,10 @@ def run(
             logger.info('Restarting MD, skipping relaxation.')
             opt_structure = None
         else:
-            try:
-                opt_structure = perform_min(settings)
-                logger.info("=" * 60)
-            except Exception as e:
-                logger.error(f"Error during optimization: {str(e)}")
-                sys.exit(1)
+            opt_structure = perform_min(settings)
+            logger.info("=" * 60)
     else:
         opt_structure = None
 
     # Perform MD with relaxed structure
     perform_md(settings, opt_structure, restart)
-    # try:
-    #     perform_md(settings, opt_structure)
-    # except Exception as e:
-    #     logger.error(f"Error during MD simulation: {str(e)}")
-    #     sys.exit(1)

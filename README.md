@@ -52,19 +52,19 @@ so3lr --help-full
 Optimize a molecule structure using the FIRE algorithm:
 
 ```shell script
-so3lr opt --input geometry.xyz --output optimized.xyz --force-conv 0.05 --lr-cutoff 12.0
+so3lr opt --input geometry.xyz --force-conv 0.05 --lr-cutoff 12.0
 ```
 
 Run NVT (constant volume and temperature) simulation:
 
 ```shell script
-so3lr nvt --input geometry.xyz --output trajectory.hdf5 --temperature 300 --dt 0.5 --md-cycles 100 --md-steps 100
+so3lr nvt --input geometry.xyz --temperature 300 --dt 0.5 --md-cycles 100 --md-steps 100
 ```
 
 Run NPT (constant pressure and temperature) simulation:
 
 ```shell script
-so3lr npt --input geometry.xyz --output trajectory.hdf5 --temperature 300 --pressure 1.0 --dt 0.5 --md-cycles 100 --md-steps 100
+so3lr npt --input geometry.xyz --temperature 300 --pressure 1.0 --dt 0.5 --md-cycles 100 --md-steps 100
 ```
 
 Both NVT and NPT ensembles are supported using the Nosé–Hoover chain thermostat/barostat. The trajectories can be saved in `.hdf5` or `.xyz` format. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart it if needed.
@@ -73,9 +73,9 @@ Example with additional parameters for NVT:
 
 ```shell script
 so3lr nvt --input geometry.xyz --output trajectory.hdf5 --temperature 300 \
-    --dt 0.5 --md-cycles 100 --md-steps 100 \
+    --dt 0.5 --md-cycles 1000 --md-steps 1000 \
     --nhc-chain 3 --nhc-steps 2 --nhc-thermo 100.0 \
-    --relax --force-conv 0.05 --seed 42 \
+    --relax --force-conv 0.1 --seed 42 \
     --restart-save checkpoint.npz
 ```
 
@@ -83,12 +83,12 @@ MD simulations can be restarted from a previously saved checkpoint. This is usef
 
 1. First save a checkpoint (updated every `save_buffer` cycles) during your simulation:
 ```shell script
-so3lr nvt --input geometry.xyz --output trajectory.hdf5 --temperature 300 --md-cycles 100 --restart-save checkpoint.npz
+so3lr nvt --input geometry.xyz --output trajectory.xyz --temperature 300 --md-cycles 100 --restart-save checkpoint.npz
 ```
 
 2. Then restart from this checkpoint to continue the simulation:
 ```shell script
-so3lr nvt --input geometry.xyz --output trajectory_continued.hdf5 --temperature 300 --md-cycles 100 --restart-load checkpoint.npz --restart-save checkpoint_1.npz
+so3lr nvt --input geometry.xyz --output trajectory.xyz --temperature 300 --md-cycles 100 --restart-load checkpoint.npz --restart-save checkpoint_new.npz
 ```
 
 The restart will continue the simulation from the exact state where it was saved, preserving atom positions, velocities, thermostat/barostat state, and simulation timestep.
@@ -122,6 +122,8 @@ print(rmse)
 ```
 
 For more in-depth evaluation using Python, check out the [example notebook](https://github.com/general-molecular-simulations/so3lr/blob/main/examples/evaluate_so3lr_on_dataset.ipynb).
+
+The CLI, repository, and model are still developing. We would appreciate if you report any errors or incosistencies.
 
 ## Atomic Simulation Environment
 To get an Atomic Simulation Environment (ASE) calculator with energies and forces predicted

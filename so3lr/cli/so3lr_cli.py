@@ -32,7 +32,7 @@ SO3LR_ASCII = """
   ╚══════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
 """
 
-# Ignore FutureWarnings or warnings that do not affect the model
+# Ignore FutureWarnings or warnings that do not affect the model's performance
 warnings.filterwarnings("ignore", message="scatter inputs have incompatible types")
 warnings.filterwarnings("ignore", message="Explicitly requested dtype.*truncated")
 
@@ -714,16 +714,12 @@ def cli(ctx: click.Context,
 
     # Run the simulation
     time_start = time.time()
-    try:
-        # Run optimization - result will be written directly to output_file
-        run(settings_dict)
-        time_end = time.time()
-        logger.info("=" * 60)
-        logger.info('Simulation completed successfully!')
-        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
-    except Exception as e:
-        logger.error(f"Error during simulation: {str(e)}")
-        sys.exit(1)
+    run(settings_dict)
+    time_end = time.time()
+    logger.info("=" * 60)
+    logger.info('Simulation completed successfully!')
+    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+
 
 
 class SubcommandHelpGroup(click.Group):
@@ -889,17 +885,13 @@ def fire_optimization(
     # Set format to extxyz for optimization, since they are usually short
     settings['output_format'] = infer_output_format(output_file)
 
+    # Run optimization
     time_start = time.time()
-    try:
-        # Run optimization - result will be written directly to output_file
-        perform_min(settings)
-        time_end = time.time()
-        logger.info("=" * 60)
-        logger.info('Optimization completed successfully!')
-        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
-    except Exception as e:
-        logger.error(f"Error during optimization: {str(e)}")
-        sys.exit(1)
+    perform_min(settings)
+    time_end = time.time()
+    logger.info("=" * 60)
+    logger.info('Optimization completed successfully!')
+    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
 
 # Define the 'nvt' subcommand
 @cli.command(name='nvt', help="Run NVT molecular dynamics simulation with `so3lr nvt --input geometry.xyz`.")
@@ -943,6 +935,8 @@ def fire_optimization(
               help=f'Number of integration steps per MD step. [default: {DEFAULT_NHC_INTEGRATION_STEPS}]')
 @click.option('--nhc-thermo', 'nhc_thermo', default=DEFAULT_NHC_THERMO, type=float,
               help=f'Thermostat damping factor in units of timestep, i.e. dt*nhc_thermo. [default: {DEFAULT_NHC_THERMO}]')
+@click.option('--nhc-sy-steps', default=DEFAULT_SUZUKI_YOSHIDA_STEPS, type=int,
+              help=f'Number of Suzuki-Yoshida integration steps [default: {DEFAULT_SUZUKI_YOSHIDA_STEPS}].')
 # Restart options
 @click.option('--restart-save', type=click.Path(), default=None,
               help='Path to save restart data.')
@@ -980,6 +974,7 @@ def nvt_md(
     nhc_chain: int,
     nhc_steps: int,
     nhc_thermo: float,
+    nhc_sy_steps: int,
     # Restart options
     restart_save: Optional[str],
     restart_load: Optional[str],
@@ -1094,6 +1089,7 @@ def nvt_md(
         'nhc_chain_length': nhc_chain,
         'nhc_steps': nhc_steps,
         'nhc_thermo': nhc_thermo,
+        'nhc_sy_steps': nhc_sy_steps,
         # Use default optimization settings
         'min_n_min': DEFAULT_MIN_N_MIN, 
         'min_start_dt': DEFAULT_MIN_START_DT,
@@ -1111,21 +1107,13 @@ def nvt_md(
 
     # Run NVT simulation
     time_start = time.time()
-    try:
-        # Run optimization - result will be written directly to output_file
-        run(settings)
-        time_end = time.time()
-        logger.info("=" * 60)
-        logger.info('Simulation completed successfully!')
-        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
-
-    except Exception as e:
-        logger.error(f"Error during simulation: {str(e)}")
-        sys.exit(1)
+    run(settings)
+    time_end = time.time()
+    logger.info("=" * 60)
+    logger.info('Simulation completed successfully!')
+    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
 
 # Define the 'npt' subcommand with clear help
-
-
 @cli.command(name='npt', help="Run NPT molecular dynamics simulation with `so3lr npt --input geometry.xyz`.")
 # Input/Output
 @click.option('--input', '--input_file', 'input_file', type=click.Path(exists=False),
@@ -1171,6 +1159,8 @@ def nvt_md(
               help=f'Thermostat damping factor in units of timestep, i.e. dt*nhc_thermo [default: {DEFAULT_NHC_THERMO}].')
 @click.option('--nhc-baro', default=DEFAULT_NHC_BARO, type=float,
               help=f'Barostat damping factor in units of timestep,  i.e. dt*nhc_baro [default: {DEFAULT_NHC_BARO}].')
+@click.option('--nhc-sy-steps', default=DEFAULT_SUZUKI_YOSHIDA_STEPS, type=int,
+              help=f'Number of Suzuki-Yoshida integration steps [default: {DEFAULT_SUZUKI_YOSHIDA_STEPS}].')
 # Restart options
 @click.option('--restart-save', type=click.Path(), default=None,
               help='Path to save restart data.')
@@ -1210,6 +1200,7 @@ def npt_md(
     nhc_steps: int,
     nhc_thermo: float,
     nhc_baro: float,
+    nhc_sy_steps: int,
     # Restart options
     restart_save: Optional[str],
     restart_load: Optional[str],
@@ -1330,6 +1321,13 @@ def npt_md(
         'nhc_steps': nhc_steps,
         'nhc_thermo': nhc_thermo,
         'nhc_baro': nhc_baro,
+        'nhc_sy_steps': nhc_sy_steps,
+        # Use default optimization settings
+        'min_n_min': DEFAULT_MIN_N_MIN, 
+        'min_start_dt': DEFAULT_MIN_START_DT,
+        'min_max_dt': DEFAULT_MIN_MAX_DT,
+        'min_cycles': DEFAULT_MIN_CYCLES,
+        'min_steps': DEFAULT_MIN_STEPS,
     }
 
     # Add log settings to the settings dictionary
@@ -1340,17 +1338,11 @@ def npt_md(
 
     # Run NPT simulation
     time_start = time.time()
-    try:
-        # Run optimization - result will be written directly to output_file
-        run(settings)
-        time_end = time.time()
-        logger.info("=" * 60)
-        logger.info('Simulation completed successfully!')
-        logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
-
-    except Exception as e:
-        logger.error(f"Error during simulation: {str(e)}")
-        sys.exit(1)
+    run(settings)
+    time_end = time.time()
+    logger.info("=" * 60)
+    logger.info('Simulation completed successfully!')
+    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
 
 # Define the 'eval' subcommand
 @cli.command(name='eval', help="Evaluate SO3LR model on a dataset with `so3lr eval --datafile dataset.extxyz`.")
@@ -1489,50 +1481,8 @@ def eval_model(
 
 def main() -> None:
     """Entry point for the command line interface."""
-    try:
-        cli(standalone_mode=False)
-    except click.exceptions.NoSuchOption as e:
-        # Get the command context from the exception's context
-        ctx = e.ctx
-        if ctx and ctx.command:
-            # Extract the command name
-            command_name = ctx.command.name
-            cmd_path = ctx.command_path
-            
-            # Print error message with suggestion
-            print(f"Error: {str(e)}")
-            print(f"\nAvailable options for '{cmd_path}':")
-            
-            # Get and print all available options for this command
-            for param in ctx.command.params:
-                if isinstance(param, click.Option):
-                    opts = '/'.join(param.opts)
-                    if param.help:
-                        print(f"  {opts:<30} {param.help}")
-                    else:
-                        print(f"  {opts}")
-                        
-            # Did they mistype an option? Find the closest match
-            mistyped_option = str(e).split("No such option: ")[-1]
-            closest_matches = []
-            for param in ctx.command.params:
-                if isinstance(param, click.Option):
-                    for opt in param.opts:
-                        if opt.startswith('--') and opt.replace('--', '').replace('-', '_') in mistyped_option.replace('--', '').replace('-', '_'):
-                            closest_matches.append(opt)
-            
-            if closest_matches:
-                print(f"\nDid you mean one of these options?")
-                for match in closest_matches:
-                    print(f"  {match}")
-        else:
-            # Fallback if we can't get the command context
-            print(f"Error: {str(e)}")
-            print("Try running `so3lr --help` to see available options.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        sys.exit(1)
+
+    cli(standalone_mode=False)
 
 
 if __name__ == '__main__':
