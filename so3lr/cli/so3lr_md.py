@@ -1127,9 +1127,6 @@ def perform_md(
     save_buffer = all_settings.get('save_buffer')
     seed = all_settings.get('seed')
     relax_before_run = all_settings.get('relax_before_run')
-    force_convergence = all_settings.get('force_convergence')
-    min_cycles = all_settings.get('min_cycles')
-    min_steps_per_cycle = all_settings.get('min_steps_per_cycle')
 
     # Handling of restart
     if restart_save_path is not None:
