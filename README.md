@@ -81,13 +81,11 @@ so3lr nvt --input geometry.xyz --output trajectory.hdf5 --temperature 300 \
 
 MD simulations can be restarted from a previously saved checkpoint. This is useful for extending simulations or recovering from interruptions. To enable restart:
 
-1. First save a checkpoint (updated every `save_buffer` cycles) during your simulation:
 ```shell script
+#1. First save a checkpoint (updated every `save_buffer` cycles) during your simulation:
 so3lr nvt --input geometry.xyz --output trajectory.xyz --temperature 300 --md-cycles 100 --restart-save checkpoint.npz
-```
 
-2. Then restart from this checkpoint to continue the simulation:
-```shell script
+#2. Then restart from this checkpoint to continue the simulation:
 so3lr nvt --input geometry.xyz --output trajectory.xyz --temperature 300 --md-cycles 100 --restart-load checkpoint.npz --restart-save checkpoint_new.npz
 ```
 
