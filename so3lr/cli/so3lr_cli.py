@@ -97,7 +97,7 @@ DEFAULT_SEED = 52
 DEFAULT_TOTAL_CHARGE = 0
 DEFAULT_DISPERSION_DAMPING = 2.0  # Angstrom
 DEFAULT_BUFFER_MULTIPLIER = 1.25
-DEFAULT_HDF5_BUFFER = 50
+DEFAULT_SAVE_BUFFER = 50
 DEFAULT_OUTPUT_FORMAT = 'extxyz'
 DEFAULT_TIMESTEP = 0.5  # femtoseconds
 DEFAULT_TEMPERATURE = 300  # Kelvin
@@ -108,8 +108,8 @@ DEFAULT_MD_CYCLES = 100
 DEFAULT_MD_STEPS_PER_CYCLE = 100
 DEFAULT_NHC_CHAIN_LENGTH = 3
 DEFAULT_NHC_INTEGRATION_STEPS = 2
-DEFAULT_NHC_THERMO = 100.0  # thermostat timescale in fs
-DEFAULT_NHC_BARO = 1000.0  # barostat timescale
+DEFAULT_NHC_THERMO = 100.0  # thermostat damping parameter multiplier, i.e. Tdamp = dt * DEFAULT_NHC_THERMO
+DEFAULT_NHC_BARO = 1000.0  # barostat damping parameter multiplier, i.e. Pdamp = dt * DEFAULT_NHC_BARO
 
 # Geometry optimization parameters with FIRE
 # More details here: https://jax-md.readthedocs.io/en/main/jax_md.minimize.html#jax_md.minimize.fire_descent
@@ -142,7 +142,7 @@ Optimize a structure with all options:
       --total-charge 0 --min-cycles 10 --min-steps 10
       --min-start-dt 0.05 --min-max-dt 0.1 --n-min 2
       --force-conv 0.05 --precision float32 --lr-cutoff 12.0 
-      --disp-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25 
+      --dispersion-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25 
       --log-file so3lr_opt.log --model /path/to/model
 
 Run NVT simulation with all options:
@@ -150,8 +150,8 @@ Run NVT simulation with all options:
       --model /path/to/model --dt 0.5 --md-cycles 100 --steps 100
       --nhc-chain 3 --nhc-steps 2 --nhc-thermo 100.0 --relax --force-conv 0.05
       --seed 42 --log-file so3lr_nvt.log --precision float32
-      --lr-cutoff 12.0 --disp-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25
-      --total-charge 0 --hdf5-buffer 50
+      --lr-cutoff 12.0 --dispersion-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25
+      --total-charge 0 --save-buffer 50
       --restart-save so3lr_nvt.npz --restart-load so3lr_nvt_previous.npz
       --log-file so3lr_nvt.log
       
@@ -161,14 +161,14 @@ Run NPT simulation with all options:
       --md-cycles 100 --steps 100 --nhc-chain 3 --nhc-steps 2 --nhc-thermo 100.0
       --nhc-baro 1000.0 --relax --seed 42
       --log-file npt_md.log --precision float32 --lr-cutoff 12.0
-      --disp-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25 --total-charge 0
-      --hdf5-buffer 50
+      --dispersion-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25 --total-charge 0
+      --save-buffer 50
       --restart-save so3lr_npt.npz --restart-load so3lr_npt_previous.npz
       --force-conv 0.05 --log-file so3lr_npt.log
 
 Evaluate SO3LR on a dataset with all options:
   so3lr eval --datafile data.extxyz --batch-size 10 --lr-cutoff 12.0
-      --disp-damping 2.0 --jit-compile --save-to predictions.extxyz
+      --dispersion-damping 2.0 --jit-compile --save-to predictions.extxyz
       --targets forces,dipole_vec,hirshfeld_ratios --precision float32
       --model /path/to/model --log-file eval.log
 
@@ -184,10 +184,10 @@ log_file: "nvt_md.log"                       # File to write logs to
 model_path: "/path/to/model"                 # Optional path to custom MLFF model
 precision: "float32"                         # Numerical precision: 'float32' or 'float64'
 lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-dispersion_energy_cutoff_lr_damping: 2.0     # Damping factor for long-range dispersion interactions
+dispersion_damping: 2.0                      # Dispersion interactions starts to switch off at (lr_cutoff-dispersion_damping) Å
 buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
 buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
-hdf5_buffer_size: 50                         # Number of frames to buffer before writing
+write_buffer: 50                             # Number of frames to buffer before writing
 
 # MD settings
 md_dt: 0.5                                   # MD timestep in femtoseconds
@@ -222,10 +222,10 @@ log_file: "npt_md.log"                       # File to write logs to
 model_path: "/path/to/model"                 # Optional path to custom MLFF model
 precision: "float32"                         # Numerical precision: 'float32' or 'float64'
 lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-dispersion_energy_cutoff_lr_damping: 2.0     # Damping factor for long-range dispersion interactions
+dispersion_damping: 2.0     # Damping factor for long-range dispersion interactions
 buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
 buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
-hdf5_buffer_size: 50                         # Number of frames to buffer before writing
+write_buffer: 50                             # Number of frames to buffer before writing
 
 # MD settings
 md_dt: 0.5                                   # MD timestep in femtoseconds
@@ -263,7 +263,7 @@ log_file: "opt.log"                          # File to write logs to
 model_path: "/path/to/model"                 # Optional path to custom MLFF model
 precision: "float32"                         # Numerical precision: 'float32' or 'float64'
 lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-dispersion_energy_cutoff_lr_damping: 2.0     # Damping factor for long-range dispersion interactions
+dispersion_damping: 2.0     # Damping factor for long-range dispersion interactions
 buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
 buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
 
@@ -290,7 +290,7 @@ log_file: "eval.log"                         # File to write logs to
 model_path: "/path/to/model"                 # Optional path to custom MLFF model
 precision: "float32"                         # Numerical precision: 'float32' or 'float64'
 lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-dispersion_energy_cutoff_lr_damping: 2.0     # Damping factor for long-range dispersion interactions
+dispersion_damping: 2.0     # Damping factor for long-range dispersion interactions
 
 # Evaluation settings
 batch_size: 10                               # Number of molecules per batch
@@ -406,14 +406,14 @@ class NVTNPTGroup(CustomCommandClass):
               help=f'Numerical precision for calculations [default: {DEFAULT_PRECISION}].')
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
               help=f'Long-range cutoff distance in Å [default: {DEFAULT_LR_CUTOFF} Å].')
-@click.option('--disp-damping', '--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
+@click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
               help=f'Damping factor for long-range dispersion interactions [default: {DEFAULT_DISPERSION_DAMPING}].')
 @click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for short-range interactions [default: {DEFAULT_BUFFER_MULTIPLIER}].')
 @click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for long-range interactions [default: {DEFAULT_BUFFER_MULTIPLIER}].')
-@click.option('--hdf5-buffer', default=DEFAULT_HDF5_BUFFER, type=int,
-              help=f'Number of frames to buffer before writing [default: {DEFAULT_HDF5_BUFFER}].')
+@click.option('--write-buffer', default=DEFAULT_SAVE_BUFFER, type=int,
+              help=f'Number of frames to buffer before writing [default: {DEFAULT_SAVE_BUFFER}].')
 @click.option('--restart-save', type=click.Path(), default=None,
               help='Path to save restart data.')
 @click.option('--restart-load', type=click.Path(exists=False), default=None,
@@ -437,9 +437,9 @@ class NVTNPTGroup(CustomCommandClass):
 @click.option('--nhc-steps', default=DEFAULT_NHC_INTEGRATION_STEPS, type=int,
               help=f'Number of integration steps per MD step [default: {DEFAULT_NHC_INTEGRATION_STEPS}].')
 @click.option('--nhc-thermo', default=DEFAULT_NHC_THERMO, type=float,
-              help=f'Thermostat timescale in femtoseconds [default: {DEFAULT_NHC_THERMO}].')
+              help=f'Thermostat damping factor in units of timestep, i.e. dt*nhc_thermo [default: {DEFAULT_NHC_THERMO}].')
 @click.option('--nhc-baro', default=DEFAULT_NHC_BARO, type=float,
-              help=f'Barostat timescale [default: {DEFAULT_NHC_BARO}].')
+              help=f'Barostat damping factor in units of timestep,  i.e. dt*nhc_baro [default: {DEFAULT_NHC_BARO}].')
 @click.option('--nhc-sy-steps', default=DEFAULT_SUZUKI_YOSHIDA_STEPS, type=int,
               help=f'Number of Suzuki-Yoshida integration steps [default: {DEFAULT_SUZUKI_YOSHIDA_STEPS}].')
 @click.option('--total-charge', default=DEFAULT_TOTAL_CHARGE, type=int,
@@ -477,7 +477,7 @@ def cli(ctx: click.Context,
         dispersion_damping: float,
         buffer_sr: float,
         buffer_lr: float,
-        hdf5_buffer: int,
+        save_buffer: int,
         restart_save: Optional[str],
         restart_load: Optional[str],
         dt: float,
@@ -569,13 +569,13 @@ def cli(ctx: click.Context,
     if lr_cutoff is not None:
         settings_dict['lr_cutoff'] = lr_cutoff
     if dispersion_damping is not None:
-        settings_dict['dispersion_energy_cutoff_lr_damping'] = dispersion_damping
+        settings_dict['dispersion_damping'] = dispersion_damping
     if buffer_sr is not None:
         settings_dict['buffer_size_multiplier_sr'] = buffer_sr
     if buffer_lr is not None:
         settings_dict['buffer_size_multiplier_lr'] = buffer_lr
-    if hdf5_buffer is not None:
-        settings_dict['hdf5_buffer_size'] = hdf5_buffer
+    if save_buffer is not None:
+        settings_dict['save_buffer'] = save_buffer
     if restart_save is not None:
         settings_dict['restart_save_path'] = restart_save
     if restart_load is not None:
@@ -658,7 +658,7 @@ def cli(ctx: click.Context,
     if model_path is not None:
         logger.info(f"Model path:                {settings_dict['model_path']}")
     logger.info(f"Long-range cutoff:         {settings_dict.get('lr_cutoff', DEFAULT_LR_CUTOFF)} Å")
-    logger.info(f"Dispersion damping:        {settings_dict.get('dispersion_energy_cutoff_lr_damping', DEFAULT_DISPERSION_DAMPING)} Å")
+    logger.info(f"Dispersion damping:        {settings_dict.get('dispersion_damping', DEFAULT_DISPERSION_DAMPING)} Å")
     logger.info(f"Short-range buffer:        {settings_dict.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)}")
     logger.info(f"Long-range buffer:         {settings_dict.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)}")
     logger.info(f"Total charge:              {settings_dict.get('total_charge', DEFAULT_TOTAL_CHARGE)}")
@@ -680,8 +680,8 @@ def cli(ctx: click.Context,
     logger.info(f"Steps per cycle:           {settings_dict.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)}")
     logger.info(f"Timestep:                  {settings_dict.get('md_dt', DEFAULT_TIMESTEP)*1000} fs")
     logger.info(f"NHC length:                {settings_dict.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)}")
-    logger.info(f"Nose-Hoover steps:         {settings_dict.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)}")
-    logger.info(f"Nose-Hoover thermo:        {settings_dict.get('nhc_thermo', DEFAULT_NHC_THERMO)}")
+    logger.info(f"NHC steps:                 {settings_dict.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)}")
+    logger.info(f"NHC thermo:                {settings_dict.get('nhc_thermo', DEFAULT_NHC_THERMO)}")
     logger.info(f"Seed:                      {settings_dict.get('seed', DEFAULT_SEED)}")
 
     if settings_dict.get('relax_before_run', False):
@@ -752,7 +752,7 @@ class SubcommandHelpGroup(click.Group):
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
               help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')
-@click.option('--disp-damping', '--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
+@click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
               help=f'Damping factor for long-range dispersion interactions. [default: {DEFAULT_DISPERSION_DAMPING}]')
 @click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for short-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
@@ -790,6 +790,7 @@ def fire_optimization(
     Example:
         so3lr opt --input geometry.xyz
     """
+    # Print help
     if not input_file or help:
         click.echo(SO3LR_ASCII)
         click.echo(fire_optimization.get_help(click.get_current_context()))
@@ -854,7 +855,7 @@ def fire_optimization(
         'force_convergence': force_conv,
         'precision': precision,
         'lr_cutoff': lr_cutoff,
-        'dispersion_energy_cutoff_lr_damping': dispersion_damping,
+        'dispersion_damping': dispersion_damping,
         'buffer_size_multiplier_sr': buffer_sr,
         'buffer_size_multiplier_lr': buffer_lr,
         'total_charge': total_charge,
@@ -892,14 +893,14 @@ def fire_optimization(
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
               help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')
-@click.option('--disp-damping', '--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
+@click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
               help=f'Damping factor for long-range dispersion interactions. [default: {DEFAULT_DISPERSION_DAMPING}]')
 @click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for short-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
 @click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
-@click.option('--hdf5-buffer', default=DEFAULT_HDF5_BUFFER, type=int,
-              help=f'Number of frames to buffer before writing to HDF5 file. [default: {DEFAULT_HDF5_BUFFER}]')
+@click.option('--save-buffer', default=DEFAULT_SAVE_BUFFER, type=int,
+              help=f'Number of frames to buffer before writing to HDF5 file. [default: {DEFAULT_SAVE_BUFFER}]')
 @click.option('--temperature', default=DEFAULT_TEMPERATURE, type=float,
               help=f'Simulation temperature in Kelvin. [default: {DEFAULT_TEMPERATURE}]')
 @click.option('--dt', default=DEFAULT_TIMESTEP, type=float,
@@ -913,7 +914,7 @@ def fire_optimization(
 @click.option('--nhc-steps', default=DEFAULT_NHC_INTEGRATION_STEPS, type=int,
               help=f'Number of integration steps per MD step. [default: {DEFAULT_NHC_INTEGRATION_STEPS}]')
 @click.option('--nhc-thermo', 'nhc_thermo', default=DEFAULT_NHC_THERMO, type=float,
-              help=f'Thermostat timescale in femtoseconds. [default: {DEFAULT_NHC_THERMO}]')
+              help=f'Thermostat damping factor in units of timestep, i.e. dt*nhc_thermo. [default: {DEFAULT_NHC_THERMO}]')
 @click.option('--restart-save', type=click.Path(), default=None,
               help='Path to save restart data.')
 @click.option('--restart-load', type=click.Path(exists=False), default=None,
@@ -937,7 +938,7 @@ def nvt_md(
     dispersion_damping: float,
     buffer_sr: float,
     buffer_lr: float,
-    hdf5_buffer: int,
+    save_buffer: int,
     temperature: float,
     dt: float,
     md_cycles: int,
@@ -978,8 +979,6 @@ def nvt_md(
     if log_file is None:
         log_file = f"{Path(output_file).stem}.log"
 
-    
-
     # Setup logging with default levels
     setup_logger(log_file)
 
@@ -1011,7 +1010,7 @@ def nvt_md(
     logger.info(f"MD cycles:                 {md_cycles}")
     logger.info(f"Steps per cycle:           {md_steps}")
     logger.info(f"Timestep:                  {dt} fs")
-    logger.info(f"Saving buffer size:        {hdf5_buffer}")
+    logger.info(f"Saving buffer size:        {save_buffer}")
     logger.info(f"NHC chain length:          {nhc_chain}")
     logger.info(f"Nose-Hoover steps:         {nhc_steps}")
     logger.info(f"Nose-Hoover thermo:        {nhc_thermo} fs")
@@ -1045,10 +1044,10 @@ def nvt_md(
         'md_cycles': md_cycles,
         'md_steps': md_steps,
         'lr_cutoff': lr_cutoff,
-        'dispersion_energy_cutoff_lr_damping': dispersion_damping,
+        'dispersion_damping': dispersion_damping,
         'buffer_size_multiplier_sr': buffer_sr,
         'buffer_size_multiplier_lr': buffer_lr,
-        'hdf5_buffer_size': hdf5_buffer,
+        'save_buffer': save_buffer,
         'total_charge': total_charge,
         'seed': seed,
         'restart_load_path': restart_load,
@@ -1059,7 +1058,8 @@ def nvt_md(
         'nhc_chain_length': nhc_chain,
         'nhc_steps': nhc_steps,
         'nhc_thermo': nhc_thermo,
-        'min_n_min': DEFAULT_MIN_N_MIN,
+        # Use default optimization settings
+        'min_n_min': DEFAULT_MIN_N_MIN, 
         'min_start_dt': DEFAULT_MIN_START_DT,
         'min_max_dt': DEFAULT_MIN_MAX_DT,
         'min_cycles': DEFAULT_MIN_CYCLES,
@@ -1103,14 +1103,14 @@ def nvt_md(
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
               help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')
-@click.option('--disp-damping', '--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
+@click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
               help=f'Damping factor for long-range dispersion interactions. [default: {DEFAULT_DISPERSION_DAMPING}]')
 @click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for short-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
 @click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
               help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
-@click.option('--hdf5-buffer', default=DEFAULT_HDF5_BUFFER, type=int,
-              help=f'Number of frames to buffer before writing to HDF5 file. [default: {DEFAULT_HDF5_BUFFER}]')
+@click.option('--save-buffer', default=DEFAULT_SAVE_BUFFER, type=int,
+              help=f'Number of frames to buffer before writing to HDF5 file. [default: {DEFAULT_SAVE_BUFFER}]')
 @click.option('--temperature', default=DEFAULT_TEMPERATURE, type=float,
               help=f'Simulation temperature in Kelvin. [default: {DEFAULT_TEMPERATURE}]')
 @click.option('--pressure', default=DEFAULT_PRESSURE, type=float,
@@ -1125,10 +1125,10 @@ def nvt_md(
               help=f'Length of the Nose-Hoover thermostat chain. [default: {DEFAULT_NHC_CHAIN_LENGTH}]')
 @click.option('--nhc-steps', default=DEFAULT_NHC_INTEGRATION_STEPS, type=int,
               help=f'Number of integration steps per MD step. [default: {DEFAULT_NHC_INTEGRATION_STEPS}]')
-@click.option('--nhc-thermo', 'nhc_thermo', default=DEFAULT_NHC_THERMO, type=float,
-              help=f'Thermostat timescale in femtoseconds. [default: {DEFAULT_NHC_THERMO}]')
+@click.option('--nhc-thermo', default=DEFAULT_NHC_THERMO, type=float,
+              help=f' [default: {DEFAULT_NHC_THERMO}].')
 @click.option('--nhc-baro', default=DEFAULT_NHC_BARO, type=float,
-              help=f'Barostat timescale. [default: {DEFAULT_NHC_BARO}]')
+              help=f'Barostat damping factor in units of timestep,  i.e. dt*nhc_baro [default: {DEFAULT_NHC_BARO}].')
 @click.option('--restart-save', type=click.Path(), default=None,
               help='Path to save restart data.')
 @click.option('--restart-load', type=click.Path(exists=False), default=None,
@@ -1152,7 +1152,7 @@ def npt_md(
     dispersion_damping: float,
     buffer_sr: float,
     buffer_lr: float,
-    hdf5_buffer: int,
+    save_buffer: int,
     temperature: float,
     pressure: float,
     dt: float,
@@ -1215,10 +1215,10 @@ def npt_md(
         'md_cycles': md_cycles,
         'md_steps': md_steps,
         'lr_cutoff': lr_cutoff,
-        'dispersion_energy_cutoff_lr_damping': dispersion_damping,
+        'dispersion_damping': dispersion_damping,
         'buffer_size_multiplier_sr': buffer_sr,
         'buffer_size_multiplier_lr': buffer_lr,
-        'hdf5_buffer_size': hdf5_buffer,
+        'save_buffer': save_buffer,
         'total_charge': total_charge,
         'seed': seed,
         'restart_load_path': restart_load,
@@ -1230,6 +1230,7 @@ def npt_md(
         'nhc_steps': nhc_steps,
         'nhc_thermo': nhc_thermo,
         'nhc_baro': nhc_baro,
+        # Use default optimization settings
         'min_n_min': DEFAULT_MIN_N_MIN,
         'min_start_dt': DEFAULT_MIN_START_DT,
         'min_max_dt': DEFAULT_MIN_MAX_DT,
@@ -1321,7 +1322,7 @@ def npt_md(
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--model', 'model_path', type=click.Path(exists=False),
               help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
-@click.option('--disp-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
+@click.option('dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
               help=f'Damping factor for long-range dispersion interactions. [default: {DEFAULT_DISPERSION_DAMPING}]')
 @click.option('--jit-compile/--no-jit-compile', default=True,
               help='JIT compile the calculation. [default: enabled]')
@@ -1418,7 +1419,7 @@ def eval_model(
             datafile=datafile,
             batch_size=batch_size,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping,
+            dispersion_damping=dispersion_damping,
             jit_compile=jit_compile,
             save_to=save_to,
             model_path=model_path,

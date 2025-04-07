@@ -457,7 +457,7 @@ def load_model(
     model_path: str,
     precision: jnp.dtype,
     lr_cutoff: float = 12.0,
-    dispersion_energy_cutoff_lr_damping: float = 2.
+    dispersion_damping: float = 2.
 ) -> MLFFPotentialSparse:
     """
     Load a trained MLFF model from a checkpoint directory.
@@ -466,7 +466,7 @@ def load_model(
         model_path (str): Path to the model checkpoint directory.
         precision (jnp.dtype): Precision to use for the calculation.
         lr_cutoff (float, optional): Long-range cutoff for SO3LR in Å. Defaults to 12.0.
-        dispersion_energy_cutoff_lr_damping (float, optional): Cutoff for dispersion
+        dispersion_damping (float, optional): Cutoff for dispersion
                                 energy damping in Å. Defaults to 2.0.
 
     Returns:
@@ -485,7 +485,7 @@ def load_model(
         from_file=True,
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
+            dispersion_energy_cutoff_lr_damping=dispersion_damping,
             neighborlist_format_lr='ordered_sparse'
         ),
         dtype=precision
@@ -1110,7 +1110,7 @@ def perform_md(
     model_path = all_settings.get('model_path')
     precision = all_settings.get('precision')
     lr_cutoff = all_settings.get('lr_cutoff')
-    dispersion_energy_cutoff_lr_damping = all_settings.get('dispersion_energy_cutoff_lr_damping')
+    dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
     total_charge = all_settings.get('total_charge')
@@ -1131,7 +1131,7 @@ def perform_md(
 
     # Format control
     output_format = all_settings.get('output_format')
-    hdf5_buffer_size = all_settings.get('hdf5_buffer_size')
+    save_buffer = all_settings.get('save_buffer')
     seed = all_settings.get('seed')
     relax_before_run = all_settings.get('relax_before_run')
     force_convergence = all_settings.get('force_convergence')
@@ -1183,7 +1183,7 @@ def perform_md(
     if output_format == 'hdf5':
         hdf5_store = init_hdf5_store(
             save_to=output_file,
-            batch_size=hdf5_buffer_size,
+            batch_size=save_buffer,
             num_atoms=position.shape[0],
             num_box_entries=1,
             exist_ok=True
@@ -1209,7 +1209,7 @@ def perform_md(
         potential = So3lrPotential(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping
+            dispersion_energy_cutoff_lr_damping=dispersion_damping
         )
     else:
         # Verify model path exists
@@ -1220,7 +1220,7 @@ def perform_md(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping
+            dispersion_energy_cutoff_lr_damping=dispersion_damping
         )
 
     # Setting up the model
@@ -1389,7 +1389,7 @@ def perform_md(
             if box is not None:
                 boxes.append(np.array(box))
 
-            if ((len(positions) % hdf5_buffer_size == 0 and len(positions) > 0) or (len(positions) == md_cycles)):
+            if ((len(positions) % save_buffer == 0 and len(positions) > 0) or (len(positions) == md_cycles)):
                 # Saving the output
                 if output_format == 'hdf5':
                     positions, momenta, boxes = write_to_hdf5(
@@ -1430,7 +1430,7 @@ def perform_md(
             logger.warn('Consider decreasing the buffer sizes if the system has equilibrated (--buffer-sr 1.15, --buffer-lr 1.1)')
             logger.warn('and/or increasing the number of steps in each jax.lax.fori_loop (--steps 1000)')
             if output_format == 'extxyz':
-                logger.warn('and/or saving the trajectory in HDF5 format (--output-format hdf5)')
+                logger.warn('and/or saving the trajectory in HDF5 format (--output traj_name.hdf5)')
 
 
 def create_min_fn(
@@ -1546,7 +1546,7 @@ def perform_min(
     model_path = all_settings.get('model_path')
     precision = all_settings.get('precision')
     lr_cutoff = all_settings.get('lr_cutoff')
-    dispersion_energy_cutoff_lr_damping = all_settings.get('dispersion_energy_cutoff_lr_damping')
+    dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
     total_charge = all_settings.get('total_charge')
@@ -1588,7 +1588,7 @@ def perform_min(
         potential = So3lrPotential(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping
+            dispersion_energy_cutoff_lr_damping=dispersion_damping
         )
     else:
         # Load custom MLFF
@@ -1597,7 +1597,7 @@ def perform_min(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping
+            dispersion_energy_cutoff_lr_damping=dispersion_damping
         )
 
     # Setting up the model
