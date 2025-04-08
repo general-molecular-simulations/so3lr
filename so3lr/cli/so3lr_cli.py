@@ -126,7 +126,6 @@ Run simulations using SO3LR Machine Learned Force Field.
 
 ## Commands
 
-so3lr [options]         Run MD simulation with options specified via command line or settings file
 so3lr opt [options]     Run geometry optimization
 so3lr nvt [options]     Run NVT (constant volume and temperature) MD simulation
 so3lr npt [options]     Run NPT (constant pressure and temperature) MD simulation
@@ -164,155 +163,153 @@ Run NPT simulation with all options:
       --save-buffer 50 --force-conv 0.05
       --restart-save so3lr_npt.npz --restart-load so3lr_npt_previous.npz
       
-
 Evaluate SO3LR on a dataset with all options:
   so3lr eval --datafile data.extxyz --batch-size 10 --lr-cutoff 12.0
       --dispersion-damping 2.0 --jit-compile --save-to predictions.extxyz
       --targets forces,dipole_vec,hirshfeld_ratios --precision float32
       --model /path/to/model --log-file eval.log
 
-### Settings File Examples
-Example settings file for NVT simulation (nvt_settings.yaml):
-```yaml
-# Input/Output
-input_file: "path/to/structure.xyz"    # Path to the initial geometry file
-output_file: "nvt_trajectory.hdf5"           # Output trajectory file in 'hdf5' or 'extxyz' format
-log_file: "nvt_md.log"                       # File to write logs to
-
-# Model settings
-model_path: "/path/to/model"                 # Optional path to custom MLFF model
-precision: "float32"                         # Numerical precision: 'float32' or 'float64'
-lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
-buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
-buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
-save_buffer: 50                              # Number of frames to buffer before writing
-
-# MD settings
-md_dt: 0.5                                   # MD timestep in femtoseconds
-md_T: 300.0                                  # Simulation temperature in Kelvin
-md_cycles: 100                               # Number of MD cycles to run
-md_steps: 100                                # Number of steps per MD cycle
-relax_before_run: true                       # Whether to perform geometry relaxation before MD
-force_convergence: 0.05                      # Force convergence criterion in eV/Å for initial relaxation
-
-# Thermostat settings
-nhc_chain_length: 3                          # Length of the Nose-Hoover thermostat chain
-nhc_steps: 2                                 # Number of integration steps per MD step
-nhc_thermo: 100.0                            # Thermostat timescale in femtoseconds
-
-# Restart options
-restart_save_path: "restart.npz"             # Path to save restart data
-restart_load_path: "previous.npz"            # Path to load restart data from previous run
-
-# Additional settings
-total_charge: 0                              # Total charge of the system
-seed: 42                                     # Random seed for MD
-```
-
-Example settings file for NPT simulation (npt_settings.yaml):
-```yaml
-# Input/Output
-input_file: "path/to/structure.xyz"    # Path to the initial geometry file
-output_file: "npt_trajectory.hdf5"           # Output trajectory file in 'hdf5' or 'xyz' format
-log_file: "npt_md.log"                       # File to write logs to
-
-# Model settings
-model_path: "/path/to/model"                 # Optional path to custom MLFF model
-precision: "float32"                         # Numerical precision: 'float32' or 'float64'
-lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
-buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
-buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
-save_buffer: 50                              # Number of frames to buffer before writing
-
-# MD settings
-md_dt: 0.5                                   # MD timestep in femtoseconds
-md_T: 300.0                                  # Simulation temperature in Kelvin
-md_P: 1.0                                    # Pressure in atmospheres (enables NPT simulation)
-md_cycles: 100                               # Number of MD cycles to run
-md_steps: 100                                # Number of steps per MD cycle
-relax_before_run: true                       # Whether to perform geometry relaxation before MD
-force_convergence: 0.05                      # Force convergence criterion in eV/Å for initial relaxation
-
-# Thermostat and barostat settings
-nhc_chain_length: 3                          # Length of the Nose-Hoover thermostat chain
-nhc_steps: 2                                 # Number of integration steps per MD step
-nhc_thermo: 100.0                            # Thermostat damping factor in units of timestep
-nhc_baro: 1000.0                             # Barostat damping factor in units of timestep
-nhc_sy_steps: 3                              # Number of Suzuki-Yoshida integration steps
-
-# Restart options
-restart_save_path: "restart.npz"             # Path to save restart data
-restart_load_path: "previous.npz"            # Path to load restart data from previous run
-
-# Additional settings
-total_charge: 0                              # Total charge of the system
-seed: 42                                     # Random seed for MD
-```
-
-Example settings file for geometry optimization (opt_settings.yaml):
-```yaml
-# Input/Output
-input_file: "path/to/structure.xyz"          # Path to the initial geometry file
-output_file: "optimized.xyz"                 # Output file to save the optimized geometry
-log_file: "opt.log"                          # File to write logs to
-
-# Model settings
-model_path: "/path/to/model"                 # Optional path to custom MLFF model
-precision: "float32"                         # Numerical precision: 'float32' or 'float64'
-lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
-buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
-buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
-
-# Optimization settings
-min_cycles: 10                               # Number of minimization cycles
-min_steps: 10                                # Number of steps per minimization cycle
-min_start_dt: 0.05                           # Initial timestep for minimization
-min_max_dt: 0.1                              # Maximum timestep for minimization
-min_n_min: 2                                 # Number of steps moving in correct direction before dt update
-force_convergence: 0.05                      # Force convergence criterion in eV/Å
-
-# Additional settings
-total_charge: 0                              # Total charge of the system
-```
-
-Example settings file for model evaluation (eval_settings.yaml):
-```yaml
-# Input/Output
-datafile: "path/to/dataset.extxyz"           # Path to data file for evaluation
-save_to: "so3lr_eval.extxyz"                 # Output file to save predictions
-log_file: "eval.log"                         # File to write logs to
-
-# Model settings
-model_path: "/path/to/model"                 # Optional path to custom MLFF model
-precision: "float32"                         # Numerical precision: 'float32' or 'float64'
-lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
-
-# Evaluation settings
-batch_size: 10                               # Number of molecules per batch
-targets: "forces,dipole_vec,hirshfeld_ratios" # Targets to evaluate
-jit_compile: true                            # Use JIT compilation for speed
-```
 """
+# so3lr [options]         Run MD simulation with options specified via command line or settings file
+# 
+# ### Settings File Examples
+# Example settings file for NVT simulation (nvt_settings.yaml):
+# ```yaml
+# # Input/Output
+# input_file: "path/to/structure.xyz"    # Path to the initial geometry file
+# output_file: "nvt_trajectory.hdf5"           # Output trajectory file in 'hdf5' or 'extxyz' format
+# log_file: "nvt_md.log"                       # File to write logs to
+
+# # Model settings
+# model_path: "/path/to/model"                 # Optional path to custom MLFF model
+# precision: "float32"                         # Numerical precision: 'float32' or 'float64'
+# lr_cutoff: 12.0                              # Long-range cutoff distance in Å
+# dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
+# buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
+# buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
+# save_buffer: 50                              # Number of frames to buffer before writing
+
+# # MD settings
+# md_dt: 0.5                                   # MD timestep in femtoseconds
+# md_T: 300.0                                  # Simulation temperature in Kelvin
+# md_cycles: 100                               # Number of MD cycles to run
+# md_steps: 100                                # Number of steps per MD cycle
+# relax_before_run: true                       # Whether to perform geometry relaxation before MD
+# force_convergence: 0.05                      # Force convergence criterion in eV/Å for initial relaxation
+
+# # Thermostat settings
+# nhc_chain_length: 3                          # Length of the Nose-Hoover thermostat chain
+# nhc_steps: 2                                 # Number of integration steps per MD step
+# nhc_thermo: 100.0                            # Thermostat timescale in femtoseconds
+
+# # Restart options
+# restart_save_path: "restart.npz"             # Path to save restart data
+# restart_load_path: "previous.npz"            # Path to load restart data from previous run
+
+# # Additional settings
+# total_charge: 0                              # Total charge of the system
+# seed: 42                                     # Random seed for MD
+# ```
+
+# Example settings file for NPT simulation (npt_settings.yaml):
+# ```yaml
+# # Input/Output
+# input_file: "path/to/structure.xyz"    # Path to the initial geometry file
+# output_file: "npt_trajectory.hdf5"           # Output trajectory file in 'hdf5' or 'xyz' format
+# log_file: "npt_md.log"                       # File to write logs to
+
+# # Model settings
+# model_path: "/path/to/model"                 # Optional path to custom MLFF model
+# precision: "float32"                         # Numerical precision: 'float32' or 'float64'
+# lr_cutoff: 12.0                              # Long-range cutoff distance in Å
+# dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
+# buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
+# buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
+# save_buffer: 50                              # Number of frames to buffer before writing
+
+# # MD settings
+# md_dt: 0.5                                   # MD timestep in femtoseconds
+# md_T: 300.0                                  # Simulation temperature in Kelvin
+# md_P: 1.0                                    # Pressure in atmospheres (enables NPT simulation)
+# md_cycles: 100                               # Number of MD cycles to run
+# md_steps: 100                                # Number of steps per MD cycle
+# relax_before_run: true                       # Whether to perform geometry relaxation before MD
+# force_convergence: 0.05                      # Force convergence criterion in eV/Å for initial relaxation
+
+# # Thermostat and barostat settings
+# nhc_chain_length: 3                          # Length of the Nose-Hoover thermostat chain
+# nhc_steps: 2                                 # Number of integration steps per MD step
+# nhc_thermo: 100.0                            # Thermostat damping factor in units of timestep
+# nhc_baro: 1000.0                             # Barostat damping factor in units of timestep
+# nhc_sy_steps: 3                              # Number of Suzuki-Yoshida integration steps
+
+# # Restart options
+# restart_save_path: "restart.npz"             # Path to save restart data
+# restart_load_path: "previous.npz"            # Path to load restart data from previous run
+
+# # Additional settings
+# total_charge: 0                              # Total charge of the system
+# seed: 42                                     # Random seed for MD
+# ```
+
+# Example settings file for geometry optimization (opt_settings.yaml):
+# ```yaml
+# # Input/Output
+# input_file: "path/to/structure.xyz"          # Path to the initial geometry file
+# output_file: "optimized.xyz"                 # Output file to save the optimized geometry
+# log_file: "opt.log"                          # File to write logs to
+
+# # Model settings
+# model_path: "/path/to/model"                 # Optional path to custom MLFF model
+# precision: "float32"                         # Numerical precision: 'float32' or 'float64'
+# lr_cutoff: 12.0                              # Long-range cutoff distance in Å
+# dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
+# buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
+# buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
+
+# # Optimization settings
+# min_cycles: 10                               # Number of minimization cycles
+# min_steps: 10                                # Number of steps per minimization cycle
+# min_start_dt: 0.05                           # Initial timestep for minimization
+# min_max_dt: 0.1                              # Maximum timestep for minimization
+# min_n_min: 2                                 # Number of steps moving in correct direction before dt update
+# force_convergence: 0.05                      # Force convergence criterion in eV/Å
+
+# # Additional settings
+# total_charge: 0                              # Total charge of the system
+# ```
+
+# Example settings file for model evaluation (eval_settings.yaml):
+# ```yaml
+# # Input/Output
+# datafile: "path/to/dataset.extxyz"           # Path to data file for evaluation
+# save_to: "so3lr_eval.extxyz"                 # Output file to save predictions
+# log_file: "eval.log"                         # File to write logs to
+
+# # Model settings
+# model_path: "/path/to/model"                 # Optional path to custom MLFF model
+# precision: "float32"                         # Numerical precision: 'float32' or 'float64'
+# lr_cutoff: 12.0                              # Long-range cutoff distance in Å
+# dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
+
+# # Evaluation settings
+# batch_size: 10                               # Number of molecules per batch
+# targets: "forces,dipole_vec,hirshfeld_ratios" # Targets to evaluate
+# jit_compile: true                            # Use JIT compilation for speed
+# ```
+
 
 BASIC_HELP_STRING = """
 Run simulations using SO3LR Machine Learned Force Field.
 
 ## Commands
 
-so3lr [options]         Run with options specified via command line or settings file
 so3lr opt [options]     Run geometry optimization
 so3lr nvt [options]     Run NVT (constant volume and temperature) MD simulation
 so3lr npt [options]     Run NPT (constant pressure and temperature) MD simulation
 so3lr eval [options]    Evaluate SO3LR model on a dataset
 
 ## Usage Examples
-
-Run with settings file:
-  so3lr --settings md_settings.yaml
 
 Optimize a structure:
   so3lr opt --input geometry.xyz --force-conv 0.05 --lr-cutoff 12.0
@@ -328,6 +325,10 @@ Evaluate on a dataset:
 
 Use --help-full to see all available options.
 """
+
+# so3lr [options]         Run with options specified via command line or settings file
+# Run with settings file:
+#   so3lr --settings md_settings.yaml
 
 def infer_output_format(output_file):
     """Determine output format based on file extension."""
