@@ -133,9 +133,6 @@ so3lr eval [options]    Run evaluation on a dataset
 
 ## Usage Examples
 
-Run with settings file:
-  so3lr --settings md_settings.yaml
-
 Optimize a structure with all options:
   so3lr opt --input geometry.xyz --output so3lr_opt.xyz 
       --total-charge 0 --min-cycles 10 --min-steps 10
@@ -170,6 +167,9 @@ Evaluate SO3LR on a dataset with all options:
       --model /path/to/model --log-file eval.log
 
 """
+
+# Run with settings file:
+#   so3lr --settings md_settings.yaml
 # so3lr [options]         Run MD simulation with options specified via command line or settings file
 # 
 # ### Settings File Examples
@@ -324,6 +324,7 @@ Evaluate on a dataset:
   so3lr eval --datafile dataset.xyz --save-to predictions.extxyz --targets forces,dipole_vec,hirshfeld_ratios
 
 Use --help-full to see all available options.
+
 """
 
 # so3lr [options]         Run with options specified via command line or settings file
