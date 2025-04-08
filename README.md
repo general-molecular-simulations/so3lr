@@ -42,11 +42,7 @@ SO3LR provides a unified command line interface that leverages JAX-MD's performa
 Each subcommand has its own set of options and can be run with `--help` to see all available parameters.
 
 ```shell script
-# Show basic help
 so3lr opt --help
-
-# Show detailed documentation of all available settings
-so3lr --help-full
 ```
 
 Optimize a molecule structure using the FIRE algorithm:
