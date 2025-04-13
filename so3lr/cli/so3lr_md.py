@@ -421,12 +421,18 @@ def atoms_to_jnp(
     positions = jnp.array(atoms.get_positions(), dtype=precision)
     species = jnp.array(atoms.get_atomic_numbers(), dtype=jnp.int32)
     masses = jnp.array(atoms.get_masses(), dtype=precision)
-
+    if not np.all(atoms.get_velocities()==0):
+        velocities = jnp.array(atoms.get_velocities(), dtype=precision)
+    else:
+        velocities = None
+     
     return {
         'positions': positions,
         'species': species,
-        'masses': masses
+        'masses': masses,
+        'velocities': velocities
     }
+
 
 def check_cell(cell: np.ndarray, lr_cutoff: float) -> np.ndarray:
     """
@@ -1407,7 +1413,8 @@ def perform_md(
                 neighbor=nbrs.idx,
                 neighbor_lr=nbrs_lr.idx,
                 kT=init_T,
-                mass=initial_geometry_dict['masses']
+                mass=initial_geometry_dict['masses'],
+                velocities = initial_geometry_dict.get('velocities')
             )
         else:
             state = init_fn(
@@ -1416,7 +1423,8 @@ def perform_md(
                 box=box,
                 neighbor=nbrs.idx,
                 kT=md_T,
-                mass=initial_geometry_dict['masses']
+                mass=initial_geometry_dict['masses'],
+                velocities = initial_geometry_dict.get('velocities')
             )
 
     # Running the MD
