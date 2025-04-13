@@ -1320,7 +1320,7 @@ def perform_md(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping
+            dispersion_damping=dispersion_damping
         )
 
     # Setting up the model
@@ -1723,7 +1723,7 @@ def perform_min(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping
+            dispersion_damping=dispersion_damping
         )
 
     # Setting up the model
