@@ -110,6 +110,7 @@ def handle_units(
     unit_system: Callable[[], Dict[str, float]],
     dt: float,
     T: Optional[float] = None,
+    init_T: Optional[float] = None,
     P: Optional[float] = None
 ) -> Dict[str, Optional[float]]:
     """
@@ -132,15 +133,18 @@ def handle_units(
         unit = unit_system()
         dt *= unit['time']
 
-        T *= unit['temperature']
-
+        if T is not None:
+            T *= unit['temperature']
+        if init_T is not None:
+            init_T *= unit['temperature']
         if P is not None:
             P *= unit['pressure']
 
         return {
             'dt': dt,
             'T': T,
-            'P': P
+            'P': P,
+            'init_T': init_T
         }
     except Exception as e:
         raise ValueError(f"Error converting units: {str(e)}.")
@@ -772,7 +776,7 @@ def compute_quantities(
             box=box
         )
 
-        if P is None:
+        if T is not None and P is None:
             H = jax_md.simulate.nvt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -781,7 +785,7 @@ def compute_quantities(
                 neighbor_lr=nbrs_lr.idx,
                 box=box
             ) / unit['energy']
-        else:
+        elif T is not None:
             H = jax_md.simulate.npt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -790,6 +794,8 @@ def compute_quantities(
                 neighbor=nbrs.idx,
                 neighbor_lr=nbrs_lr.idx
             )
+        else:
+            H = None
 
     else:
         PE = energy_fn(
@@ -797,7 +803,7 @@ def compute_quantities(
             neighbor=nbrs.idx,
             box=box
         )
-        if P is None:
+        if T is not None and P is None:
             H = jax_md.simulate.nvt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -805,7 +811,7 @@ def compute_quantities(
                 neighbor=nbrs.idx,
                 box=box
             ) / unit['energy']
-        else:
+        elif T is not None:
             H = jax_md.simulate.npt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -813,6 +819,8 @@ def compute_quantities(
                 kT=T,
                 neighbor=nbrs.idx
             )
+        else:
+            H = None
 
     current_T = jax_md.quantity.temperature(
         momentum=state.momentum,
@@ -845,6 +853,39 @@ def compute_quantities(
 
     return KE, PE, H, current_T, current_P
 
+def create_nve_fn(
+    energy_fn: callable,
+    shift: callable,
+    dt: float,
+    box: jnp.ndarray,
+    lr: bool,
+)-> Tuple[callable, callable]:
+    """
+    Create the NVE init/apply functions.
+
+    Args:
+        energy_fn (callable): Function that calculates the energy.
+        shift (callable): Function that shifts the positions.
+        dt (float): Time step.
+        box (jnp.ndarray): Box of the system.
+        lr (bool): whether to use long-range interactions.
+
+    Returns:
+        Tuple[callable, callable]: Init and apply functions.
+    """
+
+    init_fn, apply_fn = jax_md.simulate.nve(
+        energy_fn,
+        shift,
+        dt=dt
+    )
+
+    init_fn = jax.jit(init_fn)
+    apply_fn = jax.jit(apply_fn)
+
+    step_md_fn = create_md_fn('nve',lr,apply_fn)
+
+    return init_fn, step_md_fn
 
 def create_nhc_fn(
     energy_fn: callable,
@@ -913,6 +954,64 @@ def create_npt_nhc_fn(
 
     return init_fn, step_md_fn
 
+def create_nve_step_fn(
+    lr: bool,
+    apply_fn: callable,
+)-> callable:
+    """
+    Create the NVE step function.
+
+    Args:
+        lr (bool): Whether to use long-range interactions.
+        apply_fn (callable): Function that applies the MD step.
+
+    Returns:
+        callable: NVT step function.
+    """
+
+    if lr:
+        @jax.jit
+        def step_nve_fn_lr(
+            i: int,
+            state):
+            state, nbrs, nbrs_lr, box = state
+            state = apply_fn(
+                state,
+                neighbor=nbrs.idx,
+                neighbor_lr=nbrs_lr.idx,
+                box=box
+            )
+            nbrs = nbrs.update(
+                state.position,
+                neighbor=nbrs.idx,
+                box=box
+            )
+            nbrs_lr = nbrs_lr.update(
+                state.position,
+                neighbor=nbrs_lr.idx,
+                box=box
+            )
+            return state, nbrs, nbrs_lr, box
+        return step_nve_fn_lr
+
+    else:
+        @jax.jit
+        def step_nve_fn(
+            i: int,
+            state):
+            state, nbrs, box, = state
+            state = apply_fn(
+                state,
+                neighbor=nbrs.idx,
+                box=box
+            )
+            nbrs = nbrs.update(
+                state.position,
+                neighbor=nbrs.idx,
+                box=box
+            )
+            return state, nbrs, box
+        return step_nve_fn
 
 def create_nvt_step_fn(
     lr: bool,
@@ -1069,13 +1168,15 @@ def create_md_fn(
         callable: MD step function.
     """
     ensemble = ensemble.lower()
-    if ensemble == 'nvt':
+    if ensemble == 'nve':
+        return create_nve_step_fn(lr, apply_fn)
+    elif ensemble == 'nvt':
         return create_nvt_step_fn(lr, apply_fn, T)
     elif ensemble == 'npt':
         return create_npt_step_fn(lr, apply_fn, T, P)
     else:
         raise NotImplementedError(
-            f'Ensemble "{ensemble}" is not supported. Only NVT and NPT ensembles are currently implemented.')
+            f'Ensemble "{ensemble}" is not supported. Only NVE, NVT and NPT ensembles are currently implemented.')
 
 
 def perform_md(
@@ -1113,6 +1214,7 @@ def perform_md(
     # MD parameters
     md_dt = all_settings.get('md_dt')
     md_T = all_settings.get('md_T')
+    init_T = all_settings.get('init_T', md_T)
     md_P = all_settings.get('md_P')
     md_cycles = all_settings.get('md_cycles')
     md_steps = all_settings.get('md_steps')
@@ -1187,7 +1289,7 @@ def perform_md(
         try:
             state, box, current_cycle = load_state(
                 path_to_load=restart_load_path,
-                ensemble='nvt' if md_P is None else 'npt'
+                ensemble= 'nve' if md_T is None else 'nvt' if md_P is None else 'npt'
             )
             position = state.position
         except Exception as e:
@@ -1242,12 +1344,14 @@ def perform_md(
         units.metal_unit_system,
         md_dt,
         md_T,
+        init_T,
         md_P,
     )
 
     md_dt = unit_dict['dt']
     md_T = unit_dict['T']
     md_P = unit_dict['P']
+    init_T = unit_dict['init_T']
 
     # Setting up the thermostat and/or barostat
     nhc_tau = md_dt * nhc_thermo
@@ -1264,7 +1368,15 @@ def perform_md(
 
     rng_key = jax.random.PRNGKey(seed)
 
-    if md_P is None:
+    if md_T is None:
+        init_fn, step_md_fn = create_nve_fn(
+            energy_fn,
+            shift,
+            md_dt,
+            box,
+            lr,
+        )
+    elif md_P is None:
         init_fn, step_md_fn = create_nhc_fn(
             energy_fn,
             shift,
@@ -1294,7 +1406,7 @@ def perform_md(
                 box=box,
                 neighbor=nbrs.idx,
                 neighbor_lr=nbrs_lr.idx,
-                kT=md_T,
+                kT=init_T,
                 mass=initial_geometry_dict['masses']
             )
         else:
@@ -1323,7 +1435,7 @@ def perform_md(
         md_P
     )
 
-    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{H:.3f}\t{current_T:.1f}\t{0.0:.2e}')
+    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
 
     momenta, positions, boxes = [], [], []
     cycle_md = 0
@@ -1388,7 +1500,7 @@ def perform_md(
                 md_P
             )
 
-            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{H:.3f}\t{current_T:.1f}\t{time_per_step:.2e}')
+            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{time_per_step:.2e}')
 
             positions.append(np.array(state.position))
             momenta.append(np.array(state.momentum))
@@ -1419,7 +1531,7 @@ def perform_md(
                         box,
                         current_cycle,
                         restart_save_path,
-                        ensemble='nvt' if md_P is None else 'npt'
+                        ensemble='nve' if md_T is None else 'nvt' if md_P is None else 'npt'
                     )
 
     logger.info('Results saved to: ' + output_file)
@@ -1839,7 +1951,15 @@ def load_state(
 
     loaded_state = np.load(path_to_load, allow_pickle=True)
 
-    if ensemble.lower() == 'nvt':
+    if ensemble.lower() == 'nve':
+        state = jax_md.simulate.NVEState(
+            position=loaded_state['position'],
+            momentum=loaded_state['momentum'],
+            force=loaded_state['force'],
+            mass=loaded_state['mass']
+        )
+
+    elif ensemble.lower() == 'nvt':
         state = jax_md.simulate.NVTNoseHooverState(
             position=loaded_state['position'],
             momentum=loaded_state['momentum'],
@@ -1883,7 +2003,7 @@ def load_state(
             )
         )
     else:
-        raise NotImplementedError('Only NVT and NPT ensembles are supported')
+        raise NotImplementedError('Only NVE, NVT and NPT ensembles are supported')
 
     box = None if loaded_state['box'].item() is None else loaded_state['box']
     cycle = loaded_state['step']
