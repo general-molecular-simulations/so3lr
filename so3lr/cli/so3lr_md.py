@@ -1311,6 +1311,20 @@ def perform_md(
     logger.info('Starting MD simulation...')
     logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\ttime/step [s]')
 
+    # Calculate some quantities for printing
+    KE, PE, H, current_T, _ = compute_quantities(
+        energy_fn,
+        state,
+        nbrs,
+        nbrs_lr,
+        box,
+        units.metal_unit_system(),
+        md_T,
+        md_P
+    )
+
+    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{H:.3f}\t{current_T:.1f}\t{0.0:.2e}')
+
     momenta, positions, boxes = [], [], []
     cycle_md = 0
     current_cycle = 0
