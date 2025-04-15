@@ -307,6 +307,42 @@ Evaluate SO3LR on a dataset with all options:
 # jit_compile: true                            # Use JIT compilation for speed
 # ```
 
+PARAM_MAP = {
+    'input_file': 'input_file',
+    'output_file': 'output_file',
+    'final_file': 'final_file',
+    'model_path': 'model_path',
+    'precision': 'precision',
+    'dt':'md_dt',
+    'temperature': 'md_T',
+    'pressure':'md_P',
+    'md_cycles': 'md_cycles',
+    'md_steps': 'md_steps',
+    'lr_cutoff': 'lr_cutoff',
+    'dispersion_damping': 'dispersion_damping',
+    'buffer_sr':'buffer_size_multiplier_sr',
+    'buffer_lr':'buffer_size_multiplier_lr',
+    'save_buffer': 'save_buffer',
+    'total_charge': 'total_charge',
+    'seed': 'seed',
+    'restart_load': 'restart_load_path',
+    'restart_save': 'restart_save_path',
+    'relax': 'relax_before_run',
+    'force_conv': 'force_convergence',
+    # Additional MD settings
+    'nhc_chain': 'nhc_chain_length',
+    'nhc_steps': 'nhc_steps',
+    'nhc_thermo': 'nhc_thermo',
+    'nhc_baro': 'nhc_baro',
+    'nhc_sy_steps': 'nhc_sy_steps',
+    # Use default optimization settings
+    'min_n_min': 'min_n_min',
+    'min_start_dt': 'min_start_dt',
+    'min_max_dt': 'min_max_dt',
+    'min_cycles': 'min_cycles',
+    'min_steps': 'min_steps',
+}
+
 
 BASIC_HELP_STRING = """
 Run simulations using SO3LR Machine Learned Force Field.
@@ -413,6 +449,19 @@ class NVTNPTGroup(CustomCommandClass):
             cmd.context_settings["help_option_names"] = ["--help"]
         return cmd
 
+    def update_settings_from_defaults(self, ctx: click.Context, settings_dict: Dict[str, Any], key= str) -> None:
+        """Update settings dictionary with default values."""
+        param = ctx.params[key]
+        if key in PARAM_MAP:
+            if PARAM_MAP[key] in settings_dict:
+                if ctx._parameter_source[key] == click.core.ParameterSource.COMMANDLINE:
+                    # Override settings with command line arguments if provided
+                    settings_dict[PARAM_MAP[key]] = param
+            else:
+                # If not provided, set default values
+                if param is not None:
+                    settings_dict[PARAM_MAP[key]] = param
+        return settings_dict
 
 @click.group(cls=NVTNPTGroup, invoke_without_command=True,
              help="Run molecular dynamics using SO3LR Machine Learned Force Field.",
@@ -602,70 +651,76 @@ def cli(ctx: click.Context,
             logger.error(f"Error loading settings file: {str(e)}")
             sys.exit(1)
 
-    # Override settings with command line arguments if provided
-    if input_file is not None:
-        settings_dict['input_file'] = input_file
-    if output_file is not None:
-        settings_dict['output_file'] = output_file
-    if model_path is not None:
-        settings_dict['model_path'] = model_path
-    if precision is not None:
-        settings_dict['precision'] = precision
-    if lr_cutoff is not None:
-        settings_dict['lr_cutoff'] = lr_cutoff
-    if dispersion_damping is not None:
-        settings_dict['dispersion_damping'] = dispersion_damping
-    if buffer_sr is not None:
-        settings_dict['buffer_size_multiplier_sr'] = buffer_sr
-    if buffer_lr is not None:
-        settings_dict['buffer_size_multiplier_lr'] = buffer_lr
-    if save_buffer is not None:
-        settings_dict['save_buffer'] = save_buffer
-    if restart_save is not None:
-        settings_dict['restart_save_path'] = restart_save
-    if restart_load is not None:
-        settings_dict['restart_load_path'] = restart_load
     if dt is not None:
-        settings_dict['md_dt'] = dt/1000
-    if temperature is not None:
-        settings_dict['md_T'] = temperature
-        if settings_dict.get('nve') == True:
-            settings_dict['md_T'] = None
-            settings_dict['init_T'] = None
-    if pressure is not None:
-        settings_dict['md_P'] = pressure
-    if md_cycles is not None:
-        settings_dict['md_cycles'] = md_cycles
-    if md_steps is not None:
-        settings_dict['md_steps'] = md_steps
-    if min_cycles is not None:
-        settings_dict['min_cycles'] = min_cycles
-    if min_steps is not None:
-        settings_dict['min_steps'] = min_steps
-    if nhc_chain is not None:
-        settings_dict['nhc_chain_length'] = nhc_chain
-    if nhc_steps is not None:
-        settings_dict['nhc_steps'] = nhc_steps
-    if nhc_thermo is not None:
-        settings_dict['nhc_thermo'] = nhc_thermo
-    if nhc_baro is not None:
-        settings_dict['nhc_baro'] = nhc_baro
-    if nhc_sy_steps is not None:
-        settings_dict['nhc_sy_steps'] = nhc_sy_steps
-    if total_charge is not None:
-        settings_dict['total_charge'] = total_charge
-    if seed is not None:
-        settings_dict['seed'] = seed
-    if relax is not None:
-        settings_dict['relax_before_run'] = relax
-    if force_conv is not None:
-        settings_dict['force_convergence'] = force_conv
-    if min_start_dt is not None:
-        settings_dict['min_start_dt'] = min_start_dt
-    if min_max_dt is not None:
-        settings_dict['min_max_dt'] = min_max_dt
-    if min_n_min is not None:
-        settings_dict['min_n_min'] = min_n_min
+        ctx.params['dt'] = dt/1000
+
+    for key in ctx.params:
+        settings_dict = ctx.command.update_settings_from_defaults(ctx, settings_dict, key)
+
+    # # Override settings with command line arguments if provided
+    # if input_file is not None:
+    #     settings_dict['input_file'] = input_file
+    # if output_file is not None:
+    #     settings_dict['output_file'] = output_file
+    # if model_path is not None:
+    #     settings_dict['model_path'] = model_path
+    # if precision is not None:
+    #     settings_dict['precision'] = precision
+    # if lr_cutoff is not None:
+    #     settings_dict['lr_cutoff'] = lr_cutoff
+    # if dispersion_damping is not None:
+    #     settings_dict['dispersion_damping'] = dispersion_damping
+    # if buffer_sr is not None:
+    #     settings_dict['buffer_size_multiplier_sr'] = buffer_sr
+    # if buffer_lr is not None:
+    #     settings_dict['buffer_size_multiplier_lr'] = buffer_lr
+    # if save_buffer is not None:
+    #     settings_dict['save_buffer'] = save_buffer
+    # if restart_save is not None:
+    #     settings_dict['restart_save_path'] = restart_save
+    # if restart_load is not None:
+    #     settings_dict['restart_load_path'] = restart_load
+    # if dt is not None:
+    #     settings_dict['md_dt'] = dt/1000
+    # if temperature is not None:
+    #     settings_dict['md_T'] = temperature
+    #     if settings_dict.get('nve') == True:
+    #         settings_dict['md_T'] = None
+    #         settings_dict['init_T'] = None
+    # if pressure is not None:
+    #     settings_dict['md_P'] = pressure
+    # if md_cycles is not None:
+    #     settings_dict['md_cycles'] = md_cycles
+    # if md_steps is not None:
+    #     settings_dict['md_steps'] = md_steps
+    # if min_cycles is not None:
+    #     settings_dict['min_cycles'] = min_cycles
+    # if min_steps is not None:
+    #     settings_dict['min_steps'] = min_steps
+    # if nhc_chain is not None:
+    #     settings_dict['nhc_chain_length'] = nhc_chain
+    # if nhc_steps is not None:
+    #     settings_dict['nhc_steps'] = nhc_steps
+    # if nhc_thermo is not None:
+    #     settings_dict['nhc_thermo'] = nhc_thermo
+    # if nhc_baro is not None:
+    #     settings_dict['nhc_baro'] = nhc_baro
+    # if nhc_sy_steps is not None:
+    #     settings_dict['nhc_sy_steps'] = nhc_sy_steps
+    # if total_charge is not None:
+    #     settings_dict['total_charge'] = total_charge
+    # if seed is not None:
+    #     settings_dict['seed'] = seed
+    # if relax is not None:
+    #     settings_dict['relax_before_run'] = relax
+    # if force_conv is not None:
+    #     settings_dict['force_convergence'] = force_conv
+    # if min_start_dt is not None:
+    #     settings_dict['min_start_dt'] = min_start_dt
+    # if min_max_dt is not None:
+    #     settings_dict['min_max_dt'] = min_max_dt
+    # if min_n_min is not None:
+    #     settings_dict['min_n_min'] = min_n_min
 
     # Validate required settings
     if 'input_file' not in settings_dict:
