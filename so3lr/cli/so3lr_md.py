@@ -40,6 +40,19 @@ from so3lr import So3lrPotential
 # Setup logging
 logger = logging.getLogger("SO3LR")
 
+class RestartInNewEnsembleError(Exception):
+    def __init__(self, loaded_state, ensemble):
+        """
+        Exception raised when the restart file contains a different ensemble
+        than the one specified in the simulation."""
+        self.ensemble = ensemble
+        self.loaded_state = loaded_state
+        self.message = f"Restart file contains a different ensemble than the one specified.\n"\
+                       f"Requested ensemble: {self.ensemble} Loaded state: {self.loaded_state["ensemble"]}.\n"\
+                       f"Only positions, momenta and box information is loaded from the restart file."
+        super().__init__(self.message)
+    def __str__(self):
+        return self.message
 
 def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.INFO):
     """
@@ -110,7 +123,6 @@ def handle_units(
     unit_system: Callable[[], Dict[str, float]],
     dt: float,
     T: Optional[float] = None,
-    init_T: Optional[float] = None,
     P: Optional[float] = None
 ) -> Dict[str, Optional[float]]:
     """
@@ -135,8 +147,6 @@ def handle_units(
 
         if T is not None:
             T *= unit['temperature']
-        if init_T is not None:
-            init_T *= unit['temperature']
         if P is not None:
             P *= unit['pressure']
 
@@ -144,7 +154,6 @@ def handle_units(
             'dt': dt,
             'T': T,
             'P': P,
-            'init_T': init_T
         }
     except Exception as e:
         raise ValueError(f"Error converting units: {str(e)}.")
@@ -744,8 +753,9 @@ def compute_quantities(
     nbrs_lr: jax_md.partition.NeighborList,
     box: jnp.ndarray,
     unit: dict,
+    ensemble: str,
     T: float,
-    P: float = None
+    P: float = None,
 ) -> Tuple[float, float, float, float, float]:
     """
     Compute the kinetic energy, potential energy, Hamiltonian, temperature
@@ -782,7 +792,7 @@ def compute_quantities(
             box=box
         )
 
-        if T is not None and P is None:
+        if ensemble == 'nvt':
             H = jax_md.simulate.nvt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -791,7 +801,7 @@ def compute_quantities(
                 neighbor_lr=nbrs_lr.idx,
                 box=box
             ) / unit['energy']
-        elif T is not None:
+        elif ensemble == 'npt':
             H = jax_md.simulate.npt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -809,7 +819,7 @@ def compute_quantities(
             neighbor=nbrs.idx,
             box=box
         )
-        if T is not None and P is None:
+        if ensemble == 'nvt':
             H = jax_md.simulate.nvt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -817,7 +827,7 @@ def compute_quantities(
                 neighbor=nbrs.idx,
                 box=box
             ) / unit['energy']
-        elif T is not None:
+        elif ensemble == 'npt':
             H = jax_md.simulate.npt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -1220,10 +1230,10 @@ def perform_md(
     # MD parameters
     md_dt = all_settings.get('md_dt')
     md_T = all_settings.get('md_T')
-    init_T = all_settings.get('init_T', md_T)
     md_P = all_settings.get('md_P')
     md_cycles = all_settings.get('md_cycles')
     md_steps = all_settings.get('md_steps')
+    ensemble = all_settings.get('ensemble')
 
     # Thermostat parameters
     nhc_chain_length = all_settings.get('nhc_chain_length')
@@ -1295,9 +1305,15 @@ def perform_md(
         try:
             state, box, current_cycle = load_state(
                 path_to_load=restart_load_path,
-                ensemble= 'nve' if md_T is None else 'nvt' if md_P is None else 'npt'
+                ensemble= ensemble,
             )
             position = state.position
+        except RestartInNewEnsembleError as e:
+            logger.warning(e)
+            position = e.loaded_state['position']
+            initial_geometry_dict['velocities'] = e.loaded_state['momentum'] / e.loaded_state['mass']
+            box = e.loaded_state['box']
+            restart = False
         except Exception as e:
             raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
         
@@ -1350,14 +1366,12 @@ def perform_md(
         units.metal_unit_system,
         md_dt,
         md_T,
-        init_T,
         md_P,
     )
 
     md_dt = unit_dict['dt']
     md_T = unit_dict['T']
     md_P = unit_dict['P']
-    init_T = unit_dict['init_T']
 
     # Setting up the thermostat and/or barostat
     nhc_tau = md_dt * nhc_thermo
@@ -1368,13 +1382,13 @@ def perform_md(
         'tau': nhc_tau
     }
 
-    if md_P is not None:
+    if ensemble == 'npt':
         nhc_barostat_kwargs = nhc_kwargs.copy()
         nhc_barostat_kwargs['tau'] = md_dt * nhc_baro
 
     rng_key = jax.random.PRNGKey(seed)
 
-    if md_T is None:
+    if ensemble == 'nve':
         init_fn, step_md_fn = create_nve_fn(
             energy_fn,
             shift,
@@ -1382,7 +1396,7 @@ def perform_md(
             box,
             lr,
         )
-    elif md_P is None:
+    elif ensemble == 'nvt':
         init_fn, step_md_fn = create_nhc_fn(
             energy_fn,
             shift,
@@ -1412,7 +1426,7 @@ def perform_md(
                 box=box,
                 neighbor=nbrs.idx,
                 neighbor_lr=nbrs_lr.idx,
-                kT=init_T,
+                kT=md_T,
                 mass=initial_geometry_dict['masses'],
                 velocities = initial_geometry_dict.get('velocities')
             )
@@ -1439,6 +1453,7 @@ def perform_md(
         nbrs_lr,
         box,
         units.metal_unit_system(),
+        ensemble,
         md_T,
         md_P
     )
@@ -1504,6 +1519,7 @@ def perform_md(
                 nbrs_lr,
                 box,
                 units.metal_unit_system(),
+                ensemble,
                 md_T,
                 md_P
             )
@@ -1539,7 +1555,7 @@ def perform_md(
                         box,
                         current_cycle,
                         restart_save_path,
-                        ensemble='nve' if md_T is None else 'nvt' if md_P is None else 'npt'
+                        ensemble=ensemble
                     )
 
     # Write atoms object to final geometry extxyz file
@@ -1970,6 +1986,9 @@ def load_state(
     """
 
     loaded_state = np.load(path_to_load, allow_pickle=True)
+    loaded_ensemble = loaded_state.get('ensemble',None)
+    if ensemble.lower() != loaded_ensemble:
+        raise RestartInNewEnsembleError(loaded_state, ensemble)
 
     if ensemble.lower() == 'nve':
         state = jax_md.simulate.NVEState(

@@ -455,12 +455,31 @@ class NVTNPTGroup(CustomCommandClass):
         if key in PARAM_MAP:
             if PARAM_MAP[key] in settings_dict:
                 if ctx._parameter_source[key] == click.core.ParameterSource.COMMANDLINE:
+                    if param != settings_dict[PARAM_MAP[key]]:
+                        logger.warning(f"settings.yaml: {PARAM_MAP[key]} is overridden by explicit command line argument.")
+                        settings_dict[PARAM_MAP[key]] = param
                     # Override settings with command line arguments if provided
                     settings_dict[PARAM_MAP[key]] = param
             else:
                 # If not provided, set default values
                 if param is not None:
                     settings_dict[PARAM_MAP[key]] = param
+        return settings_dict
+
+    def canonicalize_ensemble(self, settings_dict: Dict[str, Any]):
+        """Canonicalize the ensemble based on the provided settings."""
+        if int(settings_dict.get('nve', False)) + int(settings_dict.get('nvt', False)) + int(settings_dict.get('npt', False)) > 1:
+            raise ValueError("Only one of --nve, --nvt or --npt can be specified.")
+        if settings_dict.get('ensemble') is None:
+            if settings_dict.get('npt') is True or settings_dict.get('md_P') is not None:
+                if settings_dict.get('md_P') is not None:
+                    settings_dict['ensemble'] = 'npt'
+                else:
+                    raise ValueError("Pressure must be specified for NPT ensemble.")
+            elif settings_dict.get('nve') is True:
+                settings_dict['ensemble'] = 'nve'
+            else: # NVT is default
+                settings_dict['ensemble'] = 'nvt'
         return settings_dict
 
 @click.group(cls=NVTNPTGroup, invoke_without_command=True,
@@ -756,6 +775,8 @@ def cli(ctx: click.Context,
     if settings is not None:
         logger.info(f"Loading settings from {settings}")
 
+    settings_dict = ctx.command.canonicalize_ensemble(settings_dict)
+
     # Print simulation details
     logger.info(f"Initial geometry:          {settings_dict['input_file']}")
     logger.info(f"Output file:               {settings_dict['output_file']}")
@@ -773,10 +794,10 @@ def cli(ctx: click.Context,
 
     logger.info(f"Temperature:               {settings_dict.get('md_T', DEFAULT_TEMPERATURE)} K")
 
-    if settings_dict.get('md_P') is not None:
+    if settings_dict.get('ensemble') == 'npt':
         logger.info(f"Pressure:                  {settings_dict.get('md_P')} atm")
         logger.info(f"Ensemble:                  NPT")
-    elif settings_dict.get('md_T') is not None:
+    elif settings_dict.get('ensemble') == 'nvt':
         logger.info(f"Ensemble:                  NVT")
     else:
         logger.info(f"Ensemble:                  NVE")
@@ -1195,7 +1216,7 @@ def nvt_md(
         'min_max_dt': DEFAULT_MIN_MAX_DT,
         'min_cycles': DEFAULT_MIN_CYCLES,
         'min_steps': DEFAULT_MIN_STEPS,
-
+        'ensemble': 'nvt',
     }
 
     # Add log settings to the settings dictionary
@@ -1431,6 +1452,7 @@ def npt_md(
         'min_max_dt': DEFAULT_MIN_MAX_DT,
         'min_cycles': DEFAULT_MIN_CYCLES,
         'min_steps': DEFAULT_MIN_STEPS,
+        'ensemble': 'npt',
     }
 
     # Add log settings to the settings dictionary
@@ -1632,7 +1654,7 @@ def nve_md(
         'min_max_dt': DEFAULT_MIN_MAX_DT,
         'min_cycles': DEFAULT_MIN_CYCLES,
         'min_steps': DEFAULT_MIN_STEPS,
-
+        'ensemble': 'nve',
     }
 
     # Add log settings to the settings dictionary
