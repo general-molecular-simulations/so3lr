@@ -1558,18 +1558,6 @@ def perform_md(
                         ensemble=ensemble
                     )
 
-    # Write atoms object to final geometry extxyz file
-    final_geometry = all_settings.get('final_file')
-    if final_geometry is not None:
-        initial_geometry.set_velocities(jax.numpy.array(state.velocity))
-        if shift_displacement == 'periodic':
-            initial_geometry.positions=jax_md.space.transform(box=box, R=state.position)
-            initial_geometry.set_cell(box)
-        else:
-            initial_geometry.positions=state.position
-            initial_geometry.set_cell(None)
-        write(final_geometry, initial_geometry, format="extxyz")
-
     logger.info('Results saved to: ' + output_file)
     average_time_per_step = total_time_for_steps / (cycle_md - 1)
     logger.info(f'Average time per step: {average_time_per_step:.2e} seconds')

@@ -310,7 +310,6 @@ Evaluate SO3LR on a dataset with all options:
 PARAM_MAP = {
     'input_file': 'input_file',
     'output_file': 'output_file',
-    'final_file': 'final_file',
     'model_path': 'model_path',
     'precision': 'precision',
     'dt':'md_dt',
@@ -615,7 +614,6 @@ def cli(ctx: click.Context,
         nvt: bool,
         npt: bool,
         # Optional arguments:
-        final_file: Optional[str] = None,
         ) -> None:
     """
     Run molecular dynamics simulations with SO3LR or MLFF models.
@@ -762,9 +760,6 @@ def cli(ctx: click.Context,
     # Add log settings to the settings dictionary
     settings_dict['log_file'] = log_file
 
-    # Pass the final file name to the settings dictionary, None is accepted
-    settings_dict['final_file'] = final_file
-
     # Setup logging with default levels
     setup_logger(log_file)
 
@@ -780,7 +775,6 @@ def cli(ctx: click.Context,
     # Print simulation details
     logger.info(f"Initial geometry:          {settings_dict['input_file']}")
     logger.info(f"Output file:               {settings_dict['output_file']}")
-    logger.info(f"Output geometry:           {settings_dict['final_file']}")
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
@@ -1101,7 +1095,6 @@ def nvt_md(
     # Help option
     help: bool,
     # Optional arguments
-    final_file: Optional[str] = None
 ) -> None:
     """
     Run NVT (constant volume and temperature) molecular dynamics simulation.
@@ -1143,7 +1136,6 @@ def nvt_md(
     logger.info("=" * 60)
     logger.info(f"Initial geometry:          {input_file}")
     logger.info(f"Output file:               {output_file}")
-    logger.info(f"Final geometry:            {final_file}")
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
@@ -1187,7 +1179,6 @@ def nvt_md(
     settings = {
         'input_file': input_file,
         'output_file': output_file,
-        'final_file': final_file,
         'model_path': model_path,
         'precision': precision,
         'md_dt': dt/1000,
@@ -1329,9 +1320,7 @@ def npt_md(
     force_conv: Optional[float],
     seed: int,
     # Help option
-    help: bool,
-    # Optional arguments
-    final_file: Optional[str] = None
+    help: bool
 ) -> None:
     """
     Run NPT (constant pressure and temperature) molecular dynamics simulation.
@@ -1375,7 +1364,6 @@ def npt_md(
     logger.info("=" * 60)
     logger.info(f"Initial geometry:          {input_file}")
     logger.info(f"Output file:               {output_file}")
-    logger.info(f"Final geometry:            {final_file}")
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
@@ -1421,7 +1409,6 @@ def npt_md(
     settings = {
         'input_file': input_file,
         'output_file': output_file,
-        'final_file': final_file,
         'model_path': model_path,
         'precision': precision,
         'md_dt': dt/1000,
@@ -1546,9 +1533,7 @@ def nve_md(
     force_conv: Optional[float],
     seed: int,
     # Help option
-    help: bool,
-    # Optional arguments
-    final_file: Optional[str] = None
+    help: bool
 ) -> None:
     """
     Run NVE (constant volume and energy) molecular dynamics simulation.
@@ -1589,7 +1574,6 @@ def nve_md(
     logger.info("=" * 60)
     logger.info(f"Initial geometry:          {input_file}")
     logger.info(f"Output file:               {output_file}")
-    logger.info(f"Final geometry:            {final_file}")
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
@@ -1630,7 +1614,6 @@ def nve_md(
     settings = {
         'input_file': input_file,
         'output_file': output_file,
-        'final_file': final_file,
         'model_path': model_path,
         'precision': precision,
         'md_dt': dt/1000,
