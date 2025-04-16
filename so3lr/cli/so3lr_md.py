@@ -48,7 +48,7 @@ class RestartInNewEnsembleError(Exception):
         self.ensemble = ensemble
         self.loaded_state = loaded_state
         self.message = f"Restart file contains a different ensemble than the one specified.\n"\
-                       f"Requested ensemble: {self.ensemble} Loaded state: {self.loaded_state["ensemble"]}.\n"\
+                       f"Requested ensemble: {self.ensemble} Loaded state: {self.loaded_state.get('ensemble',None)}.\n"\
                        f"Only positions, momenta and box information is loaded from the restart file."
         super().__init__(self.message)
     def __str__(self):
@@ -1951,6 +1951,7 @@ def save_state(
             box_momentum=state.box_momentum,
             box_mass=state.box_mass,
         )
+    state_dict.update(ensemble=ensemble)
     np.savez(path_to_save, **state_dict)
 
 
@@ -1974,8 +1975,7 @@ def load_state(
     """
 
     loaded_state = np.load(path_to_load, allow_pickle=True)
-    loaded_ensemble = loaded_state.get('ensemble',None)
-    if ensemble.lower() != loaded_ensemble:
+    if ensemble.lower() != loaded_state.get('ensemble',None):
         raise RestartInNewEnsembleError(loaded_state, ensemble)
 
     if ensemble.lower() == 'nve':
