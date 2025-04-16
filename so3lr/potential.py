@@ -7,7 +7,8 @@ from mlff.mdx.potential import MLFFPotentialSparse
 def make_potential_fn(
     lr_cutoff=12.,
         dispersion_energy_cutoff_lr_damping=2.,
-        dtype=np.float32
+        dtype=np.float32,
+        output_intermediate_quantities=None
 ):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
@@ -19,5 +20,6 @@ def make_potential_fn(
             dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
             neighborlist_format_lr='ordered_sparse'
         ),
-        dtype=dtype
+        dtype=dtype,
+        output_intermediate_quantities=output_intermediate_quantities
     )
