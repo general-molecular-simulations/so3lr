@@ -105,7 +105,7 @@ def to_jax_md(
     ):
         graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
         if has_aux:
-            return potential(graph, has_aux=[[True]])
+            return potential(graph, has_aux=True)
         else:
             return potential(graph).sum()
 

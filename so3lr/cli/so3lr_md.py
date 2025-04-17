@@ -19,7 +19,7 @@ import pathlib
 from pathlib import Path
 from functools import partial
 from logging.handlers import RotatingFileHandler
-from typing import Dict, Tuple, Union, List, Optional, Any, Callable
+from typing import Dict, Tuple, Union, List, Optional, Any, Callable, MutableMapping, Sequence
 
 import ase
 import yaml
@@ -225,7 +225,8 @@ def init_hdf5_store(
     batch_size: int,
     num_atoms: int,
     num_box_entries: int,
-    exist_ok: bool = False
+    exist_ok: bool = False,
+    observables: Optional[Sequence[str]] = None,
 ) -> HDF5Store:
     """
     Initialize an HDF5 storage object for trajectory data.
@@ -275,6 +276,21 @@ def init_hdf5_store(
         )
     }
 
+    for o in observables:
+        if o == "partial_charges":
+            dataset['partial_charges'] = DataSetEntry(
+                chunk_length=1,
+                shape=(batch_size, num_atoms, ),
+                dtype=np.float32
+            )
+
+        if o == "dipole_vec" in observables:
+            dataset['dipole_vec'] = DataSetEntry(
+                chunk_length=1,
+                shape=(batch_size, 1, 1),
+                dtype=np.float32
+            )
+
     return HDF5Store(save_path, datasets=dataset, mode='w')
 
 
@@ -283,7 +299,8 @@ def write_to_hdf5(
     momenta: Optional[List[jnp.ndarray]],
     positions: List[jnp.ndarray],
     boxes: Union[float, jnp.ndarray, List[jnp.ndarray], None],
-) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray]]:
+    obs_dict: MutableMapping[str, list] = {}
+) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
     """
     Write trajectory data to an HDF5 file.
 
@@ -294,7 +311,7 @@ def write_to_hdf5(
         momenta: List of momenta arrays for each frame, or None.
         positions: List of position arrays for each frame.
         boxes: Box vectors for each frame. Can be float, array, list of arrays, or None.
-
+        obs_dict: Dictionary of observables. Defaults to {}.
     Returns:
         Tuple of empty lists for momenta, positions, and boxes.
     """
@@ -315,7 +332,9 @@ def write_to_hdf5(
         
         hdf5_store.append(step_data)
         
-        return [], [], []
+        obs_dict = {o: [] for o in obs_dict.keys()}
+
+        return [], [], [], obs_dict
 
     except Exception as e:
         logger.error(f"Failed to write to HDF5 file: {str(e)}")
@@ -327,8 +346,9 @@ def write_to_extxyz(
     atoms: ase.Atoms,
     boxes: Union[float, jnp.ndarray, List, None],
     momenta: List,
-    positions: List
-) -> Tuple[List, List, List]:
+    positions: List,
+    obs_dict: MutableMapping[str, list] = {}
+) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
     """
     Write trajectory data to an extended XYZ file.
 
@@ -343,6 +363,7 @@ def write_to_extxyz(
              Can be float, array, or list of arrays.
         momenta: List of momenta arrays for each frame.
         positions: List of position arrays for each frame.
+        obs_dict: Dictionary of observables. Defaults to {}.
 
     Returns:
         Tuple of empty lists (momenta, positions, boxes) to clear memory on success.
@@ -398,18 +419,29 @@ def write_to_extxyz(
 
             atoms_list.append(atoms_copy)
 
+        for o in obs_dict.keys:
+            if o == "partial_charges":
+                atoms['charges']= jnp.asnumpy(obs_dict['partial_charges']).flatten()
+
+            if o == "dipole_vec" :
+                atoms.info['dipole_vec'] = jnp.asnumpy(obs_dict['dipole_vec']).flatten()
+
         # Write all atoms to file at once
         file_exists = output_path.exists()
         ase.io.write(output_path, atoms_list,
                      format='extxyz', append=file_exists)
 
         # Clear lists to free memory
-        return [], [], []
+        obs_dict = {o: [] for o in obs_dict.keys()}
+
+        return [], [], [], obs_dict
 
     except Exception as e:
         logger.warning(f"Failed to write to extxyz file: {str(e)}")
         # Return the original lists in case of failure
-        return [], [], []
+        obs_dict = {o: [] for o in obs_dict.keys()}
+
+        return [], [], [], obs_dict
 
 
 def atoms_to_jnp(
@@ -643,10 +675,14 @@ def to_jax_md_custom(
             R,
             neighbor,
             neighbor_lr,
+            has_aux=False,
             **energy_fn_kwargs
     ):
         graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
-        return potential(graph).sum()
+        if has_aux:
+            return potential(graph, has_aux=True)
+        else:
+            return potential(graph).sum()
 
     return neighbor_fn, neighbor_fn_lr, energy_fn
 
@@ -660,8 +696,9 @@ def process_model(
     buffer_size_multiplier_lr: float = 1.25,
     buffer_size_multiplier_sr: float = 1.25,
     precision: jnp.dtype = jnp.float32,
-    fractional_coordinates: bool = False
-) -> Tuple[callable, callable, callable]:
+    fractional_coordinates: bool = False,
+    has_aux: bool = False,
+) -> Tuple[callable, callable, callable, Optional[callable]]:
     """
     Process the model and create the neighbor functions and energy function.
 
@@ -685,7 +722,7 @@ def process_model(
         Tuple[callable, callable, callable]: Neighbor functions and energy function.
     """
 
-    neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md_custom(
+    neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = to_jax_md_custom(
         potential=potential,
         species=species,
         displacement_or_metric=displacement,
@@ -697,9 +734,8 @@ def process_model(
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
     )
-    energy_fn = jax.jit(energy_fn)
 
-    return neighbor_fn, neighbor_fn_lr, energy_fn
+    return neighbor_fn, neighbor_fn_lr, energy_or_obs_fn
 
 
 def check_overflow(
@@ -1194,6 +1230,50 @@ def create_md_fn(
         raise NotImplementedError(
             f'Ensemble "{ensemble}" is not supported. Only NVE, NVT and NPT ensembles are currently implemented.')
 
+def create_obs_fn(
+    energy_or_obs_fn: callable,
+    observables: Sequence[str],
+    lr: bool,
+)-> Tuple[callable, MutableMapping[str, list]]:
+    """
+    Creates an observation function for monitoring simulation observables.
+
+    Args:
+        energy_or_obs_fn (callable): A function that computes the energy or observables of the system.
+        observables (Sequence[str]): A list of observable names to monitor during the simulation.
+        lr (bool): A flag indicating whether to use a low-rank approximation.
+
+    Returns:
+        Tuple[callable, MutableMapping[str, list]]: A tuple containing:
+            - A callable observation function.
+            - A mutable dictionary mapping observable names to their respective lists of recorded values.
+    """
+
+    obs_dict = {o: [] for o in observables}
+
+    if lr:
+        @jax.jit
+        def obs_fn(state):
+            state, nbrs, nbrs_lr, box = state
+            return  energy_or_obs_fn(
+                        state.position,
+                        neighbor=nbrs.idx,
+                        neighbor_lr=nbrs_lr.idx,
+                        box=box,
+                        has_aux=True
+                    )
+    else:
+        @jax.jit
+        def obs_fn(state):
+            state, nbrs, box = state
+            return  energy_or_obs_fn(
+                        state.position,
+                        neighbor=nbrs.idx,
+                        box=box,
+                        has_aux=True
+                    )
+
+    return obs_fn, obs_dict
 
 def perform_md(
     all_settings: Dict,
@@ -1247,6 +1327,9 @@ def perform_md(
     save_buffer = all_settings.get('save_buffer')
     seed = all_settings.get('seed')
     relax_before_run = all_settings.get('relax_before_run')
+    observables = all_settings.get('observables', None)
+    if observables is not None and output_format != 'hdf5':
+        raise ValueError('Observables can currently only be saved in HDF5 format.')
 
     # Handling of restart
     if restart_save_path is not None:
@@ -1295,7 +1378,8 @@ def perform_md(
             batch_size=save_buffer,
             num_atoms=position.shape[0],
             num_box_entries=1,
-            exist_ok=True
+            exist_ok=True,
+            observables = observables,
         )
 
     current_cycle = 0
@@ -1325,7 +1409,8 @@ def perform_md(
         potential = So3lrPotential(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping
+            dispersion_energy_cutoff_lr_damping=dispersion_damping,
+            output_intermediate_quantities=observables
         )
     else:
         # Verify model path exists
@@ -1336,11 +1421,12 @@ def perform_md(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_damping=dispersion_damping
+            dispersion_damping=dispersion_damping,
+            output_intermediate_quantities=observables
         )
 
     # Setting up the model
-    neighbor_fn, neighbor_fn_lr, energy_fn = process_model(
+    neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = process_model(
         potential=potential,
         species=initial_geometry_dict['species'],
         displacement=displacement,
@@ -1349,8 +1435,11 @@ def perform_md(
         precision=precision,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
-        buffer_size_multiplier_sr=buffer_size_multiplier_sr
+        buffer_size_multiplier_sr=buffer_size_multiplier_sr,
+        has_aux=observables is not None,
     )
+
+    energy_fn = jax.jit(partial(energy_or_obs_fn,has_aux=False))
 
     # Allocating the neighbor lists
     if neighbor_fn_lr is not None:
@@ -1440,6 +1529,16 @@ def perform_md(
                 mass=initial_geometry_dict['masses'],
                 velocities = initial_geometry_dict.get('velocities')
             )
+
+    # Setup additional observables
+    obs_dict={}
+    if observables is not None:
+        obs_fn, obs_dict = create_obs_fn(
+            energy_or_obs_fn,
+            observables,
+            lr
+        )
+
 
     # Running the MD
     logger.info('Starting MD simulation...')
@@ -1531,22 +1630,30 @@ def perform_md(
             if box is not None:
                 boxes.append(np.array(box))
 
+            # Calculate observables
+            if observables is not None:
+                obs_data = obs_fn((state, nbrs, nbrs_lr, box))
+                for key in obs_dict.keys():
+                    obs_dict[key].append(obs_data[1][key])
+
             if ((len(positions) % save_buffer == 0 and len(positions) > 0) or (len(positions) == md_cycles)):
                 # Saving the output
                 if output_format == 'hdf5':
-                    positions, momenta, boxes = write_to_hdf5(
+                    positions, velocities, boxs, obs_dict = write_to_hdf5(
                         hdf5_store,
                         momenta,
                         positions,
                         boxes,
+                        obs_dict,
                     )
                 elif output_format == 'extxyz':
-                    positions, momenta, boxes = write_to_extxyz(
+                    positions, momenta, boxes, obs_dict = write_to_extxyz(
                         output_file,
                         initial_geometry,  # Template atoms
                         boxes,
                         momenta,
                         positions,
+                        obs_dict
                     )
                 # Saving the state for restart
                 if create_restart:
@@ -1743,7 +1850,7 @@ def perform_min(
         )
 
     # Setting up the model
-    neighbor_fn, neighbor_fn_lr, energy_fn = process_model(
+    neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = process_model(
         potential=potential,
         species=initial_geometry_dict['species'],
         displacement=displacement,
@@ -1754,6 +1861,7 @@ def perform_min(
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr
     )
+    energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False))
     force_fn = jax.jit(jax_md.quantity.force(energy_fn))
 
     # Allocating the neighbor lists
