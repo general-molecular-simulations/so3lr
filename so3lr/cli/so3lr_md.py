@@ -48,7 +48,7 @@ class RestartInNewEnsembleError(Exception):
         self.ensemble = ensemble
         self.loaded_state = loaded_state
         self.message = f"Restart file contains a different ensemble than the one specified.\n"\
-                       f"Requested ensemble: {self.ensemble} Loaded state: {self.loaded_state.get('ensemble',None)}.\n"\
+                       f"Requested ensemble: {str(self.ensemble).upper()} Loaded state: {str(self.loaded_state.get('ensemble',None)).upper()}.\n"\
                        f"Only positions, momenta and box information is loaded from the restart file."
         super().__init__(self.message)
     def __str__(self):
@@ -208,7 +208,7 @@ def handle_box(
     elif shift_displacement == 'free':
         # Create displacement and shift functions for free boundary conditions
         displacement, shift = jax_md.space.free()
-        box = jnp.array(0.0)
+        box = jnp.array([0.0])
         fractional_coordinates = False
 
     else:
@@ -226,7 +226,7 @@ def init_hdf5_store(
     num_atoms: int,
     num_box_entries: int,
     exist_ok: bool = False,
-    observables: Optional[Sequence[str]] = None,
+    observables: Optional[Sequence[str]] = [],
 ) -> HDF5Store:
     """
     Initialize an HDF5 storage object for trajectory data.
@@ -284,7 +284,14 @@ def init_hdf5_store(
                 dtype=np.float32
             )
 
-        if o == "dipole_vec" in observables:
+        if o == "hirshfeld_ratios":
+            dataset['hirshfeld_ratios'] = DataSetEntry(
+                chunk_length=1,
+                shape=(batch_size, num_atoms, ),
+                dtype=np.float32
+            )
+
+        if o == "dipole_vec":
             dataset['dipole_vec'] = DataSetEntry(
                 chunk_length=1,
                 shape=(batch_size, 1, 1),
@@ -320,12 +327,17 @@ def write_to_hdf5(
             'positions': jnp.stack(positions, axis=0),
         }
 
-        if boxes[0] != 0:
+        if np.any(boxes != 0):
             step_data['box'] = jnp.stack(boxes, axis=0)
     
         if momenta is not None:
             step_data['momenta'] = jnp.stack(momenta, axis=0)
-        
+
+        for o in obs_dict.keys():
+            step_data.update(
+                {o: jnp.stack(obs_dict[o], axis=0)},
+            )
+
         step_data = jax.tree.map(
             lambda u: np.asarray(u), step_data
             )
@@ -417,14 +429,17 @@ def write_to_extxyz(
             if momenta and i < len(momenta):
                 atoms_copy.set_momenta(momenta[i])
 
+            for o in obs_dict.keys():
+                if o == "partial_charges":
+                    atoms_copy.set_array('charges', np.asarray(obs_dict['partial_charges'][i]).flatten())
+
+                if o == "hirshfeld_ratios":
+                    atoms_copy.set_array('hirsh_ratios', np.asarray(obs_dict['hirshfeld_ratios'][i]).flatten())
+
+                if o == "dipole_vec" :
+                    atoms_copy.info['dipole_vec'] = np.asarray(obs_dict['dipole_vec'][i]).flatten()
+
             atoms_list.append(atoms_copy)
-
-        for o in obs_dict.keys:
-            if o == "partial_charges":
-                atoms['charges']= jnp.asnumpy(obs_dict['partial_charges']).flatten()
-
-            if o == "dipole_vec" :
-                atoms.info['dipole_vec'] = jnp.asnumpy(obs_dict['dipole_vec']).flatten()
 
         # Write all atoms to file at once
         file_exists = output_path.exists()
@@ -464,8 +479,13 @@ def atoms_to_jnp(
     masses = jnp.array(atoms.get_masses(), dtype=precision)
     if not np.all(atoms.get_velocities()==0):
         velocities = jnp.array(atoms.get_velocities(), dtype=precision)
+    elif not np.all(atoms.get_momenta()==0):
+        velocities = jnp.array(atoms.get_momenta() / masses, dtype=precision)
     else:
         velocities = None
+
+    if velocities is not None:
+        logger.info('Loading initial velocities from input file.')
      
     return {
         'positions': positions,
@@ -506,7 +526,8 @@ def load_model(
     model_path: str,
     precision: jnp.dtype,
     lr_cutoff: float = 12.0,
-    dispersion_damping: float = 2.
+    dispersion_damping: float = 2.,
+    **kwargs
 ) -> MLFFPotentialSparse:
     """
     Load a trained MLFF model from a checkpoint directory.
@@ -535,9 +556,10 @@ def load_model(
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            neighborlist_format_lr='ordered_sparse'
+            neighborlist_format_lr='ordered_sparse',
         ),
-        dtype=precision
+        dtype=precision,
+        **kwargs
     )
 
     return potential
@@ -909,6 +931,7 @@ def create_nve_fn(
     energy_fn: callable,
     shift: callable,
     dt: float,
+    T: float,
     box: jnp.ndarray,
     lr: bool,
 )-> Tuple[callable, callable]:
@@ -929,7 +952,8 @@ def create_nve_fn(
     init_fn, apply_fn = jax_md.simulate.nve(
         energy_fn,
         shift,
-        dt=dt
+        dt=dt,
+        kT=T
     )
 
     init_fn = jax.jit(init_fn)
@@ -1327,9 +1351,7 @@ def perform_md(
     save_buffer = all_settings.get('save_buffer')
     seed = all_settings.get('seed')
     relax_before_run = all_settings.get('relax_before_run')
-    observables = all_settings.get('observables', None)
-    if observables is not None and output_format != 'hdf5':
-        raise ValueError('Observables can currently only be saved in HDF5 format.')
+    observables = all_settings.get('observables', [])
 
     # Handling of restart
     if restart_save_path is not None:
@@ -1377,7 +1399,7 @@ def perform_md(
             save_to=output_file,
             batch_size=save_buffer,
             num_atoms=position.shape[0],
-            num_box_entries=1,
+            num_box_entries=box.shape[0],
             exist_ok=True,
             observables = observables,
         )
@@ -1395,12 +1417,18 @@ def perform_md(
         except RestartInNewEnsembleError as e:
             logger.warning(e)
             position = e.loaded_state['position']
+            initial_geometry_dict['masses'] = e.loaded_state['mass']
             initial_geometry_dict['velocities'] = e.loaded_state['momentum'] / e.loaded_state['mass']
             box = e.loaded_state['box']
+            if np.all(box == 0) or box is None or box == 0.0:
+                box = jnp.array([0.0])
             restart = False
         except Exception as e:
             raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
         
+    patched_potential_kwargs={}
+    if "partial_charges" in observables:
+            patched_potential_kwargs.update(output_intermediate_quantities=observables)
 
     # Loading the model
     if model_path is None:
@@ -1410,7 +1438,7 @@ def perform_md(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            output_intermediate_quantities=observables
+            **patched_potential_kwargs
         )
     else:
         # Verify model path exists
@@ -1422,7 +1450,7 @@ def perform_md(
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
             dispersion_damping=dispersion_damping,
-            output_intermediate_quantities=observables
+            **patched_potential_kwargs
         )
 
     # Setting up the model
@@ -1436,7 +1464,7 @@ def perform_md(
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
-        has_aux=observables is not None,
+        has_aux=len(observables)>0,
     )
 
     energy_fn = jax.jit(partial(energy_or_obs_fn,has_aux=False))
@@ -1482,6 +1510,7 @@ def perform_md(
             energy_fn,
             shift,
             md_dt,
+            md_T,
             box,
             lr,
         )
@@ -1532,7 +1561,7 @@ def perform_md(
 
     # Setup additional observables
     obs_dict={}
-    if observables is not None:
+    if len(observables)>0:
         obs_fn, obs_dict = create_obs_fn(
             energy_or_obs_fn,
             observables,
@@ -1631,7 +1660,7 @@ def perform_md(
                 boxes.append(np.array(box))
 
             # Calculate observables
-            if observables is not None:
+            if len(observables)>0:
                 obs_data = obs_fn((state, nbrs, nbrs_lr, box))
                 for key in obs_dict.keys():
                     obs_dict[key].append(obs_data[1][key])
@@ -1639,7 +1668,7 @@ def perform_md(
             if ((len(positions) % save_buffer == 0 and len(positions) > 0) or (len(positions) == md_cycles)):
                 # Saving the output
                 if output_format == 'hdf5':
-                    positions, velocities, boxs, obs_dict = write_to_hdf5(
+                    positions, momenta, boxes, obs_dict = write_to_hdf5(
                         hdf5_store,
                         momenta,
                         positions,
