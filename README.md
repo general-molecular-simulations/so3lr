@@ -12,13 +12,13 @@ corresponding JAX installation via
 ```shell script
 # SO3LR on GPU
 pip install --upgrade pip
-pip install "jax[cuda12]==0.5.3"
+pip install "jax[cuda12]"
 ```
 If you want to use SO3LR on CPU, e.g. for testing on your local machine which does not have a GPU, you can do
 ```shell script
 # SO3LR on CPU
 pip install --upgrade pip
-pip install jax==0.5.3
+pip install jax
 ```
 Note, that SO3LR will be much fast on GPU than on CPU, so large scale simulations are ideally performed on a GPU. More 
 details about JAX installation can be found [here](https://jax.readthedocs.io/en/latest/installation.html).
