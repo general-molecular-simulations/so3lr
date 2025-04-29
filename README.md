@@ -3,7 +3,7 @@
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb)
 [![cite-link](https://img.shields.io/badge/how_to-cite-000000)](https://github.com/general-molecular-simulation/so3lr?tab=readme-ov-file#Citation)
 [![preprint-link](https://img.shields.io/badge/paper-chemRxiv.org-A9A8AD)](https://doi.org/10.26434/chemrxiv-2024-bdfr0-v2)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14779793.svg)](https://doi.org/10.5281/zenodo.14779793)
+[![data](https://zenodo.org/badge/DOI/10.5281/zenodo.14779793.svg)](https://doi.org/10.5281/zenodo.14779793)
 ![Logo](./logo.png)
 
 ## About
@@ -20,15 +20,15 @@ corresponding JAX installation via
 pip install --upgrade pip
 pip install "jax[cuda12]==0.5.3"
 ```
+> **Note**: SO3LR runs significantly faster on GPU, making it the preferred choice for large-scale simulations. More 
+details about JAX installation can be found [here](https://jax.readthedocs.io/en/latest/installation.html).
+
 If you want to use SO3LR on CPU, e.g. for testing on your local machine which does not have a GPU, you can do
 ```shell script
 # SO3LR on CPU
 pip install --upgrade pip
 pip install jax==0.5.3
 ```
-> **Note**: SO3LR runs significantly faster on GPU, making it the preferred choice for large-scale simulations. More 
-details about JAX installation can be found [here](https://jax.readthedocs.io/en/latest/installation.html).
-
 Next clone the repository and install by doing 
 ```shell script
 git clone https://github.com/general-molecular-simulations/so3lr.git
@@ -103,7 +103,7 @@ The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fy
 
 The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld ratios are optional. If they are not present in the data, the metrics will simply be `NaN`.
 
-> **Note**: Labels are assumed to be in `eV` and `Ångström`. SO3LR was not trained specifically on energies, so only relative energies are meaningful.
+> **Important**: SO3LR was not trained specifically on energies, so only relative energies are meaningful. Labels are assumed to be in `eV` and `Ångström`. 
 
 
 The predictions can be analyzed in Python:
