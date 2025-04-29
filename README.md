@@ -1,11 +1,17 @@
 ![workflow-test-ci](https://github.com/general-molecular-simulation/so3lr/actions/workflows/CI.yml/badge.svg)
 [![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
-[![preprint-link](https://img.shields.io/badge/paper-chemRxiv.org-A9A8AD)](https://doi.org/10.26434/chemrxiv-2024-bdfr0-v2)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb)
 [![cite-link](https://img.shields.io/badge/how_to-cite-000000)](https://github.com/general-molecular-simulation/so3lr?tab=readme-ov-file#Citation)
+[![preprint-link](https://img.shields.io/badge/paper-chemRxiv.org-A9A8AD)](https://doi.org/10.26434/chemrxiv-2024-bdfr0-v2)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14779793.svg)](https://doi.org/10.5281/zenodo.14779793)
 ![Logo](./logo.png)
+
 ## About
 SO3LR - pronounced *Solar* - is a pretrained machine-learned force field for (bio)molecular simulations. It integrates the fast and stable SO3krates neural network for semi-local interactions with universal pairwise force fields designed for short-range repulsion, long-range electrostatics, and dispersion interactions.
+
+## Quick Start
+Try SO3LR without any local installation using our [Colab notebook](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb)!
+
 ## Installation
 SO3RL can be either used with CPU or with GPU. If you want to use SO3LR on GPU, you have to install the 
 corresponding JAX installation via 
@@ -20,7 +26,7 @@ If you want to use SO3LR on CPU, e.g. for testing on your local machine which do
 pip install --upgrade pip
 pip install jax==0.5.3
 ```
-Note, that SO3LR will be much fast on GPU than on CPU, so large scale simulations are ideally performed on a GPU. More 
+> **Note**: SO3LR runs significantly faster on GPU, making it the preferred choice for large-scale simulations. More 
 details about JAX installation can be found [here](https://jax.readthedocs.io/en/latest/installation.html).
 
 Next clone the repository and install by doing 
@@ -93,9 +99,12 @@ Evaluate the SO3LR model on a dataset:
 so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 12.0 --save-to predictions.extxyz
 ```
 
-The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread). **Please note, that the labels are assumed to be in `eV` and `Angstrom`.** 
+The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread).
 
-The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld ratios are optional. If they are not present in the data, the metrics will simply be `NaN`. **On that note, we want to stress that SO3LR has not been trained on energies.** Therefore, errors are not reported in the printed metrics and only relative energies have a meaning.
+The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld ratios are optional. If they are not present in the data, the metrics will simply be `NaN`.
+
+> **Note**: Labels are assumed to be in `eV` and `Ångström`. SO3LR was not trained specifically on energies, so only relative energies are meaningful.
+
 
 The predictions can be analyzed in Python:
 
@@ -147,8 +156,7 @@ print('Forces = ', forces)
 ```
 ## JAX MD
 Large scale simulations can be performed via jax-md which is a molecular dynamics library optimized for GPUs. Here we 
-give a small example for a structure in vacuum. For realistic simulations with periodic water boxes take a look at the 
-`./examples/` folder.
+give a small example for a structure in vacuum. For realistic simulations, use CLI or take a look at the `./examples/` folder.
 ```python
 import jax
 import jax.numpy as jnp
@@ -161,6 +169,7 @@ from jax_md import quantity
 from so3lr import to_jax_md
 from so3lr import So3lrPotential
 
+# Create a simple molecule
 atoms = Atoms('H2', positions=[(0, 0, 0), (0, 0, 0.74)])
 assert np.asarray(
         atoms.get_pbc()
@@ -169,10 +178,11 @@ assert np.asarray(
 positions = jnp.array(atoms.get_positions())
 atomic_numbers = jnp.array(atoms.get_atomic_numbers()) 
 
-# We assume there is no box.
+# Assume there is no box
 box = None
 displacement, shift = space.free()
 
+# Initialize SO3LR with JAX-MD
 neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
     potential=So3lrPotential(),
     displacement_or_metric=displacement,
@@ -186,11 +196,11 @@ neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
     fractional_coordinates=False
 )
 
-# Energy and force functions.
+# JIT-compile energy and force functions
 energy_fn = jax.jit(energy_fn)
 force_fn = jax.jit(quantity.force(energy_fn))
 
-# Initialize the short and long-range neighbor lists.
+# Initialize the short and long-range neighbor lists
 nbrs = neighbor_fn.allocate(
     positions, 
     box=box
@@ -199,6 +209,8 @@ nbrs_lr = neighbor_fn_lr.allocate(
     positions, 
     box=box
 )
+
+# Calculate energy and forces
 energy = energy_fn(
     positions, 
     neighbor=nbrs.idx,
@@ -211,6 +223,7 @@ forces = force_fn(
     neighbor_lr=nbrs_lr.idx,
     box=box
 )
+
 print('Energy and forces in JAX-MD')
 print('Energy = ', np.array(energy))
 print('Forces = ', np.array(forces))
