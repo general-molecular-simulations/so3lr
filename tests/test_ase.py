@@ -17,7 +17,7 @@ def test_molecules(name: str):
     calc = mlffCalculatorSparse.create_from_ckpt_dir(
         ckpt_dir=package_dir / 'so3lr' / 'params',
         lr_cutoff=12.,
-        dispersion_energy_lr_cutoff_damping=2.,
+        dispersion_energy_cutoff_lr_damping=2.,
         from_file=True,
         dtype=np.float64
     )
@@ -63,7 +63,7 @@ def test_water():
     calc = mlffCalculatorSparse.create_from_ckpt_dir(
         ckpt_dir=package_dir / 'so3lr' / 'params',
         lr_cutoff=12.,
-        dispersion_energy_lr_cutoff_damping=2.,
+        dispersion_energy_cutoff_lr_damping=2.,
         from_file=True,
         dtype=np.float64
     )
