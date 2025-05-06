@@ -1658,7 +1658,7 @@ def nve_md(
 # Define the 'eval' subcommand
 @cli.command(name='eval', help="Evaluate SO3LR model on a dataset with `so3lr eval --datafile dataset.extxyz`.")
 # Input/Output group
-@click.option('--datafile', type=click.Path(exists=False), required=True,
+@click.option('--datafile', type=click.Path(exists=False), required=False,
               help='Path to dataset file (extxyz format) containing structures to evaluate.')
 @click.option('--save-to', type=click.Path(), default=None,
               help='Output file to save predictions (.extxyz format). If not provided, predictions are not saved.')

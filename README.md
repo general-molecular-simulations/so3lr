@@ -38,11 +38,12 @@ pip install .
 
 ## Command Line Interface (CLI)
 
-SO3LR provides a unified command line interface that leverages JAX-MD's performance optimization under the hood (detailed in the JAX-MD section below). This allows you to perform optimizations and MD simulations with simple commands. The CLI supports several key functionalities:
+SO3LR provides a unified command-line interface that leverages the performance of JAX-MD under the hood (detailed in the JAX-MD section below). This allows you to perform geometry optimizations and MD simulations with simple commands. The CLI supports several key functionalities:
 
 - `so3lr opt`: Geometry optimization
 - `so3lr nvt`: NVT molecular dynamics
 - `so3lr npt`: NPT molecular dynamics
+- `so3lr nve`: NVE molecular dynamics
 - `so3lr eval`: Model evaluation on a dataset
 
 Each subcommand has its own set of options and can be run with `--help` to see all available parameters.
@@ -51,7 +52,7 @@ Each subcommand has its own set of options and can be run with `--help` to see a
 so3lr opt --help
 ```
 
-Optimize a molecule structure using the FIRE algorithm:
+Optimize a structure using the FIRE algorithm:
 
 ```shell script
 so3lr opt --input geometry.xyz --force-conv 0.05 --lr-cutoff 12.0
@@ -69,7 +70,13 @@ Run NPT (constant pressure and temperature) simulation:
 so3lr npt --input geometry.xyz --temperature 300 --pressure 1.0 --dt 0.5 --md-cycles 100 --md-steps 100
 ```
 
-Both NVT and NPT ensembles are supported using the Nosé–Hoover chain thermostat/barostat. The trajectories can be saved in `.hdf5` or `.xyz` format. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart it if needed.
+Run NVE (constant volume and energy) simulation:
+
+```shell script
+so3lr nve --input geometry.xyz --temperature 300 --dt 0.5 --md-cycles 100 --md-steps 100
+```
+
+Both NVT and NPT ensembles are supported using the Nosé–Hoover chain thermostat and barostat. The trajectories can be saved in `.hdf5` or `.xyz` format. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart if needed.
 
 Example with additional parameters for NVT:
 
