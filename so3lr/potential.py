@@ -5,9 +5,11 @@ from mlff.mdx.potential import MLFFPotentialSparse
 
 
 def make_potential_fn(
-    lr_cutoff=12.,
+        lr_cutoff=12.,
         dispersion_energy_cutoff_lr_damping=2.,
         dtype=np.float32,
+        coulomb_kspace_do_ewald=False,
+        coulomb_kspace_interp_nodes=4,
         **kwargs
 ):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
@@ -19,7 +21,8 @@ def make_potential_fn(
             cutoff_lr=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
             neighborlist_format_lr='ordered_sparse',
-            **kwargs
+            coulomb_kspace_do_ewald=coulomb_kspace_do_ewald,
+            coulomb_kspace_interp_nodes=coulomb_kspace_interp_nodes,
         ),
         dtype=dtype,
         **kwargs
