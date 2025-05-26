@@ -1420,7 +1420,7 @@ def perform_md(
             initial_geometry_dict['masses'] = e.loaded_state['mass']
             initial_geometry_dict['velocities'] = e.loaded_state['momentum'] / e.loaded_state['mass']
             box = e.loaded_state['box']
-            if np.all(box == 0) or box is None or box == 0.0:
+            if np.all(box == 0) or box is None:
                 box = jnp.array([0.0])
             restart = False
         except Exception as e:
