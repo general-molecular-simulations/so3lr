@@ -30,7 +30,7 @@ import jax
 import jax.numpy as jnp
 import jax_md
 from jax_md import units, partition
-from jax_md.space import DisplacementOrMetricFn, raw_transform
+from jax_md.space import DisplacementOrMetricFn, raw_transform, transform
 from mlff.mdx.potential import MLFFPotentialSparse
 from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
 
@@ -601,7 +601,7 @@ def load_model(
     return potential
 
 
-def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., precision=jnp.float32):
+def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., precision=jnp.float32, fractional_coordinates=True):
     """
     Create a function that builds a graph from positions and neighbors.
 
@@ -625,16 +625,41 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
         Ra_lr = R[idx_i_lr]
         Rb_lr = R[idx_j_lr]
 
-        box = kwargs.get('box', None)
-        k_grid = kwargs.get('k_grid', None)
-        k_smearing = kwargs.get('k_smearing', None)
+        box = None
+        positions = None
+        k_smearing = None
+        k_grid = None
+        if 'box' in kwargs:
+            box = kwargs.get('box')
+            if box.shape == (3, 3):
+                box = box
+            elif box.shape == (3, ):
+                box = jnp.diag(box)
+            elif box.shape == (1,):
+                box = jnp.diag(jnp.repeat(box, 3))
+            else:
+                raise ValueError(f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
+
+        if 'k_grid' in kwargs:
+            k_grid = kwargs.get('k_grid')
+            if fractional_coordinates:
+                positions = transform(box, R) # transform to non-fractional coordinates
+            else:
+                positions = R
+        if 'k_smearing' in kwargs:
+            k_smearing = kwargs.get('k_smearing')
+
+        if 'perturbation' in kwargs:
+            pert = kwargs.get('perturbation')
+            positions = transform(pert, positions)
+            box = transform(pert, box)
 
         d = jax.vmap(partial(displacement_fn, **kwargs))
         dR = d(Ra, Rb)
         dR_lr = d(Ra_lr, Rb_lr)
 
         graph = Graph(
-            positions=R if k_grid is not None else None,
+            positions=positions,
             nodes=species,
             edges=dR,
             centers=idx_i,
@@ -729,7 +754,8 @@ def to_jax_md_custom(
         displacement_or_metric,
         species,
         total_charge,
-        precision
+        precision,
+        fractional_coordinates=fractional_coordinates
     )
 
     # Create an energy_fn that is compatible with jax_md
@@ -1356,7 +1382,7 @@ def setup_kspace_grid(
     from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald
 
     k_spacing = jnp.array([kspace_spacing])
-    k_smearing = jnp.array([kspace_spacing])
+    k_smearing = jnp.array([kspace_smearing])
 
     if kspace_electrostatics == 'ewald':
         k_grid = get_kgrid_ewald(box,lr_wavelength=k_spacing)
