@@ -277,25 +277,26 @@ def init_hdf5_store(
     }
 
     for o in observables:
-        if o == "partial_charges":
-            dataset['partial_charges'] = DataSetEntry(
-                chunk_length=1,
-                shape=(batch_size, num_atoms, ),
-                dtype=np.float32
-            )
-
-        if o == "hirshfeld_ratios":
-            dataset['hirshfeld_ratios'] = DataSetEntry(
-                chunk_length=1,
-                shape=(batch_size, num_atoms, ),
-                dtype=np.float32
-            )
-
         if o == "dipole_vec":
             dataset['dipole_vec'] = DataSetEntry(
                 chunk_length=1,
                 shape=(batch_size, 1, 1),
                 dtype=np.float32
+            )
+        elif o in   ['partial_charges',
+                    'hirshfeld_ratios',
+                    'electrostatic_energy_kspace',
+                    'electrostatic_energy',
+                    'dispersion_energy',
+                    'zbl_repulsion']:
+            dataset[o] = DataSetEntry(
+                chunk_length=1,
+                shape=(batch_size, num_atoms,),
+                dtype=np.float32
+            )
+        else:
+            logger.warning(
+                f"Observable '{o}' is not recognized or not supported for HDF5 storage."
             )
 
     return HDF5Store(save_path, datasets=dataset, mode='w')
@@ -306,7 +307,8 @@ def write_to_hdf5(
     momenta: Optional[List[jnp.ndarray]],
     positions: List[jnp.ndarray],
     boxes: Union[float, jnp.ndarray, List[jnp.ndarray], None],
-    obs_dict: MutableMapping[str, list] = {}
+    obs_dict: MutableMapping[str, list] = {},
+    indices: Optional[List[int]] = None,
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
     """
     Write trajectory data to an HDF5 file.
@@ -323,20 +325,29 @@ def write_to_hdf5(
         Tuple of empty lists for momenta, positions, and boxes.
     """
     try:
+        if indices is None:
+            indices = list(range(positions[0].shape[0]))
+
         step_data = {
-            'positions': jnp.stack(positions, axis=0),
+            'positions': jnp.stack(positions, axis=0)[:,indices],
         }
 
         if np.any(boxes != 0):
             step_data['box'] = jnp.stack(boxes, axis=0)
     
         if momenta is not None:
-            step_data['momenta'] = jnp.stack(momenta, axis=0)
+            step_data['momenta'] = jnp.stack(momenta, axis=0)[:,indices]
 
         for o in obs_dict.keys():
-            step_data.update(
-                {o: jnp.stack(obs_dict[o], axis=0)},
-            )
+            # Check if the observable has atom_wise data, this test could be improved
+            if obs_dict[o][0].shape == (positions[0].shape[0],):
+                step_data.update(
+                    {o: jnp.stack(obs_dict[o], axis=0)[:,indices]},
+                )
+            else:
+                step_data.update(
+                    {o: jnp.stack(obs_dict[o], axis=0)},
+                )
 
         step_data = jax.tree.map(
             lambda u: np.asarray(u), step_data
@@ -359,7 +370,8 @@ def write_to_extxyz(
     boxes: Union[float, jnp.ndarray, List, None],
     momenta: List,
     positions: List,
-    obs_dict: MutableMapping[str, list] = {}
+    obs_dict: MutableMapping[str, list] = {},
+    indices: Optional[List[int]] = None,
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
     """
     Write trajectory data to an extended XYZ file.
@@ -433,12 +445,23 @@ def write_to_extxyz(
                 if o == "partial_charges":
                     atoms_copy.set_array('charges', np.asarray(obs_dict['partial_charges'][i]).flatten())
 
-                if o == "hirshfeld_ratios":
+                elif o == "hirshfeld_ratios":
                     atoms_copy.set_array('hirsh_ratios', np.asarray(obs_dict['hirshfeld_ratios'][i]).flatten())
 
-                if o == "dipole_vec" :
+                elif o == "dipole_vec" :
                     atoms_copy.info['dipole_vec'] = np.asarray(obs_dict['dipole_vec'][i]).flatten()
 
+                elif obs_dict[o][0].shape == (positions[0].shape[0],):
+                    atoms_copy.set_array(o, np.asarray(obs_dict[o][i]).flatten())
+                else:
+                    logger.warning(
+                        f"Observable '{o}' is not of shape (num_atoms,) and not supported by default for extxyz format."
+                    )
+
+            if indices is not None:
+                # Filter atoms based on indices
+                #atoms_copy = Filter(atoms_copy, indices=indices)
+                atoms_copy = atoms_copy[indices]
             atoms_list.append(atoms_copy)
 
         # Write all atoms to file at once
@@ -1352,6 +1375,7 @@ def perform_md(
     seed = all_settings.get('seed')
     relax_before_run = all_settings.get('relax_before_run')
     observables = all_settings.get('observables', [])
+    output_atom_indices = all_settings.get('output_atom_indices', None)
 
     # Handling of restart
     if restart_save_path is not None:
@@ -1395,10 +1419,15 @@ def perform_md(
     # Initialize HDF5 storage
     hdf5_store = None
     if output_format == 'hdf5':
+        if output_atom_indices is None:
+            num_atoms = position.shape[0]
+        else:
+            num_atoms = len(output_atom_indices)
+
         hdf5_store = init_hdf5_store(
             save_to=output_file,
             batch_size=save_buffer,
-            num_atoms=position.shape[0],
+            num_atoms=num_atoms,
             num_box_entries=box.shape[0],
             exist_ok=True,
             observables = observables,
@@ -1674,6 +1703,7 @@ def perform_md(
                         positions,
                         boxes,
                         obs_dict,
+                        output_atom_indices
                     )
                 elif output_format == 'extxyz':
                     positions, momenta, boxes, obs_dict = write_to_extxyz(
@@ -1682,7 +1712,8 @@ def perform_md(
                         boxes,
                         momenta,
                         positions,
-                        obs_dict
+                        obs_dict,
+                        output_atom_indices
                     )
                 # Saving the state for restart
                 if create_restart:
