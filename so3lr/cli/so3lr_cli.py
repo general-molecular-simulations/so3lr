@@ -305,6 +305,8 @@ Evaluate SO3LR on a dataset with all options:
 # batch_size: 10                               # Number of molecules per batch
 # targets: "forces,dipole_vec,hirshfeld_ratios" # Targets to evaluate
 # jit_compile: true                            # Use JIT compilation for speed
+
+# output_atom_indices: null                    # Optional list of atom indices to output
 # ```
 
 PARAM_MAP = {
