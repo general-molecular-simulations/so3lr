@@ -13,6 +13,7 @@ from ase.io import write
 from mlff.utils import jraph_utils, evaluation_utils
 from mlff.data import AseDataLoaderSparse
 from pathlib import Path
+import json
 
 from ..jraph_utils import jraph_to_ase_atoms, unbatch_np
 from ..base_calculator import make_so3lr
@@ -218,19 +219,28 @@ def evaluate_so3lr_on(
     # Initialize the model
     if model_path is None:
         logger.info("Using default SO3LR potential")
+        #TODO: add precision handling
         so3lr_calc = make_so3lr(
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
             calculate_forces=True
-        )
+        ) 
+        cutoff = 4.5 # Default cutoff for SO3LR
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
-        so3lr_calc = load_model(
-            model_path,
-            precision=jnp.float64 if precision == 'float64' else jnp.float32,
+        so3lr_calc = make_so3lr(
+            workdir=model_path,
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
+            calculate_forces=True
         )
+
+        with open(Path(model_path) / "hyperparameters.json", "r") as fp:
+            cfg = json.load(fp)
+        
+        cutoff = cfg['model']['cutoff']
+    
+    logger.info(f"Using cutoff: {cutoff} Å")
 
     # Load the data
     logger.info(f"Loading data from {datafile}")
@@ -241,7 +251,7 @@ def evaluate_so3lr_on(
     # Load the data with neighbor calculation
     try:
         data, stats = loader.load(
-            cutoff=4.5,
+            cutoff=cutoff,
             cutoff_lr=lr_cutoff,
             calculate_neighbors_lr=True if lr_cutoff is not None else False,
             pick_idx=np.arange(num_data)
@@ -344,7 +354,7 @@ def evaluate_so3lr_on(
         progress_bar.close()
         
         logger.info(f'Completed evaluation on {total_num_structures} / {num_data} structures')
-        logger.info(f'Evaluation time: {total_time:.3f} seconds')
+        logger.info(f'Pure evaluation time: {total_time:.3f} seconds')
         logger.info('-' * 50)
 
         # Compute final metrics

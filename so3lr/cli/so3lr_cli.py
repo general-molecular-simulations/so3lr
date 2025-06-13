@@ -55,7 +55,7 @@ def get_hardware_info():
 
         # XLA CPU devices
         for i, device in enumerate(devices):
-            logger.info(f"Device {i}:                  {device}")
+            logger.info(f"Device {i}:                    {device}")
 
     elif backend in ["gpu", "cuda", "rocm"]:
         # Running on GPU

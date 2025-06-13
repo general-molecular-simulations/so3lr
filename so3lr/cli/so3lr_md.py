@@ -574,8 +574,8 @@ def load_model(
 
     # Load from ckpt directory path
     potential = MLFFPotentialSparse.create_from_ckpt_dir(
-        model_dir,
-        from_file=True,
+        ckpt_dir=model_dir,
+        from_file=False,
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
