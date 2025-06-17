@@ -2200,7 +2200,9 @@ def load_state(
     else:
         raise NotImplementedError('Only NVE, NVT and NPT ensembles are supported')
 
-    box = None if loaded_state['box'].item() is None else loaded_state['box']
+    box = loaded_state['box']
+    if np.all(box == 0) or box is None:
+        box = jnp.array([0.0])
     cycle = loaded_state['step']
 
     return state, box, cycle
