@@ -18,6 +18,7 @@ from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 from .. import __version__
 from .so3lr_eval import evaluate_so3lr_on
 from .so3lr_md import perform_min, run, setup_logger
+from .tune_ewald import tune
 
 # Get logger
 logger = logging.getLogger("SO3LR")
@@ -355,6 +356,8 @@ PARAM_MAP = {
     'min_max_dt': 'min_max_dt',
     'min_cycles': 'min_cycles',
     'min_steps': 'min_steps',
+    'kspace_type': 'kspace_electrostatics',
+    'jit_compile': 'jit_compile'
 }
 
 
@@ -404,6 +407,22 @@ def infer_output_format(output_file):
         logger.warning(f"Unknown output extension for {output_file}, defaulting to extxyz format")
         return 'extxyz'
 
+def update_settings_from_defaults(ctx: click.Context, settings_dict: Dict[str, Any], key= str) -> None:
+    """Update settings dictionary with default values."""
+    param = ctx.params[key]
+    if key in PARAM_MAP:
+        if PARAM_MAP[key] in settings_dict:
+            if ctx._parameter_source[key] == click.core.ParameterSource.COMMANDLINE:
+                if param != settings_dict[PARAM_MAP[key]]:
+                    logger.warning(f"settings.yaml: {PARAM_MAP[key]} is overridden by explicit command line argument.")
+                    settings_dict[PARAM_MAP[key]] = param
+                # Override settings with command line arguments if provided
+                settings_dict[PARAM_MAP[key]] = param
+        else:
+            # If not provided, set default values
+            if param is not None:
+                settings_dict[PARAM_MAP[key]] = param
+    return settings_dict
 
 class CustomCommandClass(click.Group):
     """Custom Group class that displays the correct help based on flags."""
@@ -463,22 +482,7 @@ class NVTNPTGroup(CustomCommandClass):
             cmd.context_settings["help_option_names"] = ["--help"]
         return cmd
 
-    def update_settings_from_defaults(self, ctx: click.Context, settings_dict: Dict[str, Any], key= str) -> None:
-        """Update settings dictionary with default values."""
-        param = ctx.params[key]
-        if key in PARAM_MAP:
-            if PARAM_MAP[key] in settings_dict:
-                if ctx._parameter_source[key] == click.core.ParameterSource.COMMANDLINE:
-                    if param != settings_dict[PARAM_MAP[key]]:
-                        logger.warning(f"settings.yaml: {PARAM_MAP[key]} is overridden by explicit command line argument.")
-                        settings_dict[PARAM_MAP[key]] = param
-                    # Override settings with command line arguments if provided
-                    settings_dict[PARAM_MAP[key]] = param
-            else:
-                # If not provided, set default values
-                if param is not None:
-                    settings_dict[PARAM_MAP[key]] = param
-        return settings_dict
+
 
     def canonicalize_ensemble(self, settings_dict: Dict[str, Any]):
         """Canonicalize the ensemble based on the provided settings."""
@@ -687,7 +691,7 @@ def cli(ctx: click.Context,
         ctx.params['dt'] = dt/1000
 
     for key in ctx.params:
-        settings_dict = ctx.command.update_settings_from_defaults(ctx, settings_dict, key)
+        settings_dict = update_settings_from_defaults(ctx, settings_dict, key)
 
     # # Override settings with command line arguments if provided
     # if input_file is not None:
@@ -1798,6 +1802,126 @@ def eval_model(
 
     if save_to:
         logger.info(f"Predictions saved to: {save_to}")
+
+
+# Define the 'eval' subcommand
+@cli.command(name='tune-ewald', help="Tune Ewald parameters`so3lr tune-ewald --input geometry.xyz`.")
+# Input/Output group
+# Input/Output
+@click.option('--settings', type=click.Path(exists=False), default=None,
+              help='Path to YAML settings file.')
+@click.option('--input', '--input_file', 'input_file', type=click.Path(exists=False),
+              help='Input geometry file (any ASE-readable format). [default: None]')
+@click.option('--log-file', default=None, type=click.Path(),
+              help=f'File to write logs to [default: None].')
+# Model settings
+@click.option('--model', 'model_path', type=click.Path(exists=False),
+              help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
+@click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
+              help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
+@click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
+              help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')
+@click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
+              help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}]')
+@click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
+              help=f'Buffer size multiplier for short-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
+@click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
+              help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
+@click.option('--total-charge', default=DEFAULT_TOTAL_CHARGE, type=int,
+              help=f'Total charge of the system. [default: {DEFAULT_TOTAL_CHARGE}]')
+@click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
+              help='Use JIT compilation for speed. [default: enabled]')
+# Tuning settings
+@click.option('--kspace_type', default=None, type=str,
+              help=f'Type of kspace calculation. [default: {"pme"}]')
+# Help option
+@click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
+@click.pass_context
+def tune_ewald(
+    ctx: click.Context,
+    settings: Optional[str],
+    # Input/Output group
+    input_file: str,
+    log_file: Optional[str],
+    # Model settings group
+    model_path: Optional[str],
+    precision: str,
+    lr_cutoff: float,
+    dispersion_damping: float,
+    buffer_sr: float,
+    buffer_lr: float,
+    total_charge: int,
+    jit_compile: bool,
+    kspace_type: str,
+    # Help option
+    help: bool
+) -> None:
+    """
+    Tune Ewald parameters for running SO3LR model on a given structure.
+
+    Example:
+        so3lr tune-ewald --input geometry.xyz
+    """
+     # Print help if needed
+    if not input_file or help:
+        click.echo(SO3LR_ASCII)
+        click.echo(nve_md.get_help(click.get_current_context()))
+        return
+
+    # Load settings from file if provided
+    settings_dict: Dict[str, Any] = {}
+    if settings is not None:
+        try:
+            settings_path = Path(settings).expanduser().resolve()
+            if not settings_path.exists():
+                raise FileNotFoundError(f'Settings file not found: {settings}')
+
+            with open(settings_path, 'r') as f:
+                settings_dict = yaml.safe_load(f)
+
+            # Use standard logging initially for any errors
+            logger.info(f"Loading settings from {settings}")
+        except (FileNotFoundError, yaml.YAMLError) as e:
+            logger.error(f"Error loading settings file: {str(e)}")
+            sys.exit(1)
+
+    for key in ctx.params:
+        settings_dict = update_settings_from_defaults(ctx, settings_dict, key)
+
+    # Generate default log file name based on output file if not explicitly provided
+    if settings_dict.get('log_file') is None:
+        settings_dict.update({log_file: f"{Path(input_file).stem}_tune-pme.log"})
+
+    # Setup logging with default levels
+    setup_logger(settings_dict.get('log_file'))
+
+    # Log the ASCII art
+    logger.info(SO3LR_ASCII)
+    model_path = settings_dict.get('model_path')
+    logger.info("=" * 60)
+    logger.info(f"Tuner for k-space electrostatics for SO3LR (v{__version__})")
+    logger.info("=" * 60)
+    logger.info(f"Initial geometry:          {settings_dict.get('input_file')}")
+    logger.info(f"Log file:                  {settings_dict.get('log_file')}")
+    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
+    if model_path is not None:
+        logger.info(f"Model path:                {model_path}")
+    logger.info(f"Precision:                 {settings_dict.get('precision')}")
+    logger.info(f"Long-range cutoff:         {settings_dict.get('lr_cutoff')} Å")
+    logger.info(f"Total charge:              {settings_dict.get('total_charge')}")
+    logger.info(f"JIT compilation:           {'Enabled' if settings_dict.get('jit_compile') else 'Disabled'}")
+
+
+    # Log hardware info
+    get_hardware_info()
+
+    # Run tuning
+    time_start = time.time()
+    tune(settings_dict)
+    time_end = time.time()
+    logger.info("=" * 60)
+    logger.info('Tunings completed successfully!')
+    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
 
 
 def main() -> None:
