@@ -326,6 +326,7 @@ Evaluate SO3LR on a dataset with all options:
 PARAM_MAP = {
     'input_file': 'input_file',
     'output_file': 'output_file',
+    'log_file': 'log_file',
     'model_path': 'model_path',
     'precision': 'precision',
     'dt':'md_dt',

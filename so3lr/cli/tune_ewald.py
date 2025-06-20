@@ -26,7 +26,7 @@ from ase import Atoms
 from ase.io import read
 
 from so3lr import So3lrPotential
-from so3lr.cli.so3lr_md import handle_box, load_model, atoms_to_jnp, process_model
+from so3lr.cli.so3lr_md import handle_box, load_model, atoms_to_jnp, process_model, load_state
 from .so3lr_md import setup_logger
 
 # Setup logging
@@ -194,13 +194,15 @@ class GridSearchTuner(TunerBase):
         param_errors = []
         param_timings = []
         param_memorys = []
+        logger.info("---------------------------ERROR ESTIMATION:")
         for param in self.params:
             error = self.error_bounds(**param)
+            logger.info("parameters: {}".format(", ".join(f"{k}: {v}" for k, v in param.items() if v is not None)))
             param_errors.append(float(error))
         
+        logger.info("---------------------------TIMING ESTIMATION:")
         for param, error in zip(self.params, param_errors):
-            logger.info("-------------------------------")
-            logger.info("Timing parameters: {}".format(", ".join(f"{k}: {v}" for k, v in param.items() if v is not None)))
+            logger.info("parameters: {}".format(", ".join(f"{k}: {v}" for k, v in param.items() if v is not None)))
             # if param['smearing']
             # logger.info(f"kspace_spacing: {param['spacing']}")
             # if 'interpolation_nodes' in param:
@@ -214,8 +216,7 @@ class GridSearchTuner(TunerBase):
             param_memorys.append(mem)
             
             #logger.info("Results: ")
-            logger.info(f"error estimate: {error}")
-            logger.info(f"measured timing: {param_timings[-1]}")
+            logger.info(f"measured timing: {param_timings[-1]}, total error estimate: {error}, ")
             #print('memory', sum(param_memorys[-1].values()))
         return param_errors, param_timings, param_memorys
 
@@ -513,11 +514,13 @@ class EwaldErrorBounds(TuningErrorBounds):
         :param spacing: see :class:`torchpme.EwaldCalculator` for details
         :param cutoff: see :class:`torchpme.EwaldCalculator` for details
         """
-        return np.sqrt(
-            self.err_kspace(smearing, spacing) ** 2
-            + self.err_rspace(smearing, cutoff) ** 2
+        kspace = self.err_kspace(smearing, spacing)
+        rspace = self.err_rspace(smearing, cutoff)
+        logger.info(
+            f"Error bounds: kspace={kspace}, rspace={rspace}, total={np.sqrt(kspace**2 + rspace**2)}"
         )
 
+        return np.sqrt(kspace**2 + rspace**2)
 
 class EwaldErrorBounds_SR(EwaldErrorBounds):
     def __init__(
@@ -569,7 +572,7 @@ class EwaldErrorBounds_SR(EwaldErrorBounds):
                                      self._positions, self._charges,self.displacement, 
                                      idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cuton=cuton, cutoff=cutoff, smearing=smearing)
 
-        return jnp.sqrt(jnp.sum(jnp.square(full_force - interp_force))/ (3*len(self._positions)))
+        return jnp.sqrt(jnp.sum(jnp.square(full_force - interp_force))/ (len(self._positions)))
 
 def tune_pme(
     charges: jnp.ndarray,
@@ -695,15 +698,14 @@ class PMEErrorBounds(TuningErrorBounds):
         spacing: float,
         interpolation_nodes: int,
     ) -> float:
-        smearing = float(smearing)
-        spacing = float(spacing)
-        cutoff = float(cutoff)
-        interpolation_nodes = int(interpolation_nodes)
-        err_rspace = self.err_rspace(smearing, cutoff)
-        err_kspace = self.err_kspace(smearing, spacing, interpolation_nodes)
-        # print(f"smearing: {smearing}, cutoff: {cutoff}, spacing: {spacing}, interpolation_nodes: {interpolation_nodes}")
-        # print(f"err_rspace: {err_rspace}, err_kspace: {err_kspace}")
-        return math.sqrt(err_rspace**2 + err_kspace**2)
+
+        kspace = self.err_kspace(smearing, spacing, interpolation_nodes)
+        rspace = self.err_rspace(smearing, cutoff)
+        logger.info(
+            f"Error bounds: kspace={kspace}, rspace={rspace}, total={np.sqrt(kspace**2 + rspace**2)}"
+        )
+
+        return np.sqrt(kspace**2 + rspace**2)
 
 
 class PMEErrorBounds_SR(PMEErrorBounds):
@@ -725,6 +727,7 @@ class PMEErrorBounds_SR(PMEErrorBounds):
         self._charges = charges
         self.displacement = displacement
         self.electrostatic_energy_scale=electrostatic_energy_scale
+        self.cutoff_sr = cutoff_sr
         
 
     def err_rspace(self, smearing: float, cutoff: float) -> float:
@@ -750,7 +753,7 @@ class PMEErrorBounds_SR(PMEErrorBounds):
                                      self._positions, self._charges,self.displacement, 
                                      idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cuton=cuton, cutoff=cutoff, smearing=smearing)
 
-        return jnp.sqrt(jnp.sum(jnp.square(full_force - interp_force))/ (3*len(self._positions)))
+        return jnp.sqrt(jnp.sum(jnp.square(full_force - interp_force))/ (len(self._positions)))
 
 
 def tune_sr(
@@ -834,20 +837,16 @@ class NativeErrorBounds(TuningErrorBounds):
         self.displacement = displacement
         self.electrostatic_energy_scale=electrostatic_energy_scale
 
-        self.volume = abs(jnp.linalg.det(cell))
-        self.sum_squared_charges = jnp.sum(charges**2)
-        self.prefac = 2 * self.sum_squared_charges / math.sqrt(len(positions))
-        self.cell_dimensions = jnp.linalg.norm(cell, axis=1)
 
         ke = self._scale
         sigma = self.electrostatic_energy_scale
         idx_i, idx_j = self.nbrs_lr[0], self.nbrs_lr[1]
-        #self.all_force_errs = get_forces_rs(coulomb_erf,
-        #                            self._positions, self._charges,self.displacement, 
-        #                            idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=None)        
+        self.best_full_force = get_forces_rs(coulomb_erf,
+                                   self._positions, self._charges,self.displacement, 
+                                   idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=None)        
         
 
-    def error(self, smearing: float, cutoff: float, spacing: float) -> float:
+    def err_rspace(self, cutoff: float) -> float:
         ke  = self._scale
         sigma = self.electrostatic_energy_scale
         cuton = 0.45 * cutoff
@@ -868,11 +867,11 @@ class NativeErrorBounds(TuningErrorBounds):
         #                            idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=None)
         #full_force = self.all_force_errs
 
-        full_force_at_cut = get_forces_rs_at_fixed_distance(coulomb_erf,
-                                    self._positions, self._charges, fixed_distance=cutoff, 
-                                    idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=None) 
-        lr_error = jnp.sqrt(jnp.sum(jnp.square(full_force_at_cut))/ (3*len(self._positions)))
-        print(lr_error)
+        # full_force_at_cut = get_forces_rs_at_fixed_distance(coulomb_erf,
+        #                             self._positions, self._charges, fixed_distance=cutoff, 
+        #                             idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=None) 
+        # lr_error = jnp.sqrt(jnp.sum(jnp.square(full_force_at_cut))/ (3*len(self._positions)))
+        # print(lr_error)
 
         full_force = get_forces_rs(coulomb_erf,
                                     self._positions, self._charges,self.displacement, 
@@ -880,8 +879,37 @@ class NativeErrorBounds(TuningErrorBounds):
         interp_force = get_forces_rs(coulomb_erf_shifted_force_smooth, 
                                      self._positions, self._charges,self.displacement, 
                                      idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cuton=cuton, cutoff=cutoff)
-        return jnp.sqrt(jnp.sum(jnp.square(full_force - interp_force))/ (3*len(self._positions)))
+        return full_force, jnp.sqrt(jnp.sum(jnp.square(full_force - interp_force))/ (len(self._positions)))
 
+    def err_kspace(self, cutoff: float) -> float:
+        # Currently this give the error per interaction, not per atom, this needs to be improved
+        ke  = self._scale
+        sigma = self.electrostatic_energy_scale
+        positions = self.positions
+        nbr_distances = self.nbrs_lr_distances
+
+        r = jnp.ones(positions.shape[0],dtype=positions.dtype)*cutoff
+        fake_idx = jnp.arange(len(positions), dtype=jnp.int32)
+        full_force_at_cut = get_forces(coulomb_erf, r, q, idx_i=fake_idx,  idx_j=fake_idx, ke=ke, sigma=sigma, cutoff=None)
+        return jnp.sqrt(jnp.sum(full_force_at_cut**2)/(len(full_force_at_cut)))    
+
+
+    def error(
+        self,
+        cutoff: float,
+        smearing: float,
+        spacing: float,
+        interpolation_nodes: int,
+    ) -> float:
+
+        #kspace = self.err_kspace(cutoff)
+        full_force, rspace = self.err_rspace(cutoff)
+        kspace =  jnp.sqrt(jnp.sum(jnp.square(full_force - self.best_full_force))/ (len(self._positions)))
+        logger.info(
+            f"Error bounds: kspace={kspace}, rspace={rspace}, total={np.sqrt(kspace**2 + rspace**2)}"
+        )
+
+        return np.sqrt(kspace**2 + rspace**2)
 
 def tune(
     settings: dict
@@ -911,7 +939,7 @@ def tune(
     dispersion_damping = settings.get('dispersion_damping')
     buffer_size_multiplier_lr = settings.get('buffer_size_multiplier_lr', 1.0)
     buffer_size_multiplier_sr = settings.get('buffer_size_multiplier_sr', 1.0)
-    jit_compile = settings.get('jit_compile', True)    
+    jit_compile = settings.get('jit_compile', True)
 
     # Ewald electrostatics settings
     kspace_electrostatics = settings.get('kspace_electrostatics',None)
@@ -920,7 +948,6 @@ def tune(
     # Tuning parameters
     # Note that all the tuning parameters are loaded further below
 
-    # Geometry, cell and charge
     input_file_path = settings.get('input_file')
     if input_file_path is None:
         raise ValueError('Initial geometry file path must be provided in settings.')
@@ -931,9 +958,8 @@ def tune(
     except Exception as e:
         raise RuntimeError(f"Failed to read geometry file {input_file_path}: {e}")
 
-    cell = initial_geometry.get_cell()
+    cell = initial_geometry.get_cell().T
     assert cell is not None and not np.all(cell != 0.0), "Cell must be provided in the input geometry."
-
 
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
 
@@ -941,8 +967,9 @@ def tune(
     #(position, box, displacement, shift, fractional_coordinates) = handle_box(
     #    'periodic', initial_geometry_dict['positions'], cell)
     
-    box = jnp.array(np.diag(np.array(cell)))
-    if box.shape == (3,3):
+    box = jnp.array(cell)
+    if box.shape == (3,3) and np.all( box[~np.eye(box.shape[0],dtype=bool)]==0):
+        # orthorhombic boxes are reduced to 3 entries
         box = jnp.diag(box)
     fractional_coordinates = False
 
