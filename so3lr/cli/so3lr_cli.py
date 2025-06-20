@@ -1805,7 +1805,7 @@ def eval_model(
         logger.info(f"Predictions saved to: {save_to}")
 
 
-# Define the 'eval' subcommand
+# Define the 'tune-ewald' subcommand
 @cli.command(name='tune-ewald', help="Tune Ewald parameters`so3lr tune-ewald --input geometry.xyz`.")
 # Input/Output group
 # Input/Output
@@ -1864,9 +1864,9 @@ def tune_ewald(
         so3lr tune-ewald --input geometry.xyz
     """
      # Print help if needed
-    if not input_file or help:
+    if help:
         click.echo(SO3LR_ASCII)
-        click.echo(nve_md.get_help(click.get_current_context()))
+        click.echo(tune_ewald.get_help(click.get_current_context()))
         return
 
     # Load settings from file if provided
