@@ -484,8 +484,14 @@ class EwaldErrorBounds(TuningErrorBounds):
         :param smearing: see :class:`torchpme.EwaldCalculator` for details
         :param spacing: see :class:`torchpme.EwaldCalculator` for details
         """
+        # return (
+        #     self.prefac**0.5
+        #     / smearing
+        #     / np.sqrt((2 * np.pi) ** 2 * self.volume / (spacing) ** 0.5)
+        #     * np.exp(-((2 * np.pi) ** 2) * smearing**2 / (spacing))
+        # )
         return (
-            self.prefac**0.5
+            self.prefac*0.5
             / smearing
             / np.sqrt((2 * np.pi) ** 2 * self.volume / (spacing) ** 0.5)
             * np.exp(-((2 * np.pi) ** 2) * smearing**2 / (spacing))
@@ -503,24 +509,6 @@ class EwaldErrorBounds(TuningErrorBounds):
             / np.sqrt(cutoff * self.volume)
             * np.exp(-(cutoff**2) / 2 / smearing**2)
         )
-
-    def __call__(
-        self, smearing: float, spacing: float, cutoff: float
-    ) -> float:
-        r"""
-        Calculate the error bound of Ewald.
-
-        :param smearing: see :class:`torchpme.EwaldCalculator` for details
-        :param spacing: see :class:`torchpme.EwaldCalculator` for details
-        :param cutoff: see :class:`torchpme.EwaldCalculator` for details
-        """
-        kspace = self.err_kspace(smearing, spacing)
-        rspace = self.err_rspace(smearing, cutoff)
-        logger.info(
-            f"Error bounds: kspace={kspace}, rspace={rspace}, total={np.sqrt(kspace**2 + rspace**2)}"
-        )
-
-        return np.sqrt(kspace**2 + rspace**2)
 
 class EwaldErrorBounds_SR(EwaldErrorBounds):
     def __init__(
@@ -542,11 +530,6 @@ class EwaldErrorBounds_SR(EwaldErrorBounds):
 
         self.cutoff_sr = cutoff_sr
         self.electrostatic_energy_scale=electrostatic_energy_scale
-
-        self.volume = abs(jnp.linalg.det(cell))
-        self.sum_squared_charges = jnp.sum(charges**2)
-        self.prefac = 2 * self.sum_squared_charges / math.sqrt(len(positions))
-        self.cell_dimensions = jnp.linalg.norm(cell, axis=1)
         
 
     def err_rspace(self, smearing: float, cutoff: float) -> float:
@@ -573,6 +556,25 @@ class EwaldErrorBounds_SR(EwaldErrorBounds):
                                      idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cuton=cuton, cutoff=cutoff, smearing=smearing)
 
         return jnp.sqrt(jnp.sum(jnp.square(full_force - interp_force))/ (len(self._positions)))
+
+    def error(
+        self, smearing: float, spacing: float, cutoff: float
+    ) -> float:
+        r"""
+        Calculate the error bound of Ewald.
+
+        :param smearing: see :class:`torchpme.EwaldCalculator` for details
+        :param spacing: see :class:`torchpme.EwaldCalculator` for details
+        :param cutoff: see :class:`torchpme.EwaldCalculator` for details
+        """
+        kspace = self.err_kspace(smearing, spacing)
+        rspace = self.err_rspace(smearing, cutoff)
+        rspace_ana = super().err_rspace(smearing, self.cutoff_sr)
+        logger.info(
+            f"Error bounds: kspace={kspace}, rspace={rspace}, rspace (estimate)={rspace_ana} total={np.sqrt(kspace**2 + rspace**2)}"
+        )
+
+        return np.sqrt(kspace**2 + rspace**2)
 
 def tune_pme(
     charges: jnp.ndarray,
@@ -655,7 +657,7 @@ class PMEErrorBounds(TuningErrorBounds):
 
         self.volume = abs(jnp.linalg.det(cell))
         self.sum_squared_charges = jnp.sum(charges**2)
-        self.prefac = 2 * self.sum_squared_charges / math.sqrt(len(positions))
+        self.prefac = 2 * self._scale * self.sum_squared_charges / math.sqrt(len(positions))
         self.cell_dimensions = jnp.linalg.norm(cell, axis=1)
 
     def err_kspace(
@@ -701,8 +703,9 @@ class PMEErrorBounds(TuningErrorBounds):
 
         kspace = self.err_kspace(smearing, spacing, interpolation_nodes)
         rspace = self.err_rspace(smearing, cutoff)
+        rspace_ana = super().err_rspace(smearing, self.cutoff_sr)
         logger.info(
-            f"Error bounds: kspace={kspace}, rspace={rspace}, total={np.sqrt(kspace**2 + rspace**2)}"
+            f"Error bounds: kspace={kspace}, rspace={rspace}, rspace (estimate)={rspace_ana}, total={np.sqrt(kspace**2 + rspace**2)}"
         )
 
         return np.sqrt(kspace**2 + rspace**2)
