@@ -196,8 +196,8 @@ class GridSearchTuner(TunerBase):
         param_memorys = []
         logger.info("---------------------------ERROR ESTIMATION:")
         for param in self.params:
-            error = self.error_bounds(**param)
             logger.info("parameters: {}".format(", ".join(f"{k}: {v}" for k, v in param.items() if v is not None)))
+            error = self.error_bounds(**param)
             param_errors.append(float(error))
         
         logger.info("---------------------------TIMING ESTIMATION:")
@@ -216,7 +216,7 @@ class GridSearchTuner(TunerBase):
             param_memorys.append(mem)
             
             #logger.info("Results: ")
-            logger.info(f"measured timing: {param_timings[-1]}, total error estimate: {error}, ")
+            logger.info(f"measured timing: {param_timings[-1]}, total error estimate: {error}")
             #print('memory', sum(param_memorys[-1].values()))
         return param_errors, param_timings, param_memorys
 
@@ -230,7 +230,7 @@ class GridSearchTuner(TunerBase):
         # )
         # calculator.to(device=self.positions.device, dtype=self.positions.dtype)
         #return self.time_func(calculator)        
-        return self.time_func(k_space_params["cutoff"],k_space_params["smearing"], k_space_params["spacing"])
+        return self.time_func(**k_space_params)
 
 class TuningTimings:
     """
@@ -292,7 +292,7 @@ class TuningTimings:
 
         self.kspace_electrostatics = kspace_electrostatics
 
-    def __call__(self, cutoff: float, smearing: float, spacing) -> tuple[float, dict[str, float]]:
+    def __call__(self, **input_params) -> tuple[float, dict[str, float]]:
         """
         Estimate the execution time of a given calculator for the structure
         to be used as benchmark.
@@ -302,14 +302,16 @@ class TuningTimings:
         """
         execution_time = 0.0
 
+        cutoff = input_params.get('cutoff')
+
         if self.kspace_electrostatics == "ewald":
-            k_spacing = jnp.array(spacing)
-            k_smearing = jnp.array([smearing])
+            k_spacing = jnp.array([input_params.get('spacing')])
+            k_smearing = jnp.array([input_params.get('smearing')])
             k_grid = get_kgrid_ewald(self.cell, k_spacing)
         elif self.kspace_electrostatics == "pme":
-            k_spacing = jnp.array(spacing)
+            k_spacing = jnp.array([input_params.get('spacing')])
+            k_smearing = jnp.array([input_params.get('smearing')])
             k_grid = get_kgrid_mesh(self.cell, k_spacing)
-            k_smearing = jnp.array([smearing])
         else:
             k_grid = None
             k_smearing = None
@@ -778,9 +780,7 @@ def tune_sr(
 
     params = [
         {
-            "smearing": None,
             "cutoff": cut,
-            "spacing":  None,
         }
          for cut in np.arange(cutoff_hi, cutoff_lo -cutoff_it, -cutoff_it)
     ]
@@ -900,9 +900,6 @@ class NativeErrorBounds(TuningErrorBounds):
     def error(
         self,
         cutoff: float,
-        smearing: float,
-        spacing: float,
-        interpolation_nodes: int,
     ) -> float:
 
         #kspace = self.err_kspace(cutoff)
