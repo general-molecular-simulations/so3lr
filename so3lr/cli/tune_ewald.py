@@ -571,12 +571,12 @@ class EwaldErrorBounds_SR(EwaldErrorBounds):
         """
         kspace = self.err_kspace(smearing, spacing)
         rspace = self.err_rspace(smearing, cutoff)
-        rspace_ana = super().err_rspace(smearing, self.cutoff_sr)
+        rspace_lr = super().err_rspace(smearing, self.cutoff_sr)
+        total = np.sqrt(kspace**2 + rspace**2 + rspace_lr**2)
         logger.info(
-            f"Error bounds: kspace={kspace}, rspace={rspace}, rspace (estimate)={rspace_ana} total={np.sqrt(kspace**2 + rspace**2)}"
+            f"Error bounds: kspace={kspace}, rspace={rspace}, rspace (estimate)={rspace_lr}, total={total}"
         )
-
-        return np.sqrt(kspace**2 + rspace**2)
+        return total
 
 def tune_pme(
     charges: jnp.ndarray,
@@ -695,23 +695,6 @@ class PMEErrorBounds(TuningErrorBounds):
             * np.exp(-(cutoff**2) / 2 / smearing**2)
         )
 
-    def error(
-        self,
-        cutoff: float,
-        smearing: float,
-        spacing: float,
-        interpolation_nodes: int,
-    ) -> float:
-
-        kspace = self.err_kspace(smearing, spacing, interpolation_nodes)
-        rspace = self.err_rspace(smearing, cutoff)
-        rspace_ana = super().err_rspace(smearing, self.cutoff_sr)
-        logger.info(
-            f"Error bounds: kspace={kspace}, rspace={rspace}, rspace (estimate)={rspace_ana}, total={np.sqrt(kspace**2 + rspace**2)}"
-        )
-
-        return np.sqrt(kspace**2 + rspace**2)
-
 
 class PMEErrorBounds_SR(PMEErrorBounds):
     def __init__(
@@ -760,6 +743,22 @@ class PMEErrorBounds_SR(PMEErrorBounds):
 
         return jnp.sqrt(jnp.sum(jnp.square(full_force - interp_force))/ (len(self._positions)))
 
+    def error(
+        self,
+        cutoff: float,
+        smearing: float,
+        spacing: float,
+        interpolation_nodes: int,
+    ) -> float:
+
+        kspace = self.err_kspace(smearing, spacing, interpolation_nodes)
+        rspace = self.err_rspace(smearing, cutoff)
+        rspace_lr = super().err_rspace(smearing, self.cutoff_sr)
+        total = np.sqrt(kspace**2 + rspace**2 + rspace_lr**2)
+        logger.info(
+            f"Error bounds: kspace={kspace}, rspace={rspace}, rspace (estimate)={rspace_lr}, total={total}"
+        )
+        return total
 
 def tune_sr(
     charges: jnp.ndarray,
@@ -1129,8 +1128,10 @@ def tune(
         logger.info(f"  lr_cutoff: {params['cutoff']}")
     else:
         logger.info(f"Tuned {kspace_electrostatics.upper()} parameters: ")
+        logger.info(f"  lr_cutoff: {params['cutoff']}")
         logger.info(f"  kspace_smearing: {params['smearing']}")
         logger.info(f"  kspace_spacing: {params['spacing']}")
         if 'interpolation_nodes' in params:
             logger.info(f"  kspace_interp_nodes: {params['interpolation_nodes']}")        
+    logger.info(f"  timing: {timing}")
 
