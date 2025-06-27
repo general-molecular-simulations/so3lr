@@ -441,14 +441,7 @@ def tune_ewald(
     #timings = [0.0]*len(errs)
     #print(errs)
 
-    if any(err < accuracy for err in errs):
-        return params[timings.index(min(timings))], min(timings)
-    warn(
-        f"No parameter meets the accuracy requirement.\n"
-        f"Returning the parameter with the smallest error, which is {min(errs)}.\n",
-        stacklevel=1,
-    )
-    return params[errs.index(min(errs))], timings[errs.index(min(errs))]
+    return params, errs, timings
 
 
 class EwaldErrorBounds(TuningErrorBounds):
@@ -571,10 +564,10 @@ class EwaldErrorBounds_SR(EwaldErrorBounds):
         """
         kspace = self.err_kspace(smearing, spacing)
         rspace = self.err_rspace(smearing, cutoff)
-        rspace_lr = super().err_rspace(smearing, self.cutoff_sr)
+        rspace_lr = super().err_rspace(smearing, cutoff)
         total = np.sqrt(kspace**2 + rspace**2 + rspace_lr**2)
         logger.info(
-            f"Error bounds: kspace={kspace}, rspace={rspace}, rspace (estimate)={rspace_lr}, total={total}"
+            f"Error bounds: kspace={kspace}, rspace-sr={rspace}, rspace-lr={rspace_lr}, total={total}"
         )
         return total
 
@@ -641,15 +634,7 @@ def tune_pme(
     #timings = [0.0]*len(errs)
     #print(errs)
     
-    if any(err < accuracy for err in errs):
-        return params[timings.index(min(timings))], min(timings)
-    warn(
-        f"No parameter meets the accuracy requirement.\n"
-        f"Returning the parameter with the smallest error, which is {min(errs)}.\n",
-        stacklevel=1,
-    )
-    return params[errs.index(min(errs))], timings[errs.index(min(errs))]
-
+    return params, errs, timings
 
 class PMEErrorBounds(TuningErrorBounds):
     def __init__(
@@ -753,10 +738,10 @@ class PMEErrorBounds_SR(PMEErrorBounds):
 
         kspace = self.err_kspace(smearing, spacing, interpolation_nodes)
         rspace = self.err_rspace(smearing, cutoff)
-        rspace_lr = super().err_rspace(smearing, self.cutoff_sr)
+        rspace_lr = super().err_rspace(smearing, cutoff)
         total = np.sqrt(kspace**2 + rspace**2 + rspace_lr**2)
         logger.info(
-            f"Error bounds: kspace={kspace}, rspace={rspace}, rspace (estimate)={rspace_lr}, total={total}"
+            f"Error bounds: kspace={kspace}, rspace-sr={rspace}, rspace-lr={rspace_lr}, total={total}"
         )
         return total
 
@@ -808,15 +793,8 @@ def tune_sr(
     errs, timings, memorys = tuner.tune(accuracy)
     #timings = [0.0]*len(errs)
     #print(errs)
+    return params, errs, timings
     
-    if any(err < accuracy for err in errs):
-        return params[timings.index(min(timings))], min(timings)
-    warn(
-        f"No parameter meets the accuracy requirement.\n"
-        f"Returning the parameter with the smallest error, which is {min(errs)}.\n",
-        stacklevel=1,
-    )
-    return params[errs.index(min(errs))], timings[errs.index(min(errs))]
 
 
 class NativeErrorBounds(TuningErrorBounds):
@@ -903,12 +881,12 @@ class NativeErrorBounds(TuningErrorBounds):
 
         #kspace = self.err_kspace(cutoff)
         full_force, rspace = self.err_rspace(cutoff)
-        kspace =  jnp.sqrt(jnp.sum(jnp.square(full_force - self.best_full_force))/ (len(self._positions)))
+        rspace_lr =  jnp.sqrt(jnp.sum(jnp.square(full_force - self.best_full_force))/ (len(self._positions)))
         logger.info(
-            f"Error bounds: kspace={kspace}, rspace={rspace}, total={np.sqrt(kspace**2 + rspace**2)}"
+            f"Error bounds: rspace-sr={rspace}, rspace-lr={rspace_lr},  total={np.sqrt(rspace_lr**2 + rspace**2)}"
         )
 
-        return np.sqrt(kspace**2 + rspace**2)
+        return np.sqrt(rspace_lr**2 + rspace**2)
 
 def tune(
     settings: dict
@@ -1057,7 +1035,8 @@ def tune(
     if kspace_electrostatics == "ewald":
         # Tune Ewald parameters
         logger.info("Tuning Ewald parameters...")
-        params, timing = tune_ewald(
+        accuracy= settings.get('accuracy', 1e-3)  # Load from settings
+        params, errs, timings = tune_ewald(
             charges=charges,
             cell=box,
             positions=position,
@@ -1073,14 +1052,15 @@ def tune(
             smear_it= settings.get('smear_it', 2.0),  # Load from settings
             ns_lo=    settings.get('ns_lo', 4),  # Load from settings
             ns_hi=    settings.get('ns_hi', 8),  # Load from settings
-            accuracy= settings.get('accuracy', 2e-2),  # Load from settings
+            accuracy= accuracy,
             model_kwargs=model_kwargs,
         )
 
     elif kspace_electrostatics == "pme":
         logger.info("Tuning PME parameters...")
         # Tune PME parameters
-        params, timing = tune_pme(
+        accuracy= settings.get('accuracy', 1e-3)  # Load from settings
+        params, errs, timings = tune_pme(
             charges=charges,
             cell=box,
             positions=position,
@@ -1098,14 +1078,15 @@ def tune(
             nodes_hi= settings.get('nodes_hi', 3),  # Load from settings
             mesh_lo=  settings.get('mesh_lo', 4),  # Load from settings
             mesh_hi=  settings.get('mesh_hi', 6),  # Load from settings
-            accuracy= settings.get('accuracy', 2e-2),  # Load from settings
+            accuracy= accuracy,
             model_kwargs=model_kwargs,
         )
     elif kspace_electrostatics is None:
         logger.info("No k-space electrostatics tuning, only tuning the cutoff.")
         # If no k-space electrostatics is specified, use native short-range tuning
         # No k-space electrostatics, use native short-range tuning
-        params, timing = tune_sr(
+        accuracy= settings.get('accuracy', 1.0)  # Load from settings
+        params, errs, timings = tune_sr(
             charges=charges,
             cell=box, 
             positions=position,
@@ -1116,22 +1097,41 @@ def tune(
             cutoff_lo=settings.get('cutoff_lo', 10.0),  # Load from settings
             cutoff_it=settings.get('cutoff_it', 2.0),  # Load from settings
             cutoff_hi=settings.get('cutoff_hi', lr_cutoff),  # Default to lr_cutoff
-            accuracy= settings.get('accuracy', 1.0),  # Load from settings
+            accuracy= accuracy,
             exponent=1,  # Native short-range uses 1/r potential
             model_kwargs=model_kwargs,
         )
     else:
         raise ValueError(f"Unknown kspace_electrostatics type: {kspace_electrostatics}. Must be 'ewald' or 'pme'.")
 
+    if any(err < accuracy for err in errs):
+        param, timing, error = params[timings.index(min(timings))], min(timings), errs[timings.index(min(timings))]
+        if kspace_electrostatics is None:
+            logger.info(f"Optimally timed parameters for cutoff electrostatics with an estimated force error below {accuracy}eV/A:")
+            logger.info(f"  lr_cutoff: {param['cutoff']}")
+        else:
+            logger.info(f"Optimally timed {kspace_electrostatics.upper()} parameters with an estimated force error below {accuracy}eV/A:")
+            logger.info(f"  lr_cutoff: {param['cutoff']}")
+            logger.info(f"  kspace_smearing: {param['smearing']}")
+            logger.info(f"  kspace_spacing: {param['spacing']}")
+            if 'interpolation_nodes' in params:
+                logger.info(f"  kspace_interp_nodes: {param['interpolation_nodes']}")        
+        logger.info(f"  timing: {timing}")
+        logger.info(f"  force error estimate [eV/A]: {error}")
+
+    else:
+        warn(f"No parameter meets the accuracy requirement.\n",stacklevel=1)
+    param, timing, error = params[errs.index(min(errs))], timings[errs.index(min(errs))], min(errs)
+    logger.info(f"The parameters with the smallest error estimate are:")
     if kspace_electrostatics is None:
-        logger.info("Tuned parameters for cutoff electrostatics:")
-        logger.info(f"  lr_cutoff: {params['cutoff']}")
+        logger.info(f"  lr_cutoff: {param['cutoff']}")
     else:
         logger.info(f"Tuned {kspace_electrostatics.upper()} parameters: ")
-        logger.info(f"  lr_cutoff: {params['cutoff']}")
-        logger.info(f"  kspace_smearing: {params['smearing']}")
-        logger.info(f"  kspace_spacing: {params['spacing']}")
+        logger.info(f"  lr_cutoff: {param['cutoff']}")
+        logger.info(f"  kspace_smearing: {param['smearing']}")
+        logger.info(f"  kspace_spacing: {param['spacing']}")
         if 'interpolation_nodes' in params:
-            logger.info(f"  kspace_interp_nodes: {params['interpolation_nodes']}")        
+            logger.info(f"  kspace_interp_nodes: {param['interpolation_nodes']}")        
     logger.info(f"  timing: {timing}")
+    logger.info(f"  force error estimate [eV/A]: {error}")
 
