@@ -1588,7 +1588,8 @@ def perform_md(
         box=box
     )
 
-    energy_fn = jax.jit(partial(energy_or_obs_fn,has_aux=False, k_grid=k_grid, k_smearing=k_smearing))
+    energy_or_obs_fn = partial(energy_or_obs_fn, k_grid=k_grid, k_smearing=k_smearing)
+    energy_fn = jax.jit(partial(energy_or_obs_fn,has_aux=False))
 
     # Allocating the neighbor lists
     if neighbor_fn_lr is not None:
