@@ -75,6 +75,32 @@ def _unbatch(graph: gn_graph.GraphsTuple, np_) -> List[gn_graph.GraphsTuple]:
         ]
         return list_of_nests
 
+    def _map_split_globals(nest, n_graphs, skip_fields=None):
+        """Splits global features, optionally skipping certain fields."""
+        skip_fields = skip_fields or set()
+        
+        def split_or_replicate(key, field):
+            if key in skip_fields:
+                # Replicate the field for all graphs instead of splitting
+                return [field for _ in range(n_graphs)]
+            else:
+                # Split normally - expect one value per graph
+                if field.shape[0] != n_graphs:
+                    raise ValueError(f"Global field '{key}' has {field.shape[0]} elements but expected {n_graphs}")
+                return [field[i:i+1] for i in range(n_graphs)]
+        
+        # Apply splitting/replication to each field
+        nest_of_lists = {}
+        for key, field in nest.items():
+            nest_of_lists[key] = split_or_replicate(key, field)
+        
+        # Transpose the structure from {field: [list]} to [{field: value}, ...]
+        list_of_nests = [
+            {key: field_list[i] for key, field_list in nest_of_lists.items()}
+            for i in range(n_graphs)
+        ]
+        return list_of_nests
+
     all_n_node = graph.n_node[:, None]
     all_n_edge = graph.n_edge[:, None]
     all_n_pair = graph.n_pairs[:, None]
@@ -83,7 +109,9 @@ def _unbatch(graph: gn_graph.GraphsTuple, np_) -> List[gn_graph.GraphsTuple]:
     edge_offsets = np_.cumsum(graph.n_edge[:-1])
     pairs_offsets = np_.cumsum(graph.n_pairs[:-1])
     all_edges = _map_split(graph.edges, edge_offsets)
-    all_globals = _map_split(graph.globals, len(graph.n_node))
+    # Skip splitting residue_charge and residue_segments when calculating dimer binding energy
+    all_globals = _map_split_globals(graph.globals, len(graph.n_node), 
+                                   skip_fields={'residue_charge', 'residue_segments'})
     all_senders = np_.split(graph.senders, edge_offsets)
     all_receivers = np_.split(graph.receivers, edge_offsets)
     all_idx_i_lr = np_.split(graph.idx_i_lr, pairs_offsets)

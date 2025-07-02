@@ -32,8 +32,8 @@ def make_so3lr(
         )
     )
 
+    # Change shapes to allow for multiple theory levels, only needed for https://github.com/kabylda/mlff/tree/v1.0-tfds version
     # if 'energy_offset' in params['params']['observables_0']:
-    #     # Change shapes to allow for multiple theory levels, only needed for https://github.com/kabylda/mlff/tree/v1.0-tfds version
     #     num_theory_levels=16
     #     old_energy_offset = params['params']['observables_0']['energy_offset']
     #     if len(old_energy_offset.shape) == 1:
@@ -70,10 +70,20 @@ def make_so3lr(
             other_inputs['batch_segments'] = batch_segments
             other_inputs['graph_mask'] = graph_mask
 
+        # Handle residue information for dimer calculations
+        residue_segments = other_inputs.get('residue_segments', None)
+        residue_charge = other_inputs.get('residue_charge', None)
+        
         inputs = dict(
             positions=positions,
             **other_inputs
         )
+
+        # Add residue information if provided
+        if residue_segments is not None:
+            inputs['residue_segments'] = residue_segments
+        if residue_charge is not None:
+            inputs['residue_charge'] = residue_charge
 
         output = model.apply(params, inputs)
 
