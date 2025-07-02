@@ -15,6 +15,8 @@ Graph = namedtuple(
         "edges_lr",
         "idx_i_lr",
         "idx_j_lr",
+        "cell",
+        "theory_mask",
         "residue_segments",
         "residue_charge",
     )
