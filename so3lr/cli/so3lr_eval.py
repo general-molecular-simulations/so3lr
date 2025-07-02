@@ -209,9 +209,9 @@ def evaluate_so3lr_on(
             raise RuntimeError(
                 f'Output file already exists: {save_to}')
 
-        if save_to.suffix != '.extxyz':
+        if save_to.suffix != '.xyz' and save_to.suffix != '.extxyz':
             raise ValueError(
-                f"Output file must have suffix `.extxyz`. Received: {save_to.suffix}.")
+                f"Output file must have suffix `.xyz` or `.extxyz`. Received: {save_to.suffix}.")
 
         # Create parent directory if it doesn't exist
         save_to.parent.mkdir(parents=True, exist_ok=True)
@@ -264,6 +264,8 @@ def evaluate_so3lr_on(
     n_edge = stats['max_num_of_edges'] * batch_size + 1
     n_graph = batch_size + 1
     n_pairs = stats['max_num_of_nodes'] * (stats['max_num_of_nodes'] - 1) * batch_size + 1
+
+    logger.info(f"Batch size: n_node={n_node}, n_edge={n_edge}, n_graph={n_graph}, n_pairs={n_pairs}")
 
     # Batch the graphs
     batched_graphs = jraph.dynamically_batch(

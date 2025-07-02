@@ -75,7 +75,7 @@ def get_hardware_info():
                 else:
                     mem_str = "unknown"
 
-                logger.info(f"Device {i}:                {device}")
+                logger.info(f"Device {i}:                  {device}")
                 logger.info(f"Memory usage:              {mem_str}")
             except:
                 logger.info(f"Device {i}:                {device}")
