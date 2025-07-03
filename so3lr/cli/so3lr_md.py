@@ -1452,18 +1452,15 @@ def check_kspace_grid(
         if kspace_electrostatics == 'ewald':
             if k_grid.shape != get_kgrid_ewald_shape(box,lr_wavelength=k_spacing):
                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
-                logger.info(f'k-grid shape: {k_grid.shape}')
-                return k_grid
         elif kspace_electrostatics == 'pme':
             if k_grid.shape != get_kgrid_mesh_shape(box,mesh_spacing=k_spacing):
                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
-                logger.info(f'k-grid shape: {k_grid.shape}')
-                return k_grid
         else:
             raise ValueError(
                 f'Invalid kspace_electrostatics value: {kspace_electrostatics}. '
                 'Expected None, "ewald", or "pme".'
             )
+        return k_grid
 
 def perform_md(
     all_settings: Dict,
@@ -1764,7 +1761,10 @@ def perform_md(
 
     # Running the MD
     logger.info('Starting MD simulation...')
-    logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\ttime/step [s]')
+    if ensemble == 'npt':
+        logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\tBox [A]\t\ttime/step [s]')
+    else:
+        logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\ttime/step [s]')
 
     # Calculate some quantities for printing
     KE, PE, H, current_T, _ = compute_quantities(
@@ -1779,8 +1779,10 @@ def perform_md(
         md_T,
         md_P
     )
-
-    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
+    if ensemble == 'npt':
+        logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box[0]:.1f}\t{0.0:.2e}')
+    else:
+        logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
 
     momenta, positions, boxes = [], [], []
     cycle_md = 0
@@ -1857,7 +1859,10 @@ def perform_md(
                 md_P
             )
 
-            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{time_per_step:.2e}')
+            if ensemble == 'npt':
+                logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box[0]:.1f}\t{time_per_step:.2e}')
+            else:
+                logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{time_per_step:.2e}')
 
             positions.append(np.array(state.position))
             momenta.append(np.array(state.momentum))
