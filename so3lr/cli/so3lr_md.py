@@ -631,14 +631,15 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
         k_grid = None
         if 'box' in kwargs:
             box = kwargs.get('box')
-            if box.shape == (3, 3):
-                box = box
-            elif box.shape == (3, ):
-                box = jnp.diag(box)
-            elif box.shape == (1,):
-                box = jnp.diag(jnp.repeat(box, 3))
-            else:
-                raise ValueError(f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
+            if box is not None:
+                if box.shape == (3, 3):
+                    box = box
+                elif box.shape == (3, ):
+                    box = jnp.diag(box)
+                elif box.shape == (1,):
+                    box = jnp.diag(jnp.repeat(box, 3))
+                else:
+                    raise ValueError(f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
 
         if 'k_grid' in kwargs:
             k_grid = kwargs.get('k_grid')
