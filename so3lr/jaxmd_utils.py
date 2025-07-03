@@ -3,12 +3,12 @@ import jax.numpy as jnp
 
 from functools import partial
 from jax_md import partition
-from jax_md.space import DisplacementOrMetricFn, Box
+from jax_md.space import DisplacementOrMetricFn, Box, transform
 
 from so3lr.graph import Graph
 
 
-def neighbor_list_featurizer(displacement_fn, species):
+def neighbor_list_featurizer(displacement_fn, species, fractional_coordinates=True):
     def featurize(R, neighbor, neighbor_lr, **kwargs):
         idx_i = neighbor[0]  # shape: P
         idx_j = neighbor[1]  # shape: P
@@ -20,15 +20,41 @@ def neighbor_list_featurizer(displacement_fn, species):
         Ra_lr = R[idx_i_lr]
         Rb_lr = R[idx_j_lr]
 
+        box = None
+        positions = None
+        k_smearing = None
+        k_grid = None
         if 'box' in kwargs:
             box = kwargs.get('box')
+            if box.shape == (3, 3):
+                box = box
+            elif box.shape == (3, ):
+                box = jnp.diag(box)
+            elif box.shape == (1,):
+                box = jnp.diag(jnp.repeat(box, 3))
+            else:
+                raise ValueError(f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
+
+        if 'k_grid' in kwargs:
+            k_grid = kwargs.get('k_grid')
+            if fractional_coordinates:
+                positions = transform(box, R) # transform to non-fractional coordinates
+            else:
+                positions = R
+        if 'k_smearing' in kwargs:
+            k_smearing = kwargs.get('k_smearing')
+
+        if 'perturbation' in kwargs:
+            pert = kwargs.get('perturbation')
+            positions = transform(pert, positions)
+            box = transform(pert, box)
 
         d = jax.vmap(partial(displacement_fn, **kwargs))
         dR = d(Ra, Rb)
         dR_lr = d(Ra_lr, Rb_lr)
 
         graph = Graph(
-            positions=None,
+            positions=positions,
             nodes=species,
             edges=dR,
             centers=idx_i,
@@ -39,7 +65,9 @@ def neighbor_list_featurizer(displacement_fn, species):
             edges_lr=dR_lr,
             idx_i_lr=idx_i_lr,
             idx_j_lr=idx_j_lr,
-            cell=box  # will raise an error if box not in kwargs.
+            cell=box,  # will raise an error if box not in kwargs.
+            k_grid=k_grid,
+            k_smearing=k_smearing
         )
 
         return graph
@@ -92,7 +120,8 @@ def to_jax_md(
 
     featurizer = neighbor_list_featurizer(
         displacement_or_metric,
-        species
+        species,
+        fractional_coordinates=fractional_coordinates,
     )
 
     # create an energy_fn that is compatible with jax_md

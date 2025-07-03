@@ -30,7 +30,7 @@ import jax
 import jax.numpy as jnp
 import jax_md
 from jax_md import units, partition
-from jax_md.space import DisplacementOrMetricFn, raw_transform
+from jax_md.space import DisplacementOrMetricFn, raw_transform, transform
 from mlff.mdx.potential import MLFFPotentialSparse
 from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
 
@@ -193,6 +193,8 @@ def handle_box(
             raise ValueError('Cell must be defined for periodic boundary conditions.')
 
         box = jnp.array(np.diag(np.array(cell)))
+        if box.shape == (3,3):
+            box = jnp.diag(box)
         fractional_coordinates = True
 
         # Create displacement and shift functions for periodic boundary conditions
@@ -216,7 +218,7 @@ def handle_box(
             f"Unsupported boundary condition: '{shift_displacement}'. "
             "Only 'free' or 'periodic' boundary conditions are supported."
         )
-
+    logger.info(f"Box for So3LR: {box}")
     return positions, box, displacement, shift, fractional_coordinates
 
 
@@ -518,13 +520,20 @@ def atoms_to_jnp(
     }
 
 
-def check_cell(cell: np.ndarray, lr_cutoff: float) -> np.ndarray:
+def check_cell(
+    cell: np.ndarray,
+    lr_cutoff: float,
+    kspace_electrostatics: str,
+    kspace_smearing: float = None
+    ) -> np.ndarray:
     """
     Validate the provided cell matrix for compatibility with JAX-MD requirements.
 
     Args:
         cell (np.ndarray): The cell matrix to be validated.
         lr_cutoff (float): The long-range cutoff distance.
+        kspace_electrostatics (str): Type of k-space electrostatics to use.
+        kspace_smearing (float): K-space smearing value.
 
     Returns:
         np.ndarray: The validated cell matrix if all checks pass, or None if the cell is zero.
@@ -540,7 +549,7 @@ def check_cell(cell: np.ndarray, lr_cutoff: float) -> np.ndarray:
     if np.any(np.diag(cell) < lr_cutoff * 2):
         raise ValueError(f'Each dimension of the cell {np.diag(cell)} must be at least twice the long-range cutoff distance [{lr_cutoff} Å].')
         
-    if lr_cutoff < 10:
+    if lr_cutoff < 10 and (kspace_electrostatics == None or kspace_smearing == None):
         raise ValueError(f'Long-range cutoff below 10 Å is not supported yet. Provided cutoff: {lr_cutoff} Å.')
 
     return cell
@@ -550,6 +559,8 @@ def load_model(
     precision: jnp.dtype,
     lr_cutoff: float = 12.0,
     dispersion_damping: float = 2.,
+    kspace_electrostatics: str = None,
+    kspace_interp_nodes: int = 4,
     **kwargs
 ) -> MLFFPotentialSparse:
     """
@@ -580,6 +591,8 @@ def load_model(
             cutoff_lr=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
             neighborlist_format_lr='ordered_sparse',
+            coulomb_kspace_do_ewald=True if kspace_electrostatics == 'ewald' else False,
+            coulomb_kspace_interp_nodes=kspace_interp_nodes,
         ),
         dtype=precision,
         **kwargs
@@ -588,7 +601,7 @@ def load_model(
     return potential
 
 
-def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., precision=jnp.float32):
+def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., precision=jnp.float32, fractional_coordinates=True):
     """
     Create a function that builds a graph from positions and neighbors.
 
@@ -612,14 +625,41 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
         Ra_lr = R[idx_i_lr]
         Rb_lr = R[idx_j_lr]
 
-        box = kwargs.get('box', None)
+        box = None
+        positions = None
+        k_smearing = None
+        k_grid = None
+        if 'box' in kwargs:
+            box = kwargs.get('box')
+            if box.shape == (3, 3):
+                box = box
+            elif box.shape == (3, ):
+                box = jnp.diag(box)
+            elif box.shape == (1,):
+                box = jnp.diag(jnp.repeat(box, 3))
+            else:
+                raise ValueError(f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
+
+        if 'k_grid' in kwargs:
+            k_grid = kwargs.get('k_grid')
+            if fractional_coordinates:
+                positions = transform(box, R) # transform to non-fractional coordinates
+            else:
+                positions = R
+        if 'k_smearing' in kwargs:
+            k_smearing = kwargs.get('k_smearing')
+
+        if 'perturbation' in kwargs:
+            pert = kwargs.get('perturbation')
+            positions = transform(pert, positions)
+            box = transform(pert, box)
 
         d = jax.vmap(partial(displacement_fn, **kwargs))
         dR = d(Ra, Rb)
         dR_lr = d(Ra_lr, Rb_lr)
 
         graph = Graph(
-            positions=None,
+            positions=positions,
             nodes=species,
             edges=dR,
             centers=idx_i,
@@ -630,7 +670,9 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
             edges_lr=dR_lr,
             idx_i_lr=idx_i_lr,
             idx_j_lr=idx_j_lr,
-            cell=box  # Will be None for free boundary conditions
+            cell=box,  # Will be None for free boundary conditions
+            k_grid=k_grid,
+            k_smearing=k_smearing,
         )
 
         return graph
@@ -712,7 +754,8 @@ def to_jax_md_custom(
         displacement_or_metric,
         species,
         total_charge,
-        precision
+        precision,
+        fractional_coordinates=fractional_coordinates
     )
 
     # Create an energy_fn that is compatible with jax_md
@@ -1322,6 +1365,38 @@ def create_obs_fn(
 
     return obs_fn, obs_dict
 
+def setup_kspace_grid(
+    kspace_electrostatics: str,
+    kspace_smearing: float,
+    kspace_spacing: float,
+    box: jnp.ndarray,)-> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Setup the k-space grid for Ewald summation.
+    Args:
+        kspace_electrostatics (str): Type of k-space electrostatics (None or 'ewald' or 'pme').
+        kspace_smearing (float): Smearing value for the k-space grid.
+        kspace_spacing (float): Spacing for the k-space grid.
+    Returns:
+        Tuple[jnp.ndarray, jnp.ndarray]: k-space grid and smearing values.
+    """
+    from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald
+
+    k_spacing = jnp.array([kspace_spacing])
+    k_smearing = jnp.array([kspace_smearing])
+
+    if kspace_electrostatics == 'ewald':
+        k_grid = get_kgrid_ewald(box,lr_wavelength=k_spacing)
+        logger.info('Doing Ewald electrostatics')
+        logger.info(f'k-grid shape: {k_grid.shape}')
+    elif kspace_electrostatics == 'pme':
+        k_grid = get_kgrid_mesh(box, mesh_spacing=k_spacing)
+        logger.info('Doing PME electrostatics')
+        logger.info(f'k-grid shape: {k_grid.shape}')
+    else:
+        k_grid = None
+        k_smearing = None
+    return k_grid, k_smearing
+
 def perform_md(
     all_settings: Dict,
     opt_structure: Optional[jnp.ndarray] = None,
@@ -1353,6 +1428,12 @@ def perform_md(
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
     total_charge = all_settings.get('total_charge')
+
+    # Ewald electrostatics settings
+    kspace_electrostatics = all_settings.get('kspace_electrostatics',None)
+    kspace_smearing = all_settings.get('kspace_smearing', 4.0)
+    kspace_spacing = all_settings.get('kspace_spacing', 2.0)
+    kspace_interp_nodes = all_settings.get('kspace_interp_nodes', 4)
 
     # MD parameters
     md_dt = all_settings.get('md_dt')
@@ -1398,7 +1479,7 @@ def perform_md(
         initial_geometry.set_positions(opt_structure)
 
     cell = initial_geometry.get_cell()
-    cell = check_cell(cell, lr_cutoff)        
+    cell = check_cell(cell, lr_cutoff, kspace_electrostatics, kspace_smearing)
 
     if md_P is not None and cell is None:
         raise ValueError(
@@ -1467,6 +1548,8 @@ def perform_md(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
+            coulomb_kspace_do_ewald=True if kspace_electrostatics == 'ewald' else False,
+            coulomb_kspace_interp_nodes=kspace_interp_nodes,
             **patched_potential_kwargs
         )
     else:
@@ -1479,6 +1562,8 @@ def perform_md(
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
             dispersion_damping=dispersion_damping,
+            kspace_electrostatics=kspace_electrostatics,
+            kspace_interp_nodes=kspace_interp_nodes,
             **patched_potential_kwargs
         )
 
@@ -1496,6 +1581,14 @@ def perform_md(
         has_aux=len(observables)>0,
     )
 
+    k_grid, k_smearing = setup_kspace_grid(
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_spacing=kspace_spacing,
+        kspace_smearing=kspace_smearing,
+        box=box
+    )
+
+    energy_or_obs_fn = partial(energy_or_obs_fn, k_grid=k_grid, k_smearing=k_smearing)
     energy_fn = jax.jit(partial(energy_or_obs_fn,has_aux=False))
 
     # Allocating the neighbor lists
@@ -1859,6 +1952,12 @@ def perform_min(
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
     total_charge = all_settings.get('total_charge')
+
+    # Ewald electrostatics settings
+    kspace_electrostatics = all_settings.get('kspace_electrostatics',None)
+    kspace_smearing = all_settings.get('kspace_smearing', 4.0)
+    kspace_spacing = all_settings.get('kspace_spacing', 2.0)
+    kspace_interp_nodes = all_settings.get('kspace_interp_nodes', 4)
     
     # Settings for the minimization
     min_cycles = all_settings.get('min_cycles')
@@ -1877,7 +1976,7 @@ def perform_min(
     except FileNotFoundError:
         raise FileNotFoundError(f"Cannot find initial geometry file: {input_file_path}")
     cell = initial_geometry.get_cell()
-    cell = check_cell(cell, lr_cutoff)        
+    cell = check_cell(cell, lr_cutoff, kspace_electrostatics, kspace_smearing)
 
     if cell is not None:
         shift_displacement = 'periodic'
@@ -1906,7 +2005,9 @@ def perform_min(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_damping=dispersion_damping
+            dispersion_damping=dispersion_damping,
+            kspace_electrostatics=kspace_electrostatics,
+            kspace_interp_nodes=kspace_interp_nodes,
         )
 
     # Setting up the model
@@ -1921,7 +2022,15 @@ def perform_min(
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr
     )
-    energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False))
+
+    k_grid, k_smearing = setup_kspace_grid(
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_spacing=kspace_spacing,
+        kspace_smearing=kspace_smearing,
+        box=box
+    )
+
+    energy_fn = jax.jit(partial(energy_or_obs_fn,has_aux=False, k_grid=k_grid, k_smearing=k_smearing))
     force_fn = jax.jit(jax_md.quantity.force(energy_fn))
 
     # Allocating the neighbor lists
@@ -2200,7 +2309,9 @@ def load_state(
     else:
         raise NotImplementedError('Only NVE, NVT and NPT ensembles are supported')
 
-    box = None if loaded_state['box'].item() is None else loaded_state['box']
+    box = loaded_state['box']
+    if np.all(box == 0) or box is None:
+        box = jnp.array([0.0])
     cycle = loaded_state['step']
 
     return state, box, cycle

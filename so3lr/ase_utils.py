@@ -8,7 +8,8 @@ def make_ase_calculator(
         lr_cutoff=12.,
         dispersion_energy_cutoff_lr_damping=2.,
         calculate_stress=False,
-        dtype=np.float32
+        dtype=np.float32,
+        **kwargs
 ):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
@@ -18,7 +19,8 @@ def make_ase_calculator(
         dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
         from_file=True,
         calculate_stress=calculate_stress,
-        dtype=dtype
+        dtype=dtype,
+        **kwargs
     )
 
     return calc

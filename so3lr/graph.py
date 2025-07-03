@@ -15,6 +15,8 @@ _GraphBase = namedtuple(
         "idx_i_lr",
         "idx_j_lr",
         "cell",
+        "k_grid",
+        "k_smearing",,
         "theory_mask",
         "residue_segments",
         "residue_charge",

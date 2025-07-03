@@ -306,6 +306,16 @@ Evaluate SO3LR on a dataset with all options:
 # targets: "forces,dipole_vec,hirshfeld_ratios" # Targets to evaluate
 # jit_compile: true                            # Use JIT compilation for speed
 
+# # Experimental settings
+#
+# Ewald electrostatics settings
+# kspace_electrostatics: null                  # Whether to use Ewald summation for long-range electrostatics (null/"ewald"/"pme")
+# kspace_smearing: 4.0                         # Smearing width for Ewald summation
+# kspace_spacing: 2.0                          # Grid spacing for Ewald summation
+# kspace_interp_nodes: 4                       # Number of interpolation nodes for PME
+#
+# observables: ["partial_charges","dipole_vec","hirshfeld_ratios"]
+#
 # output_atom_indices: null                    # Optional list of atom indices to output
 # ```
 
