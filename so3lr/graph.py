@@ -28,9 +28,9 @@ class Graph(_GraphBase):
     
     def __new__(cls, positions, edges, nodes, centers, others, mask, 
                 total_charge, num_unpaired_electrons, edges_lr, idx_i_lr, 
-                idx_j_lr, cell, theory_mask=None, residue_segments=None, 
+                idx_j_lr, cell, k_grid=None, k_smearing=None, theory_mask=None, residue_segments=None, 
                 residue_charge=None):
         return super().__new__(cls, positions, edges, nodes, centers, others, 
                              mask, total_charge, num_unpaired_electrons, 
-                             edges_lr, idx_i_lr, idx_j_lr, cell, theory_mask, 
+                             edges_lr, idx_i_lr, idx_j_lr, cell, k_grid, k_smearing, theory_mask, 
                              residue_segments, residue_charge)
