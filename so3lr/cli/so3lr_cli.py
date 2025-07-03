@@ -35,6 +35,9 @@ SO3LR_ASCII = """
 # Ignore FutureWarnings or warnings that do not affect the model's performance
 warnings.filterwarnings("ignore", message="scatter inputs have incompatible types")
 warnings.filterwarnings("ignore", message="Explicitly requested dtype.*truncated")
+warnings.filterwarnings("ignore", category=SyntaxWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 
 def get_hardware_info():
     """Detect and print information about the computing hardware being used.
