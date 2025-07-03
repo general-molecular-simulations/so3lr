@@ -632,7 +632,7 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
         box = kwargs.get('box', None)
         k_grid = kwargs.get('k_grid', None)
 
-        if 'box' is not None:
+        if box is not None:
             box = kwargs.get('box')
             if box is not None:
                 if box.shape == (3, 3):
@@ -644,7 +644,7 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
                 else:
                     raise ValueError(f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
 
-        if 'k_grid' is not None:
+        if k_grid is not None:
             k_smearing = kwargs.get('k_smearing')
             if fractional_coordinates:
                 positions = transform(box, R) # transform to non-fractional coordinates
@@ -1402,12 +1402,14 @@ def setup_kspace_grid(
 
     k_spacing = jnp.array([kspace_spacing])
     k_smearing = jnp.array([kspace_smearing])
-    if box.ndim == 1:
-        cell = jnp.diag(box)
-    elif box.ndim == 2:
+    if box.shape == (3, 3):
         cell = box
+    elif box.shape == (3, ):
+        cell = jnp.diag(box)
+    elif box.shape == (1,):
+        cell = jnp.diag(jnp.repeat(box, 3))
     else:
-        raise ValueError("Box must be a 1D or 2D array representing the cell dimensions.")
+        raise ValueError(f"k-space grid setup: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
 
     if kspace_electrostatics == 'ewald':
         k_grid = get_kgrid_ewald(cell,lr_wavelength=k_spacing)
