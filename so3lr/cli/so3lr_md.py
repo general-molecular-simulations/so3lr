@@ -37,6 +37,8 @@ from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
 
+from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald, get_kgrid_mesh_shape, get_kgrid_ewald_shape
+
 # Setup logging
 logger = logging.getLogger("SO3LR")
 
@@ -625,11 +627,12 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
         Ra_lr = R[idx_i_lr]
         Rb_lr = R[idx_j_lr]
 
-        box = None
         positions = None
         k_smearing = None
-        k_grid = None
-        if 'box' in kwargs:
+        box = kwargs.get('box', None)
+        k_grid = kwargs.get('k_grid', None)
+
+        if 'box' is not None:
             box = kwargs.get('box')
             if box is not None:
                 if box.shape == (3, 3):
@@ -641,14 +644,12 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
                 else:
                     raise ValueError(f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
 
-        if 'k_grid' in kwargs:
-            k_grid = kwargs.get('k_grid')
+        if 'k_grid' is not None:
+            k_smearing = kwargs.get('k_smearing')
             if fractional_coordinates:
                 positions = transform(box, R) # transform to non-fractional coordinates
             else:
                 positions = R
-        if 'k_smearing' in kwargs:
-            k_smearing = kwargs.get('k_smearing')
 
         if 'perturbation' in kwargs:
             pert = kwargs.get('perturbation')
@@ -878,6 +879,7 @@ def compute_quantities(
     nbrs: jax_md.partition.NeighborList,
     nbrs_lr: jax_md.partition.NeighborList,
     box: jnp.ndarray,
+    k_grid: jnp.ndarray,
     unit: dict,
     ensemble: str,
     T: float,
@@ -915,7 +917,8 @@ def compute_quantities(
             state.position,
             neighbor=nbrs.idx,
             neighbor_lr=nbrs_lr.idx,
-            box=box
+            box=box,
+            k_grid=k_grid
         )
 
         if ensemble == 'nvt':
@@ -925,7 +928,8 @@ def compute_quantities(
                 kT=T,
                 neighbor=nbrs.idx,
                 neighbor_lr=nbrs_lr.idx,
-                box=box
+                box=box,
+                k_grid=k_grid
             ) / unit['energy']
         elif ensemble == 'npt':
             H = jax_md.simulate.npt_nose_hoover_invariant(
@@ -934,7 +938,8 @@ def compute_quantities(
                 pressure=P,
                 kT=T,
                 neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx
+                neighbor_lr=nbrs_lr.idx,
+                k_grid=k_grid
             )
         else:
             H = None
@@ -943,7 +948,8 @@ def compute_quantities(
         PE = energy_fn(
             state.position,
             neighbor=nbrs.idx,
-            box=box
+            box=box,
+            k_grid=k_grid
         )
         if ensemble == 'nvt':
             H = jax_md.simulate.nvt_nose_hoover_invariant(
@@ -951,7 +957,8 @@ def compute_quantities(
                 state,
                 kT=T,
                 neighbor=nbrs.idx,
-                box=box
+                box=box,
+                k_grid=k_grid
             ) / unit['energy']
         elif ensemble == 'npt':
             H = jax_md.simulate.npt_nose_hoover_invariant(
@@ -959,7 +966,8 @@ def compute_quantities(
                 state,
                 pressure=P,
                 kT=T,
-                neighbor=nbrs.idx
+                neighbor=nbrs.idx,
+                k_grid=k_grid
             )
         else:
             H = None
@@ -978,7 +986,8 @@ def compute_quantities(
             #    box=box,
             #    neighbor=nbrs.idx,
             #    neighbor_lr=nbrs_lr.idx,
-            #    kinetic_energy=KE
+            #    kinetic_energy=KE,
+            #    k_grid=k_grid
             # )
             current_P = 0.0
         else:
@@ -987,7 +996,8 @@ def compute_quantities(
             #    state.position,
             #    box=box,
             #    neighbor=nbrs.idx,
-            #    kinetic_energy=KE
+            #    kinetic_energy=KE,
+            #    k_grid=k_grid
             # )
             current_P = 0.0
     else:
@@ -1118,12 +1128,13 @@ def create_nve_step_fn(
         def step_nve_fn_lr(
             i: int,
             state):
-            state, nbrs, nbrs_lr, box = state
+            state, nbrs, nbrs_lr, box, k_grid = state
             state = apply_fn(
                 state,
                 neighbor=nbrs.idx,
                 neighbor_lr=nbrs_lr.idx,
-                box=box
+                box=box,
+                k_grid=k_grid
             )
             nbrs = nbrs.update(
                 state.position,
@@ -1135,7 +1146,7 @@ def create_nve_step_fn(
                 neighbor=nbrs_lr.idx,
                 box=box
             )
-            return state, nbrs, nbrs_lr, box
+            return state, nbrs, nbrs_lr, box, k_grid
         return step_nve_fn_lr
 
     else:
@@ -1143,18 +1154,19 @@ def create_nve_step_fn(
         def step_nve_fn(
             i: int,
             state):
-            state, nbrs, box, = state
+            state, nbrs, box, k_grid = state
             state = apply_fn(
                 state,
                 neighbor=nbrs.idx,
-                box=box
+                box=box,
+                k_grid=k_grid
             )
             nbrs = nbrs.update(
                 state.position,
                 neighbor=nbrs.idx,
                 box=box
             )
-            return state, nbrs, box
+            return state, nbrs, box, k_grid
         return step_nve_fn
 
 def create_nvt_step_fn(
@@ -1177,13 +1189,14 @@ def create_nvt_step_fn(
     if lr:
         @jax.jit
         def step_nvt_fn_lr(i: int, state):
-            state, nbrs, nbrs_lr, box = state
+            state, nbrs, nbrs_lr, box, k_grid = state
             state = apply_fn(
                 state,
                 neighbor=nbrs.idx,
                 neighbor_lr=nbrs_lr.idx,
                 kT=T,
-                box=box
+                box=box,
+                k_grid=k_grid
             )
             nbrs = nbrs.update(
                 state.position,
@@ -1195,24 +1208,25 @@ def create_nvt_step_fn(
                 neighbor=nbrs_lr.idx,
                 box=box
             )
-            return state, nbrs, nbrs_lr, box
+            return state, nbrs, nbrs_lr, box, k_grid
         return step_nvt_fn_lr
     else:
         @jax.jit
         def step_nvt_fn(i: int, state):
-            state, nbrs, box, = state
+            state, nbrs, box, k_grid = state
             state = apply_fn(
                 state,
                 neighbor=nbrs.idx,
                 kT=T,
-                box=box
+                box=box,
+                k_grid=k_grid
             )
             nbrs = nbrs.update(
                 state.position,
                 neighbor=nbrs.idx,
                 box=box
             )
-            return state, nbrs, box
+            return state, nbrs, box, k_grid
         return step_nvt_fn
 
 
@@ -1238,14 +1252,15 @@ def create_npt_step_fn(
     if lr:
         @jax.jit
         def step_npt_fn(i, state):
-            state, nbrs, nbrs_lr, box, = state
+            state, nbrs, nbrs_lr, box, k_grid = state
 
             state = apply_fn(
                 state,
                 neighbor=nbrs.idx,
                 neighbor_lr=nbrs_lr.idx,
                 kT=T,
-                pressure=P
+                pressure=P,
+                k_grid=k_grid
             )
 
             box = jax_md.simulate.npt_box(state)
@@ -1262,18 +1277,19 @@ def create_npt_step_fn(
                 box=box
             )
 
-            return state, nbrs, nbrs_lr, box
+            return state, nbrs, nbrs_lr, box, k_grid
         return step_npt_fn
     else:
         @jax.jit
         def step_npt_fn(i, state):
-            state, nbrs, box, = state
+            state, nbrs, box, k_grid = state
 
             state = apply_fn(
                 state,
                 neighbor=nbrs.idx,
                 kT=T,
-                pressure=P
+                pressure=P,
+                k_grid=k_grid
             )
 
             box = jax_md.simulate.npt_box(state)
@@ -1284,7 +1300,7 @@ def create_npt_step_fn(
                 box=box
             )
 
-            return state, nbrs, box
+            return state, nbrs, box, k_grid
         return step_npt_fn
 
 
@@ -1346,22 +1362,24 @@ def create_obs_fn(
     if lr:
         @jax.jit
         def obs_fn(state):
-            state, nbrs, nbrs_lr, box = state
+            state, nbrs, nbrs_lr, box, k_grid = state
             return  energy_or_obs_fn(
                         state.position,
                         neighbor=nbrs.idx,
                         neighbor_lr=nbrs_lr.idx,
                         box=box,
+                        k_grid=k_grid,
                         has_aux=True
                     )
     else:
         @jax.jit
         def obs_fn(state):
-            state, nbrs, box = state
+            state, nbrs, box, k_grid = state
             return  energy_or_obs_fn(
                         state.position,
                         neighbor=nbrs.idx,
                         box=box,
+                        k_grid=k_grid,
                         has_aux=True
                     )
 
@@ -1381,23 +1399,69 @@ def setup_kspace_grid(
     Returns:
         Tuple[jnp.ndarray, jnp.ndarray]: k-space grid and smearing values.
     """
-    from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald
 
     k_spacing = jnp.array([kspace_spacing])
     k_smearing = jnp.array([kspace_smearing])
+    if box.ndim == 1:
+        cell = jnp.diag(box)
+    elif box.ndim == 2:
+        cell = box
+    else:
+        raise ValueError("Box must be a 1D or 2D array representing the cell dimensions.")
 
     if kspace_electrostatics == 'ewald':
-        k_grid = get_kgrid_ewald(box,lr_wavelength=k_spacing)
+        k_grid = get_kgrid_ewald(cell,lr_wavelength=k_spacing)
         logger.info('Doing Ewald electrostatics')
         logger.info(f'k-grid shape: {k_grid.shape}')
     elif kspace_electrostatics == 'pme':
-        k_grid = get_kgrid_mesh(box, mesh_spacing=k_spacing)
+        k_grid = get_kgrid_mesh(cell, mesh_spacing=k_spacing)
         logger.info('Doing PME electrostatics')
         logger.info(f'k-grid shape: {k_grid.shape}')
     else:
         k_grid = None
         k_smearing = None
     return k_grid, k_smearing
+
+def check_kspace_grid(
+    k_grid: jnp.array,
+    kspace_electrostatics: str,
+    kspace_smearing: float,
+    kspace_spacing: float,
+    box: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Check and setup the k-space grid for Ewald summation.
+
+    Args:
+        kspace_electrostatics (str): Type of k-space electrostatics (None or 'ewald' or 'pme').
+        kspace_smearing (float): Smearing value for the k-space grid.
+        kspace_spacing (float): Spacing for the k-space grid.
+        box (jnp.ndarray): Box of the system.
+
+    Returns:
+        Tuple[jnp.ndarray, jnp.ndarray]: k-space grid and smearing values.
+    """
+
+    if kspace_electrostatics is None:
+        return None
+    else:
+        k_spacing = jnp.array([kspace_spacing])
+        k_smearing = jnp.array([kspace_smearing])
+        if kspace_electrostatics == 'ewald':
+            if k_grid.shape != get_kgrid_ewald_shape(box,lr_wavelength=k_spacing):
+                k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
+                logger.info(f'k-grid shape: {k_grid.shape}')
+                return k_grid
+        elif kspace_electrostatics == 'pme':
+            if k_grid.shape != get_kgrid_mesh_shape(box,mesh_spacing=k_spacing):
+                k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
+                logger.info(f'k-grid shape: {k_grid.shape}')
+                return k_grid
+        else:
+            raise ValueError(
+                f'Invalid kspace_electrostatics value: {kspace_electrostatics}. '
+                'Expected None, "ewald", or "pme".'
+            )
 
 def perform_md(
     all_settings: Dict,
@@ -1436,6 +1500,7 @@ def perform_md(
     kspace_smearing = all_settings.get('kspace_smearing', 4.0)
     kspace_spacing = all_settings.get('kspace_spacing', 2.0)
     kspace_interp_nodes = all_settings.get('kspace_interp_nodes', 4)
+    kspace_buffer = all_settings.get('kspace_buffer', 100)
 
     # MD parameters
     md_dt = all_settings.get('md_dt')
@@ -1590,7 +1655,7 @@ def perform_md(
         box=box
     )
 
-    energy_or_obs_fn = partial(energy_or_obs_fn, k_grid=k_grid, k_smearing=k_smearing)
+    energy_or_obs_fn = partial(energy_or_obs_fn, k_smearing=k_smearing)
     energy_fn = jax.jit(partial(energy_or_obs_fn,has_aux=False))
 
     # Allocating the neighbor lists
@@ -1670,7 +1735,8 @@ def perform_md(
                 neighbor_lr=nbrs_lr.idx,
                 kT=md_T,
                 mass=initial_geometry_dict['masses'],
-                velocities = initial_geometry_dict.get('velocities')
+                velocities = initial_geometry_dict.get('velocities'),
+                k_grid=k_grid
             )
         else:
             state = init_fn(
@@ -1680,7 +1746,8 @@ def perform_md(
                 neighbor=nbrs.idx,
                 kT=md_T,
                 mass=initial_geometry_dict['masses'],
-                velocities = initial_geometry_dict.get('velocities')
+                velocities = initial_geometry_dict.get('velocities'),
+                k_grid=k_grid
             )
 
     # Setup additional observables
@@ -1704,6 +1771,7 @@ def perform_md(
         nbrs,
         nbrs_lr,
         box,
+        k_grid,
         units.metal_unit_system(),
         ensemble,
         md_T,
@@ -1721,21 +1789,21 @@ def perform_md(
     while cycle_md < md_cycles:
         old_time = time.time()
         if lr:
-            new_state, nbrs, nbrs_lr, new_box = jax.block_until_ready(
+            new_state, nbrs, nbrs_lr, new_box, k_grid = jax.block_until_ready(
                 jax.lax.fori_loop(
                     0,
                     md_steps,
                     step_md_fn,
-                    (state, nbrs, nbrs_lr, box)
+                    (state, nbrs, nbrs_lr, box, k_grid)
                 )
             )
         else:
-            new_state, nbrs, new_box = jax.block_until_ready(
+            new_state, nbrs, new_box, k_grid = jax.block_until_ready(
                 jax.lax.fori_loop(
                     0,
                     md_steps,
                     step_md_fn,
-                    (state, nbrs, box)
+                    (state, nbrs, box, k_grid)
                 )
             )
 
@@ -1756,12 +1824,22 @@ def perform_md(
             new_state,
             new_box
         )
+
         if not overflow:
             cycle_md += 1
             current_cycle += 1
 
             state = new_state
             box = new_box
+
+            if (ensemble == 'npt') and (current_cycle % kspace_buffer == 0):
+                k_grid = check_kspace_grid(
+                    k_grid,
+                    kspace_electrostatics,
+                    kspace_smearing,
+                    kspace_spacing,
+                    box
+                )
 
             # Calculate some quantities for printing
             KE, PE, H, current_T, _ = compute_quantities(
@@ -1770,6 +1848,7 @@ def perform_md(
                 nbrs,
                 nbrs_lr,
                 box,
+                k_grid,
                 units.metal_unit_system(),
                 ensemble,
                 md_T,
@@ -1785,7 +1864,7 @@ def perform_md(
 
             # Calculate observables
             if len(observables)>0:
-                obs_data = obs_fn((state, nbrs, nbrs_lr, box))
+                obs_data = obs_fn((state, nbrs, nbrs_lr, box, k_grid))
                 for key in obs_dict.keys():
                     obs_dict[key].append(obs_data[1][key])
 
