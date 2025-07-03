@@ -1430,6 +1430,47 @@ def setup_kspace_grid(
         k_smearing = None
     return k_grid, k_smearing
 
+def check_kspace_grid(
+    k_grid: jnp.array,
+    kspace_electrostatics: str,
+    kspace_smearing: float,
+    kspace_spacing: float,
+    box: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Check and setup the k-space grid for Ewald summation.
+
+    Args:
+        kspace_electrostatics (str): Type of k-space electrostatics (None or 'ewald' or 'pme').
+        kspace_smearing (float): Smearing value for the k-space grid.
+        kspace_spacing (float): Spacing for the k-space grid.
+        box (jnp.ndarray): Box of the system.
+
+    Returns:
+        Tuple[jnp.ndarray, jnp.ndarray]: k-space grid and smearing values.
+    """
+
+    if kspace_electrostatics is None:
+        return None
+    else:
+        k_spacing = jnp.array([kspace_spacing])
+        k_smearing = jnp.array([kspace_smearing])
+        if kspace_electrostatics == 'ewald':
+            if k_grid.shape != get_kgrid_ewald_shape(box,lr_wavelength=k_spacing):
+                k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
+                logger.info(f'k-grid shape: {k_grid.shape}')
+                return k_grid
+        elif kspace_electrostatics == 'pme':
+            if k_grid.shape != get_kgrid_mesh_shape(box,mesh_spacing=k_spacing):
+                k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
+                logger.info(f'k-grid shape: {k_grid.shape}')
+                return k_grid
+        else:
+            raise ValueError(
+                f'Invalid kspace_electrostatics value: {kspace_electrostatics}. '
+                'Expected None, "ewald", or "pme".'
+            )
+
 def perform_md(
     all_settings: Dict,
     opt_structure: Optional[jnp.ndarray] = None,
