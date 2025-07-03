@@ -120,6 +120,8 @@ def get_forces_rs_at_fixed_distance(energy, positions, q, fixed_distance, **para
 
 @jax.jit
 def dispersion_vdw_QDO_energy(hirshfeld_ratios, r, idx_i, idx_j,  atomic_numbers, sigma, cutoff_lr, cutoff_lr_damping):
+    input_dtype = hirshfeld_ratios.dtype
+
     # Calculate alpha_ij and C6_ij using mixing rules
     alpha_ij, C6_ij = mixing_rules(
         atomic_numbers,
@@ -127,7 +129,6 @@ def dispersion_vdw_QDO_energy(hirshfeld_ratios, r, idx_i, idx_j,  atomic_numbers
         idx_j,
         hirshfeld_ratios,
     )
-    input_dtype = hirshfeld_ratios.dtype
     # Use cubic fit for gamma
     gamma_ij = gamma_cubic_fit(alpha_ij)
 
@@ -141,9 +142,8 @@ def dispersion_vdw_QDO_energy(hirshfeld_ratios, r, idx_i, idx_j,  atomic_numbers
         'ordered_sparse'
     )
 
-    if cutoff_lr is None:
-        return dispersion_energy_ij
-    else:
+    if cutoff_lr is not None and cutoff_lr_damping is not None:
+
         _cutoff_lr = jnp.asarray(cutoff_lr, dtype=input_dtype)
         _cutoff_lr_damping = jnp.asarray(cutoff_lr_damping, dtype=input_dtype)
         w = safe_mask(
@@ -155,7 +155,7 @@ def dispersion_vdw_QDO_energy(hirshfeld_ratios, r, idx_i, idx_j,  atomic_numbers
         )
         dispersion_energy_ij = safe_scale(dispersion_energy_ij, w, 0.)
 
-        return dispersion_energy_ij
+    return dispersion_energy_ij
 
 
 class TuningErrorBounds:
@@ -930,8 +930,7 @@ class NativeErrorBounds(TuningErrorBounds):
         # Currently this give the error per interaction, not per atom, this needs to be improved
         ke = self._scale
         sigma = self.electrostatic_energy_scale
-        positions = self.positions
-        nbr_distances = self.nbrs_lr_distances
+        positions = self._positions
 
         r = jnp.ones(positions.shape[0], dtype=positions.dtype)*cutoff
         fake_idx = jnp.arange(len(positions), dtype=jnp.int32)
@@ -1035,7 +1034,7 @@ class NativeErrorBounds_Dispersion(TuningErrorBounds):
 
         idx_i, idx_j = self.nbrs_lr[0], self.nbrs_lr[1]
         self.best_full_force = get_forces_rs(partial(dispersion_vdw_QDO_energy, atomic_numbers=self.atomic_numbers,
-                                                     sigma=self.dispersion_energy_scale, cutoff_lr=None, cutoff_lr_damping=0.0),
+                                                     sigma=self.dispersion_energy_scale, cutoff_lr=None, cutoff_lr_damping=None),
                                              self._positions, self._charges, self.displacement,
                                              idx_i=idx_i, idx_j=idx_j)
 
@@ -1047,7 +1046,7 @@ class NativeErrorBounds_Dispersion(TuningErrorBounds):
         idx_i, idx_j = nbrs[0], nbrs[1]
 
         full_force = get_forces_rs(partial(dispersion_vdw_QDO_energy, atomic_numbers=self.atomic_numbers,
-                                           sigma=sigma, cutoff_lr=cutoff, cutoff_lr_damping=0.0),
+                                           sigma=sigma, cutoff_lr=cutoff, cutoff_lr_damping=None),
                                    self._positions, self._charges, self.displacement,
                                    idx_i=idx_i, idx_j=idx_j)
         interp_force = get_forces_rs(partial(dispersion_vdw_QDO_energy, atomic_numbers=self.atomic_numbers,
@@ -1231,11 +1230,11 @@ def tune(
     hirshfeld_ratios = obs_data[1]['hirshfeld_ratios']
 
     if box.shape == (3, 3):
-        box = box
+        cell = box
     elif box.shape == (3, ):
-        box = jnp.diag(box)
+        cell = jnp.diag(box)
     elif box.shape == (1,):
-        box = jnp.diag(jnp.repeat(box, 3))
+        cell = jnp.diag(jnp.repeat(box, 3))
     else:
         raise ValueError(
             f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
@@ -1246,7 +1245,7 @@ def tune(
         accuracy = settings.get('accuracy', 1e-3)  # Load from settings
         params, errs, timings = tune_ewald(
             charges=charges,
-            cell=box,
+            cell=cell,
             positions=position,
             displacement=displacement,
             nbrs_lr=nbrs_lr.idx,
@@ -1271,7 +1270,7 @@ def tune(
         accuracy = settings.get('accuracy', 1e-3)  # Load from settings
         params, errs, timings = tune_pme(
             charges=charges,
-            cell=box,
+            cell=cell,
             positions=position,
             displacement=displacement,
             nbrs_lr=nbrs_lr.idx,
@@ -1298,7 +1297,7 @@ def tune(
         accuracy = settings.get('accuracy', 1.0)  # Load from settings
         params, errs, timings = tune_sr(
             charges=charges,
-            cell=box,
+            cell=cell,
             positions=position,
             displacement=displacement,
             nbrs_lr=nbrs_lr.idx,
@@ -1313,13 +1312,13 @@ def tune(
             model_kwargs=model_kwargs,
         )
     elif kspace_dispersion == 'cutoff':
-        logger.info("No k-space disperion tuning, only tuning the cutoff.")
+        logger.info("No k-space dispersion tuning, only tuning the cutoff.")
         # If no k-space electrostatics is specified, use native short-range tuning
         # No k-space electrostatics, use native short-range tuning
         accuracy = settings.get('accuracy', 0.001)  # Load from settings
         params, errs, timings = tune_dispersion_sr(
             hirshfeld_ratios=hirshfeld_ratios,
-            cell=box,
+            cell=cell,
             positions=position,
             displacement=displacement,
             nbrs_lr=nbrs_lr.idx,
