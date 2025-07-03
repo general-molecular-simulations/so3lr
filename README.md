@@ -20,8 +20,7 @@ corresponding JAX installation via
 pip install --upgrade pip
 pip install "jax[cuda12]==0.5.3"
 ```
-> **Note**: SO3LR runs significantly faster on GPU, making it the preferred choice for large-scale simulations. More 
-details about JAX installation can be found [here](https://jax.readthedocs.io/en/latest/installation.html).
+> **Note**: SO3LR runs significantly faster on GPU, making it the preferred choice for large-scale simulations. More details about JAX installation can be found [here](https://jax.readthedocs.io/en/latest/installation.html). Also, we recommend installing with [uv](https://docs.astral.sh/uv/), it's magical.
 
 If you want to use SO3LR on CPU, e.g. for testing on your local machine which does not have a GPU, you can do
 ```shell script
