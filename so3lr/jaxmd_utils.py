@@ -67,8 +67,8 @@ def neighbor_list_featurizer(displacement_fn, species, fractional_coordinates=Tr
             idx_j_lr=idx_j_lr,
             cell=box,  # will raise an error if box not in kwargs.
             k_grid=k_grid,
-            k_smearing=k_smearing
-            # theory_mask=jnp.eye(16)[0]
+            k_smearing=k_smearing,
+            theory_mask=jnp.eye(16)[0]
         )
 
         return graph
