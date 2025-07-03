@@ -109,7 +109,8 @@ The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fy
 
 The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld ratios are optional. If they are not present in the data, the metrics will simply be `NaN`.
 
-> **Important**: SO3LR was not trained specifically on energies, so only relative energies are meaningful. Labels are assumed to be in `eV` and `Ångström`. 
+> [!IMPORTANT]
+> SO3LR was not trained on energies, so only relative energies are meaningful. Labels are assumed to be in `eV` and `Ångström`. For gas-phase simulations, we suggest using `--lr-cutoff 1000`.
 
 
 The predictions can be analyzed in Python:
