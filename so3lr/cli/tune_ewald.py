@@ -141,15 +141,15 @@ def dispersion_vdw_QDO_energy(hirshfeld_ratios, r, idx_i, idx_j,  atomic_numbers
         'ordered_sparse'
     )
 
-    if cutoff_lr is None or cutoff_lr <= 0.0:
+    if cutoff_lr is None:
         return dispersion_energy_ij
     else:
-        cutoff_lr = jnp.asarray(cutoff_lr, dtype=input_dtype)
-        cutoff_lr_damping = jnp.asarray(cutoff_lr_damping, dtype=input_dtype)
+        _cutoff_lr = jnp.asarray(cutoff_lr, dtype=input_dtype)
+        _cutoff_lr_damping = jnp.asarray(cutoff_lr_damping, dtype=input_dtype)
         w = safe_mask(
             r > 0,
-            partial(switching_fn, x_on=cutoff_lr -
-                    cutoff_lr_damping, x_off=cutoff_lr),
+            partial(switching_fn, x_on=_cutoff_lr -
+                    _cutoff_lr_damping, x_off=_cutoff_lr),
             r,
             0.
         )
@@ -993,7 +993,7 @@ def tune_dispersion_sr(
         cell=cell,
         positions=positions,
         exponent=exponent,
-        error_bounds=NativeErrorBounds_Dispersion(hirshfeld_ratios=hirshfeld_ratios, atomic_numbers=atomic_numbers,
+        error_bounds=NativeErrorBounds_Dispersion(hirshfeld_ratios=hirshfeld_ratios, 
                                                   cell=cell, positions=positions,
                                                   displacement=displacement,
                                                   nbrs_lr=nbrs_lr, nbrs_lr_distances=nbrs_lr_distances,
@@ -1022,7 +1022,7 @@ class NativeErrorBounds_Dispersion(TuningErrorBounds):
         nbrs_lr: jnp.ndarray,
         nbrs_lr_distances: jnp.ndarray,
         atomic_numbers: jnp.ndarray,
-        dispersion_energy_scale: float = 1.0
+        dispersion_energy_scale: float = 1.2
     ):
         super().__init__(hirshfeld_ratios, cell, positions)
         self.nbrs_lr = nbrs_lr
@@ -1063,10 +1063,11 @@ class NativeErrorBounds_Dispersion(TuningErrorBounds):
     def error(
         self,
         cutoff: float,
+        cutoff_lr_damping: float,
     ) -> float:
 
         # kspace = self.err_kspace(cutoff)
-        full_force, rspace = self.err_rspace(cutoff)
+        full_force, rspace = self.err_rspace(cutoff, cutoff_lr_damping)
         rspace_lr = jnp.sqrt(jnp.sum(jnp.square(
             full_force - self.best_full_force)) / (len(self._positions)))
         logger.info(
@@ -1186,7 +1187,7 @@ def tune(
     )
 
     dispersion_model_kwargs = dict(
-        dispersion_energy_scale=4.0  # 4.0 is the default value, TODO load from model_config!
+        dispersion_energy_scale=1.2,  # 1.0 is the default value, TODO load from model_config!
         atomic_numbers=initial_geometry.get_atomic_numbers()
     )
 
@@ -1290,7 +1291,7 @@ def tune(
             accuracy=accuracy,
             model_kwargs=model_kwargs,
         )
-    elif kspace_electrostatics is 'cutoff':
+    elif kspace_electrostatics == 'cutoff':
         logger.info("No k-space electrostatics tuning, only tuning the cutoff.")
         # If no k-space electrostatics is specified, use native short-range tuning
         # No k-space electrostatics, use native short-range tuning
@@ -1311,7 +1312,7 @@ def tune(
             exponent=1,  # Native short-range uses 1/r potential
             model_kwargs=model_kwargs,
         )
-    elif kspace_dispersion is 'cutoff':
+    elif kspace_dispersion == 'cutoff':
         logger.info("No k-space disperion tuning, only tuning the cutoff.")
         # If no k-space electrostatics is specified, use native short-range tuning
         # No k-space electrostatics, use native short-range tuning
@@ -1330,11 +1331,10 @@ def tune(
             cutoff_hi=settings.get('cutoff_hi', lr_cutoff),
             damp_lo=settings.get('dispersion_damping_lo', 2.0),
             damp_hi=settings.get('dispersion_damping_hi', 4.0),
-            damp_it=settings.get('dispersion_damping_it',
-                                 1.0),  # Load from settings
+            damp_it=settings.get('dispersion_damping_it', 1.0),
             accuracy=accuracy,
             exponent=1,  # Native short-range uses 1/r potential
-            model_kwargs=model_kwargs,
+            model_kwargs=dispersion_model_kwargs,
         )
     else:
         raise ValueError(
