@@ -674,7 +674,7 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
             cell=box,  # Will be None for free boundary conditions
             k_grid=k_grid,
             k_smearing=k_smearing,
-            theory_mask=jnp.eye(16)[0]
+            theory_mask=jnp.eye(16)[0].reshape(1, -1)
         )
 
         return graph
