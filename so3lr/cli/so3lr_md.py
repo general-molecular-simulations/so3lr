@@ -646,6 +646,8 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
 
         if k_grid is not None:
             k_smearing = kwargs.get('k_smearing')
+            assert box is not None, "k_grid requires a box to be defined."
+            assert k_smearing is not None, "k_grid requires k_smearing to be defined."
             if fractional_coordinates:
                 positions = transform(box, R) # transform to non-fractional coordinates
             else:
@@ -1413,12 +1415,10 @@ def setup_kspace_grid(
 
     if kspace_electrostatics == 'ewald':
         k_grid = get_kgrid_ewald(cell,lr_wavelength=k_spacing)
-        logger.info('Doing Ewald electrostatics')
-        logger.info(f'k-grid shape: {k_grid.shape}')
+        logger.info(f'Doing Ewald with k-grid shape: {k_grid.shape}')
     elif kspace_electrostatics == 'pme':
         k_grid = get_kgrid_mesh(cell, mesh_spacing=k_spacing)
-        logger.info('Doing PME electrostatics')
-        logger.info(f'k-grid shape: {k_grid.shape}')
+        logger.info(f'Doing PME with k-grid shape: {k_grid.shape}')
     else:
         k_grid = None
         k_smearing = None
