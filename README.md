@@ -135,6 +135,22 @@ For more in-depth evaluation using Python, check out the [example notebook](http
 
 The CLI, repository, and model are still developing. We would appreciate if you report any errors or incosistencies.
 
+## Dimer Binding Energy Calculations
+
+You can calculate binding energies with SO3LR as reported in the preprint (Fig. 2B). The binding energy is computed as the difference between the bound dimer and non-interacting monomers (separated by a distance larger than the long-range cutoff) with charges assigned for each monomer separately.
+
+For XYZ files with dimer metadata (`charge_a`, `charge_b`, `selection_a`, `selection_b`, like [NCIAtlas](https://github.com/Honza-R/NCIAtlas/blob/main/geometries/NCIA_D1200/1.01.01_100.xyz) format), generate original and translated structures:
+
+```shell script
+python so3lr/prepare_dimer_xyz.py --datafile data.xyz
+```
+
+Then evaluate energies (see [SAPT10k](https://doi.org/10.1063/5.0204064) dataset in examples/data):
+
+```shell script
+so3lr eval --datafile sapt10k.xyz --targets energy --save-to sapt10k_eval.xyz --lr-cutoff 1000
+```
+
 ## Atomic Simulation Environment
 To get an Atomic Simulation Environment (ASE) calculator with energies and forces predicted
 from SO3LR just do 
