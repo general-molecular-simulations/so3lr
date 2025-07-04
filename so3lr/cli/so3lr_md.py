@@ -1599,8 +1599,6 @@ def perform_md(
                 ensemble= ensemble,
                 restart_reset = all_settings.get('restart_reset', False)
             )
-            if all_settings.get('restart_reset', False):
-                raise RestartInNewEnsembleError(state, ensemble)
             position = state.position
         except RestartInNewEnsembleError as e:
             logger.warning(e)
