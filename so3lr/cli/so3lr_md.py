@@ -1592,6 +1592,7 @@ def perform_md(
             state, box, current_cycle = load_state(
                 path_to_load=restart_load_path,
                 ensemble= ensemble,
+                restart_reset = all_settings.get('restart_reset', False)
             )
             position = state.position
         except RestartInNewEnsembleError as e:
@@ -2326,7 +2327,8 @@ def save_state(
 
 def load_state(
     path_to_load: str,
-    ensemble: str = 'nvt'
+    ensemble: str = 'nvt',
+    restart_reset: bool = False
 ) -> Tuple:
     """
 
@@ -2344,6 +2346,8 @@ def load_state(
     """
 
     loaded_state = np.load(path_to_load, allow_pickle=True)
+    if restart_reset:
+        raise RestartInNewEnsembleError(loaded_state, ensemble)
     if ensemble.lower() != loaded_state.get('ensemble',None):
         raise RestartInNewEnsembleError(loaded_state, ensemble)
 
