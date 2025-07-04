@@ -1342,11 +1342,11 @@ def tune(
     if any(err < accuracy for err in errs):
         param, timing, error = params[timings.index(min(timings))], min(
             timings), errs[timings.index(min(timings))]
-        if kspace_electrostatics is None:
+        if kspace_electrostatics == 'cutoff':
             logger.info(
                 f"Optimally timed parameters for cutoff electrostatics with an estimated force error below {accuracy}eV/A:")
             logger.info(f"  lr_cutoff: {param['cutoff']}")
-        else:
+        elif kspace_electrostatics in ['ewald', 'pme']:
             logger.info(
                 f"Optimally timed {kspace_electrostatics.upper()} parameters with an estimated force error below {accuracy}eV/A:")
             logger.info(f"  lr_cutoff: {param['cutoff']}")
@@ -1355,6 +1355,11 @@ def tune(
             if 'interpolation_nodes' in params:
                 logger.info(
                     f"  kspace_interp_nodes: {param['interpolation_nodes']}")
+        elif kspace_dispersion == 'cutoff':
+            logger.info(
+                f"Optimally timed parameters for cutoff disperion with an estimated force error below {accuracy}eV/A:")
+            logger.info(f"  lr_cutoff: {param['cutoff']}")
+            logger.info(f"  dispersion_damping: {param['cutoff_lr_damping']}")
         logger.info(f"  timing: {timing}")
         logger.info(f"  force error estimate [eV/A]: {error}")
 
@@ -1363,9 +1368,9 @@ def tune(
     param, timing, error = params[errs.index(
         min(errs))], timings[errs.index(min(errs))], min(errs)
     logger.info(f"The parameters with the smallest error estimate are:")
-    if kspace_electrostatics is None:
+    if kspace_electrostatics == 'cutoff':
         logger.info(f"  lr_cutoff: {param['cutoff']}")
-    else:
+    elif kspace_electrostatics in ['ewald', 'pme']:
         logger.info(f"Tuned {kspace_electrostatics.upper()} parameters: ")
         logger.info(f"  lr_cutoff: {param['cutoff']}")
         logger.info(f"  kspace_smearing: {param['smearing']}")
@@ -1373,5 +1378,9 @@ def tune(
         if 'interpolation_nodes' in params:
             logger.info(
                 f"  kspace_interp_nodes: {param['interpolation_nodes']}")
+    elif kspace_dispersion == 'cutoff':
+        logger.info(f"Tuned cutoff dispersion parameters: ")
+        logger.info(f"  lr_cutoff: {param['cutoff']}")
+        logger.info(f"  dispersion_damping: {param['cutoff_lr_damping']}")
     logger.info(f"  timing: {timing}")
     logger.info(f"  force error estimate [eV/A]: {error}")
