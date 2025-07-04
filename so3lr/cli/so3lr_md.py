@@ -1428,44 +1428,6 @@ def setup_kspace_grid(
         k_smearing = None
     return k_grid, k_smearing
 
-# def check_kspace_grid(
-#     k_grid: jnp.array,
-#     kspace_electrostatics: str,
-#     kspace_smearing: float,
-#     kspace_spacing: float,
-#     box: jnp.ndarray,
-# ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-#     """
-#     Check and setup the k-space grid for Ewald summation.
-
-#     Args:
-#         kspace_electrostatics (str): Type of k-space electrostatics (None or 'ewald' or 'pme').
-#         kspace_smearing (float): Smearing value for the k-space grid.
-#         kspace_spacing (float): Spacing for the k-space grid.
-#         box (jnp.ndarray): Box of the system.
-
-#     Returns:
-#         Tuple[jnp.ndarray, jnp.ndarray]: k-space grid and smearing values.
-#     """
-
-#     if kspace_electrostatics is None:
-#         return None
-#     else:
-#         k_spacing = jnp.array([kspace_spacing])
-#         k_smearing = jnp.array([kspace_smearing])
-#         if kspace_electrostatics == 'ewald':
-#             if k_grid.shape != get_kgrid_ewald_shape(cell,lr_wavelength=k_spacing):
-#                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
-#         elif kspace_electrostatics == 'pme':
-#             if k_grid.shape != get_kgrid_mesh_shape(cell,mesh_spacing=k_spacing):
-#                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
-#         else:
-#             raise ValueError(
-#                 f'Invalid kspace_electrostatics value: {kspace_electrostatics}. '
-#                 'Expected None, "ewald", or "pme".'
-#             )
-#         return k_grid
-
 def perform_md(
     all_settings: Dict,
     opt_structure: Optional[jnp.ndarray] = None,
@@ -1503,7 +1465,7 @@ def perform_md(
     kspace_smearing = all_settings.get('kspace_smearing', 4.0)
     kspace_spacing = all_settings.get('kspace_spacing', 2.0)
     kspace_interp_nodes = all_settings.get('kspace_interp_nodes', 4)
-    kspace_buffer = all_settings.get('kspace_buffer', 100)
+    kspace_npt_cycles = all_settings.get('kspace_npt_cycles', 100)
 
     # MD parameters
     md_dt = all_settings.get('md_dt')
@@ -1767,7 +1729,7 @@ def perform_md(
     # Running the MD
     logger.info('Starting MD simulation...')
     if ensemble == 'npt':
-        logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\tBox [A]\t\ttime/step [s]')
+        logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\t\t\tBox [A]\t\t\ttime/step [s]')
     else:
         logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\ttime/step [s]')
 
@@ -1785,7 +1747,11 @@ def perform_md(
         md_P
     )
     if ensemble == 'npt':
-        logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box[0]:.1f}\t{0.0:.2e}')
+        if len(box) == 1:
+            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box[0]:.3f}\t{0.0:.2e}')
+        else:
+            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t'+
+                        f'({box[0]:.3f},{box[1]:.3f},{box[2]:.3f})\t{0.0:.2e}')
     else:
         logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
 
@@ -1841,7 +1807,7 @@ def perform_md(
             state = new_state
             box = new_box
 
-            if (ensemble == 'npt') and (current_cycle % kspace_buffer == 0):
+            if (ensemble == 'npt') and (current_cycle % kspace_npt_cycles == 0):
                 k_grid,_ = setup_kspace_grid(
                     kspace_electrostatics,
                     kspace_smearing,
@@ -1865,7 +1831,11 @@ def perform_md(
             )
 
             if ensemble == 'npt':
-                logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box[0]:.1f}\t{time_per_step:.2e}')
+                if len(box) == 1:
+                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box[0]:.3f}\t{time_per_step:.2e}')
+                else:
+                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t'+
+                                f'({box[0]:.3f},{box[1]:.3f},{box[2]:.3f})\t{time_per_step:.2e}')
             else:
                 logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{time_per_step:.2e}')
 
