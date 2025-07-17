@@ -165,6 +165,7 @@ atoms.info['charge'] = 0.0
 
 calc = So3lrCalculator(
     calculate_stress=False,
+    lr_cutoff=1000, # for gas-phase systems
     dtype=np.float32
 )
 atoms.calc = calc
