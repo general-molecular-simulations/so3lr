@@ -655,8 +655,10 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
 
         if 'perturbation' in kwargs:
             pert = kwargs.get('perturbation')
-            positions = transform(pert, positions)
-            box = transform(pert, box)
+            if positions is not None:
+                positions = transform(pert, positions)
+            if box is not None:
+                box = transform(pert, box)
 
         d = jax.vmap(partial(displacement_fn, **kwargs))
         dR = d(Ra, Rb)
