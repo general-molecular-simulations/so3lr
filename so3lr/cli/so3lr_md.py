@@ -2061,7 +2061,9 @@ def perform_min(
         potential = So3lrPotential(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping
+            dispersion_energy_cutoff_lr_damping=dispersion_damping,
+            coulomb_kspace_do_ewald=True if kspace_electrostatics == 'ewald' else False,
+            coulomb_kspace_interp_nodes=kspace_interp_nodes,
         )
     else:
         # Load custom MLFF
