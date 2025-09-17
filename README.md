@@ -102,16 +102,15 @@ The restart will continue the simulation from the exact state where it was saved
 Evaluate the SO3LR model on a dataset:
 
 ```shell script
-so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 12.0 --save-to predictions.extxyz
+so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 1000.0 --save-to predictions.extxyz
 ```
 
 The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread).
 
-The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld ratios are optional. If they are not present in the data, the metrics will simply be `NaN`.
-
 > [!IMPORTANT]
 > SO3LR was not trained on energies, so only relative energies are meaningful. Labels are assumed to be in `eV` and `Ångström`. For gas-phase simulations, we suggest using `--lr-cutoff 1000`.
 
+The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld ratios are optional. If they are not present in the data, the metrics will simply be `NaN`.
 
 The predictions can be analyzed in Python:
 
