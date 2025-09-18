@@ -96,9 +96,10 @@ def calculate_metrics(
 
         diff = jnp.asarray(y_pred) - jnp.asarray(y_true)
 
-        abs_sum = jnp.abs(diff[mask]).sum()
-        sq_sum  = (diff[mask] ** 2).sum()
-        count   = jnp.asarray(mask).sum()
+        diff_masked = diff[mask]
+        abs_sum = jnp.abs(diff_masked).sum()
+        sq_sum  = (diff_masked ** 2).sum()
+        count = diff_masked.size
 
         # Store as Python scalars to avoid tracer issues later
         metrics[f"{target}_abs_sum"] = float(abs_sum)
