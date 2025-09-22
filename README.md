@@ -282,11 +282,13 @@ If you use parts of the code please cite
 ```
 @article{kabylda2024molecular,
   title={Molecular Simulations with a Pretrained Neural Network and Universal Pairwise Force Fields},
-  author={Kabylda, A. and Frank, J. T. and Dou, S. S. and Khabibrakhmanov, A. and Sandonas, L. M.
-          and Unke, O. T. and Chmiela, S. and M{\"u}ller, K.R. and Tkatchenko, A.},
-  journal={ChemRxiv},
-  year={2024},
-  doi={10.26434/chemrxiv-2024-bdfr0-v2}
+  author={Kabylda, Adil and Frank, J Thorben and Su{\'a}rez-Dou, Sergio and Khabibrakhmanov, Almaz and Medrano Sandonas, Leonardo and Unke, Oliver T and Chmiela, Stefan and M{\"u}ller, Klaus-Robert and Tkatchenko, Alexandre},
+  journal={Journal of the American Chemical Society},
+  volume={147},
+  number={37},
+  pages={33723},
+  year={2025},
+  doi={10.1021/jacs.5c09558}
 }
 
 @article{frank2024euclidean,
@@ -296,6 +298,7 @@ If you use parts of the code please cite
   volume={15},
   number={1},
   pages={6539},
-  year={2024}
+  year={2024},
+  doi={10.1038/s41467-024-50620-6}
 }
 ```
