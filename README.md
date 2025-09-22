@@ -2,7 +2,7 @@
 [![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb)
 [![cite-link](https://img.shields.io/badge/how_to-cite-000000)](https://github.com/general-molecular-simulation/so3lr?tab=readme-ov-file#Citation)
-[![preprint-link](https://img.shields.io/badge/paper-chemRxiv.org-A9A8AD)](https://doi.org/10.26434/chemrxiv-2024-bdfr0-v2)
+[![preprint-link](https://img.shields.io/badge/paper-JACS-FFCE34)](https://doi.org/10.1021/jacs.5c09558)
 [![data](https://zenodo.org/badge/DOI/10.5281/zenodo.14779793.svg)](https://doi.org/10.5281/zenodo.14779793)
 ![Logo](./logo.png)
 
