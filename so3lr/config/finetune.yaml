@@ -1,7 +1,7 @@
-workdir: finetune_so3lr  # Working directory. Checkpoints and hyperparameters are saved there.
+workdir: null  # Working directory, i.e., for saving the checkpoints and log. During finetuning, this is set via the CLI command so keep as null.
 neighborlist_format_lr: sparse
 data:
-  filepath: null  # Path to the data file. Either ASE digestible or .npz with appropriate column names are supported.
+  filepath: null  # Path to the data file. During finetuning, this is set via the CLI command so keep as null.
   energy_unit: eV  # Energy unit.
   length_unit: Angstrom  # Length unit.
   electric_charge_unit: e  # Electric charge unit.
@@ -47,8 +47,9 @@ training:
   loss_weights:
     energy: 0.01  # Loss weight for the energy.
     forces: 0.99  # Loss weight for the forces.
-    dipole_vec: 0.01 
-    hirshfeld_ratios: 0.01
+    # Uncomment if dipole_vec and/or hirshfeld ratios are in the dataset and should be used in the loss.
+    # dipole_vec: 0.01 
+    # hirshfeld_ratios: 0.01
   use_robust_loss: false  # Use robust loss function.
   robust_loss_alpha: 1.99 # Alpha parameter for the robust loss function.
   model_seed: 0  # Seed used for the initialization of the model parameters.

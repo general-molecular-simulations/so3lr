@@ -368,11 +368,12 @@ Run simulations using SO3LR Machine Learned Force Field.
 
 ## Commands
 
-so3lr opt [options]     Run geometry optimization
-so3lr nvt [options]     Run NVT (constant volume and temperature) MD simulation
-so3lr npt [options]     Run NPT (constant pressure and temperature) MD simulation
-so3lr nve [options]     Run NVT (constant volume and energy) MD simulation
-so3lr eval [options]    Evaluate SO3LR model on a dataset
+so3lr opt [options]          Run geometry optimization
+so3lr nvt [options]          Run NVT (constant volume and temperature) MD simulation
+so3lr npt [options]          Run NPT (constant pressure and temperature) MD simulation
+so3lr nve [options]          Run NVT (constant volume and energy) MD simulation
+so3lr eval [options]         Evaluate SO3LR model on a dataset
+so3lr finetune [options]     Finetune SO3LR model on a dataset
 
 ## Usage Examples
 
@@ -390,6 +391,9 @@ Run NVE simulation:
 
 Evaluate on a dataset:
   so3lr eval --datafile dataset.xyz --save-to predictions.extxyz --targets forces,dipole_vec,hirshfeld_ratios
+
+Finetune on a dataset:
+  so3lr finetune --datafile dataset.xyz --workdir so3lr_finetuned --num-train 100 --num-valid 10
 
 Use --help-full to see all available options.
 
@@ -1807,30 +1811,29 @@ def eval_model(
 
 
 # Define the 'finetune' subcommand
-@cli.command(name='finetune', help="Finetune SO3LR model on a dataset with `so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num_train 50 --num_valid 10`.")
+@cli.command(name='finetune', help="Finetune SO3LR model on a dataset with `so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10`.")
 # Input/Output group
-@click.option('--workdir', type=click.Path(), required=True,
-              help='Output file to save predictions (.extxyz format). If not provided, predictions are not saved.')
-@click.option('--datafile', type=click.Path(), required=True,
-              help='Path to dataset file (extxyz or tfds format) containing data used for finetuning.')
+@click.option('--workdir', type=click.Path(), help='Output file to save predictions (.extxyz format). If not provided, predictions are not saved.')
+@click.option('--datafile', type=click.Path(), help='Path to dataset file (extxyz or tfds format) containing data used for finetuning.')
+@click.option('--log-file', default=None, type=click.Path(),
+              help='File to write logs to [default: None].')
 # Finetuning settings.
-@click.option('--strategy', type=click.Choice(available_strategies = ['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer']),
-              default='full', help='Strategy for finetuning.')
+@click.option('--strategy', type=click.Choice(['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer']),
+              default='full', help='Strategy for finetuning. [default: full]')
 @click.option('--config', '--config_path', 'config_path', type=click.Path(exists=False), default=None,
               help='Path to the finetuning config. If not provided is defaults to the one pre-defined in the SO3LR repo. [default: None]')
 @click.option('--model', '--model_path', 'model_path', type=click.Path(exists=False), default=None,
               help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
 # Training settings
-@click.option('--num-train', '--num_train', type=int, required=True,
-              help='Number of data points used for gradient calculations.')
-@click.option('--num-valid', '--num_valid', type=int, required=True,
-              help='Number of data points used for validation.')
+@click.option('--num-train', '--num_train', type=int, help='Number of data points used for gradient calculations.')
+@click.option('--num-valid', '--num_valid', type=int, help='Number of data points used for validation.')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def finetune_model(
     # Input/Output group
     workdir: str,
     datafile: str,
+    log_file: Optional[str],
     # Finetuning settings.
     strategy: str,
     model_path: Optional[str],
@@ -1847,10 +1850,10 @@ def finetune_model(
     This command finetunes the SO3LR model or another MLFF model on a dataset of molecular structures.
 
     Example:
-        so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num_train 50 --num_valid 10
+        so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10
     """
     # Print help if needed
-    if not datafile or help:
+    if not datafile or not workdir or help:
         click.echo(SO3LR_ASCII)
         click.echo(finetune_model.get_help(click.get_current_context()))
         return
@@ -1859,7 +1862,7 @@ def finetune_model(
     if log_file is None:
         log_file = Path(workdir).resolve() / "finetuning.log"
 
-    # Setup logging with default levels
+    # Setup logging with default levels. The log file creates the workdir.
     setup_logger(log_file)
 
     # Log ASCII art
@@ -1895,6 +1898,8 @@ def finetune_model(
         datafile=datafile,
         workdir=workdir,
         strategy=strategy,
+        num_train=num_train,
+        num_valid=num_valid,
         model_path=model_path,
         config_path=config_path,
         log_file=log_file
