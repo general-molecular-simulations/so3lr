@@ -17,6 +17,7 @@ from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 
 from .. import __version__
 from .so3lr_eval import evaluate_so3lr_on
+from .so3lr_finetune import finetune_so3lr
 from .so3lr_md import perform_min, run, setup_logger
 from .tune_ewald import tune
 
@@ -1803,6 +1804,103 @@ def eval_model(
 
     if save_to:
         logger.info(f"Predictions saved to: {save_to}")
+
+
+# Define the 'finetune' subcommand
+@cli.command(name='finetune', help="Finetune SO3LR model on a dataset with `so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num_train 50 --num_valid 10`.")
+# Input/Output group
+@click.option('--workdir', type=click.Path(), required=True,
+              help='Output file to save predictions (.extxyz format). If not provided, predictions are not saved.')
+@click.option('--datafile', type=click.Path(), required=True,
+              help='Path to dataset file (extxyz or tfds format) containing data used for finetuning.')
+# Finetuning settings.
+@click.option('--strategy', type=click.Choice(available_strategies = ['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer']),
+              default='full', help='Strategy for finetuning.')
+@click.option('--config', '--config_path', 'config_path', type=click.Path(exists=False), default=None,
+              help='Path to the finetuning config. If not provided is defaults to the one pre-defined in the SO3LR repo. [default: None]')
+@click.option('--model', '--model_path', 'model_path', type=click.Path(exists=False), default=None,
+              help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
+# Training settings
+@click.option('--num-train', '--num_train', type=int, required=True,
+              help='Number of data points used for gradient calculations.')
+@click.option('--num-valid', '--num_valid', type=int, required=True,
+              help='Number of data points used for validation.')
+# Help option
+@click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
+def finetune_model(
+    # Input/Output group
+    workdir: str,
+    datafile: str,
+    # Finetuning settings.
+    strategy: str,
+    model_path: Optional[str],
+    config_path: Optional[str],
+    # Training settings
+    num_train: int,
+    num_valid: int,
+    # Help option
+    help: bool
+) -> None:
+    """
+    Finetune SO3LR or MLFF model on a dataset.
+
+    This command finetunes the SO3LR model or another MLFF model on a dataset of molecular structures.
+
+    Example:
+        so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num_train 50 --num_valid 10
+    """
+    # Print help if needed
+    if not datafile or help:
+        click.echo(SO3LR_ASCII)
+        click.echo(finetune_model.get_help(click.get_current_context()))
+        return
+
+    # Generate default log file name based on output file if not explicitly provided
+    if log_file is None:
+        log_file = Path(workdir).resolve() / "finetuning.log"
+
+    # Setup logging with default levels
+    setup_logger(log_file)
+
+    # Log ASCII art
+    logger.info(SO3LR_ASCII)
+
+    # Log all settings
+    logger.info("=" * 60)
+    logger.info(f"SO3LR Model Evaluation (v{__version__})")
+    logger.info("=" * 60)
+    logger.info(f"Dataset file:              {datafile}")
+    logger.info(f"Workdir:                   {workdir}")
+    logger.info(f"Finetuning strategy:       {strategy}")
+    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
+    if model_path is not None:
+        logger.info(f"Model path:            {model_path}")
+    logger.info(f"Config:                    {'Default' if model_path else 'Custom'}")
+    if config_path is not None:
+        logger.info(f"Config path:           {config_path}")
+    logger.info(f"Number training points:    {num_train}")
+    logger.info(f"Number validation points:  {num_valid}")
+    logger.info("=" * 60)
+
+    # Log hardware info
+    get_hardware_info()
+
+    # Validate file existence
+    if not Path(datafile).exists():
+        logger.error(f"Error: Dataset file not found: {datafile}")
+        sys.exit(1)
+
+    # Call the evaluate_so3lr_on function from so3lr_eval.py
+    finetune_so3lr(
+        datafile=datafile,
+        workdir=workdir,
+        strategy=strategy,
+        model_path=model_path,
+        config_path=config_path,
+        log_file=log_file
+    )
+    logger.info("=" * 60)
+    logger.info("finetuning completed successfully!")
 
 
 # Define the 'tune-ewald' subcommand
