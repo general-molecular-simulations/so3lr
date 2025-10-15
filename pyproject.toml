@@ -11,8 +11,6 @@ python = ">=3.12"
 numpy = "*"
 ase = "*"
 h5py = "*"
-jax = "==0.5.3"
-jaxlib = "==0.5.3"
 setuptools = "<81"
 mlff = { git = "https://github.com/kabylda/mlff.git", branch = "v1.0-tfds-pme", optional = false }
 jraph = { git = "https://github.com/kabylda/jraph.git", branch = "master", optional = false }
