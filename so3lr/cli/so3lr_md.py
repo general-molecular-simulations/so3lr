@@ -1614,8 +1614,13 @@ def perform_md(
     md_T = unit_dict['T']
     md_P = unit_dict['P']
 
-    # Setting up the thermostat and/or barostat
-    nhc_tau = md_dt * nhc_thermo
+    # set nhc_tau to 0 for NVE ensemble only
+    if ensemble == 'nve':
+        nhc_tau = 0
+    else:
+        nhc_tau = md_dt * nhc_thermo
+    
+
     nhc_kwargs = {
         'chain_length': nhc_chain_length,
         'chain_steps': nhc_steps,
