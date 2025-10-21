@@ -1732,25 +1732,21 @@ def perform_md(
     md_T = unit_dict['T']
     md_P = unit_dict['P']
 
-    # set nhc_tau to 0 for NVE ensemble only
-    if ensemble == 'nve':
-        nhc_tau = 0
-    else:
+    # Setting up the thermostat and/or barostat parameters
+    if ensemble != 'nve':
         nhc_tau = md_dt * nhc_thermo
-    
-
-    nhc_kwargs = {
-        'chain_length': nhc_chain_length,
-        'chain_steps': nhc_steps,
-        'sy_steps': nhc_sy_steps,
-        'tau': nhc_tau
-    }
+        nhc_kwargs = {
+            'chain_length': nhc_chain_length,
+            'chain_steps': nhc_steps,
+            'sy_steps': nhc_sy_steps,
+            'tau': nhc_tau
+        }
 
     if ensemble == 'npt':
         nhc_barostat_kwargs = nhc_kwargs.copy()
         nhc_barostat_kwargs['tau'] = md_dt * nhc_baro
 
-    rng_key = jax.random.PRNGKey(seed)
+    # Setting up the thermostat and/or barostat jax functions
 
     if ensemble == 'nve':
         init_fn, step_md_fn = create_nve_fn(
@@ -1782,6 +1778,8 @@ def perform_md(
             nhc_barostat_kwargs,
             lr
         )
+
+    rng_key = jax.random.PRNGKey(seed)
 
     if not restart:
         if lr:
