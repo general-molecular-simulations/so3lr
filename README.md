@@ -44,6 +44,7 @@ SO3LR provides a unified command-line interface that leverages the performance o
 - `so3lr npt`: NPT molecular dynamics
 - `so3lr nve`: NVE molecular dynamics
 - `so3lr eval`: Model evaluation on a dataset
+- `so3lr finetune`: Fine-tune the model on custom datasets
 
 Each subcommand has its own set of options and can be run with `--help` to see all available parameters.
 
@@ -133,6 +134,18 @@ print(rmse)
 For more in-depth evaluation using Python, check out the [example notebook](https://github.com/general-molecular-simulations/so3lr/blob/main/examples/evaluate_so3lr_on_dataset.ipynb).
 
 The CLI, repository, and model are still developing. We would appreciate if you report any errors or incosistencies.
+
+## Fine-tuning SO3LR (experimental)
+
+SO3LR can be fine-tuned on custom datasets to improve performance on specific systems or molecular environments. The input datafile should be readable by ASE (e.g., `.extxyz`, `.xyz`) and contain atomic positions, forces, and energies (ideally also dipole moments and Hirshfeld ratios). Please see the Zenodo repository for an example datafile.
+
+Basic fine-tuning command:
+
+```shell script
+so3lr finetune --datafile dataset.xyz --workdir so3lr_finetuned --num-train 1000 --num-valid 100
+```
+
+You can customize the training process with a config file (`--config custom_finetune.yaml`), choose different fine-tuning strategies (`--strategy full`), or fine-tune from a previously trained model (`--model-path ./previous_finetune_workdir`). Possible strategies include full, final_mlp, last_layer, last_layer_and_final_mlp, first_layer, and first_layer_and_last_layer. The default configuration in `so3lr/config/finetune.yaml` includes settings for the optimizer, learning rate schedule, batch size, loss weights, and data filtering.
 
 ## Dimer Binding Energy Calculations
 
