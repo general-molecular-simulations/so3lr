@@ -8,6 +8,7 @@ def make_ase_calculator(
         lr_cutoff=12.,
         dispersion_energy_cutoff_lr_damping=2.,
         calculate_stress=False,
+        calculate_hessian=False,
         dtype=np.float32,
         **kwargs
 ):
@@ -19,6 +20,7 @@ def make_ase_calculator(
         dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
         from_file=True,
         calculate_stress=calculate_stress,
+        calculate_hessian=calculate_hessian,
         dtype=dtype,
         **kwargs
     )

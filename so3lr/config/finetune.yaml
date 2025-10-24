@@ -1,0 +1,62 @@
+workdir: null  # Working directory, i.e., for saving the checkpoints and log. During finetuning, this is set via the CLI command so keep as null.
+neighborlist_format_lr: sparse
+data:
+  filepath: null  # Path to the data file. During finetuning, this is set via the CLI command so keep as null.
+  energy_unit: eV  # Energy unit.
+  length_unit: Angstrom  # Length unit.
+  electric_charge_unit: e  # Electric charge unit.
+  dipole_vec_unit: e * Angstrom  # Dipole vector unit.
+  shift_mode: null  # Options are null, mean, custom.
+  energy_shifts: null  # Energy shifts in eV to subtract.
+  split_seed: 0  # Seed using for splitting the data into training, validation and test.
+  neighbors_lr_bool: true  # Calculate long-range neighborhood indices. Required for modules like DispersionEnergy.
+  neighbors_lr_cutoff: 100  # Cutoff for calculating the long-range neighborhoods in Angstrom. Is converted to the
+  # data set units internally. Note that it is not required to be equal to the lr_cutoff of the model.
+  # E.g. one can calculate neighbors up to 50 Ang and use no long-range cutoff in the model during training at all.
+  # More details see README.
+  avg_num_neighbors: null  # Average number of neighbors per atom in the data set. If not set, it will be calculated from the data.
+  filter:
+    min_distance: 0.25  # Minimal allowed distance in Angstrom. Is converted to the data set units internally.
+    max_force: 25.  # Maximal allowed force component in eV/Angstrom. Is converted to the data set units internally.
+optimizer:
+  name: adam  # Name of the optimizer. See https://optax.readthedocs.io/en/latest/api.html#common-optimizers for available ones.
+  optimizer_args: null
+  learning_rate: 0.001  # Learning rate to use.
+  learning_rate_schedule: exponential_decay  # Which learning rate schedule to use. See https://optax.readthedocs.io/en/latest/api.html#optimizer-schedules for available ones.
+  learning_rate_schedule_args:  # Arguments passed to the learning rate schedule. See https://optax.readthedocs.io/en/latest/api.html#optimizer-schedules.
+    decay_rate: 0.75
+    transition_steps: 125000
+  gradient_clipping: identity
+  gradient_clipping_args: null
+  num_of_nans_to_ignore: 0  # Number of repeated update/gradient steps that ignore NaNs before raising on error.
+training:
+  allow_restart: false  # Re-starting from checkpoint is allowed. This will overwrite existing checkpoints so only use if this is desired.
+  num_epochs: 100  # Number of epochs.
+  num_train: null  # Number of training points to draw from data.filepath.
+  num_valid: null  # Number of validation points to draw from data.filepath.
+  batch_max_num_nodes: null  # Maximal number of nodes per batch. Must be at least maximal number of atoms + 1 in the data set.
+  batch_max_num_edges: null  # Maximal number of edges per batch. Must be at least maximal number of edges + 1 in the data set.
+  batch_max_num_pairs: null
+  # If batch_max_num_nodes and batch_max_num_edges is set to null, they will be determined from the max_num_of_graphs.
+  # If they are set to values, each batch will contain as many molecular structures/graphs such none of the three values
+  # batch_max_num_nodes, batch_max_num_edges and batch_max_num_of_graphs is exceeded.
+  batch_max_num_graphs: 6  # Maximal number of graphs per batch.
+  # Since there is one padding graph involved for an effective batch size of 5 corresponds to 6 max_num_graphs.
+  batch_n_proc: 1  # Number of processors used for queuing training batches, used only for TFDS dataloader
+  eval_every_num_steps: 1000  # Number of gradient steps after which the metrics on the validation set are calculated.
+  loss_weights:
+    energy: 0.01  # Loss weight for the energy.
+    forces: 0.99  # Loss weight for the forces.
+    # Uncomment if dipole_vec and/or hirshfeld ratios are in the dataset and should be used in the loss.
+    # dipole_vec: 0.01 
+    # hirshfeld_ratios: 0.01
+  use_robust_loss: false  # Use robust loss function.
+  robust_loss_alpha: 1.99 # Alpha parameter for the robust loss function.
+  model_seed: 0  # Seed used for the initialization of the model parameters.
+  training_seed: 0  # Seed used for shuffling the batches during training.
+  log_gradient_values: False  # Log the norm of the gradients for each set of weights.
+  use_wandb: true  # Use wandb for logging.
+  wandb_init_args:  # Arguments to wandb.init(). See https://docs.wandb.ai/ref/python/init. The config itself is passed as config to wandb.init().
+    # name: finetune_so3lr
+    project: so3lr
+    group: finetune_so3lr

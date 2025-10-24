@@ -11,15 +11,15 @@ python = ">=3.12"
 numpy = "*"
 ase = "*"
 h5py = "*"
+setuptools = "<81"
 jax = "==0.5.3"
 jaxlib = "==0.5.3"
 orbax-checkpoint = "==0.11.13"
-setuptools = "<81"
-mlff = { git = "https://github.com/kabylda/mlff.git", branch = "v1.0-tfds-pme", optional = false }
+mlff = { git = "https://github.com/kabylda/mlff.git", branch = "v1.0_dev_import", optional = false }
 jraph = { git = "https://github.com/kabylda/jraph.git", branch = "master", optional = false }
 jax-md = { git = "https://github.com/kabylda/jax-md.git", branch = "main" , optional = false }
 glp = { git = "https://github.com/kabylda/glp.git", branch = "electrostatics_neighbourlist", optional = false }
-jax-pme = { git = "https://github.com/lab-cosmo/jax-pme", branch = "main" , optional = false }
+jax-pme = { git = "https://github.com/fbruenig/jax-pme", branch = "main" , optional = false }
 
 
 [build-system]
