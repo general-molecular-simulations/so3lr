@@ -137,7 +137,7 @@ The CLI, repository, and model are still developing. We would appreciate if you 
 
 ## Fine-tuning SO3LR (experimental)
 
-SO3LR can be fine-tuned on custom datasets to improve performance on specific systems or molecular environments. The input datafile should be readable by ASE (e.g., `.extxyz`, `.xyz`) and contain atomic positions, forces, and energies (ideally also dipole moments and Hirshfeld ratios). Please see the Zenodo repository for an example datafile.
+SO3LR can be fine-tuned on custom datasets to improve performance on specific systems or molecular environments. The input datafile should be readable by ASE (e.g., `.extxyz`, `.xyz`) and include atomic positions and forces (ideally also dipole moments and Hirshfeld ratios). Please refer to the Zenodo repository for an example data file.
 
 Basic fine-tuning command:
 
