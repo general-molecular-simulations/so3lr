@@ -133,8 +133,6 @@ print(rmse)
 
 For more in-depth evaluation using Python, check out the [example notebook](https://github.com/general-molecular-simulations/so3lr/blob/main/examples/evaluate_so3lr_on_dataset.ipynb).
 
-The CLI, repository, and model are still developing. We would appreciate if you report any errors or incosistencies.
-
 ## Fine-tuning SO3LR (experimental)
 
 SO3LR can be fine-tuned on custom datasets to improve performance on specific systems or molecular environments. The input datafile should be readable by ASE (e.g., `.extxyz`, `.xyz`) and include atomic positions and forces (ideally also dipole moments and Hirshfeld ratios). Please refer to the Zenodo repository for an example data file.
@@ -292,6 +290,21 @@ an input and returns a potential energy. It is compatible with common `jax` tran
 high-level perspective, all that needs to be done is to define some function `system_to_graph` which transforms 
 whatever input structure one has to a `Graph` object. Passed to `so3lr_potential` one gets the potential energy of 
 the system.
+
+## Coming soon!
+
+- Fast TFDS dataloader
+- General robust loss
+- Multi-head fine-tuning
+- PME + tuning
+- Analytical Hessians
+- Force decompositions
+- Extract embeddings
+
+If you would like to see new features, add your own functionality, or share ideas, please reach out or open an issue. We are always happy to collaborate and hear your thoughts!
+
+The CLI, repository, and model are still evolving, and your feedback is invaluable. We would appreciate if you report any errors or incosistencies.
+
 ## Datasets
 The quantum mechanical datasets used for training and testing SO3LR are available on Zenodo:
 
