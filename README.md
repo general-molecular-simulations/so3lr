@@ -150,6 +150,13 @@ Then evaluate energies (see [SAPT10k](https://doi.org/10.1063/5.0204064) dataset
 so3lr eval --datafile sapt10k.xyz --targets energy --save-to sapt10k_eval.xyz --lr-cutoff 1000
 ```
 
+Finally, compute the binding energy:
+```shell script
+mols = read('sapt10k_eval.xyz', index=':')
+energy = [a.info['energy_so3lr'] for a in mols]
+bind_energy = [energy[i]-energy[i+1] for i in range(0, len(energy), 2)]
+```
+
 ## Atomic Simulation Environment
 To get an Atomic Simulation Environment (ASE) calculator with energies and forces predicted
 from SO3LR just do 
@@ -280,7 +287,7 @@ The quantum mechanical datasets used for training and testing SO3LR are availabl
 ## Citation
 If you use parts of the code please cite
 ```
-@article{kabylda2024molecular,
+@article{kabylda2025molecular,
   title={Molecular Simulations with a Pretrained Neural Network and Universal Pairwise Force Fields},
   author={Kabylda, Adil and Frank, J Thorben and Su{\'a}rez-Dou, Sergio and Khabibrakhmanov, Almaz and Medrano Sandonas, Leonardo and Unke, Oliver T and Chmiela, Stefan and M{\"u}ller, Klaus-Robert and Tkatchenko, Alexandre},
   journal={Journal of the American Chemical Society},
