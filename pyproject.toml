@@ -12,6 +12,8 @@ numpy = "*"
 ase = "*"
 h5py = "*"
 setuptools = "<81"
+jax = "==0.5.3"
+jaxlib = "==0.5.3"
 orbax-checkpoint = "==0.11.13"
 mlff = { git = "https://github.com/kabylda/mlff.git", branch = "v1.0_dev_import", optional = false }
 jraph = { git = "https://github.com/kabylda/jraph.git", branch = "master", optional = false }
