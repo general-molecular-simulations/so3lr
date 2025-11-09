@@ -143,7 +143,7 @@ Basic fine-tuning command:
 so3lr finetune --datafile dataset.xyz --workdir so3lr_finetuned --num-train 1000 --num-valid 100
 ```
 
-You can customize the training process with a config file (`--config custom_finetune.yaml`), choose different fine-tuning strategies (`--strategy full`), or fine-tune from a previously trained model (`--model-path ./previous_finetune_workdir`). Possible strategies include full, final_mlp, last_layer, last_layer_and_final_mlp, first_layer, and first_layer_and_last_layer. The default configuration in `so3lr/config/finetune.yaml` includes settings for the optimizer, learning rate schedule, batch size, loss weights, and data filtering.
+You can customize the training process with a config file (`--config custom_finetune.yaml`), choose different fine-tuning strategies (`--strategy full`), or fine-tune from a previously trained model (`--model-path ./previous_finetune_workdir`). Possible strategies include `full`, `final_mlp`, `last_layer`, `last_layer_and_final_mlp`, `first_layer`, and `first_layer_and_last_layer`. The default configuration in `so3lr/config/finetune.yaml` includes settings for the optimizer, learning rate schedule, batch size, loss weights, and data filtering.
 
 ## Dimer Binding Energy Calculations
 
@@ -183,7 +183,7 @@ atoms.info['charge'] = 0.0
 calc = So3lrCalculator(
     calculate_stress=False,
     lr_cutoff=1000, # for gas-phase systems
-    dtype=np.float32
+    dtype=np.float64
 )
 atoms.calc = calc
 

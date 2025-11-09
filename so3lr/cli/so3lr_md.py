@@ -220,7 +220,7 @@ def handle_box(
             f"Unsupported boundary condition: '{shift_displacement}'. "
             "Only 'free' or 'periodic' boundary conditions are supported."
         )
-    logger.info(f"Box for So3LR: {box}")
+    logger.info(f"Box for SO3LR: {box}")
     return positions, box, displacement, shift, fractional_coordinates
 
 
