@@ -8,7 +8,7 @@ data:
   dipole_vec_unit: e * Angstrom  # Dipole vector unit.
   shift_mode: null  # Options are null, mean, custom.
   energy_shifts: null  # Energy shifts in eV to subtract.
-  split_seed: 0  # Seed using for splitting the data into training, validation and test.
+  split_seed: 42  # Seed using for splitting the data into training, validation and test.
   neighbors_lr_bool: true  # Calculate long-range neighborhood indices. Required for modules like DispersionEnergy.
   neighbors_lr_cutoff: 100  # Cutoff for calculating the long-range neighborhoods in Angstrom. Is converted to the
   # data set units internally. Note that it is not required to be equal to the lr_cutoff of the model.
@@ -19,9 +19,9 @@ data:
     min_distance: 0.25  # Minimal allowed distance in Angstrom. Is converted to the data set units internally.
     max_force: 25.  # Maximal allowed force component in eV/Angstrom. Is converted to the data set units internally.
 optimizer:
-  name: adam  # Name of the optimizer. See https://optax.readthedocs.io/en/latest/api.html#common-optimizers for available ones.
+  name: adamw  # Name of the optimizer. See https://optax.readthedocs.io/en/latest/api.html#common-optimizers for available ones.
   optimizer_args: null
-  learning_rate: 0.001  # Learning rate to use.
+  learning_rate: 0.0001  # Learning rate to use.
   learning_rate_schedule: exponential_decay  # Which learning rate schedule to use. See https://optax.readthedocs.io/en/latest/api.html#optimizer-schedules for available ones.
   learning_rate_schedule_args:  # Arguments passed to the learning rate schedule. See https://optax.readthedocs.io/en/latest/api.html#optimizer-schedules.
     decay_rate: 0.75
@@ -43,17 +43,17 @@ training:
   batch_max_num_graphs: 6  # Maximal number of graphs per batch.
   # Since there is one padding graph involved for an effective batch size of 5 corresponds to 6 max_num_graphs.
   batch_n_proc: 1  # Number of processors used for queuing training batches, used only for TFDS dataloader
-  eval_every_num_steps: 1000  # Number of gradient steps after which the metrics on the validation set are calculated.
+  eval_every_num_steps: 10000  # Number of gradient steps after which the metrics on the validation set are calculated.
   loss_weights:
-    energy: 0.01  # Loss weight for the energy.
-    forces: 0.99  # Loss weight for the forces.
-    # Uncomment if dipole_vec and/or hirshfeld ratios are in the dataset and should be used in the loss.
+    forces: 1.00  # Loss weight for the forces.
+    # Uncomment if energy, dipole_vec and/or hirshfeld ratios are in the dataset and should be used in the loss.
+    # energy: 0.01  # Loss weight for the energy.
     # dipole_vec: 0.01 
     # hirshfeld_ratios: 0.01
-  use_robust_loss: false  # Use robust loss function.
-  robust_loss_alpha: 1.99 # Alpha parameter for the robust loss function.
-  model_seed: 0  # Seed used for the initialization of the model parameters.
-  training_seed: 0  # Seed used for shuffling the batches during training.
+  use_robust_loss: false  # Use robust loss function. See https://arxiv.org/abs/1701.03077.
+  robust_loss_alpha: 1.00 # Alpha parameter for the robust loss function.
+  model_seed: 42  # Seed used for the initialization of the model parameters.
+  training_seed: 42  # Seed used for shuffling the batches during training.
   log_gradient_values: False  # Log the norm of the gradients for each set of weights.
   use_wandb: true  # Use wandb for logging.
   wandb_init_args:  # Arguments to wandb.init(). See https://docs.wandb.ai/ref/python/init. The config itself is passed as config to wandb.init().
