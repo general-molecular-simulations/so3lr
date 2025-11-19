@@ -13,7 +13,7 @@ SO3LR - pronounced *Solar* - is a pretrained machine-learned force field for (bi
 Try SO3LR without any local installation using our [Colab notebook](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb)!
 
 ## Installation
-SO3RL can be either used with CPU or with GPU. If you want to use SO3LR on GPU, you have to install the 
+SO3LR can be either used with CPU or with GPU. If you want to use SO3LR on GPU, you have to install the 
 corresponding JAX installation via 
 ```shell script
 # SO3LR on GPU
@@ -147,7 +147,7 @@ You can customize the training process with a config file (`--config custom_fine
 
 ## Dimer Binding Energy Calculations
 
-You can calculate binding energies with SO3LR as reported in the preprint (Fig. 2B). The binding energy is computed as the difference between the bound dimer and non-interacting monomers (separated by a distance larger than the long-range cutoff) with charges assigned for each monomer separately.
+You can calculate binding energies with SO3LR as reported in the paper (Fig. 2B). The binding energy is computed as the difference between the energies of the bound dimer and the non-interacting monomers (separated by a distance larger than the long-range cutoff), with charges assigned to each monomer separately to prevent spurious charge transfer.
 
 For XYZ files with dimer metadata (`charge_a`, `charge_b`, `selection_a`, `selection_b`, like [NCIAtlas](https://github.com/Honza-R/NCIAtlas/blob/main/geometries/NCIA_D1200/1.01.01_100.xyz) format), generate original and translated structures:
 
@@ -169,8 +169,7 @@ bind_energy = [energy[i]-energy[i+1] for i in range(0, len(energy), 2)]
 ```
 
 ## Atomic Simulation Environment
-To get an Atomic Simulation Environment (ASE) calculator with energies and forces predicted
-from SO3LR just do 
+To obtain an Atomic Simulation Environment (ASE) calculator that predicts energies and forces using SO3LR, simply run: 
 ```python
 import numpy as np
 
@@ -196,7 +195,7 @@ print('Forces = ', forces)
 
 ```
 ## JAX MD
-Large scale simulations can be performed via jax-md which is a molecular dynamics library optimized for GPUs. Here we 
+Large-scale simulations can be performed via jax-md which is a molecular dynamics library optimized for GPUs. Here we 
 give a small example for a structure in vacuum. For realistic simulations, use CLI or take a look at the `./examples/` folder.
 ```python
 import jax
@@ -271,7 +270,7 @@ print('Forces = ', np.array(forces))
 ```
 
 ## Potential energy function
-To obtain a potential energy function which is not specifally tailored for `jax-md` we provide a convenience 
+To obtain a potential energy function which is not specifically tailored for `jax-md` we provide a convenience 
 interface. You can do  
 ```python
 from so3lr import So3lrPotential
@@ -283,12 +282,12 @@ so3lr_potential = So3lrPotential()
 
 energy = so3lr_potential(graph)
 ```
-The `Graph` object is a `collections.namedtuple` which abstracts the molecule as a graph common practice in the 
+The `Graph` object is a `collections.namedtuple` which abstracts the molecule as a graph, common practice in the 
 context of message passing neural networks. The `So3lrPotential` is a pure `python` function which takes a graph as 
 an input and returns a potential energy. It is compatible with common `jax` transformations as `jax.jit`, `jax.vmap`, 
 `jax.grad`, `...`. Its use targets developers, interested in integrating SO3LR into their own MD code base. From a 
 high-level perspective, all that needs to be done is to define some function `system_to_graph` which transforms 
-whatever input structure one has to a `Graph` object. Passed to `so3lr_potential` one gets the potential energy of 
+whatever input structure one has to a `Graph` object. When passed to `so3lr_potential` one gets the potential energy of 
 the system.
 
 ## Coming soon!
@@ -303,7 +302,7 @@ the system.
 
 If you would like to see new features, add your own functionality, or share ideas, please reach out or open an issue. We are always happy to collaborate and hear your thoughts!
 
-The CLI, repository, and model are still evolving, and your feedback is invaluable. We would appreciate if you report any errors or incosistencies.
+The CLI, repository, and model are still evolving, and your feedback is invaluable. We would appreciate if you report any errors or inconsistencies.
 
 ## Datasets
 The quantum mechanical datasets used for training and testing SO3LR are available on Zenodo:
