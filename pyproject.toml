@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "so3lr"
-version = "0.0.1"
+version = "0.1.0"
 description = "SO3krates Universal Pairwise Force Field with Long Range Interactions (SO3LR) for Molecular Simulation"
 authors = ["Adil Kabylda, Thorben Frank"]
 license = "MIT"

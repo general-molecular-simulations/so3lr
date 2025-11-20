@@ -1,4 +1,4 @@
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 from .ase_utils import make_ase_calculator as So3lrCalculator
 from .graph import Graph
