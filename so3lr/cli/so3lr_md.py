@@ -935,6 +935,16 @@ def compute_quantities(
                 box=box,
                 k_grid=k_grid
             ) / unit['energy']
+        elif ensemble == 'nvt_langevin':
+            H = jax_md.simulate.nvt_langevin(
+                energy_fn,
+                state,
+                kT=T,
+                neighbor=nbrs.idx,
+                neighbor_lr=nbrs_lr.idx,
+                box=box,
+                k_grid=k_grid
+            ) / unit['energy']
         elif ensemble == 'npt':
             H = jax_md.simulate.npt_nose_hoover_invariant(
                 energy_fn,
@@ -1085,6 +1095,45 @@ def create_nhc_fn(
 
     return init_fn, step_md_fn
 
+def create_langevin_fn(
+    energy_fn: callable,
+    shift: callable,
+    dt: float,
+    T: float,
+    box: jnp.ndarray,
+    langevin_kwargs: dict,
+    lr: bool
+) -> Tuple[callable, callable]:
+    """
+    Create the Langevin Thermostat functions.
+
+    Args:
+        energy_fn (callable): Function that calculates the energy.
+        shift (callable): Function that shifts the positions.
+        dt (float): Time step.
+        T (float): Target temperature.
+        box (jnp.ndarray): Box of the system.
+        nhc_kwargs (dict): Settings for the NHC thermostat.
+        lr (bool): whether to use long-range interactions.
+
+    Returns:
+        Tuple[callable, callable]: Init and apply functions.
+    """
+
+    init_fn, apply_fn = jax_md.simulate.nvt_langevin(
+        energy_fn,
+        shift,
+        dt=dt,
+        kT=T,
+        box=box,
+        thermostat_kwargs=langevin_kwargs
+    )
+    init_fn = jax.jit(init_fn)
+    apply_fn = jax.jit(apply_fn)
+
+    step_md_fn = create_md_fn('nvt', lr, apply_fn, T)
+
+    return init_fn, step_md_fn
 
 def create_npt_nhc_fn(
     energy_fn,
@@ -1518,12 +1567,16 @@ def perform_md(
     md_steps = all_settings.get('md_steps')
     ensemble = all_settings.get('ensemble')
 
-    # Thermostat parameters
+    # Nose-Hoover thermostat parameters
     nhc_chain_length = all_settings.get('nhc_chain_length')
     nhc_steps = all_settings.get('nhc_steps')
     nhc_thermo = all_settings.get('nhc_thermo')
     nhc_baro = all_settings.get('nhc_baro')
     nhc_sy_steps = all_settings.get('nhc_sy_steps')
+
+    # Langevin thermostat parameters
+    langevin_removecmmotion = all_settings.get('remove_cmmotion')
+    langevin_thermo = all_settings.get('langevin_thermo')
 
     # Format control
     output_format = all_settings.get('output_format')
@@ -1691,6 +1744,7 @@ def perform_md(
     # set nhc_tau to 0 for NVE ensemble only
     if ensemble == 'nve':
         nhc_tau = 0
+        langevin_thermo = 0
     else:
         nhc_tau = md_dt * nhc_thermo
     
@@ -1700,6 +1754,11 @@ def perform_md(
         'chain_steps': nhc_steps,
         'sy_steps': nhc_sy_steps,
         'tau': nhc_tau
+    }
+
+    langevin_kwargs = {
+        'gamma': langevin_thermo,
+        'center_velocity': langevin_removecmmotion
     }
 
     if ensemble == 'npt':
@@ -1725,6 +1784,16 @@ def perform_md(
             md_T,
             box,
             nhc_kwargs,
+            lr
+        )
+    elif ensemble == 'nvt_langevin':
+        init_fn, step_md_fn = create_langevin_fn(
+            energy_fn,
+            shift,
+            md_dt,
+            md_T,
+            box,
+            langevin_kwargs,
             lr
         )
     else:
