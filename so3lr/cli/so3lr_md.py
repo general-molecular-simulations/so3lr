@@ -936,15 +936,7 @@ def compute_quantities(
                 k_grid=k_grid
             ) / unit['energy']
         elif ensemble == 'nvt_langevin':
-            H = jax_md.simulate.nvt_langevin(
-                energy_fn,
-                state,
-                kT=T,
-                neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx,
-                box=box,
-                k_grid=k_grid
-            ) / unit['energy']
+            H = KE + PE
         elif ensemble == 'npt':
             H = jax_md.simulate.npt_nose_hoover_invariant(
                 energy_fn,
@@ -974,6 +966,8 @@ def compute_quantities(
                 box=box,
                 k_grid=k_grid
             ) / unit['energy']
+        elif ensemble == 'nvt_langevin':
+            H = KE + PE
         elif ensemble == 'npt':
             H = jax_md.simulate.npt_nose_hoover_invariant(
                 energy_fn,
