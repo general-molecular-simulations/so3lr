@@ -935,7 +935,7 @@ def compute_quantities(
                 box=box,
                 k_grid=k_grid
             ) / unit['energy']
-        elif ensemble == 'nvt_langevin':
+        elif ensemble == 'nvt-langevin':
             H = KE + PE
         elif ensemble == 'npt':
             H = jax_md.simulate.npt_nose_hoover_invariant(
@@ -966,7 +966,7 @@ def compute_quantities(
                 box=box,
                 k_grid=k_grid
             ) / unit['energy']
-        elif ensemble == 'nvt_langevin':
+        elif ensemble == 'nvt-langevin':
             H = KE + PE
         elif ensemble == 'npt':
             H = jax_md.simulate.npt_nose_hoover_invariant(
@@ -1569,7 +1569,7 @@ def perform_md(
     nhc_sy_steps = all_settings.get('nhc_sy_steps')
 
     # Langevin thermostat parameters
-    langevin_removecmmotion = all_settings.get('remove_cmmotion')
+    langevin_removecmmotion = all_settings.get('langevin_removecmmotion')
     langevin_thermo = all_settings.get('langevin_thermo')
 
     # Format control
@@ -1741,6 +1741,7 @@ def perform_md(
         langevin_thermo = 0
     else:
         nhc_tau = md_dt * nhc_thermo
+        langevin_gamma = md_dt * langevin_thermo
     
 
     nhc_kwargs = {
@@ -1751,7 +1752,7 @@ def perform_md(
     }
 
     langevin_kwargs = {
-        'gamma': langevin_thermo,
+        'gamma': langevin_gamma,
         'center_velocity': langevin_removecmmotion
     }
 
@@ -1780,7 +1781,7 @@ def perform_md(
             nhc_kwargs,
             lr
         )
-    elif ensemble == 'nvt_langevin':
+    elif ensemble == 'nvt-langevin':
         init_fn, step_md_fn = create_langevin_fn(
             energy_fn,
             shift,
