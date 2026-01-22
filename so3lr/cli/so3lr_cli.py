@@ -480,7 +480,7 @@ class NVTNPTGroup(CustomCommandClass):
                     args.pop(pressure_index + 1)
                 args.remove('--pressure')
                 ctx.command.params_map['pressure'].default = None
-        if '--nvt' or '--nvt-langevin' in args:
+        if '--nvt' in args:
             args.remove('--nvt')
             if '--pressure' in args:
                 # Remove any pressure argument to ensure NVT mode
@@ -490,7 +490,18 @@ class NVTNPTGroup(CustomCommandClass):
                     args.pop(pressure_index + 1)
                 args.remove('--pressure')
                 ctx.command.params_map['pressure'].default = None
-
+        
+        if '--nvt-langevin' in args:
+            args.remove('--nvt-langevin')
+            if '--pressure' in args:
+                # Remove any pressure argument to ensure NVT mode
+                pressure_index = args.index('--pressure')
+                if pressure_index < len(args) - 1 and not args[pressure_index + 1].startswith('--'):
+                    # Remove the value too
+                    args.pop(pressure_index + 1)
+                args.remove('--pressure')
+                ctx.command.params_map['pressure'].default = None
+              
         if '--npt' in args:
             args.remove('--npt')
             # If no pressure specified, use default of 1.0 atm
