@@ -1835,8 +1835,8 @@ def eval_model(
 @click.option('--model', '--model_path', 'model_path', type=click.Path(exists=False), default=None,
               help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
 # Training settings
-@click.option('--num-train', '--num_train', type=int, help='Number of data points used for gradient calculations.')
-@click.option('--num-valid', '--num_valid', type=int, help='Number of data points used for validation.')
+@click.option('--num-train', '--num_train', default=None, type=int, help='Number of data points used for gradient calculations.')
+@click.option('--num-valid', '--num_valid', default=None, type=int, help='Number of data points used for validation.')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def finetune_model(
@@ -1849,8 +1849,8 @@ def finetune_model(
     model_path: Optional[str],
     config_path: Optional[str],
     # Training settings
-    num_train: int,
-    num_valid: int,
+    num_train: Optional[int],
+    num_valid: Optional[int],
     # Help option
     help: bool
 ) -> None:
@@ -1863,7 +1863,8 @@ def finetune_model(
         so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10
     """
     # Print help if needed
-    if not datafile or not workdir or help:
+    #if not datafile or not workdir or help:
+    if not workdir or help:        
         click.echo(SO3LR_ASCII)
         click.echo(finetune_model.get_help(click.get_current_context()))
         return
