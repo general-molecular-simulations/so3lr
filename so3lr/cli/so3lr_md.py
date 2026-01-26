@@ -630,7 +630,7 @@ def load_model(
             cutoff_lr=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
             neighborlist_format_lr='ordered_sparse',
-            coulomb_kspace_do_ewald=True if kspace_electrostatics == 'ewald' else False,
+            coulomb_kspace_method=kspace_electrostatics,
             coulomb_kspace_interp_nodes=kspace_interp_nodes,
         ),
         dtype=precision,
@@ -1505,7 +1505,7 @@ def check_kspace_grid(
         else:
             raise ValueError(
                 f'Invalid kspace_electrostatics value: {kspace_electrostatics}. '
-                'Expected None, "ewald", or "pme".'
+                'Expected None, "ewald", "pme", or "p3m".'
             )
 
 def perform_md(
@@ -1668,7 +1668,7 @@ def perform_md(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            coulomb_kspace_do_ewald=True if kspace_electrostatics == 'ewald' else False,
+            coulomb_kspace_method=kspace_electrostatics,
             coulomb_kspace_interp_nodes=kspace_interp_nodes,
             **patched_potential_kwargs
         )
@@ -2158,7 +2158,7 @@ def perform_min(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            coulomb_kspace_do_ewald=True if kspace_electrostatics == 'ewald' else False,
+            coulomb_kspace_method=kspace_electrostatics,
             coulomb_kspace_interp_nodes=kspace_interp_nodes,
         )
     else:
