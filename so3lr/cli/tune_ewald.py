@@ -24,7 +24,7 @@ from functools import partial
 from jax_md.space import distance, periodic_general, DisplacementFn
 from jax_md.quantity import force
 
-from jaxpme.kspace import get_kgrid_ewald, get_kgrid_mesh
+from jaxpme import get_kgrid_ewald, get_kgrid_mesh
 
 from ase import Atoms
 from ase.io import read
