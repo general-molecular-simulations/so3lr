@@ -788,9 +788,12 @@ def cli(ctx: click.Context,
     settings_dict['output_format'] = infer_output_format(settings_dict['output_file'])
 
     # Set default log file based on output file if not explicitly provided
-    if log_file is None:
+    # Check both CLI argument and settings file
+    if log_file is None and 'log_file' not in settings_dict:
         output_path = Path(settings_dict['output_file'])
         log_file = f"{output_path.stem}.log"
+    elif log_file is None and 'log_file' in settings_dict:
+        log_file = settings_dict['log_file']
 
     # Add log settings to the settings dictionary
     settings_dict['log_file'] = log_file
