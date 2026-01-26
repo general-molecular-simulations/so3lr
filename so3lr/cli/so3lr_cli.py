@@ -315,10 +315,10 @@ Evaluate SO3LR on a dataset with all options:
 # # Experimental settings
 #
 # Ewald electrostatics settings
-# kspace_electrostatics: null                  # Whether to use Ewald summation for long-range electrostatics (null/"ewald"/"pme")
-# kspace_smearing: 4.0                         # Smearing width for Ewald summation
-# kspace_spacing: 2.0                          # Grid spacing for Ewald summation
-# kspace_interp_nodes: 4                       # Number of interpolation nodes for PME
+# kspace_electrostatics: null                  # K-space method for long-range electrostatics (null/"ewald"/"pme"/"p3m")
+# kspace_smearing: 4.0                         # Smearing width for k-space summation
+# kspace_spacing: 2.0                          # Grid spacing for k-space summation
+# kspace_interp_nodes: 4                       # Number of interpolation nodes for PME/P3M
 #
 # observables: ["partial_charges","dipole_vec","hirshfeld_ratios"]
 #
@@ -1979,7 +1979,7 @@ def train_model(
 
 
 # Define the 'tune-ewald' subcommand
-@cli.command(name='tune-ewald', help="Tune Ewald parameters`so3lr tune-ewald --input geometry.xyz`.")
+@cli.command(name='tune-ewald', help="Tune k-space electrostatics parameters (Ewald/PME/P3M): `so3lr tune-ewald --input geometry.xyz`.")
 # Input/Output group
 # Input/Output
 @click.option('--settings', type=click.Path(exists=False), default=None,
@@ -2007,7 +2007,7 @@ def train_model(
               help='Use JIT compilation for speed. [default: enabled]')
 # Tuning settings
 @click.option('--kspace_type', default=None, type=str,
-              help=f'Type of kspace calculation. [default: {"pme"}]')
+              help='Type of k-space calculation: "ewald", "pme", or "p3m". [default: "pme"]')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 @click.pass_context
@@ -2031,10 +2031,15 @@ def tune_ewald(
     help: bool
 ) -> None:
     """
-    Tune Ewald parameters for running SO3LR model on a given structure.
+    Tune k-space electrostatics parameters (Ewald/PME/P3M) for running SO3LR model on a given structure.
+
+    Supports three methods:
+    - ewald: Traditional Ewald summation
+    - pme: Particle Mesh Ewald (faster, uses Lagrange interpolation)
+    - p3m: Particle-Particle Particle-Mesh (uses B-spline interpolation)
 
     Example:
-        so3lr tune-ewald --input geometry.xyz
+        so3lr tune-ewald --input geometry.xyz --kspace_type pme
     """
      # Print help if needed
     if help:
@@ -2064,7 +2069,7 @@ def tune_ewald(
 
     # Generate default log file name based on output file if not explicitly provided
     if settings_dict.get('log_file') is None:
-        settings_dict.update({'log_file': f"{Path(input_file).stem}_tune-pme.log"})
+        settings_dict.update({'log_file': f"{Path(input_file).stem}_tune-kspace.log"})
 
     # Setup logging with default levels
     setup_logger(settings_dict.get('log_file'))
