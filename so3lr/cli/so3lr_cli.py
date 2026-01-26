@@ -129,6 +129,9 @@ DEFAULT_MIN_MAX_DT = 0.1
 DEFAULT_MIN_N_MIN = 2
 DEFAULT_SUZUKI_YOSHIDA_STEPS = 3
 
+# Additional parameters
+DEFAULT_OBSERVABLES = ()
+
 # Help strings for CLI
 FULL_HELP_STRING = """
 Run simulations using SO3LR Machine Learned Force Field.
@@ -371,6 +374,7 @@ PARAM_MAP = {
     'nhc_sy_steps': 'nhc_sy_steps',
     'langevin_removecmmotion': 'langevin_removecmmotion',
     'langevin_thermo': 'langevin_thermo',
+    'observable': 'observables',
     # Use default optimization settings
     'min_n_min': 'min_n_min',
     'min_start_dt': 'min_start_dt',
@@ -617,6 +621,8 @@ class NVTNPTGroup(CustomCommandClass):
               help='Perform geometry relaxation before MD [default: enabled].')
 @click.option('--seed', default=DEFAULT_SEED, type=int,
               help=f'Random seed for MD [default: {DEFAULT_SEED}].')
+@click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
+              help=f'Observables [default: {DEFAULT_OBSERVABLES}].')
 # Help options
 @click.option('--help-full', is_flag=True,
               help='Show detailed information about MD settings.')
@@ -672,6 +678,7 @@ def cli(ctx: click.Context,
         # Additional options
         relax: bool,
         seed: int,
+        observable: Optional[tuple],
         # Help options
         help_full: bool,
         help: bool,
@@ -892,6 +899,7 @@ def cli(ctx: click.Context,
     logger.info(f"Langevin CMMotion Removal: {settings_dict.get('langevin_removecmmotion', DEFAULT_LANGEVIN_REMOVECMMOTION)}")
     logger.info(f"Langevin Gamma:            {settings_dict.get('langevin_thermo', DEFAULT_LANGEVIN_THERMO)}")
     logger.info(f"Seed:                      {settings_dict.get('seed', DEFAULT_SEED)}")
+    logger.info(f"Observables:               {settings_dict.get('observables', DEFAULT_OBSERVABLES)}")
 
     if settings_dict.get('relax_before_run', False):
         logger.info(f"Geometry relaxation:       Enabled")
@@ -1144,6 +1152,8 @@ def fire_optimization(
               help='Force convergence criterion in eV/Å for initial relaxation. [default: None]')
 @click.option('--seed', default=DEFAULT_SEED, type=int,
               help=f'Random seed for MD. [default: {DEFAULT_SEED}]')
+@click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
+              help=f'Observables [default: {DEFAULT_OBSERVABLES}].')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def nvt_md(
@@ -1177,6 +1187,7 @@ def nvt_md(
     relax: bool,
     force_conv: Optional[float],
     seed: int,
+    observable: Optional[tuple],
     # Help option
     help: bool,
     # Optional arguments
@@ -1242,6 +1253,7 @@ def nvt_md(
     logger.info(f"Nose-Hoover steps:         {nhc_steps}")
     logger.info(f"Nose-Hoover Tdamp:         {nhc_thermo*dt} fs")
     logger.info(f"Random seed:               {seed}")
+    logger.info(f"Observables:               {observable}")
 
     if restart_load:
         logger.info(f"Restart from:              {restart_load}")
@@ -1293,6 +1305,7 @@ def nvt_md(
         'min_cycles': DEFAULT_MIN_CYCLES,
         'min_steps': DEFAULT_MIN_STEPS,
         'ensemble': 'nvt',
+        'observables': observable
     }
 
     # Add log settings to the settings dictionary
@@ -1362,6 +1375,8 @@ def nvt_md(
               help='Force convergence criterion in eV/Å for initial relaxation. [default: None]')
 @click.option('--seed', default=DEFAULT_SEED, type=int,
               help=f'Random seed for MD. [default: {DEFAULT_SEED}]')
+@click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
+              help=f'Observables [default: {DEFAULT_OBSERVABLES}].')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def nvt_langevin_md(
@@ -1393,6 +1408,7 @@ def nvt_langevin_md(
     relax: bool,
     force_conv: Optional[float],
     seed: int,
+    observable: Optional[tuple],
     # Help option
     help: bool,
     # Optional arguments
@@ -1457,6 +1473,7 @@ def nvt_langevin_md(
     logger.info(f"Center of Mass Motion Removal: {langevin_removecmmotion}")
     logger.info(f"Langevin friction value:   {dt * langevin_thermo}")
     logger.info(f"Random seed:               {seed}")
+    logger.info(f"Observables:               {observable}")
 
     if restart_load:
         logger.info(f"Restart from:              {restart_load}")
@@ -1506,6 +1523,7 @@ def nvt_langevin_md(
         'min_cycles': DEFAULT_MIN_CYCLES,
         'min_steps': DEFAULT_MIN_STEPS,
         'ensemble': 'nvt-langevin',
+        'observables': observable
     }
 
     # Add log settings to the settings dictionary
@@ -1582,6 +1600,8 @@ def nvt_langevin_md(
               help='Force convergence criterion in eV/Å for initial relaxation. [default: None]')
 @click.option('--seed', default=DEFAULT_SEED, type=int,
               help=f'Random seed for MD. [default: {DEFAULT_SEED}]')
+@click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
+              help=f'Observables [default: {DEFAULT_OBSERVABLES}].')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def npt_md(
@@ -1617,6 +1637,7 @@ def npt_md(
     relax: bool,
     force_conv: Optional[float],
     seed: int,
+    observable: Optional[tuple],
     # Help option
     help: bool
 ) -> None:
@@ -1685,6 +1706,7 @@ def npt_md(
     logger.info(f"Nose-Hoover Tdamp:         {nhc_thermo*dt} fs")
     logger.info(f"Nose-Hoover Pdamp:         {nhc_baro*dt} fs")
     logger.info(f"Random seed:               {seed}")
+    logger.info(f"Observables:               {observable}")
 
     if restart_load:
         logger.info(f"Restart from:              {restart_load}")
@@ -1738,6 +1760,7 @@ def npt_md(
         'min_cycles': DEFAULT_MIN_CYCLES,
         'min_steps': DEFAULT_MIN_STEPS,
         'ensemble': 'npt',
+        'observables': observable
     }
 
     # Add log settings to the settings dictionary
@@ -1802,6 +1825,8 @@ def npt_md(
               help='Force convergence criterion in eV/Å for initial relaxation. [default: None]')
 @click.option('--seed', default=DEFAULT_SEED, type=int,
               help=f'Random seed for MD. [default: {DEFAULT_SEED}]')
+@click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
+              help=f'Observables [default: {DEFAULT_OBSERVABLES}].')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def nve_md(
@@ -1830,6 +1855,7 @@ def nve_md(
     relax: bool,
     force_conv: Optional[float],
     seed: int,
+    observable: Optional[tuple],
     # Help option
     help: bool
 ) -> None:
@@ -1890,6 +1916,7 @@ def nve_md(
     logger.info(f"Timestep:                  {dt} fs")
     logger.info(f"Saving buffer size:        {save_buffer}")
     logger.info(f"Random seed:               {seed}")
+    logger.info(f"Observables:               {observable}")
 
     if restart_load:
         logger.info(f"Restart from:              {restart_load}")
@@ -1936,6 +1963,7 @@ def nve_md(
         'min_cycles': DEFAULT_MIN_CYCLES,
         'min_steps': DEFAULT_MIN_STEPS,
         'ensemble': 'nve',
+        'observables': observable
     }
 
     # Add log settings to the settings dictionary
