@@ -205,6 +205,161 @@ print('Energy = ', energy)
 print('Forces = ', forces)
 
 ```
+
+## Advanced Calculator Features
+
+The SO3LR calculator provides access to individual energy components, their gradients, and Hessian matrices for advanced analysis and method development.
+
+### Extracting Observables
+
+You can extract individual energy components and other observables from the model by enabling `has_aux=True` and specifying which observables to output:
+
+```python
+import numpy as np
+from so3lr import So3lrCalculator
+from ase import Atoms
+
+atoms = Atoms('H2O', positions=[(0, 0, 0), (0.96, 0, 0), (0.24, 0.93, 0)])
+atoms.info['charge'] = 0.0
+
+calc = So3lrCalculator(
+    lr_cutoff=12.0,
+    dtype=np.float64,
+    has_aux=True,
+    observables=[
+        'nn_energy',              # Neural network energy
+        'electrostatic_energy',   # Electrostatic energy
+        'dispersion_energy',      # Dispersion energy
+        'zbl_repulsion',          # ZBL repulsion energy
+        'partial_charges',        # Atomic partial charges
+        'hirshfeld_ratios'        # Hirshfeld volume ratios
+    ]
+)
+
+atoms.calc = calc
+energy = atoms.get_potential_energy()
+
+# Access observables from auxiliary outputs
+aux = calc.results['aux']
+
+# Energy components (per-atom arrays, sum for total)
+nn_energy = np.sum(aux['nn_energy'])
+electrostatic_energy = np.sum(aux['electrostatic_energy'])
+dispersion_energy = np.sum(aux['dispersion_energy'])
+zbl_repulsion = np.sum(aux['zbl_repulsion'])
+
+# Atomic properties
+partial_charges = aux['partial_charges']      # shape: (n_atoms,)
+hirshfeld_ratios = aux['hirshfeld_ratios']    # shape: (n_atoms,)
+
+print(f"Total energy: {energy:.6f} eV")
+print(f"  NN energy: {nn_energy:.6f} eV")
+print(f"  Electrostatic: {electrostatic_energy:.6f} eV")
+print(f"  Dispersion: {dispersion_energy:.6f} eV")
+print(f"  ZBL repulsion: {zbl_repulsion:.6f} eV")
+print(f"Partial charges: {partial_charges}")
+```
+
+**Available observables:**
+| Observable | Description | Shape |
+|------------|-------------|-------|
+| `nn_energy` | Neural network energy contribution | `(n_atoms,)` |
+| `electrostatic_energy` | Damped electrostatic energy | `(n_atoms,)` |
+| `dispersion_energy` | Damped dispersion energy | `(n_atoms,)` |
+| `zbl_repulsion` | ZBL short-range repulsion | `(n_atoms,)` |
+| `partial_charges` | Atomic partial charges | `(n_atoms,)` |
+| `hirshfeld_ratios` | Hirshfeld volume ratios | `(n_atoms,)` |
+| `electrostatic_energy_undamped` | Undamped electrostatic energy | `(n_atoms,)` |
+| `dispersion_energy_undamped` | Undamped dispersion energy | `(n_atoms,)` |
+
+### Observable Gradients
+
+To compute gradients of observables with respect to atomic positions, append `_grad` to the observable name and specify `output_atom_indices`:
+
+```python
+calc = So3lrCalculator(
+    lr_cutoff=12.0,
+    dtype=np.float64,
+    has_aux=True,
+    observables=['nn_energy_grad', 'partial_charges_jac'],
+    output_atom_indices=[0, 1, 2]  # Compute gradients for these atoms
+)
+
+atoms.calc = calc
+_ = atoms.get_potential_energy()
+
+aux = calc.results['aux']
+
+# Gradient of scalar observable (energy)
+# Returns dict: {atom_idx: (value, gradient)}
+nn_grad_dict = aux['nn_energy_grad']
+for idx in [0, 1, 2]:
+    value, grad = nn_grad_dict[idx]
+    # value: scalar (atomic energy)
+    # grad: shape (3,) - gradient w.r.t. atom position [x, y, z]
+    print(f"Atom {idx}: energy={value:.6f}, grad={grad}")
+
+# Jacobian of vector observable (partial charges)
+# Returns dict: {atom_idx: (value, jacobian)}
+charges_jac_dict = aux['partial_charges_jac']
+for idx in [0, 1, 2]:
+    value, jac = charges_jac_dict[idx]
+    # value: scalar - partial charge for atom idx
+    # jac: shape (n_atoms, 3) - d(all charges)/d(atom_idx position)
+    print(f"Atom {idx}: charge={value:.4f}, Jacobian shape={jac.shape}")
+```
+
+**Gradient/Jacobian suffixes:**
+- `_grad`: For scalar observables (energies). Returns gradient of shape `(3,)`.
+- `_jac`: For vector observables (charges, ratios). Returns Jacobian of shape `(n_atoms, 3)`.
+
+### Hessian Calculation
+
+The Hessian matrix (second derivatives of energy with respect to positions) can be computed for vibrational analysis, transition state searches, or other applications:
+
+```python
+calc = So3lrCalculator(
+    lr_cutoff=12.0,
+    dtype=np.float64,
+    calculate_hessian=True
+)
+
+atoms.calc = calc
+_ = atoms.get_potential_energy()
+
+hessian = calc.results['hessian']
+# Shape: (n_atoms, 3, n_atoms, 3)
+# hessian[i, a, j, b] = d²E / (dR_i^a dR_j^b)
+
+print(f"Hessian shape: {hessian.shape}")
+
+# Reshape to 2D for eigenvalue analysis
+n_atoms = len(atoms)
+hessian_2d = hessian.reshape(n_atoms * 3, n_atoms * 3)
+eigenvalues = np.linalg.eigvalsh(hessian_2d)
+print(f"Hessian eigenvalues: {eigenvalues}")
+```
+
+**Subsystem Hessians:** For large systems, compute the Hessian only for a subset of atoms:
+
+```python
+# Compute Hessian block only for atoms 0-9 (must be contiguous)
+calc = So3lrCalculator(
+    lr_cutoff=12.0,
+    dtype=np.float64,
+    calculate_hessian=True,
+    output_atom_indices=list(range(10))
+)
+
+atoms.calc = calc
+_ = atoms.get_potential_energy()
+
+hessian = calc.results['hessian']
+# Shape: (10, 3, 10, 3) - subset x subset block of the full Hessian
+```
+
+> **Note:** `calculate_hessian` cannot be used simultaneously with `calculate_stress` or observable gradients.
+
 ## JAX MD
 Large-scale simulations can be performed via jax-md which is a molecular dynamics library optimized for GPUs. Here we 
 give a small example for a structure in vacuum. For realistic simulations, use CLI or take a look at the `./examples/` folder.
@@ -307,8 +462,6 @@ the system.
 - General robust loss
 - Multi-head fine-tuning
 - PME + tuning
-- Analytical Hessians
-- Force decompositions
 - Extract embeddings
 
 If you would like to see new features, add your own functionality, or share ideas, please reach out or open an issue. We are always happy to collaborate and hear your thoughts!
