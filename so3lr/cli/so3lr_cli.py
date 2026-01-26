@@ -885,7 +885,7 @@ def cli(ctx: click.Context,
     logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
     logger.info(f"MD cycles:                 {settings_dict.get('md_cycles', DEFAULT_MD_CYCLES)}")
     logger.info(f"Steps per cycle:           {settings_dict.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)}")
-    logger.info(f"Timestep:                  {settings_dict.get('md_dt', DEFAULT_TIMESTEP)*1000} fs")
+    logger.info(f"Timestep:                  {settings_dict.get('md_dt', DEFAULT_TIMESTEP)} fs")
     logger.info(f"NHC length:                {settings_dict.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)}")
     logger.info(f"NHC steps:                 {settings_dict.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)}")
     logger.info(f"NHC thermo:                {settings_dict.get('nhc_thermo', DEFAULT_NHC_THERMO)}")
