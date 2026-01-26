@@ -37,7 +37,7 @@ from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
 
-from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald #, get_kgrid_mesh_shape, get_kgrid_ewald_shape
+from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald, get_kgrid_mesh_shape, get_kgrid_ewald_shape
 
 # Setup logging
 logger = logging.getLogger("SO3LR")
@@ -1431,7 +1431,7 @@ def create_obs_fn(
                     )
 
     return obs_fn, obs_dict
-'''
+
 def setup_kspace_grid(
     kspace_electrostatics: str,
     kspace_smearing: float,
@@ -1513,7 +1513,7 @@ def check_kspace_grid(
                 f'Invalid kspace_electrostatics value: {kspace_electrostatics}. '
                 'Expected None, "ewald", or "pme".'
             )
-'''
+
 
 def perform_md(
     all_settings: Dict,
@@ -1742,9 +1742,10 @@ def perform_md(
         langevin_thermo = 0
     elif ensemble == 'nvt-langevin':
         langevin_gamma = md_dt * langevin_thermo
+        nhc_tau = 0
     else:
         nhc_tau = md_dt * nhc_thermo
-    
+        langevin_gamma = 0
 
     nhc_kwargs = {
         'chain_length': nhc_chain_length,
