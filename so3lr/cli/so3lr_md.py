@@ -1740,9 +1740,10 @@ def perform_md(
     if ensemble == 'nve':
         nhc_tau = 0
         langevin_thermo = 0
+    elif ensemble == 'nvt-langevin':
+        langevin_gamma = md_dt * langevin_thermo
     else:
         nhc_tau = md_dt * nhc_thermo
-        langevin_gamma = md_dt * langevin_thermo
     
 
     nhc_kwargs = {
