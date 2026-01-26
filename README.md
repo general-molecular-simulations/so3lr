@@ -461,8 +461,132 @@ the system.
 - Fast TFDS dataloader
 - General robust loss
 - Multi-head fine-tuning
-- PME + tuning
 - Extract embeddings
+
+## Long-Range Electrostatics (Ewald/PME/P3M)
+
+For periodic systems, SO3LR supports long-range electrostatic calculations using three different k-space methods powered by [jax-pme](https://github.com/lab-cosmo/jax-pme/) (a JAX port of [torch-pme](https://github.com/lab-cosmo/torch-pme/)):
+
+- **Ewald summation** (`ewald`): Classical Ewald method, exact but O(N²) scaling
+- **Particle Mesh Ewald** (`pme`): FFT-accelerated method with O(N log N) scaling
+- **Particle-Particle Particle-Mesh** (`p3m`): Similar to PME with improved accuracy for the same grid size
+
+### When to Use K-Space Electrostatics
+
+K-space electrostatics should be used for:
+- **Periodic systems** (bulk liquids, crystals, interfaces)
+- **Charged systems** where long-range Coulomb interactions are important
+- Systems where electrostatic cutoffs would introduce artifacts
+
+For **gas-phase/molecular systems**, use `lr_cutoff=1000` instead (no k-space needed).
+
+### ASE Calculator with K-Space Electrostatics
+
+```python
+import numpy as np
+from ase import Atoms
+from ase.io import read
+from so3lr import So3lrCalculator
+from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald
+
+# Load a periodic water box
+atoms = read('water_box.xyz')
+cell = np.array(atoms.get_cell())
+
+# Set up k-space parameters
+smearing = 4.0  # Ewald smearing parameter in Angstrom
+
+# For PME/P3M: use mesh grid
+k_spacing = np.array([smearing / 8])  # Grid spacing
+k_grid = get_kgrid_mesh(cell, k_spacing)
+
+# For Ewald: use ewald grid instead
+# k_spacing = np.array([smearing / 2])
+# k_grid = get_kgrid_ewald(cell, k_spacing)
+
+# Store k-space parameters in atoms.info
+atoms.info['k_grid'] = k_grid
+atoms.info['k_smearing'] = np.array([smearing])
+
+# Create calculator with PME
+calc = So3lrCalculator(
+    lr_cutoff=12.0,
+    dtype=np.float64,
+    coulomb_kspace_method='pme',  # Options: 'ewald', 'pme', 'p3m'
+)
+
+atoms.calc = calc
+energy = atoms.get_potential_energy()
+forces = atoms.get_forces()
+
+print(f"Energy: {energy:.6f} eV")
+```
+
+### Extracting K-Space Energy Components
+
+```python
+calc = So3lrCalculator(
+    lr_cutoff=12.0,
+    dtype=np.float64,
+    coulomb_kspace_method='pme',
+    has_aux=True,
+    observables=[
+        'electrostatic_energy',        # Short-range (real-space) contribution
+        'electrostatic_energy_kspace', # Long-range (k-space) contribution
+        'partial_charges'
+    ]
+)
+
+atoms.calc = calc
+energy = atoms.get_potential_energy()
+
+aux = calc.results['aux']
+sr_energy = np.sum(aux['electrostatic_energy'])
+kspace_energy = np.sum(aux['electrostatic_energy_kspace'])
+charges = aux['partial_charges']
+
+print(f"Short-range electrostatic: {sr_energy:.6f} eV")
+print(f"K-space electrostatic: {kspace_energy:.6f} eV")
+print(f"Total charge: {np.sum(charges):.6f}")
+```
+
+### CLI with K-Space Electrostatics
+
+For MD simulations via the CLI:
+
+```shell script
+# NVT with PME electrostatics
+so3lr nvt --input water_box.xyz --temperature 300 --dt 0.5 \
+    --md-cycles 100 --md-steps 100 \
+    --kspace-electrostatics pme \
+    --kspace-smearing 4.0 \
+    --kspace-spacing 0.5
+
+# Available options:
+# --kspace-electrostatics: 'ewald', 'pme', or 'p3m'
+# --kspace-smearing: Ewald smearing parameter (Angstrom)
+# --kspace-spacing: K-space grid spacing (Angstrom)
+```
+
+### Method Comparison
+
+| Method | Scaling | Accuracy | Best For |
+|--------|---------|----------|----------|
+| `ewald` | O(N²) | Exact | Small systems (<1000 atoms) |
+| `pme` | O(N log N) | High | Large systems, production MD |
+| `p3m` | O(N log N) | Higher | When accuracy is critical |
+
+### Tuning K-Space Parameters
+
+The `k_smearing` parameter controls the split between real-space and k-space:
+- **Larger smearing** → More work in k-space, less in real-space
+- **Smaller smearing** → More work in real-space, less in k-space
+- Typical values: 3.0 - 5.0 Å
+
+The `k_spacing` controls the k-space grid density:
+- **Smaller spacing** → Finer grid, higher accuracy, more computation
+- For PME/P3M: `k_spacing ≈ smearing / 8` is a good starting point
+- For Ewald: `k_spacing ≈ smearing / 2` is typical
 
 If you would like to see new features, add your own functionality, or share ideas, please reach out or open an issue. We are always happy to collaborate and hear your thoughts!
 
