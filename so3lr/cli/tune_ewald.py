@@ -367,7 +367,7 @@ class TuningTimings:
             k_spacing = jnp.array([input_params.get('spacing')])
             k_smearing = jnp.array([input_params.get('smearing')])
             k_grid = get_kgrid_ewald(self.cell, k_spacing)
-        elif self.kspace_electrostatics == "pme":
+        elif self.kspace_electrostatics in ["pme", "p3m"]:
             k_spacing = jnp.array([input_params.get('spacing')])
             k_smearing = jnp.array([input_params.get('smearing')])
             k_grid = get_kgrid_mesh(self.cell, k_spacing)
@@ -1290,6 +1290,32 @@ def tune(
             accuracy=accuracy,
             model_kwargs=model_kwargs,
         )
+    elif kspace_electrostatics == "p3m":
+        logger.info("Tuning P3M parameters...")
+        # Tune P3M parameters (same as PME but with p3m method)
+        accuracy = settings.get('accuracy', 1e-3)  # Load from settings
+        params, errs, timings = tune_pme(
+            charges=charges,
+            cell=cell,
+            positions=position,
+            displacement=displacement,
+            nbrs_lr=nbrs_lr.idx,
+            nbrs_lr_distances=nbrs_lr_distances,
+            force_fn=force_fn,
+            cutoff_lo=settings.get('cutoff_lo', 7.0),  # Load from settings
+            cutoff_it=settings.get('cutoff_it', 2.0),  # Load from settings
+            # Default to lr_cutoff
+            cutoff_hi=settings.get('cutoff_hi', lr_cutoff),
+            smear_lo=settings.get('smear_lo', 2.0),  # Load from settings
+            smear_hi=settings.get('smear_hi', 6.0),  # Load from settings
+            smear_it=settings.get('smear_it', 2.0),  # Load from settings
+            nodes_lo=settings.get('nodes_lo', 3),  # Load from settings
+            nodes_hi=settings.get('nodes_hi', 3),  # Load from settings
+            mesh_lo=settings.get('mesh_lo', 4),  # Load from settings
+            mesh_hi=settings.get('mesh_hi', 6),  # Load from settings
+            accuracy=accuracy,
+            model_kwargs=model_kwargs,
+        )
     elif kspace_electrostatics == 'cutoff':
         logger.info("No k-space electrostatics tuning, only tuning the cutoff.")
         # If no k-space electrostatics is specified, use native short-range tuning
@@ -1337,7 +1363,7 @@ def tune(
         )
     else:
         raise ValueError(
-            f"Unknown kspace_electrostatics type: {kspace_electrostatics}. Must be 'ewald' or 'pme' or 'cutoff'.")
+            f"Unknown kspace_electrostatics type: {kspace_electrostatics}. Must be 'ewald', 'pme', 'p3m', or 'cutoff'.")
 
     if any(err < accuracy for err in errs):
         param, timing, error = params[timings.index(min(timings))], min(
@@ -1346,7 +1372,7 @@ def tune(
             logger.info(
                 f"Optimally timed parameters for cutoff electrostatics with an estimated force error below {accuracy}eV/A:")
             logger.info(f"  lr_cutoff: {param['cutoff']}")
-        elif kspace_electrostatics in ['ewald', 'pme']:
+        elif kspace_electrostatics in ['ewald', 'pme', 'p3m']:
             logger.info(
                 f"Optimally timed {kspace_electrostatics.upper()} parameters with an estimated force error below {accuracy}eV/A:")
             logger.info(f"  lr_cutoff: {param['cutoff']}")
@@ -1370,7 +1396,7 @@ def tune(
     logger.info(f"The parameters with the smallest error estimate are:")
     if kspace_electrostatics == 'cutoff':
         logger.info(f"  lr_cutoff: {param['cutoff']}")
-    elif kspace_electrostatics in ['ewald', 'pme']:
+    elif kspace_electrostatics in ['ewald', 'pme', 'p3m']:
         logger.info(f"Tuned {kspace_electrostatics.upper()} parameters: ")
         logger.info(f"  lr_cutoff: {param['cutoff']}")
         logger.info(f"  kspace_smearing: {param['smearing']}")
