@@ -2460,6 +2460,21 @@ def run(
     else:
         jax.config.update("jax_enable_x64", False)
 
+    # Check for allowed atom types
+    input_file_path = settings.get('input_file')
+    if input_file_path is not None:
+        try:
+            initial_geometry = read(input_file_path)
+            allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
+            current_atomic_numbers = {int(x) for x in initial_geometry.get_atomic_numbers()}
+            if not current_atomic_numbers.issubset(allowed_atomic_numbers):
+                unsupported = current_atomic_numbers - allowed_atomic_numbers
+                logger.error(f"Input geometry contains unsupported element(s): {unsupported}. "
+                             f"Supported elements are: H(1), C(6), N(7), O(8), F(9), P(15), S(16), Cl(17).")
+                raise ValueError(f"Input geometry contains unsupported element(s): {unsupported}")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Cannot find initial geometry file: {input_file_path}")
+
     # Load restart file if needed
     restart_load_path = settings.get('restart_load_path')
     if restart_load_path is not None:

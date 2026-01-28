@@ -261,6 +261,24 @@ def evaluate_so3lr_on(
     except Exception as e:
         raise RuntimeError(f"Error loading data: {str(e)}")
 
+    # Check for allowed atom types
+    allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
+    for i, graph in enumerate(data):
+        if hasattr(graph, 'nodes') and isinstance(graph.nodes, dict) and 'atomic_numbers' in graph.nodes:
+             atomic_nums = graph.nodes['atomic_numbers']
+        elif isinstance(graph, dict) and 'nodes' in graph and 'atomic_numbers' in graph['nodes']:
+             atomic_nums = graph['nodes']['atomic_numbers']
+        else:
+             # Fallback or skip if structure is unclear, but better to be safe
+             continue
+             
+        current_atomic_numbers = {int(x) for x in atomic_nums}
+        if not current_atomic_numbers.issubset(allowed_atomic_numbers):
+             unsupported = current_atomic_numbers - allowed_atomic_numbers
+             logger.error(f"Structure {i} contains unsupported element(s): {unsupported}. "
+                          f"Supported elements are: H(1), C(6), N(7), O(8), F(9), P(15), S(16), Cl(17).")
+             raise ValueError(f"Unsupported elements in structure {i}: {unsupported}")
+
     # Determine padding sizes
     n_node = stats['max_num_of_nodes'] * batch_size + 1
     n_edge = stats['max_num_of_edges'] * batch_size + 1
