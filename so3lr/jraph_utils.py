@@ -27,7 +27,11 @@ def jraph_to_ase_atoms(graph):
         pbc=pbc
     )
 
-    atoms.info['charge'] = int(graph.globals["total_charge"])
+    # Handle total_charge - could be 0-d or 1-d array after unbatching
+    total_charge = graph.globals["total_charge"]
+    if hasattr(total_charge, 'shape') and total_charge.shape:
+        total_charge = total_charge.item() if total_charge.size == 1 else int(total_charge[0])
+    atoms.info['charge'] = int(total_charge)
     atoms.info['energy'] = float(f'{float(graph.globals["energy"][0]):.6g}')
     atoms.info['energy_so3lr'] = float(f'{float(graph.globals["energy_so3lr"][0]):.6g}')
     atoms.arrays['forces'] = graph.nodes['forces']
