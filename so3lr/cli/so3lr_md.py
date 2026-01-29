@@ -1458,10 +1458,10 @@ def setup_kspace_grid(
         if k_grid is None or k_grid.shape != get_kgrid_ewald_shape(cell,lr_wavelength=k_spacing):
             k_grid = get_kgrid_ewald(cell,lr_wavelength=k_spacing)
             logger.info(f'Doing Ewald with k-grid shape: {k_grid.shape}')
-    elif kspace_electrostatics == 'pme':
+    elif kspace_electrostatics == 'pme' or kspace_electrostatics == 'p3m':
         if k_grid is None or k_grid.shape != get_kgrid_mesh_shape(cell,mesh_spacing=k_spacing):
             k_grid = get_kgrid_mesh(cell, mesh_spacing=k_spacing)
-            logger.info(f'Doing PME with k-grid shape: {k_grid.shape}')
+            logger.info(f'Doing {kspace_electrostatics.upper()} with k-grid shape: {k_grid.shape}')
     else:
         k_grid = None
         k_smearing = None
@@ -1497,7 +1497,7 @@ def check_kspace_grid(
                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
                 logger.info(f'k-grid shape: {k_grid.shape}')
                 return k_grid
-        elif kspace_electrostatics == 'pme':
+        elif kspace_electrostatics == 'pme' or kspace_electrostatics == 'p3m':
             if k_grid.shape != get_kgrid_mesh_shape(box,mesh_spacing=k_spacing):
                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
                 logger.info(f'k-grid shape: {k_grid.shape}')
