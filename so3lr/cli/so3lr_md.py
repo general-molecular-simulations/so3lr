@@ -36,7 +36,7 @@ from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
 
-from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald, get_kgrid_mesh_shape, get_kgrid_ewald_shape
+import jaxpme
 
 import h5py
 from collections import namedtuple
@@ -1455,12 +1455,12 @@ def setup_kspace_grid(
         raise ValueError(f"k-space grid setup: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
 
     if kspace_electrostatics == 'ewald':
-        if k_grid is None or k_grid.shape != get_kgrid_ewald_shape(cell,lr_wavelength=k_spacing):
-            k_grid = get_kgrid_ewald(cell,lr_wavelength=k_spacing)
+        if k_grid is None or k_grid.shape != jaxpme.kspace.get_kgrid_ewald_shape(cell,lr_wavelength=k_spacing):
+            k_grid = jaxpme.kspace.get_kgrid_ewald(cell,lr_wavelength=k_spacing)
             logger.info(f'Doing Ewald with k-grid shape: {k_grid.shape}')
     elif kspace_electrostatics == 'pme' or kspace_electrostatics == 'p3m':
-        if k_grid is None or k_grid.shape != get_kgrid_mesh_shape(cell,mesh_spacing=k_spacing):
-            k_grid = get_kgrid_mesh(cell, mesh_spacing=k_spacing)
+        if k_grid is None or k_grid.shape != jaxpme.kspace.get_kgrid_mesh_shape(cell,mesh_spacing=k_spacing):
+            k_grid = jaxpme.kspace.get_kgrid_mesh(cell, mesh_spacing=k_spacing)
             logger.info(f'Doing {kspace_electrostatics.upper()} with k-grid shape: {k_grid.shape}')
     else:
         k_grid = None
@@ -1493,12 +1493,12 @@ def check_kspace_grid(
         k_spacing = jnp.array([kspace_spacing])
         k_smearing = jnp.array([kspace_smearing])
         if kspace_electrostatics == 'ewald':
-            if k_grid.shape != get_kgrid_ewald_shape(box,lr_wavelength=k_spacing):
+            if k_grid.shape != jaxpme.kspace.get_kgrid_ewald_shape(box,lr_wavelength=k_spacing):
                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
                 logger.info(f'k-grid shape: {k_grid.shape}')
                 return k_grid
         elif kspace_electrostatics == 'pme' or kspace_electrostatics == 'p3m':
-            if k_grid.shape != get_kgrid_mesh_shape(box,mesh_spacing=k_spacing):
+            if k_grid.shape != jaxpme.kspace.get_kgrid_mesh_shape(box,mesh_spacing=k_spacing):
                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
                 logger.info(f'k-grid shape: {k_grid.shape}')
                 return k_grid

@@ -24,7 +24,7 @@ from functools import partial
 from jax_md.space import distance, periodic_general, DisplacementFn
 from jax_md.quantity import force
 
-from jaxpme.kspace import get_kgrid_ewald, get_kgrid_mesh
+import jaxpme
 
 from ase import Atoms
 from ase.io import read
@@ -366,11 +366,11 @@ class TuningTimings:
         if self.kspace_electrostatics == "ewald":
             k_spacing = jnp.array([input_params.get('spacing')])
             k_smearing = jnp.array([input_params.get('smearing')])
-            k_grid = get_kgrid_ewald(self.cell, k_spacing)
+            k_grid = jaxpme.kspace.get_kgrid_ewald(self.cell, k_spacing)
         elif self.kspace_electrostatics in ["pme", "p3m"]:
             k_spacing = jnp.array([input_params.get('spacing')])
             k_smearing = jnp.array([input_params.get('smearing')])
-            k_grid = get_kgrid_mesh(self.cell, k_spacing)
+            k_grid = jaxpme.kspace.get_kgrid_mesh(self.cell, k_spacing)
         else:
             k_grid = None
             k_smearing = None
