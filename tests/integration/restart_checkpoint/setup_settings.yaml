@@ -1,0 +1,30 @@
+# Settings for generating the initial restart file
+# Run: so3lr --settings setup_settings.yaml
+
+input_file: input.gro
+output_file: setup_trajectory.hdf5
+log_file: setup.log
+
+# Model settings
+precision: float64
+lr_cutoff: 12.0
+dispersion_damping: 2.0
+buffer_size_multiplier_sr: 1.25
+buffer_size_multiplier_lr: 1.25
+
+# MD settings
+ensemble: nvt
+md_T: 300.0
+md_dt: 0.0005
+md_cycles: 2
+md_steps: 2
+relax_before_run: false
+
+# Save restart for next test
+restart_save_path: './restart.npz'
+restart_reset: true
+
+# Output settings
+save_buffer: 1
+total_charge: 0
+seed: 42

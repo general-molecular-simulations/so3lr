@@ -1,0 +1,32 @@
+# NPT ensemble test - constant pressure simulation
+# Tests running NPT dynamics with barostat
+
+input_file: input.gro
+output_file: trajectory.hdf5
+log_file: so3lr.log
+
+# Model settings
+precision: float64
+lr_cutoff: 10.0  # Smaller cutoff for small PBC box
+dispersion_damping: 1.0
+buffer_size_multiplier_sr: 1.25
+buffer_size_multiplier_lr: 1.25
+
+# Key feature: NPT ensemble with pressure
+md_T: 300.0
+md_P: 1.0  # Pressure in atm - enables NPT
+md_dt: 0.0005
+md_cycles: 2
+md_steps: 2
+relax_before_run: false
+
+# Thermostat/Barostat settings
+nhc_chain_length: 3
+nhc_steps: 2
+nhc_thermo: 100.0
+nhc_baro: 1000.0
+
+# Output settings
+save_buffer: 1
+total_charge: 0
+seed: 42
