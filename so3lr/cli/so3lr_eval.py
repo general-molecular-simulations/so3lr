@@ -10,13 +10,13 @@ from typing import Dict, List, Tuple, Union, Optional, Any
 from tqdm import tqdm
 
 from ase.io import write
-from mlff.utils import jraph_utils, evaluation_utils
-from mlff.data import AseDataLoaderSparse
+from so3lr.mlff.utils import jraph_utils, evaluation_utils
+from so3lr.mlff.data import AseDataLoaderSparse
 from pathlib import Path
 import json
 from collections import defaultdict
 
-from ..jraph_utils import jraph_to_ase_atoms, unbatch_np
+from ..jraph_utils import jraph_to_ase_atoms
 from ..base_calculator import make_so3lr
 from .so3lr_md import load_model, setup_logger
 
@@ -26,7 +26,7 @@ logger = logging.getLogger("SO3LR")
 
 def process_predictions(
     save_to: Optional[str],
-    graph_batch: jraph.GraphsTuple,
+    graph_batch: Tuple[jraph.GraphsTuple, jraph.GraphsTuple],
     inputs: Dict[str, Any],
     output_prediction: Dict[str, Any]
 ) -> List:
@@ -37,8 +37,8 @@ def process_predictions(
     -----------
     save_to : str or None
         File path where to save the predictions
-    graph_batch : jraph.GraphsTuple
-        The batch of graphs to process
+    graph_batch : tuple of jraph.GraphsTuple
+        Tuple of (main_graph, long_range_graph) batches
     inputs : dict
         Input dictionary containing masks and data
     output_prediction : dict
@@ -52,15 +52,18 @@ def process_predictions(
     if save_to is None:
         return []
 
-    # Add predictions to graph nodes and globals
-    graph_batch.nodes['forces_so3lr'] = output_prediction['forces']
-    graph_batch.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
-    graph_batch.globals['energy_so3lr'] = output_prediction['energy']
-    graph_batch.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
-    # graph_batch.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
+    # Unpack the graph batch tuple
+    main_graph, _ = graph_batch
 
-    # Unbatch the graphs and filter out padding
-    unbatched_graphs = unbatch_np(graph_batch)
+    # Add predictions to graph nodes and globals
+    main_graph.nodes['forces_so3lr'] = output_prediction['forces']
+    main_graph.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
+    main_graph.globals['energy_so3lr'] = output_prediction['energy']
+    main_graph.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
+    # main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
+
+    # Unbatch the graphs and filter out padding using jraph's standard unbatch
+    unbatched_graphs = jraph.unbatch_np(main_graph)
     graph_mask = np.array(inputs['graph_mask'])
     return [x for x, cond in zip(unbatched_graphs, graph_mask) if (cond == True).all()]
 
@@ -287,8 +290,8 @@ def evaluate_so3lr_on(
 
     logger.info(f"Batch size: n_node={n_node}, n_edge={n_edge}, n_graph={n_graph}, n_pairs={n_pairs}")
 
-    # Batch the graphs
-    batched_graphs = jraph.dynamically_batch(
+    # Batch the graphs using MLFF's custom batch function that supports n_pairs
+    batched_graphs = jraph_utils.dynamically_batch_with_lr(
         data,
         n_node=n_node,
         n_edge=n_edge,
@@ -301,7 +304,7 @@ def evaluate_so3lr_on(
         so3lr_calc = jax.jit(so3lr_calc)
 
         # Create a dummy batch for compilation
-        dummy_batched_graphs = jraph.dynamically_batch(
+        dummy_batched_graphs = jraph_utils.dynamically_batch_with_lr(
             data[:n_graph],
             n_node=n_node,
             n_edge=n_edge,
@@ -313,9 +316,9 @@ def evaluate_so3lr_on(
         compile_start = time.time()
 
         try:
+            dummy_batch = next(dummy_batched_graphs)
             _compile_out = jax.block_until_ready(
-                so3lr_calc(jraph_utils.graph_to_batch_fn(
-                    next(dummy_batched_graphs)))
+                so3lr_calc(jraph_utils.graph_to_batch_fn(*dummy_batch))
             )
             compile_end = time.time()
             compile_time = compile_end - compile_start
@@ -344,7 +347,8 @@ def evaluate_so3lr_on(
         
         for graph_batch in batched_graphs:
             # Transform the batched graph to inputs dict
-            inputs = jraph_utils.graph_to_batch_fn(graph_batch)
+            # graph_batch is a tuple of (main_graph, long_range_graph)
+            inputs = jraph_utils.graph_to_batch_fn(*graph_batch)
             batch_size = inputs['num_of_non_padded_graphs']
             
             # Update progress bar with actual batch size

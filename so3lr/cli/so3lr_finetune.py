@@ -12,17 +12,17 @@ from tqdm import tqdm
 import yaml
 
 from ase.io import write
-from mlff.utils import jraph_utils, evaluation_utils
-from mlff.data import AseDataLoaderSparse
-from mlff.utils import calculator_utils
-from mlff.config import from_config
+from so3lr.mlff.utils import jraph_utils, evaluation_utils
+from so3lr.mlff.data import AseDataLoaderSparse
+from so3lr.mlff.utils import calculator_utils
+from so3lr.mlff.config import from_config
 
 from ml_collections import config_dict
 from pathlib import Path
 import json
 from collections import defaultdict
 
-from ..jraph_utils import jraph_to_ase_atoms, unbatch_np
+from ..jraph_utils import jraph_to_ase_atoms
 from ..base_calculator import make_so3lr
 from .so3lr_md import load_model, setup_logger
 

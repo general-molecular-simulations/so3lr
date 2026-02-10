@@ -7,7 +7,7 @@ import pytest
 
 from ase.io import read
 from jax_md import space, quantity
-from mlff.mdx.potential import MLFFPotentialSparse
+from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr import jaxmd_utils
 
 lr_cutoff = 12.0
@@ -49,7 +49,7 @@ def test_molecules_with_box(name: str):
     R0 = jnp.array(mol.get_positions()) / box[0]
 
     # define mlff potential
-    mlff_potential = MLFFPotentialSparse.create_from_ckpt_dir(
+    mlff_potential = PotentialSparse.create_from_workdir(
         package_dir / 'so3lr' / 'params',
         from_file=True,
         long_range_kwargs=dict(
@@ -124,7 +124,7 @@ def test_molecules_free(name: str):
     R0 = jnp.array(mol.get_positions())
 
     # define mlff potential
-    mlff_potential = MLFFPotentialSparse.create_from_ckpt_dir(
+    mlff_potential = PotentialSparse.create_from_workdir(
         package_dir / 'so3lr' / 'params',
         from_file=True,
         long_range_kwargs=dict(
@@ -200,8 +200,9 @@ def test_water():
     R0 = jnp.array(mol.get_positions()) / box  # box can have different side lengths
 
     # define mlff potential
-    mlff_potential = MLFFPotentialSparse.create_from_ckpt_dir(
+    mlff_potential = PotentialSparse.create_from_workdir(
         package_dir / 'so3lr' / 'params',
+        from_file=True,
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,  # this controls whether elec and disp modules use force shifting and damping.
             dispersion_energy_cutoff_lr_damping=lr_cutoff_damp,

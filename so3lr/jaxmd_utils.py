@@ -92,10 +92,17 @@ def to_jax_md(
         fractional_coordinates: bool = True,
         **neighbor_kwargs
 ):
+    # Handle vacuum systems (box_size=None) by using a large effective box
+    # JAX-MD doesn't accept None for box_size, so we use a very large value
+    if box_size is None:
+        effective_box_size = jnp.array(1e7)  # Very large box for vacuum
+    else:
+        effective_box_size = box_size
+
     # create the neighbor_fn
     neighbor_fn = partition.neighbor_list(
         displacement_or_metric,
-        box_size,
+        effective_box_size,
         potential.cutoff,  # load the cutoff of the model from the MLFFPotential
         dr_threshold,
         capacity_multiplier,
@@ -109,7 +116,7 @@ def to_jax_md(
     # create the neighbor_fn for long-range cutoff
     neighbor_fn_lr = partition.neighbor_list(
         displacement_or_metric,
-        box_size,
+        effective_box_size,
         potential.long_range_cutoff,
         dr_threshold,
         capacity_multiplier,

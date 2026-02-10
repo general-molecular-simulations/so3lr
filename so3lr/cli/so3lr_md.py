@@ -31,13 +31,50 @@ import jax.numpy as jnp
 import jax_md
 from jax_md import units, partition
 from jax_md.space import DisplacementOrMetricFn, raw_transform, transform
-from mlff.mdx.potential import MLFFPotentialSparse
-from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
+from so3lr.mlff.calculators.potential import PotentialSparse
 
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
 
 from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald, get_kgrid_mesh_shape, get_kgrid_ewald_shape
+
+import h5py
+from collections import namedtuple
+
+# HDF5 wrapper to replace mlff.mdx.hdfdict
+DataSetEntry = namedtuple('DataSetEntry', ('chunk_length', 'shape', 'dtype'))
+
+
+class HDF5Store(object):
+    """
+    Class to append value to a hdf5 file.
+    """
+
+    def __init__(self, datapath, datasets: Dict[str, DataSetEntry], compression="gzip", mode: str = "w-"):
+        self.datapath = datapath
+        self.dataset = datasets
+        self.i = 0
+        self.mode = mode
+
+        with h5py.File(self.datapath, mode=self.mode) as h5f:
+            for name, x in self.dataset.items():
+                h5f.create_dataset(
+                    name,
+                    shape=(0,) + x.shape,
+                    maxshape=(None,) + x.shape,
+                    dtype=x.dtype,
+                    compression=compression,
+                    chunks=(x.chunk_length,) + x.shape)
+
+    def append(self, x: Dict):
+        with h5py.File(self.datapath, mode='a') as h5f:
+            for key, values in x.items():
+                dset = h5f[key]
+                dset.resize((self.i + 1,) + self.dataset[key].shape)
+                dset[self.i] = [values]
+
+            self.i += 1
+            h5f.flush()
 
 # Setup logging
 logger = logging.getLogger("SO3LR")
@@ -564,7 +601,7 @@ def load_model(
     kspace_electrostatics: str = None,
     kspace_interp_nodes: int = 4,
     **kwargs
-) -> MLFFPotentialSparse:
+) -> PotentialSparse:
     """
     Load a trained MLFF model from a checkpoint directory.
 
@@ -576,7 +613,7 @@ def load_model(
                                 energy damping in Å. Defaults to 2.0.
 
     Returns:
-        MLFFPotentialSparse: The loaded MLFF model.
+        PotentialSparse: The loaded MLFF model.
     """
     logger.info(f'Loading model from {model_path}')
 
@@ -585,9 +622,9 @@ def load_model(
     if not model_dir.exists():
         raise FileNotFoundError(f"Model path not found: {model_path}")
 
-    # Load from ckpt directory path
-    potential = MLFFPotentialSparse.create_from_ckpt_dir(
-        ckpt_dir=model_dir,
+    # Load from workdir path
+    potential = PotentialSparse.create_from_workdir(
+        workdir=model_dir,
         from_file=False,
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,
@@ -783,7 +820,7 @@ def to_jax_md_custom(
 
 
 def process_model(
-    potential: MLFFPotentialSparse,
+    potential: PotentialSparse,
     species: jnp.ndarray,
     displacement: DisplacementOrMetricFn,
     box: jnp.ndarray,
@@ -798,7 +835,7 @@ def process_model(
     Process the model and create the neighbor functions and energy function.
 
     Args:
-        potential (MLFFPotentialSparse): Force field model.
+        potential (PotentialSparse): Force field model.
         species (jnp.ndarray): Atomic species.
         displacement (DisplacementOrMetricFn): Displacement function.
         box (jnp.ndarray): Box of the system.
