@@ -1,44 +1,38 @@
 #!/usr/bin/env python
-"""Validation script for NPT ensemble test."""
+"""Validation script for k-space electrostatics P3M test."""
 import sys
-import pathlib
+from validation_utils import Validator
+
 
 def validate():
-    """Validate NPT simulation output."""
-    workdir = pathlib.Path('.')
-    
-    # Check stderr for NPT indication
-    stderr_log = workdir / 'stderr.log'
-    if stderr_log.exists():
-        content = stderr_log.read_text()
-        if 'NPT' not in content.upper():
-            print("WARNING: NPT not mentioned in stderr")
-        if 'pressure' not in content.lower() and 'barostat' not in content.lower():
-            print("WARNING: Pressure/barostat not mentioned")
-    
+    """Validate k-space electrostatics P3M simulation output."""
+    v = Validator()
+    settings = v.load_settings()
+    n_atoms = v.count_atoms(settings['input_file'])
+    n_cycles = settings['md_cycles']
+
     # Check trajectory exists
-    trajectory = workdir / 'trajectory.hdf5'
-    if not trajectory.exists():
-        print(f"ERROR: Trajectory file not found: {trajectory}")
-        return False
-    
-    # For NPT, cell should change - check HDF5 for cell data
-    try:
-        import h5py
-        with h5py.File(trajectory, 'r') as f:
-            datasets = list(f.keys())
-            print(f"HDF5 datasets: {datasets}")
-            # NPT should have box/cell information
-            if 'box' in f or 'cell' in f or 'lattice' in f:
-                print("Found cell/box data in trajectory (expected for NPT)")
-    except ImportError:
-        print("WARNING: h5py not available")
-    except Exception as e:
-        print(f"WARNING: Could not check HDF5: {e}")
-    
-    print("NPT simulation completed")
-    print("Validation PASSED")
-    return True
+    v.check_file_exists('trajectory.hdf5')
+
+    # Validate HDF5 structure
+    v.validate_hdf5(
+        'trajectory.hdf5',
+        required_datasets=['positions', 'box'],
+        check_shapes={'positions': (n_cycles, 1, n_atoms, 3),
+                        'box': (n_cycles, 1, 3)},
+    )
+
+    # Validate log contains success message
+    v.check_log_contains(
+        'stderr.log',
+        required_strings=['completed successfully', 'Doing P3M'],
+    )
+
+    # Check all settings are reflected in logs
+    v.check_settings_in_logs(settings)
+
+    print("K-space electrostatics simulation completed")
+    return v.report()
 
 
 if __name__ == '__main__':

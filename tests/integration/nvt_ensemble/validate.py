@@ -1,41 +1,41 @@
 #!/usr/bin/env python
 """Validation script for acetone vacuum NVT test."""
 import sys
-import pathlib
+from validation_utils import Validator
+
 
 def validate():
-    """Validate test output."""
-    workdir = pathlib.Path('.')
-    
-    # Check trajectory file exists
-    trajectory = workdir / 'trajectory.hdf5'
-    if not trajectory.exists():
-        print(f"ERROR: Trajectory file not found: {trajectory}")
-        return False
-    
-    # Check log file exists
-    log_file = workdir / 'so3lr.log'
-    if not log_file.exists():
-        print(f"ERROR: Log file not found: {log_file}")
-        return False
-    
+    """Validate NVT ensemble test output."""
+    v = Validator()
+    settings = v.load_settings()
+    n_atoms = v.count_atoms(settings['input_file'])
+    n_cycles = settings['md_cycles']
+
+    # Check required files exist
+    v.check_files_exist([
+        'trajectory.hdf5',
+        'so3lr.log',
+    ])
+
+    # Validate log contains success message and NVT indication
+    v.check_log_contains(
+        'stderr.log',
+        required_strings=['completed successfully', 'NVT'],
+    )
+
     # Validate HDF5 structure
-    try:
-        import h5py
-        with h5py.File(trajectory, 'r') as f:
-            # Check for expected datasets
-            if 'R' not in f and 'positions' not in f:
-                print("ERROR: Missing positions dataset in HDF5")
-                return False
-            print(f"HDF5 datasets: {list(f.keys())}")
-    except ImportError:
-        print("WARNING: h5py not available, skipping HDF5 validation")
-    except Exception as e:
-        print(f"ERROR: Failed to read HDF5: {e}")
-        return False
-    
-    print("Validation PASSED")
-    return True
+    v.validate_hdf5(
+        'trajectory.hdf5',
+        required_datasets=['positions'],
+        check_shapes={
+            'positions': (n_cycles, 1, n_atoms, 3),
+        },
+    )
+
+    # Check all settings are reflected in logs
+    v.check_settings_in_logs(settings)
+
+    return v.report()
 
 
 if __name__ == '__main__':

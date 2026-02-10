@@ -1,31 +1,38 @@
 #!/usr/bin/env python
 """Validation script for initial velocities test."""
 import sys
-import pathlib
+from validation_utils import Validator
+
 
 def validate():
     """Validate that initial velocities were loaded from input."""
-    workdir = pathlib.Path('.')
-    
-    # Check stderr for velocity loading message
-    stderr_log = workdir / 'stderr.log'
-    if stderr_log.exists():
-        content = stderr_log.read_text()
-        if 'Loading initial velocities from input file' in content or \
-           'velocities' in content.lower():
-            print("Found velocity loading message in stderr")
-        else:
-            print("WARNING: Velocity loading message not found in stderr")
-    
+    v = Validator()
+    settings = v.load_settings()
+    n_atoms = v.count_atoms(settings['input_file'])
+    n_cycles = settings['md_cycles']
+
     # Check trajectory exists
-    trajectory = workdir / 'trajectory.hdf5'
-    if not trajectory.exists():
-        print(f"ERROR: Trajectory file not found: {trajectory}")
-        return False
-    
+    v.check_file_exists('trajectory.hdf5')
+
+    # Validate HDF5 structure
+    v.validate_hdf5(
+        'trajectory.hdf5',
+        required_datasets=['positions'],
+        check_shapes={'positions': (n_cycles, 1, n_atoms, 3)},
+    )
+
+    # Check for success
+    v.check_log_contains(
+        'stderr.log',
+        required_strings=['completed successfully',
+                          'Loading initial velocities from input file'],
+    )
+
+    # Check all settings are reflected in logs
+    v.check_settings_in_logs(settings)
+
     print("Initial velocities simulation completed")
-    print("Validation PASSED")
-    return True
+    return v.report()
 
 
 if __name__ == '__main__':

@@ -8,7 +8,6 @@ import subprocess
 import shutil
 import pathlib
 import pytest
-import yaml
 
 # ============================================================================
 # Test case discovery
@@ -54,6 +53,10 @@ def integration_workdir(tmp_path, request):
             shutil.copy2(item, tmp_path)
         elif item.is_dir() and item.name not in ['__pycache__', 'hdf5', 'expected']:
             shutil.copytree(item, tmp_path / item.name)
+    # Copy shared validation utilities so validate.py scripts can import them
+    validation_utils = integration_dir.parent / 'validation_utils.py'
+    if validation_utils.exists():
+        shutil.copy2(validation_utils, tmp_path)
     expected_dir = integration_dir / 'expected'
     if expected_dir.exists():
         shutil.copytree(expected_dir, tmp_path / 'expected')
@@ -263,19 +266,3 @@ class TestSO3LRCLIOptions:
         )
         assert result.returncode == 0, f"nvt xyz output failed: {result.stderr}"
         assert (workdir / 'trajectory.xyz').exists()
-
-# ============================================================================
-# Utility functions for test validation
-# ============================================================================
-
-def validate_hdf5_output(filepath):
-    import h5py
-    with h5py.File(filepath, 'r') as f:
-        assert 'positions' in f or 'R' in f, "Missing positions dataset"
-        return True
-
-def validate_xyz_output(filepath):
-    from ase.io import read
-    atoms = read(filepath)
-    assert len(atoms) > 0, "Empty structure"
-    return True

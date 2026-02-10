@@ -1,34 +1,42 @@
 #!/usr/bin/env python
 """Validation script for NVE ensemble test."""
 import sys
-import pathlib
+from validation_utils import Validator
+
 
 def validate():
     """Validate NVE simulation output."""
-    workdir = pathlib.Path('.')
-    
-    # Check stderr for NVE indication
-    stderr_log = workdir / 'stderr.log'
-    if stderr_log.exists():
-        content = stderr_log.read_text()
-        if 'NVE' not in content.upper():
-            print("WARNING: NVE not mentioned in stderr")
-    
-    # Check trajectory exists
-    trajectory = workdir / 'trajectory.hdf5'
-    if not trajectory.exists():
-        print(f"ERROR: Trajectory file not found: {trajectory}")
-        return False
-    
-    # Check restart file created
-    restart = workdir / 'nve_restart.npz'
-    if not restart.exists():
-        print(f"ERROR: Restart file not found: {restart}")
-        return False
-    
+    v = Validator()
+    settings = v.load_settings()
+    n_atoms = v.count_atoms(settings['input_file'])
+    n_cycles = settings['md_cycles']
+
+    # Check required files exist
+    v.check_files_exist([
+        'trajectory.hdf5',
+        'nve_restart.npz',
+    ])
+
+    # Validate log contains NVE and success message
+    v.check_log_contains(
+        'stderr.log',
+        required_strings=['NVE', 'completed successfully'],
+    )
+
+    # Validate HDF5 structure
+    v.validate_hdf5(
+        'trajectory.hdf5',
+        required_datasets=['positions'],
+        check_shapes={
+            'positions': (n_cycles, 1, n_atoms, 3),
+        },
+    )
+
+    # Check all settings are reflected in logs
+    v.check_settings_in_logs(settings)
+
     print("NVE simulation completed with restart file")
-    print("Validation PASSED")
-    return True
+    return v.report()
 
 
 if __name__ == '__main__':
