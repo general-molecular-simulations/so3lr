@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import pathlib
 
-from mlff.mdx.potential.mlff_potential_sparse import load_model_from_workdir
+from so3lr.mlff.calculators.potential import load_model_from_workdir
 
 
 def make_so3lr(

@@ -1,7 +1,7 @@
 import numpy as np
 import pathlib
 
-from mlff.mdx.potential import MLFFPotentialSparse
+from so3lr.mlff.calculators.potential import PotentialSparse
 
 
 def make_potential_fn(
@@ -14,7 +14,7 @@ def make_potential_fn(
 ):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
-    return MLFFPotentialSparse.create_from_workdir(
+    return PotentialSparse.create_from_workdir(
         workdir=package_dir / 'so3lr' / 'params',
         from_file=True,
         long_range_kwargs=dict(

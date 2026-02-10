@@ -5,9 +5,9 @@ This tuning module is refactored from:
 https://github.com/lab-cosmo/torch-pme/tree/main/src/torchpme/tuning
 """
 from jax.ops import segment_sum
-from mlff.masking.mask import safe_scale, safe_mask
-from mlff.nn.observable.observable_sparse import mixing_rules, gamma_cubic_fit, vdw_QDO_disp_damp, switching_fn
-from mlff.nn.observable.observable_sparse import coulomb_erf_shifted_force_smooth, coulomb_erf_shifted_force_smooth_pme, coulomb_erf
+from so3lr.mlff.masking.mask import safe_scale, safe_mask
+from so3lr.mlff.nn.observable.observable_sparse import mixing_rules, gamma_cubic_fit, vdw_QDO_disp_damp, switching_fn
+from so3lr.mlff.nn.observable.observable_sparse import coulomb_erf_shifted_force_smooth, coulomb_erf_shifted_force_smooth_pme, coulomb_erf
 import numpy as np
 import jax
 import jax.numpy as jnp

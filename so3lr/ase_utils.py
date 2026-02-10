@@ -1,7 +1,7 @@
 import numpy as np
 import pathlib
 
-from mlff.md import mlffCalculatorSparse
+from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 
 
 def make_ase_calculator(
@@ -14,13 +14,12 @@ def make_ase_calculator(
 ):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
-    calc = mlffCalculatorSparse.create_from_ckpt_dir(
-        ckpt_dir=package_dir / 'so3lr' / 'params',
+    calc = AseCalculatorSparse.create_from_workdir(
+        workdir=package_dir / 'so3lr' / 'params',
         lr_cutoff=lr_cutoff,
         dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
         from_file=True,
         calculate_stress=calculate_stress,
-        calculate_hessian=calculate_hessian,
         dtype=dtype,
         **kwargs
     )

@@ -3,7 +3,7 @@ import numpy.testing as npt
 import pathlib
 import pytest
 from ase.io import read
-from mlff.md.calculator_sparse import mlffCalculatorSparse
+from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 
 
 @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
@@ -14,8 +14,8 @@ def test_molecules(name: str):
 
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
-    calc = mlffCalculatorSparse.create_from_ckpt_dir(
-        ckpt_dir=package_dir / 'so3lr' / 'params',
+    calc = AseCalculatorSparse.create_from_workdir(
+        workdir=package_dir / 'so3lr' / 'params',
         lr_cutoff=12.,
         dispersion_energy_cutoff_lr_damping=2.,
         from_file=True,
@@ -61,8 +61,8 @@ def test_water():
         package_dir / f'tests/test_data/water_64.xyz'
     ) * [2, 2, 2]
 
-    calc = mlffCalculatorSparse.create_from_ckpt_dir(
-        ckpt_dir=package_dir / 'so3lr' / 'params',
+    calc = AseCalculatorSparse.create_from_workdir(
+        workdir=package_dir / 'so3lr' / 'params',
         lr_cutoff=12.,
         dispersion_energy_cutoff_lr_damping=2.,
         from_file=True,
