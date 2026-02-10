@@ -176,7 +176,8 @@ def graph_mse_loss(
 def node_mse_loss(
     y, y_label, batch_segments, graph_mask, scale,
     use_robust_loss: bool = False, robust_loss_alpha: float = 1.99,
-    adaptive_alpha: jnp.ndarray = None, adaptive_scale: jnp.ndarray = None
+    adaptive_alpha: jnp.ndarray = None, adaptive_scale: jnp.ndarray = None,
+    atomic_numbers=None, atom_loss_weights=None
 ):
     """Compute MSE loss for node-level properties (forces, etc.).
 
