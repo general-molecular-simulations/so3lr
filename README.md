@@ -18,7 +18,7 @@ corresponding JAX installation via
 ```shell script
 # SO3LR on GPU
 pip install --upgrade pip
-pip install "jax[cuda12]==0.5.3"
+pip install "jax[cuda12]"
 ```
 > **Note**: SO3LR runs significantly faster on GPU, making it the preferred choice for large-scale simulations. More details about JAX installation can be found [here](https://jax.readthedocs.io/en/latest/installation.html). Also, we recommend installing with [uv](https://docs.astral.sh/uv/), it's magical.
 
@@ -26,7 +26,7 @@ If you want to use SO3LR on CPU, e.g. for testing on your local machine which do
 ```shell script
 # SO3LR on CPU
 pip install --upgrade pip
-pip install jax==0.5.3
+pip install jax
 ```
 Next clone the repository and install by doing 
 ```shell script
@@ -143,7 +143,7 @@ Basic fine-tuning command:
 so3lr finetune --datafile dataset.xyz --workdir so3lr_finetuned --num-train 1000 --num-valid 100
 ```
 
-You can customize the training process with a config file (`--config custom_finetune.yaml`), choose different fine-tuning strategies (`--strategy full`), or fine-tune from a previously trained model (`--model-path ./previous_finetune_workdir`). Possible strategies include `full`, `final_mlp`, `last_layer`, `last_layer_and_final_mlp`, `first_layer`, and `first_layer_and_last_layer`. The default configuration in `so3lr/config/finetune.yaml` includes settings for the optimizer, learning rate schedule, batch size, loss weights, and data filtering.
+You can customize the training process with a config file (`--config custom_finetune.yaml`), choose different fine-tuning strategies (`--strategy full`), or fine-tune from a previously trained model (`--model-path ./previous_finetune_workdir`). Possible strategies include `full`, `final_mlp`, `last_layer`, `last_layer_and_final_mlp`, `first_layer`, and `first_layer_and_last_layer`. We recommend using the `full` or `last_layer_and_final_mlp` strategies. The default configuration in `so3lr/config/finetune.yaml` includes settings for the optimizer, learning rate schedule, batch size, loss weights, and data filtering. To use a fine-tuned model, use the `--model path_to_finetuned_model` flag.
 
 ## Dimer Binding Energy Calculations
 
