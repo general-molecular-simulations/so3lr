@@ -89,7 +89,7 @@ def calculate_energy_mean(x: Sequence):
         else:
             rolling_mean = (rolling_mean + energy / (count - 1)) / count * (count - 1)
 
-    return rolling_mean
+    return np.squeeze(rolling_mean)
 
 
 def calculate_average_number_of_nodes(x: Sequence):

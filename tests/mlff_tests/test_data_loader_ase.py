@@ -115,7 +115,7 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
         all_data, data_stats = loader.load(
             cutoff=4.,
             calculate_neighbors_lr=calculate_neighbors_lr,
-            cutoff_lr=75.
+            cutoff_lr=15.
         )
 
         npt.assert_equal(len(all_data), 50)
@@ -130,7 +130,7 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
         all_data, data_stats = loader.load(
             cutoff=4.,
             calculate_neighbors_lr=calculate_neighbors_lr,
-            cutoff_lr=75.
+            cutoff_lr=15.
         )
 
         npt.assert_equal(len(all_data), 50)

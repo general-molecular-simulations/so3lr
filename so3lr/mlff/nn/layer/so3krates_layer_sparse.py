@@ -358,8 +358,6 @@ class AttentionBlock(nn.Module):
             q2_i = functional_rms_norm(q2_i)
             k2_j = functional_rms_norm(k2_j)
 
-        return x * jax.lax.rsqrt(jnp.mean(x ** 2, axis=-1, keepdims=True) + eps)
-
         if self.normalization == 'identity':
             nc1 = jnp.array([1.])
             nc2 = jnp.array([1.])
