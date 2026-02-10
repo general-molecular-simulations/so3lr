@@ -1741,11 +1741,10 @@ def perform_md(
         nhc_tau = 0
         langevin_thermo = 0
     elif ensemble == 'nvt-langevin':
-        langevin_gamma = md_dt * langevin_thermo
         nhc_tau = 0
     else:
         nhc_tau = md_dt * nhc_thermo
-        langevin_gamma = 0
+        langevin_thermo = 0
 
     nhc_kwargs = {
         'chain_length': nhc_chain_length,
@@ -1755,7 +1754,7 @@ def perform_md(
     }
 
     langevin_kwargs = {
-        'gamma': langevin_gamma,
+        'gamma': langevin_thermo,
         'center_velocity': langevin_removecmmotion
     }
 
