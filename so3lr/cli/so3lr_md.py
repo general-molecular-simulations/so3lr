@@ -1587,6 +1587,13 @@ def perform_md(
     except Exception as e:
         raise RuntimeError(f"Failed to read geometry file {input_file_path}: {e}")
 
+    if len(initial_geometry) == 0:
+        raise ValueError(f"Input geometry file {input_file_path} contains no atoms.")
+    if initial_geometry.get_atomic_numbers() is None or len(initial_geometry.get_atomic_numbers()) == 0:
+        raise ValueError(f"Input geometry file {input_file_path} has no atomic numbers.")
+    pbc_str = "PBC" if np.any(initial_geometry.get_pbc()) else "no PBC"
+    logger.info(f"Read {len(initial_geometry)} atoms ({initial_geometry.get_chemical_formula()}) from {input_file_path} [{pbc_str}]")
+
     if opt_structure is not None:
         initial_geometry.set_positions(opt_structure)
 
@@ -2123,6 +2130,14 @@ def perform_min(
         initial_geometry = read(input_file_path)
     except FileNotFoundError:
         raise FileNotFoundError(f"Cannot find initial geometry file: {input_file_path}")
+
+    if len(initial_geometry) == 0:
+        raise ValueError(f"Input geometry file {input_file_path} contains no atoms.")
+    if initial_geometry.get_atomic_numbers() is None or len(initial_geometry.get_atomic_numbers()) == 0:
+        raise ValueError(f"Input geometry file {input_file_path} has no atomic numbers.")
+    pbc_str = "PBC" if np.any(initial_geometry.get_pbc()) else "no PBC"
+    logger.info(f"Read {len(initial_geometry)} atoms ({initial_geometry.get_chemical_formula()}) from {input_file_path} [{pbc_str}]")
+
     cell = initial_geometry.get_cell()
     cell = check_cell(cell, lr_cutoff, kspace_electrostatics, kspace_smearing)
 
@@ -2502,15 +2517,23 @@ def run(
     if input_file_path is not None:
         try:
             initial_geometry = read(input_file_path)
-            allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
-            current_atomic_numbers = {int(x) for x in initial_geometry.get_atomic_numbers()}
-            if not current_atomic_numbers.issubset(allowed_atomic_numbers):
-                unsupported = current_atomic_numbers - allowed_atomic_numbers
-                logger.error(f"Input geometry contains unsupported element(s): {unsupported}. "
-                             f"Supported elements are: H(1), C(6), N(7), O(8), F(9), P(15), S(16), Cl(17).")
-                raise ValueError(f"Input geometry contains unsupported element(s): {unsupported}")
         except FileNotFoundError:
             raise FileNotFoundError(f"Cannot find initial geometry file: {input_file_path}")
+
+        if len(initial_geometry) == 0:
+            raise ValueError(f"Input geometry file {input_file_path} contains no atoms.")
+        if initial_geometry.get_atomic_numbers() is None or len(initial_geometry.get_atomic_numbers()) == 0:
+            raise ValueError(f"Input geometry file {input_file_path} has no atomic numbers.")
+        pbc_str = "PBC" if np.any(initial_geometry.get_pbc()) else "no PBC"
+        logger.info(f"Read {len(initial_geometry)} atoms ({initial_geometry.get_chemical_formula()}) from {input_file_path} [{pbc_str}]")
+
+        allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
+        current_atomic_numbers = {int(x) for x in initial_geometry.get_atomic_numbers()}
+        if not current_atomic_numbers.issubset(allowed_atomic_numbers):
+            unsupported = current_atomic_numbers - allowed_atomic_numbers
+            logger.error(f"Input geometry contains unsupported element(s): {unsupported}. "
+                         f"Supported elements are: H(1), C(6), N(7), O(8), F(9), P(15), S(16), Cl(17).")
+            raise ValueError(f"Input geometry contains unsupported element(s): {unsupported}")
 
     # Load restart file if needed
     restart_load_path = settings.get('restart_load_path')
