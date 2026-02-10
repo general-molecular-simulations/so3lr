@@ -372,7 +372,7 @@ Run simulations using SO3LR Machine Learned Force Field.
 so3lr opt [options]          Run geometry optimization
 so3lr nvt [options]          Run NVT (constant volume and temperature) MD simulation
 so3lr npt [options]          Run NPT (constant pressure and temperature) MD simulation
-so3lr nve [options]          Run NVT (constant volume and energy) MD simulation
+so3lr nve [options]          Run NVE (constant volume and energy) MD simulation
 so3lr eval [options]         Evaluate SO3LR model on a dataset
 so3lr finetune [options]     Finetune SO3LR model on a dataset
 so3lr train [options]        Train a SO3LR/SO3krates model from a config file
@@ -694,6 +694,11 @@ def cli(ctx: click.Context,
 
             # Use standard logging initially for any errors
             logger.info(f"Loading settings from {settings}")
+
+            # Convert md_dt from fs (user-facing) to ps (internal)
+            if 'md_dt' in settings_dict:
+                settings_dict['md_dt'] = settings_dict['md_dt'] / 1000
+
         except (FileNotFoundError, yaml.YAMLError) as e:
             logger.error(f"Error loading settings file: {str(e)}")
             sys.exit(1)
@@ -1647,7 +1652,7 @@ def nve_md(
         'model_path': model_path,
         'precision': precision,
         'md_dt': dt/1000,
-        'init_T': temperature,
+        'md_T': temperature,
         'md_cycles': md_cycles,
         'md_steps': md_steps,
         'lr_cutoff': lr_cutoff,
@@ -1818,7 +1823,7 @@ def eval_model(
 # Define the 'finetune' subcommand
 @cli.command(name='finetune', help="Finetune SO3LR model on a dataset with `so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10`.")
 # Input/Output group
-@click.option('--workdir', type=click.Path(), help='Output file to save predictions (.extxyz format). If not provided, predictions are not saved.')
+@click.option('--workdir', type=click.Path(), help='Working directory for fine-tuned model checkpoints and logs.')
 @click.option('--datafile', type=click.Path(), help='Path to dataset file (extxyz or tfds format) containing data used for finetuning.')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
@@ -2055,7 +2060,7 @@ def tune_ewald(
 
     # Generate default log file name based on output file if not explicitly provided
     if settings_dict.get('log_file') is None:
-        settings_dict.update({log_file: f"{Path(input_file).stem}_tune-pme.log"})
+        settings_dict.update({'log_file': f"{Path(input_file).stem}_tune-pme.log"})
 
     # Setup logging with default levels
     setup_logger(settings_dict.get('log_file'))
