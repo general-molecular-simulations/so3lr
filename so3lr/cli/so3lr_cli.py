@@ -18,6 +18,7 @@ from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 from .. import __version__
 from .so3lr_eval import evaluate_so3lr_on
 from .so3lr_finetune import finetune_so3lr
+from .so3lr_train import train_so3lr
 from .so3lr_md import perform_min, run, setup_logger
 # from .tune_ewald import tune
 
@@ -374,6 +375,7 @@ so3lr npt [options]          Run NPT (constant pressure and temperature) MD simu
 so3lr nve [options]          Run NVT (constant volume and energy) MD simulation
 so3lr eval [options]         Evaluate SO3LR model on a dataset
 so3lr finetune [options]     Finetune SO3LR model on a dataset
+so3lr train [options]        Train a SO3LR/SO3krates model from a config file
 
 ## Usage Examples
 
@@ -394,6 +396,9 @@ Evaluate on a dataset:
 
 Finetune on a dataset:
   so3lr finetune --datafile dataset.xyz --workdir so3lr_finetuned --num-train 100 --num-valid 10
+
+Train from a config file:
+  so3lr train --config config.yaml
 
 Use --help-full to see all available options.
 
@@ -1906,6 +1911,62 @@ def finetune_model(
     )
     logger.info("=" * 60)
     logger.info("finetuning completed successfully!")
+
+
+@cli.command(name='train', help="Train a SO3krates model from a config file with `so3lr train --config config.yaml`.")
+@click.option('--config', 'config_path', type=click.Path(exists=False), default=None,
+              help='Path to the training config file (YAML or JSON).')
+@click.option('--log-file', default=None, type=click.Path(),
+              help='File to write logs to [default: None].')
+@click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
+def train_model(
+    config_path: Optional[str],
+    log_file: Optional[str],
+    help: bool
+) -> None:
+    """
+    Train a SO3krates model from a config file.
+
+    Example:
+        so3lr train --config config.yaml
+    """
+    if help or not config_path:
+        click.echo(SO3LR_ASCII)
+        click.echo(train_model.get_help(click.get_current_context()))
+        return
+
+    # Validate file existence
+    if not Path(config_path).exists():
+        logger.error(f"Error: Config file not found: {config_path}")
+        sys.exit(1)
+
+    # Setup logging
+    if log_file is None:
+        log_file = Path(config_path).stem + "_training.log"
+
+    setup_logger(log_file)
+
+    # Log ASCII art
+    logger.info(SO3LR_ASCII)
+
+    # Log all settings
+    logger.info("=" * 60)
+    logger.info(f"SO3LR Model Training (v{__version__})")
+    logger.info("=" * 60)
+    logger.info(f"Config file:               {config_path}")
+    logger.info(f"Log file:                  {log_file}")
+    logger.info("=" * 60)
+
+    # Log hardware info
+    get_hardware_info()
+
+    # Run training
+    time_start = time.time()
+    train_so3lr(config_path=config_path, log_file=log_file)
+    time_end = time.time()
+    logger.info("=" * 60)
+    logger.info("Training completed successfully!")
+    logger.info(f"Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)")
 
 
 # # Define the 'tune-ewald' subcommand
