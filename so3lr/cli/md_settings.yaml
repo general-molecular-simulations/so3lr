@@ -20,8 +20,8 @@ restart_load_path: null                    # Path to load simulation state from 
 model_path: null                           # Path to a custom MLFF model directory. If null, uses built-in SO3LR. [Default: null]
 lr_cutoff: 12.0                            # Long-range cutoff distance in Å [Default: 12.0]
 dispersion_damping: 2.0                    # Dispersion interactions start damping at (lr_cutoff - dispersion_damping) Å [Default: 2.0]
-buffer-sr: 1.25                            # Buffer size multiplier for short-range neighbor list [Default: 1.25]
-buffer-lr: 1.25                            # Buffer size multiplier for long-range neighbor list [Default: 1.25]
+buffer_sr: 1.25                            # Buffer size multiplier for short-range neighbor list [Default: 1.25]
+buffer_lr: 1.25                            # Buffer size multiplier for long-range neighbor list [Default: 1.25]
 
 ## Minimization Settings
 relax_before_run: true                     # Perform geometry relaxation before MD run [Default: true]
