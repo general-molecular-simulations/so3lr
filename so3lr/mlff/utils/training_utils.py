@@ -385,8 +385,70 @@ def node_mae_loss(y, y_label, batch_segments, graph_mask, scale, **kwargs):
 
     return mae
 
+def graph_mse_loss_per_atom(
+    y, y_label, batch_segments, graph_mask, scale,
+    use_robust_loss: bool = False, robust_loss_alpha: float = 1.99,
+    adaptive_alpha: jnp.ndarray = None, adaptive_scale: jnp.ndarray = None,
+    atomic_numbers=None, atom_loss_weights=None
+):
+    """Compute MSE loss for graph-level energy normalized per atom (E/N).
+
+    Same as graph_mse_loss but divides predictions and labels by the number of
+    atoms per graph before computing the loss, so that molecules of different
+    sizes contribute equally.
+    """
+    assert y.shape == y_label.shape
+
+    # Number of atoms per graph
+    num_atoms_per_graph = jraph.segment_sum(
+        jnp.ones(len(batch_segments), dtype=y.dtype),
+        batch_segments, num_segments=len(graph_mask)
+    )
+    num_atoms_per_graph = jnp.maximum(num_atoms_per_graph, 1.0)
+
+    # Normalize by number of atoms
+    y = y / num_atoms_per_graph
+    y_label = y_label / num_atoms_per_graph
+
+    return graph_mse_loss(
+        y, y_label, batch_segments, graph_mask, scale,
+        use_robust_loss=use_robust_loss, robust_loss_alpha=robust_loss_alpha,
+        adaptive_alpha=adaptive_alpha, adaptive_scale=adaptive_scale,
+        atomic_numbers=atomic_numbers, atom_loss_weights=atom_loss_weights
+    )
+
+
+def graph_mae_loss_per_atom(
+    y, y_label, batch_segments, graph_mask, scale,
+    atomic_numbers=None, atom_loss_weights=None
+):
+    """Compute MAE loss for graph-level energy normalized per atom (E/N).
+
+    Same as graph_mae_loss but divides predictions and labels by the number of
+    atoms per graph before computing the loss, so that molecules of different
+    sizes contribute equally.
+    """
+    assert y.shape == y_label.shape
+
+    # Number of atoms per graph
+    num_atoms_per_graph = jraph.segment_sum(
+        jnp.ones(len(batch_segments), dtype=y.dtype),
+        batch_segments, num_segments=len(graph_mask)
+    )
+    num_atoms_per_graph = jnp.maximum(num_atoms_per_graph, 1.0)
+
+    # Normalize by number of atoms
+    y = y / num_atoms_per_graph
+    y_label = y_label / num_atoms_per_graph
+
+    return graph_mae_loss(
+        y, y_label, batch_segments, graph_mask, scale,
+        atomic_numbers=atomic_numbers, atom_loss_weights=atom_loss_weights
+    )
+
+
 property_to_mae = {
-    'energy': graph_mae_loss,
+    'energy': graph_mae_loss_per_atom,
     'stress': graph_mae_loss,
     'forces': node_mae_loss,
     'dipole_vec': graph_mae_loss,
@@ -395,7 +457,7 @@ property_to_mae = {
 }
 
 property_to_loss = {
-    'energy': graph_mse_loss,
+    'energy': graph_mse_loss_per_atom,
     'stress': graph_mse_loss,
     'forces': node_mse_loss,
     'dipole_vec': graph_mse_loss,
