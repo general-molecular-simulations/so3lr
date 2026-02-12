@@ -400,11 +400,12 @@ def evaluate_so3lr_on(
             # Calculate batch metrics (sums & counts)
             batch_metrics = calculate_metrics(output_prediction, inputs, target_list)
 
-            # Accumulate
+            # Accumulate (only for targets that had ground truth)
             for t in target_list:
-                tot_abs[t] += batch_metrics[f"{t}_abs_sum"]
-                tot_sq[t]  += batch_metrics[f"{t}_sq_sum"]
-                tot_n[t]   += batch_metrics[f"{t}_count"]
+                if f"{t}_abs_sum" in batch_metrics:
+                    tot_abs[t] += batch_metrics[f"{t}_abs_sum"]
+                    tot_sq[t]  += batch_metrics[f"{t}_sq_sum"]
+                    tot_n[t]   += batch_metrics[f"{t}_count"]
 
             # Process predictions if saving is enabled
             if save_predictions_bool:
@@ -421,9 +422,11 @@ def evaluate_so3lr_on(
         logger.info(f'Pure evaluation time: {total_time:.3f} seconds')
         logger.info('-' * 50)
 
-        # Compute final metrics from totals (global per-atom/per-structure)
+        # Compute final metrics from totals (only for targets with ground truth)
         test_metrics = {}
         for t in target_list:
+            if t not in tot_n:
+                continue
             n = tot_n[t]
             if n <= 0:
                 # Avoid division by zero; report NaNs if nothing was counted
