@@ -2011,7 +2011,12 @@ def nve_md(
 @click.option('--batch-size', default=1, type=int,
               help='Number of molecules per batch. [default: 1]')
 @click.option('--targets', default='forces,dipole_vec,hirshfeld_ratios', type=str,
-              help='Comma-separated list of targets to evaluate (forces, energy, dipole_vec, hirshfeld_ratios). [default: forces,dipole_vec,hirshfeld_ratios]')
+              help='Comma-separated list of targets to evaluate. '
+                   'Standard targets: forces, energy, dipole_vec, hirshfeld_ratios. '
+                   'Observables (saved to output, metrics only if ground truth exists): '
+                   'nn_energy, partial_charges, electrostatic_energy, dispersion_energy, '
+                   'zbl_repulsion, electrostatic_energy_undamped, dispersion_energy_undamped. '
+                   '[default: forces,dipole_vec,hirshfeld_ratios]')
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
               help='Use JIT compilation for speed. [default: enabled]')
 # Help option

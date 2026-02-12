@@ -23,6 +23,14 @@ from .so3lr_md import load_model, setup_logger
 # Get logger
 logger = logging.getLogger("SO3LR")
 
+# Observable quantities that require output_intermediate_quantities from the model.
+# All observables are per-atom (node-level) quantities.
+OBSERVABLES = {
+    'nn_energy', 'partial_charges', 'electrostatic_energy',
+    'dispersion_energy', 'zbl_repulsion',
+    'electrostatic_energy_undamped', 'dispersion_energy_undamped',
+}
+
 
 def process_predictions(
     save_to: Optional[str],
@@ -69,6 +77,11 @@ def process_predictions(
     for field in ('residue_charge', 'residue_segments'):
         main_graph.globals.pop(field, None)
 
+    # Add any observable quantities that are present in the predictions
+    for obs_key in OBSERVABLES:
+        if obs_key in output_prediction:
+            main_graph.nodes[f'{obs_key}_so3lr'] = output_prediction[obs_key]
+
     # Unbatch the graphs and filter out padding using jraph's standard unbatch
     unbatched_graphs = jraph.unbatch_np(main_graph)
     graph_mask = np.array(inputs['graph_mask'])
@@ -100,6 +113,10 @@ def calculate_metrics(
     metrics = {}
 
     for target in targets:
+        # Skip targets that have no ground truth in the dataset (e.g., observables)
+        if target not in inputs:
+            continue
+
         mask = assign_mask(target, inputs=inputs)
         y_pred = output_prediction[target]
         y_true = inputs[target]
@@ -208,6 +225,12 @@ def evaluate_so3lr_on(
     target_list = targets.split(',')
     logger.info(f"Evaluating targets: {', '.join(target_list)}")
 
+    # Determine which targets are observables (need output_intermediate_quantities)
+    observable_targets = [t for t in target_list if t in OBSERVABLES]
+    output_intermediate_quantities = observable_targets if observable_targets else None
+    if observable_targets:
+        logger.info(f"Observable targets (no ground truth expected): {', '.join(observable_targets)}")
+
     # Process input file path
     datafile = Path(datafile).resolve().expanduser()
     if not datafile.exists():
@@ -235,8 +258,9 @@ def evaluate_so3lr_on(
         so3lr_calc = make_so3lr(
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            calculate_forces=True
-        ) 
+            calculate_forces=True,
+            output_intermediate_quantities=output_intermediate_quantities
+        )
         cutoff = 4.5 # Default cutoff for SO3LR
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
@@ -244,7 +268,8 @@ def evaluate_so3lr_on(
             workdir=model_path,
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            calculate_forces=True
+            calculate_forces=True,
+            output_intermediate_quantities=output_intermediate_quantities
         )
 
         with open(Path(model_path) / "hyperparameters.json", "r") as fp:
@@ -479,5 +504,7 @@ def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:
         return node_mask
     # elif x == 'c6_ratios':
     #     return node_mask
+    elif x in OBSERVABLES:
+        return node_mask
     else:
         raise ValueError(f"Evaluation not implemented for target='{x}'.")

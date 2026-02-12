@@ -45,6 +45,13 @@ def jraph_to_ase_atoms(graph):
     atoms.info['dipole_vec'] = np.array([float(f'{x:.6g}') for x in graph.globals['dipole_vec'].flatten()])
     atoms.info['dipole_vec_so3lr'] = np.array([float(f'{x:.6g}') for x in graph.globals['dipole_vec_so3lr'].flatten()])
 
+    # Write any additional observable quantities that were added to nodes
+    _handled_node_keys = {'positions', 'atomic_numbers', 'forces', 'forces_so3lr',
+                          'hirshfeld_ratios', 'hirshfeld_ratios_so3lr'}
+    for key in graph.nodes:
+        if key.endswith('_so3lr') and key not in _handled_node_keys:
+            atoms.arrays[key] = graph.nodes[key]
+
     return atoms
 
 
