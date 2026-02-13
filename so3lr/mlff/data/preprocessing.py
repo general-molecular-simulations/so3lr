@@ -1,7 +1,6 @@
 import numpy as np
 import jax.numpy as jnp
 
-from sklearn.feature_extraction import DictVectorizer
 from typing import (Tuple, Union)
 
 
@@ -34,17 +33,20 @@ def get_per_atom_shift(z: Array, q: Array, pad_value: int = None) -> Tuple[Array
     else:
         idx_ = np.arange(len(u))
 
-    count_fn = lambda y: dict(zip(*np.unique(y, return_counts=True)))
-    lhs_counts = list(map(count_fn, z))
-
-    v = DictVectorizer(sparse=False)
-    X = v.fit_transform(lhs_counts)
-    X = X[..., idx_]
+    # Build count matrix: for each structure, count occurrences of each unique atomic number (excluding pad).
+    unique_z = u[idx_]
+    z_to_col = {int(z_val): col for col, z_val in enumerate(unique_z)}
+    X = np.zeros((len(z), len(unique_z)), dtype=np.float64)
+    for i, row in enumerate(z):
+        for atom in row:
+            atom_int = int(atom)
+            if atom_int in z_to_col:
+                X[i, z_to_col[atom_int]] += 1
 
     sol = np.linalg.lstsq(X, q)
 
     shifts = np.zeros(np.max(u) + 1)
-    for k, v in dict(zip(u[idx_], sol[0])).items():
+    for k, v in dict(zip(unique_z, sol[0])).items():
         shifts[k] = v
 
     q_scaled = q - np.take(shifts, z).sum(axis=-1)

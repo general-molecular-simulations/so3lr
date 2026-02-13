@@ -1,10 +1,9 @@
-import clu.metrics as clu_metrics
 import itertools as it
 import jax
 import jax.numpy as jnp
 import jraph
 import numpy as np
-import pandas as pd
+import csv
 from tqdm import tqdm
 from typing import Any
 from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_force_fn_sparse
@@ -57,13 +56,13 @@ def evaluate(
         n_pairs=batch_max_num_pairs,
     )
 
-    # Create a collections object for the test targets.
-    test_collection = clu_metrics.Collection.create(
-        **{f'{t}_{m}': clu_metrics.Average.from_output(f'{t}_{m}') for (t, m) in it.product(testing_targets, ('mae', 'mse'))})
+    # Metric keys to track (running averages over batches).
+    metric_keys = [f'{t}_{m}' for (t, m) in it.product(testing_targets, ('mae', 'mse'))]
+    metric_totals = {k: 0.0 for k in metric_keys}
+    metric_counts = {k: 0 for k in metric_keys}
 
     # Start iteration over validation batches.
     row_metrics = []
-    test_metrics: Any = None
     for graph_batch_testing, lr_batch_testing in tqdm(iterator_testing):
         batch_testing = graph_to_batch_fn(graph_batch_testing, lr_batch_testing)
         batch_testing = jax.tree_util.tree_map(jnp.array, batch_testing)
@@ -102,22 +101,26 @@ def evaluate(
             )
             metrics_dict[f"{t}_true"] = batch_testing[t][msk]
             metrics_dict[f"{t}_predicted"] = output_prediction[t][msk]
-     
+
         # Track the metrics per batch if they are written to file.
         if write_batch_metrics_to is not None:
             row_metrics += [jax.device_get(metrics_dict)]
 
-        test_metrics = (
-            test_collection.single_from_model_output(**metrics_dict)
-            if test_metrics is None
-            else test_metrics.merge(test_collection.single_from_model_output(**metrics_dict))
-        )
-    test_metrics = test_metrics.compute()
+        # Accumulate running averages.
+        for k in metric_keys:
+            if k in metrics_dict:
+                metric_totals[k] += np.asarray(metrics_dict[k]).item()
+                metric_counts[k] += 1
 
-    if write_batch_metrics_to:
-        df = pd.DataFrame(row_metrics)
-        with open(write_batch_metrics_to, mode='w') as fp:
-            df.to_csv(fp)
+    test_metrics = {k: metric_totals[k] / metric_counts[k] for k in metric_keys if metric_counts[k] > 0}
+
+    if write_batch_metrics_to and row_metrics:
+        fieldnames = list(row_metrics[0].keys())
+        with open(write_batch_metrics_to, mode='w', newline='') as fp:
+            writer = csv.DictWriter(fp, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in row_metrics:
+                writer.writerow({k: float(v) if hasattr(v, 'item') else v for k, v in row.items()})
 
     test_metrics = {
         f'test_{k}': float(v) for k, v in test_metrics.items()
