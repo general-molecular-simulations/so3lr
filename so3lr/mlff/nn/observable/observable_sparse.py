@@ -37,9 +37,6 @@ class EnergySparse(BaseSubModule):
     zbl_repulsion_bool: bool = False
     zbl_repulsion: Optional[Any] = None
     use_final_bias_bool: bool = True
-    # Unconstrained force prediction fields
-    predict_forces_directly: bool = False  # If True, predict forces directly instead of via gradient
-    force_regression_dim: int = None  # Hidden dimension for force MLP (None = single layer)
 
     def setup(self):
         if self.output_is_zero_at_init:
@@ -156,30 +153,6 @@ class EnergySparse(BaseSubModule):
             inputs.update(**self.dispersion_energy(inputs))
             atomic_energy += inputs['dispersion_energy']
 
-        # Direct force prediction (for unconstrained mode)
-        nn_forces = None
-        if self.predict_forces_directly:
-            # Predict forces directly from atomic representations
-            if self.force_regression_dim is not None:
-                f = nn.Dense(
-                    self.force_regression_dim,
-                    kernel_init=nn.initializers.lecun_normal(),
-                    name='force_dense_regression'
-                )(x)  # (num_nodes, force_regression_dim)
-                f = self.activation_fn(f)
-                nn_forces = nn.Dense(
-                    3,
-                    kernel_init=self.kernel_init,
-                    name='force_dense_final'
-                )(f)  # (num_nodes, 3)
-            else:
-                nn_forces = nn.Dense(
-                    3,
-                    kernel_init=self.kernel_init,
-                    name='force_dense_final'
-                )(x)  # (num_nodes, 3)
-            nn_forces = safe_scale(nn_forces, node_mask[:, None])
-
         if self.output_convention == 'per_structure':
             energy = segment_sum(
                 atomic_energy,
@@ -189,8 +162,6 @@ class EnergySparse(BaseSubModule):
             energy = safe_scale(energy, graph_mask)
 
             result = dict(energy=energy)
-            if self.predict_forces_directly:
-                result['nn_forces'] = nn_forces
             if self.output_intermediate_quantities is not None:
                 result.update(self.get_intermediate_quantities(inputs))
             return result
@@ -199,8 +170,6 @@ class EnergySparse(BaseSubModule):
             energy = safe_scale(atomic_energy, node_mask)  # (num_nodes)
 
             result = dict(energy=energy)
-            if self.predict_forces_directly:
-                result['nn_forces'] = nn_forces
             if self.output_intermediate_quantities is not None:
                 result.update(self.get_intermediate_quantities(inputs))
             return result
@@ -237,8 +206,6 @@ class EnergySparse(BaseSubModule):
                                    'zbl_repulsion_bool': self.zbl_repulsion_bool,
                                    'electrostatic_energy_bool': self.electrostatic_energy_bool,
                                    'dispersion_energy_bool': self.dispersion_energy_bool,
-                                   'predict_forces_directly': self.predict_forces_directly,
-                                   'force_regression_dim': self.force_regression_dim,
                                    'prop_keys': self.prop_keys}
                 }
 

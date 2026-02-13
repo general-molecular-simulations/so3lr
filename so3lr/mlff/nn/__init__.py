@@ -13,8 +13,7 @@ from .mlp import MLP, Residual
 from .representation import SO3kratesSparse
 
 from .stacknet import (get_observable_fn_sparse,
-                       get_energy_and_force_fn_sparse,
-                       get_hybrid_energy_force_fn_sparse)
+                       get_energy_and_force_fn_sparse)
 
 from .embed import (GeometryEmbedSparse,
                     GeometryEmbedE3x,
