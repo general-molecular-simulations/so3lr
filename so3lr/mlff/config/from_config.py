@@ -5,7 +5,7 @@ from so3lr.mlff import training_utils
 from so3lr.mlff import evaluation_utils
 from so3lr.mlff import data
 from so3lr.mlff import jraph_utils
-from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_force_fn_sparse, get_hybrid_energy_force_fn_sparse
+from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_force_fn_sparse
 from ml_collections import config_dict
 import numpy as np
 from pathlib import Path
@@ -83,9 +83,6 @@ def make_so3krates_sparse_from_config(
         use_final_bias_bool=model_config.get('use_final_bias_bool', True),
         neighborlist_format_lr=config.neighborlist_format_lr,
         output_intermediate_quantities=output_intermediate_quantities,
-        # Unconstrained force prediction options
-        predict_forces_directly=model_config.get('predict_forces_directly', False),
-        force_regression_dim=model_config.get('force_regression_dim', None)
     )
 
 
@@ -178,11 +175,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             f'{model=} is not a valid model.'
         )
 
-    # Get force mode from config (defaults to constrained for backwards compatibility)
-    force_mode = config.model.get('force_mode', 'constrained')
-    
-    # Use hybrid force function that supports both constrained and unconstrained modes
-    force_fn = get_hybrid_energy_force_fn_sparse(net, force_mode=force_mode)
+    force_fn = get_energy_and_force_fn_sparse(net)
     
     # Robust loss configuration
     use_robust_loss = config.training.get('use_robust_loss', False)

@@ -59,9 +59,6 @@ def init_so3krates_sparse(
         input_convention: str = 'positions',
         neighborlist_format_lr: str = 'sparse',  # or 'ordered_sparse'
         output_intermediate_quantities: Optional[Sequence[str]] = None,
-        # Unconstrained force prediction parameters
-        predict_forces_directly: bool = False,
-        force_regression_dim: Optional[int] = None,
 ):
     embedding_modules = make_embedding_modules(
         num_features=num_features,
@@ -169,8 +166,6 @@ def init_so3krates_sparse(
         zbl_repulsion_bool=zbl_repulsion_bool,
         output_intermediate_quantities=output_intermediate_quantities,
         use_final_bias_bool=use_final_bias_bool,
-        predict_forces_directly=predict_forces_directly,
-        force_regression_dim=force_regression_dim
     )
 
     return StackNetSparse(
