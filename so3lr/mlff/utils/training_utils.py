@@ -407,8 +407,11 @@ def graph_mse_loss_per_atom(
     num_atoms_per_graph = jnp.maximum(num_atoms_per_graph, 1.0)
 
     # Normalize by number of atoms
-    y = y / num_atoms_per_graph
-    y_label = y_label / num_atoms_per_graph
+    # Expand dims to broadcast with y's trailing dimensions (e.g., (N,) -> (N,1) for dipole_vec)
+    expand_axes = tuple(range(1, y.ndim))
+    num_atoms = jnp.expand_dims(num_atoms_per_graph, axis=expand_axes)
+    y = y / num_atoms
+    y_label = y_label / num_atoms
 
     return graph_mse_loss(
         y, y_label, batch_segments, graph_mask, scale,
@@ -438,8 +441,11 @@ def graph_mae_loss_per_atom(
     num_atoms_per_graph = jnp.maximum(num_atoms_per_graph, 1.0)
 
     # Normalize by number of atoms
-    y = y / num_atoms_per_graph
-    y_label = y_label / num_atoms_per_graph
+    # Expand dims to broadcast with y's trailing dimensions (e.g., (N,) -> (N,1) for dipole_vec)
+    expand_axes = tuple(range(1, y.ndim))
+    num_atoms = jnp.expand_dims(num_atoms_per_graph, axis=expand_axes)
+    y = y / num_atoms
+    y_label = y_label / num_atoms
 
     return graph_mae_loss(
         y, y_label, batch_segments, graph_mask, scale,
@@ -451,7 +457,7 @@ property_to_mae = {
     'energy': graph_mae_loss_per_atom,
     'stress': graph_mae_loss,
     'forces': node_mae_loss,
-    'dipole_vec': graph_mae_loss,
+    'dipole_vec': graph_mae_loss_per_atom,
     'hirshfeld_ratios': node_mae_loss,
     'c6_ratios': node_mae_loss,
 }
@@ -460,7 +466,7 @@ property_to_loss = {
     'energy': graph_mse_loss_per_atom,
     'stress': graph_mse_loss,
     'forces': node_mse_loss,
-    'dipole_vec': graph_mse_loss,
+    'dipole_vec': graph_mse_loss_per_atom,
     'hirshfeld_ratios': node_mse_loss,
     'c6_ratios': node_mse_loss,
 }
