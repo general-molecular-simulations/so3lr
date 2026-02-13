@@ -105,15 +105,13 @@ class EnergySparse(BaseSubModule):
             atomic_energy = nn.Dense(
                 num_theory_levels,
                 kernel_init=self.kernel_init,
-                # optional
-                use_bias=False,
+                use_bias=self.use_final_bias_bool,
                 name='energy_dense_final'
             )(y)  # (num_nodes, num_levels_of_theory)
         else:
             atomic_energy = nn.Dense(
                 num_theory_levels,
-                # optional
-                use_bias=False,
+                use_bias=self.use_final_bias_bool,
                 kernel_init=self.kernel_init,
                 name='energy_dense_final'
             )(x) # (num_nodes, num_levels_of_theory)

@@ -45,6 +45,7 @@ SO3LR provides a unified command-line interface that leverages the performance o
 - `so3lr nve`: NVE molecular dynamics
 - `so3lr eval`: Model evaluation on a dataset
 - `so3lr finetune`: Fine-tune the model on custom datasets
+- `so3lr train`: Train a SO3LR/SO3krates model from scratch
 
 Each subcommand has its own set of options and can be run with `--help` to see all available parameters.
 
@@ -144,6 +145,16 @@ so3lr finetune --datafile dataset.xyz --workdir so3lr_finetuned --num-train 1000
 ```
 
 You can customize the training process with a config file (`--config custom_finetune.yaml`), choose different fine-tuning strategies (`--strategy full`), or fine-tune from a previously trained model (`--model-path ./previous_finetune_workdir`). Possible strategies include `full`, `final_mlp`, `last_layer`, `last_layer_and_final_mlp`, `first_layer`, and `first_layer_and_last_layer`. We recommend using the `full` or `last_layer_and_final_mlp` strategies. The default configuration in `so3lr/config/finetune.yaml` includes settings for the optimizer, learning rate schedule, batch size, loss weights, and data filtering. To use a fine-tuned model, use the `--model path_to_finetuned_model` flag.
+
+## Training from Scratch
+
+You can train a SO3krates model from scratch using a YAML configuration file. The default configuration is in `so3lr/config/config.yaml` and includes settings for the model architecture, optimizer, learning rate schedule, batch size, loss weights, and data filtering.
+
+Basic training command:
+
+```shell script
+so3lr train --config config.yaml
+```
 
 ## Dimer Binding Energy Calculations
 
