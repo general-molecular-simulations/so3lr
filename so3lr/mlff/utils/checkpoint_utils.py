@@ -1,4 +1,5 @@
 """Utilities for checkpointing."""
+import pickle
 import orbax.checkpoint as ocp
 
 from pathlib import Path
@@ -61,8 +62,17 @@ def load_params_from_workdir(workdir):
         RuntimeError: Loaded parameters are None.
 
     """
-    ckpt_dir = Path(workdir).expanduser().resolve() / "checkpoints"
+    workdir_path = Path(workdir).expanduser().resolve()
 
+    # Try loading from params.pkl first (faster, more portable)
+    pkl_path = workdir_path / "params.pkl"
+    if pkl_path.exists():
+        with open(pkl_path, 'rb') as f:
+            params = pickle.load(f)
+        return params
+
+    # Fall back to orbax checkpoint
+    ckpt_dir = workdir_path / "checkpoints"
     params = load_params_from_checkpoint(ckpt_dir=ckpt_dir)
 
     return params
