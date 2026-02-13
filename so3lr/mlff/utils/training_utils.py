@@ -1,4 +1,3 @@
-import clu.metrics as clu_metrics
 import jraph
 import jax
 import jax.numpy as jnp
@@ -1037,8 +1036,8 @@ def fit(
                 )
 
                 # Start iteration over validation batches.
-                eval_metrics: Any = None
-                eval_collection: Any = None
+                eval_totals = {}
+                eval_counts = {}
                 for graph_batch_validation, lr_batch_validation in iterator_validation:
                     batch_validation = graph_to_batch_fn(graph_batch_validation, lr_batch_validation)
                     batch_validation = jax.tree_util.tree_map(jnp.array, batch_validation)
@@ -1047,19 +1046,12 @@ def fit(
                         params,
                         batch_validation
                     )
-                    # The metrics are created dynamically during the first evaluation batch, since we aim to support
-                    # all kinds of targets beyond energies and forces at some point.
-                    if eval_collection is None:
-                        eval_collection = clu_metrics.Collection.create(
-                            **{k: clu_metrics.Average.from_output(f'{k}') for k in eval_out.keys()})
 
-                    eval_metrics = (
-                        eval_collection.single_from_model_output(**eval_out)
-                        if eval_metrics is None
-                        else eval_metrics.merge(eval_collection.single_from_model_output(**eval_out))
-                    )
+                    for k, v in eval_out.items():
+                        eval_totals[k] = eval_totals.get(k, 0.0) + np.asarray(v).item()
+                        eval_counts[k] = eval_counts.get(k, 0) + 1
 
-                eval_metrics = eval_metrics.compute()
+                eval_metrics = {k: eval_totals[k] / eval_counts[k] for k in eval_totals}
 
                 # Convert to dict to log with weights and bias.
                 eval_metrics = {
@@ -1338,8 +1330,8 @@ def fit_from_iterator(
             # Start validation process.
             if step % eval_every_num_steps == 0:
                 # Start iteration over validation batches.
-                eval_metrics: Any = None
-                eval_collection: Any = None
+                eval_totals = {}
+                eval_counts = {}
                 validation_iterator_loop = validation_iterator.next_epoch(split='train', mode='validation')
                 for graph_batch_validation, lr_batch_validation in validation_iterator_loop:
                     batch_validation = graph_to_batch_fn(graph_batch_validation, lr_batch_validation)
@@ -1349,19 +1341,12 @@ def fit_from_iterator(
                         params,
                         batch_validation
                     )
-                    # The metrics are created dynamically during the first evaluation batch, since we aim to support
-                    # all kinds of targets beyond energies and forces at some point.
-                    if eval_collection is None:
-                        eval_collection = clu_metrics.Collection.create(
-                            **{k: clu_metrics.Average.from_output(f'{k}') for k in eval_out.keys()})
 
-                    eval_metrics = (
-                        eval_collection.single_from_model_output(**eval_out)
-                        if eval_metrics is None
-                        else eval_metrics.merge(eval_collection.single_from_model_output(**eval_out))
-                    )
+                    for k, v in eval_out.items():
+                        eval_totals[k] = eval_totals.get(k, 0.0) + np.asarray(v).item()
+                        eval_counts[k] = eval_counts.get(k, 0) + 1
 
-                eval_metrics = eval_metrics.compute()
+                eval_metrics = {k: eval_totals[k] / eval_counts[k] for k in eval_totals}
 
                 # Convert to dict to log with weights and bias.
                 eval_metrics = {
