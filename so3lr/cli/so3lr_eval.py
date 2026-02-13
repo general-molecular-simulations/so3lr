@@ -62,6 +62,13 @@ def process_predictions(
     main_graph.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
     # main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
 
+    # Remove non-standard global fields that don't have one row per graph
+    # (residue_charge has shape (2,) per graph, residue_segments has shape
+    # (num_atoms,) per graph), which causes jraph.unbatch_np to fail when
+    # splitting globals evenly by the number of graphs.
+    for field in ('residue_charge', 'residue_segments'):
+        main_graph.globals.pop(field, None)
+
     # Unbatch the graphs and filter out padding using jraph's standard unbatch
     unbatched_graphs = jraph.unbatch_np(main_graph)
     graph_mask = np.array(inputs['graph_mask'])
@@ -97,10 +104,10 @@ def calculate_metrics(
         y_pred = output_prediction[target]
         y_true = inputs[target]
 
-        diff = jnp.asarray(y_pred) - jnp.asarray(y_true)
+        diff = np.asarray(y_pred) - np.asarray(y_true)
 
         diff_masked = diff[mask]
-        abs_sum = jnp.abs(diff_masked).sum()
+        abs_sum = np.abs(diff_masked).sum()
         sq_sum  = (diff_masked ** 2).sum()
         count = diff_masked.size
 
@@ -343,23 +350,27 @@ def evaluate_so3lr_on(
 
     try:
         # Create a progress bar that shows structures processed instead of batches
-        progress_bar = tqdm(total=num_data, desc="Processing structures", unit="structure")
-        
+        progress_bar = tqdm(total=num_data, desc="Processing structures", unit="structure",
+                            smoothing=0.1, mininterval=0.5)
+
         for graph_batch in batched_graphs:
             # Transform the batched graph to inputs dict
             # graph_batch is a tuple of (main_graph, long_range_graph)
             inputs = jraph_utils.graph_to_batch_fn(*graph_batch)
-            batch_size = inputs['num_of_non_padded_graphs']
-            
-            # Update progress bar with actual batch size
-            progress_bar.update(int(batch_size))
-            total_num_structures += batch_size
 
             # Run the model
             start = time.time()
             output_prediction = jax.block_until_ready(so3lr_calc(inputs))
             end = time.time()
             total_time += end - start
+
+            # Bulk-transfer outputs and inputs to numpy to avoid repeated syncs
+            output_prediction = jax.device_get(output_prediction)
+            inputs = jax.device_get(inputs)
+
+            batch_size = int(inputs['num_of_non_padded_graphs'])
+            total_num_structures += batch_size
+            progress_bar.update(batch_size)
 
             # Calculate batch metrics (sums & counts)
             batch_metrics = calculate_metrics(output_prediction, inputs, target_list)
