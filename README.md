@@ -103,13 +103,13 @@ The restart will continue the simulation from the exact state where it was saved
 Evaluate the SO3LR model on a dataset:
 
 ```shell script
-so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 1000.0 --save-to predictions.extxyz
+so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 100 --save-to predictions.extxyz
 ```
 
 The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread).
 
 > [!IMPORTANT]
-> SO3LR was not trained on energies, so only relative energies are meaningful. Labels are assumed to be in `eV` and `Ångström`. For gas-phase simulations, we suggest using `--lr-cutoff 1000`.
+> SO3LR was not trained on energies, so only relative energies are meaningful. Labels are assumed to be in `eV` and `Ångström`. For gas-phase simulations, we suggest using `--lr-cutoff 100`.
 
 The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld ratios are optional. If they are not present in the data, the metrics will simply be `NaN`.
 
@@ -152,13 +152,13 @@ You can calculate binding energies with SO3LR as reported in the paper (Fig. 2B)
 For XYZ files with dimer metadata (`charge_a`, `charge_b`, `selection_a`, `selection_b`, like [NCIAtlas](https://github.com/Honza-R/NCIAtlas/blob/main/geometries/NCIA_D1200/1.01.01_100.xyz) format), generate original and translated structures:
 
 ```shell script
-python so3lr/prepare_dimer_xyz.py --datafile data.xyz
+python so3lr/prepare_dimer_xyz.py --datafile sapt10k.xyz
 ```
 
 Then evaluate energies (see [SAPT10k](https://doi.org/10.1063/5.0204064) dataset in examples/data):
 
 ```shell script
-so3lr eval --datafile sapt10k.xyz --targets energy --save-to sapt10k_eval.xyz --lr-cutoff 1000
+so3lr eval --datafile sapt10k_prepared.xyz --targets energy --save-to sapt10k_eval.xyz --lr-cutoff 100
 ```
 
 Finally, compute the binding energy:
@@ -181,7 +181,7 @@ atoms.info['charge'] = 0.0
 
 calc = So3lrCalculator(
     calculate_stress=False,
-    lr_cutoff=1000, # for gas-phase systems
+    lr_cutoff=100, # for gas-phase systems
     dtype=np.float64
 )
 atoms.calc = calc
