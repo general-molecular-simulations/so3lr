@@ -36,7 +36,7 @@ class EnergySparse(BaseSubModule):
     hirshfeld_ratios: Optional[Any] = None
     zbl_repulsion_bool: bool = False
     zbl_repulsion: Optional[Any] = None
-    use_final_bias_bool: bool = True
+    use_final_bias_bool: bool = False
 
     def setup(self):
         if self.output_is_zero_at_init:

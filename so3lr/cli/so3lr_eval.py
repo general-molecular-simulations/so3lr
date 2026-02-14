@@ -293,7 +293,7 @@ def evaluate_so3lr_on(
     n_node = stats['max_num_of_nodes'] * batch_size + 1
     n_edge = stats['max_num_of_edges'] * batch_size + 1
     n_graph = batch_size + 1
-    n_pairs = stats['max_num_of_nodes'] * (stats['max_num_of_nodes'] - 1) * batch_size + 1
+    n_pairs = stats['max_num_of_pairs'] * batch_size + 1
 
     logger.info(f"Batch size: n_node={n_node}, n_edge={n_edge}, n_graph={n_graph}, n_pairs={n_pairs}")
 
