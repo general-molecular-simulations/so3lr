@@ -9,6 +9,7 @@ import pytest
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATAFILE = PROJECT_ROOT / 'tests' / 'test_data' / 'ac.xyz'
+DATAFILE_WATER = PROJECT_ROOT / 'tests' / 'test_data' / 'water_pbc_dummy.xyz'
 DEFAULT_CONFIG = PROJECT_ROOT / 'so3lr' / 'config' / 'config.yaml'
 
 
@@ -53,7 +54,7 @@ def _run_train(config_path):
     )
 
 
-def _assert_training_succeeded(result, workdir):
+def _assert_training_succeeded(result, workdir, max_loss=10.0):
     """Assert that training completed and produced expected outputs."""
     assert result.returncode == 0, (
         f"so3lr train failed with return code {result.returncode}\n"
@@ -78,8 +79,8 @@ def _assert_training_succeeded(result, workdir):
     assert match is not None, f"Could not parse eval_loss from: {last_val_line}"
 
     final_loss = float(match.group(1))
-    assert 0 < final_loss < 10.0, (
-        f"Final eval_loss={final_loss} is outside reasonable range (0, 10.0).\n"
+    assert 0 < final_loss < max_loss, (
+        f"Final eval_loss={final_loss} is outside reasonable range (0, {max_loss}).\n"
         f"Last validation line: {last_val_line}"
     )
 
@@ -91,7 +92,7 @@ def test_cli_train_forces_only(workdir, tmp_path):
     config_path = _write_config(cfg, tmp_path)
 
     result = _run_train(config_path)
-    _assert_training_succeeded(result, workdir)
+    _assert_training_succeeded(result, workdir, max_loss=5.0)
 
 
 def test_cli_train_forces_and_energy_with_lse_shifts(workdir, tmp_path):
@@ -102,7 +103,7 @@ def test_cli_train_forces_and_energy_with_lse_shifts(workdir, tmp_path):
     config_path = _write_config(cfg, tmp_path)
 
     result = _run_train(config_path)
-    _assert_training_succeeded(result, workdir)
+    _assert_training_succeeded(result, workdir, max_loss=5.0)
 
     # Verify per-element energy shifts were computed and saved
     with open(workdir / 'hyperparameters.json') as f:
@@ -113,3 +114,36 @@ def test_cli_train_forces_and_energy_with_lse_shifts(workdir, tmp_path):
     assert carbon_shift == pytest.approx(-3.7451, abs=1e-3), (
         f"Carbon (Z=6) energy shift {carbon_shift} does not match expected value"
     )
+
+
+def test_cli_train_water_pbc_forces_only(workdir, tmp_path):
+    """Train on periodic water box with forces-only loss."""
+    cfg = _base_config(workdir)
+    cfg['data']['filepath'] = str(DATAFILE_WATER)
+    cfg['training']['loss_weights'] = {'forces': 1.0}
+    cfg['training']['num_train'] = 13
+    cfg['training']['num_valid'] = 2
+    config_path = _write_config(cfg, tmp_path, name='test_train_water.yaml')
+
+    result = _run_train(config_path)
+    _assert_training_succeeded(result, workdir, max_loss=15.0)
+
+
+def test_cli_train_water_pbc_with_long_range(workdir, tmp_path):
+    """Train on periodic water box with long-range interactions enabled."""
+    cfg = _base_config(workdir)
+    cfg['data']['filepath'] = str(DATAFILE_WATER)
+    cfg['data']['neighbors_lr_bool'] = True
+    cfg['data']['neighbors_lr_cutoff'] = 12.0
+    cfg['model']['cutoff_lr'] = 12.0
+    cfg['model']['cutoff_lr_damping'] = 2.0
+    cfg['model']['dispersion_energy_cutoff_lr_damping'] = 2.0
+    cfg['model']['electrostatic_energy_bool'] = True
+    cfg['model']['dispersion_energy_bool'] = True
+    cfg['training']['loss_weights'] = {'forces': 1.0}
+    cfg['training']['num_train'] = 13
+    cfg['training']['num_valid'] = 2
+    config_path = _write_config(cfg, tmp_path, name='test_train_water_lr.yaml')
+
+    result = _run_train(config_path)
+    _assert_training_succeeded(result, workdir, max_loss=15.0)
