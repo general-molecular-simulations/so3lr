@@ -80,7 +80,7 @@ def make_so3krates_sparse_from_config(
         dispersion_energy_scale=model_config.dispersion_energy_scale,
         return_representations_bool=return_representations_bool,
         zbl_repulsion_bool=model_config.zbl_repulsion_bool,
-        use_final_bias_bool=model_config.get('use_final_bias_bool', True),
+        use_final_bias_bool=model_config.get('use_final_bias_bool', False),
         neighborlist_format_lr=config.neighborlist_format_lr,
         output_intermediate_quantities=output_intermediate_quantities,
     )
@@ -224,10 +224,6 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
 
     if config.training.batch_max_num_pairs is None:
         if config.data.neighbors_lr_bool is True:
-            # TODO: This always creates num_pairs to be quadratic in the number of nodes. Add data_stats about max
-            #  num_pairs which is important for the case of lr_cutoff smaller than largest separation in the data
-            #  as this allows to safe cost.
-
             if tf_record_present:
                 raise ValueError(
                     'When reading TFDSDataSet, `max_num_pairs` can not be auto- '
@@ -235,8 +231,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
                     'training.batch_max_num_nodes and training.batch_max_num_edges.'
                 )
 
-            batch_max_num_pairs = data_stats['max_num_of_nodes'] * (data_stats['max_num_of_nodes'] - 1) * (config.training.batch_max_num_graphs - 1) + 1
-            # batch_max_num_pairs = config.training.batch_max_num_nodes * (config.training.batch_max_num_nodes - 1) + 1
+            batch_max_num_pairs = data_stats['max_num_of_pairs'] * (config.training.batch_max_num_graphs - 1) + 1
         else:
             batch_max_num_pairs = 0
 
@@ -434,7 +429,7 @@ def run_evaluation(
                     'training.batch_max_num_nodes and training.batch_max_num_edges.'
                 )
 
-            batch_max_num_pairs = data_stats['max_num_of_nodes'] * (data_stats['max_num_of_nodes'] - 1) * (config.training.batch_max_num_graphs - 1) + 1
+            batch_max_num_pairs = data_stats['max_num_of_pairs'] * (config.training.batch_max_num_graphs - 1) + 1
         else:
             batch_max_num_pairs = 0
 
@@ -753,7 +748,7 @@ def run_fine_tuning(
                     'training.batch_max_num_nodes and training.batch_max_num_edges.'
                 )
 
-            batch_max_num_pairs = data_stats['max_num_of_nodes'] * (data_stats['max_num_of_nodes'] - 1) * (config.training.batch_max_num_graphs - 1) + 1
+            batch_max_num_pairs = data_stats['max_num_of_pairs'] * (config.training.batch_max_num_graphs - 1) + 1
         else:
             batch_max_num_pairs = 0
 

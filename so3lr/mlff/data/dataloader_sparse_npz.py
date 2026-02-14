@@ -75,6 +75,7 @@ class NpzDataLoaderSparse:
         loaded_data = []
         max_num_of_nodes = 0
         max_num_of_edges = 0
+        max_num_of_pairs = 0
 
         logging.mlff(
             f"Load data from {self.input_file}."
@@ -96,11 +97,13 @@ class NpzDataLoaderSparse:
                     calculate_neighbors_lr=calculate_neighbors_lr,
                     cutoff_lr=cutoff_lr
                 )
-                graph, _ = result
+                graph, long_range = result
                 num_nodes = len(graph.nodes['atomic_numbers'])
                 num_edges = len(graph.receivers)
+                num_pairs = int(long_range.n_edge[0])
                 max_num_of_nodes = max_num_of_nodes if num_nodes <= max_num_of_nodes else num_nodes
                 max_num_of_edges = max_num_of_edges if num_edges <= max_num_of_edges else num_edges
+                max_num_of_pairs = max_num_of_pairs if num_pairs <= max_num_of_pairs else num_pairs
                 loaded_data.append(result)
             else:
                 pass
@@ -113,7 +116,7 @@ class NpzDataLoaderSparse:
                 )
         logging.mlff("... done!")
 
-        return loaded_data, {'max_num_of_nodes': max_num_of_nodes, 'max_num_of_edges': max_num_of_edges}
+        return loaded_data, {'max_num_of_nodes': max_num_of_nodes, 'max_num_of_edges': max_num_of_edges, 'max_num_of_pairs': max_num_of_pairs}
 
 
 def entry_to_jraph(
