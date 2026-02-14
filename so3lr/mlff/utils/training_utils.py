@@ -19,6 +19,9 @@ from .jraph_utils import dynamically_batch_with_lr
 from .robust_loss_jax import distribution as robust_loss_dist
 from .robust_loss_jax import general as robust_loss_general
 
+import logging
+logger = logging.getLogger("SO3LR")
+
 # Global distribution object for adaptive robust loss (handles partition function)
 ROBUST_LOSS_DIST = robust_loss_dist.Distribution()
 
@@ -1059,7 +1062,7 @@ def fit(
                 }
 
                 # Print eval_metrics
-                print(print_metrics(f"val_{epoch}_{step}:", eval_metrics))
+                logger.info(print_metrics(f"val_{epoch}_{step}:", eval_metrics))
 
                 # Save checkpoint.
                 ckpt_mngr.save(
@@ -1353,7 +1356,7 @@ def fit_from_iterator(
                     f'eval_{k}': float(v) for k, v in eval_metrics.items()
                 }
 
-                print(print_metrics(f"val_{epoch}_{step}:", eval_metrics))
+                logger.info(print_metrics(f"val_{epoch}_{step}:", eval_metrics))
                 eval_loss = eval_metrics['eval_loss']
 
                 # Only save if loss is finite
