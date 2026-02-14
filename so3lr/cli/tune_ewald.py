@@ -1186,7 +1186,7 @@ def tune(
     )
 
     dispersion_model_kwargs = dict(
-        dispersion_energy_scale=1.2,  # 1.0 is the default value, TODO load from model_config!
+        dispersion_energy_scale=1.2,  # 1.2 is the default value, TODO load from model_config!
         atomic_numbers=initial_geometry.get_atomic_numbers()
     )
 

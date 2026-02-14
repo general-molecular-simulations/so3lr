@@ -46,20 +46,25 @@ class EnergySparse(BaseSubModule):
 
     @nn.compact
     def __call__(self, inputs: Dict, *args, **kwargs):
-        """
-        #TODO: Update docstring
+        """Compute total energy from node features, including optional physical corrections.
+
+        Predicts per-atom energies from learned node features, with optional atomic-type
+        scales and shifts controlled by a theory mask. Optionally adds ZBL repulsion,
+        electrostatic energy (real-space and k-space), and dispersion energy contributions.
+
         Args:
             inputs (Dict):
-                x (Array): Node features, (num_nodes, num_features)
-                atomic_numbers (Array): Atomic numbers, (num_nodes)
-                batch_segments (Array): Batch segments, (num_nodes)
-                node_mask (Array): Node mask, (num_nodes)
-                graph_mask (Array): Graph mask, (num_graphs)
-            *args ():
-            **kwargs ():
+                x (Array): Node features, shape: (num_nodes, num_features)
+                atomic_numbers (Array): Atomic numbers, shape: (num_nodes)
+                batch_segments (Array): Batch segments, shape: (num_nodes)
+                node_mask (Array): Node mask, shape: (num_nodes)
+                graph_mask (Array): Graph mask, shape: (num_graphs)
+                theory_mask (Array): Theory level mask, shape: (num_graphs, num_theory_levels)
 
         Returns:
-
+            Dict: Contains 'energy' as per-structure (num_graphs) or per-atom (num_nodes)
+                array depending on ``output_convention``. May also include intermediate
+                quantities if ``output_intermediate_quantities`` is set.
         """
         x = inputs['x']  # (num_nodes, num_features)
         atomic_numbers = inputs['atomic_numbers']  # (num_nodes)
@@ -226,21 +231,20 @@ class HirshfeldSparse(BaseSubModule):
                  inputs: Dict,
                  *args,
                  **kwargs) -> Dict[str, jnp.ndarray]:
-        """
-        #TODO: Update docstring
-        Predict Hirshfeld volumes from atom-wise features `x` and atomic types `z`.
+        """Predict Hirshfeld volume ratios from atom-wise features and atomic types.
+
+        Uses an attention-like mechanism with element-dependent queries and learned keys
+        to predict per-atom Hirshfeld ratios, plus an element-dependent shift.
 
         Args:
             inputs (Dict):
                 x (Array): Atomic features, shape: (num_nodes, num_features)
                 atomic_numbers (Array): Atomic types, shape: (num_nodes)
-                node_mask (Array): Node mask, (num_nodes)
-                theory_mask (Array): Theory mask, (num_nodes, num_theory_levels)
-            *args ():
-            **kwargs ():
+                node_mask (Array): Node mask, shape: (num_nodes)
 
-        Returns: Dictionary of form {'v_eff': Array}, where Array are the predicted Hirshfeld ratios
-
+        Returns:
+            Dict: ``{'hirshfeld_ratios': Array}`` with predicted Hirshfeld ratios,
+                shape: (num_nodes).
         """
         x = inputs['x']  # (num_nodes, num_features)
         atomic_numbers = inputs['atomic_numbers']  # (num_nodes)
@@ -299,6 +303,28 @@ class PartialChargesSparse(BaseSubModule):
                  inputs: Dict,
                  *args,
                  **kwargs) -> Dict[str, jnp.ndarray]:
+        """Predict partial atomic charges with total charge conservation.
+
+        Computes unconstrained per-atom charges from node features with an
+        element-dependent bias, then adjusts them so that the sum over each
+        structure (or residue, if ``residue_charge`` is provided) equals the
+        target total charge.
+
+        Args:
+            inputs (Dict):
+                x (Array): Node features, shape: (num_nodes, num_features)
+                atomic_numbers (Array): Atomic numbers, shape: (num_nodes)
+                batch_segments (Array): Batch segments, shape: (num_nodes)
+                node_mask (Array): Node mask, shape: (num_nodes)
+                graph_mask (Array): Graph mask, shape: (num_graphs)
+                total_charge (Array): Target total charge per structure, shape: (num_graphs)
+                residue_charge (Array, optional): Target charge per residue for dimer calculations.
+                residue_segments (Array, optional): Residue assignment per atom.
+
+        Returns:
+            Dict: ``{'partial_charges': Array}`` with charge-conserving partial charges,
+                shape: (num_nodes).
+        """
 
         x = inputs['x']  # (num_nodes, num_features)
         atomic_numbers = inputs['atomic_numbers']  # (num_nodes)
@@ -370,6 +396,22 @@ class DipoleVecSparse(BaseSubModule):
                  inputs: Dict,
                  *args,
                  **kwargs) -> Dict[str, jnp.ndarray]:
+        """Compute molecular dipole vectors from partial charges and atomic positions.
+
+        Calculates partial charges via the ``partial_charges`` sub-module, then
+        computes per-atom dipole contributions as ``positions * charge`` and sums
+        them per structure.
+
+        Args:
+            inputs (Dict):
+                batch_segments (Array): Batch segments, shape: (num_nodes)
+                graph_mask (Array): Graph mask, shape: (num_graphs)
+                positions (Array): Atomic positions, shape: (num_nodes, 3)
+                (plus all keys required by ``PartialChargesSparse``)
+
+        Returns:
+            Dict: ``{'dipole_vec': Array}`` with dipole vectors, shape: (num_graphs, 3).
+        """
 
         batch_segments = inputs['batch_segments']  # (num_nodes)
         graph_mask = inputs['graph_mask']  # (num_graphs)
@@ -420,6 +462,22 @@ def vdw_QDO_disp_damp(
         gamma_scale,
         neighborlist_format: str = 'sparse'
 ):
+    """Compute damped QDO (Quantum Drude Oscillator) dispersion energy.
+
+    Evaluates C6, C8, and C10 dispersion terms with Tang-Toennies-style damping
+    using a power-law regularization of the 1/R^n singularity.
+
+    Args:
+        R: Pairwise distances in Bohr.
+        gamma: Damping parameter from ``gamma_cubic_fit``.
+        C6: Isotropic C6 dispersion coefficients (a.u.).
+        alpha_ij: Mean polarizabilities for each pair (a.u.).
+        gamma_scale: Scaling factor for the damping radius.
+        neighborlist_format: ``'sparse'`` (factor 0.5) or ``'ordered_sparse'`` (factor 1.0).
+
+    Returns:
+        Pairwise dispersion energies in eV.
+    """
     # Determine the input dtype
     input_dtype = R.dtype
 
@@ -456,6 +514,23 @@ def vdw_QDO_disp_damp_nosigma(
         gamma_scale,
         neighborlist_format: str = 'sparse'
 ):
+    """Compute undamped QDO dispersion energy (no short-range regularization).
+
+    Same as ``vdw_QDO_disp_damp`` but without the power-law damping radius ``p``,
+    so the C6/R^6, C8/R^8, and C10/R^10 terms are evaluated directly. Used to
+    obtain the undamped reference for computing damping corrections.
+
+    Args:
+        R: Pairwise distances in Bohr.
+        gamma: Damping parameter from ``gamma_cubic_fit``.
+        C6: Isotropic C6 dispersion coefficients (a.u.).
+        alpha_ij: Mean polarizabilities for each pair (a.u.).
+        gamma_scale: Scaling factor (unused in undamped form, kept for API consistency).
+        neighborlist_format: ``'sparse'`` (factor 0.5) or ``'ordered_sparse'`` (factor 1.0).
+
+    Returns:
+        Pairwise undamped dispersion energies in eV.
+    """
     # Determine the input dtype
     input_dtype = R.dtype
 
@@ -488,6 +563,22 @@ def mixing_rules(
         idx_j: jnp.ndarray,
         hirshfeld_ratios: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Apply Casimir-Polder mixing rules to obtain pairwise dispersion parameters.
+
+    Scales free-atom reference polarizabilities and C6 coefficients by Hirshfeld
+    volume ratios, then combines them into pairwise quantities using the
+    Casimir-Polder combination rule for C6 coefficients.
+
+    Args:
+        atomic_numbers: Atomic numbers, shape: (num_nodes).
+        idx_i: Sender indices for long-range edges.
+        idx_j: Receiver indices for long-range edges.
+        hirshfeld_ratios: Per-atom Hirshfeld volume ratios, shape: (num_nodes).
+
+    Returns:
+        Tuple of (alpha_ij, C6_ij): mean polarizabilities and combined C6
+        coefficients for each pair.
+    """
     dtype = hirshfeld_ratios.dtype
 
     atomic_number_i = atomic_numbers[idx_i] - 1
@@ -508,6 +599,17 @@ def mixing_rules(
 
 @jax.jit
 def gamma_cubic_fit(alpha):
+    """Compute the QDO damping parameter gamma from polarizabilities via cubic fit.
+
+    Converts polarizabilities to van der Waals radii, then applies a cubic
+    polynomial fit to obtain sigma, from which gamma = 1/(2*sigma^2).
+
+    Args:
+        alpha: Pairwise mean polarizabilities (a.u.).
+
+    Returns:
+        Damping parameter gamma for each pair.
+    """
     input_dtype = alpha.dtype
 
     vdW_radius = fine_structure ** (jnp.asarray(-4. / 21, input_dtype)) * alpha ** jnp.asarray(1. / 7, input_dtype)
@@ -569,6 +671,27 @@ def coulomb_erf_shifted_force_smooth_pme(
         smearing: float = None,
         neighborlist_format: str = 'sparse'
 ) -> jnp.ndarray:
+    """Pairwise Coulomb interaction with erf damping for PME (real-space part).
+
+    Computes the short-range real-space contribution to the Coulomb energy for use
+    with Particle Mesh Ewald. The potential is ``erf(r/sigma)/r - erf(r/smearing)/r``,
+    smoothed to zero at the cutoff using a switching function and shifted-force correction.
+
+    Args:
+        q: Partial charges, shape: (num_nodes).
+        rij: Pairwise distances, shape: (num_edges).
+        idx_i: Sender atom indices.
+        idx_j: Receiver atom indices.
+        ke: Coulomb constant in eV*Angstrom/e^2.
+        sigma: Short-range damping width (Angstrom).
+        cutoff: Real-space cutoff distance (Angstrom).
+        cuton: Distance at which the switching function begins.
+        smearing: Ewald smearing parameter (Angstrom).
+        neighborlist_format: ``'sparse'`` or ``'ordered_sparse'``.
+
+    Returns:
+        Pairwise electrostatic energies, shape: (num_edges).
+    """
 
     input_dtype = rij.dtype
 
@@ -623,6 +746,27 @@ def coulomb_erf_shifted_force_smooth_pme_nosigma(
         smearing: float = None,
         neighborlist_format: str = 'sparse'
 ) -> jnp.ndarray:
+    """Pairwise Coulomb for PME without short-range sigma damping.
+
+    Same as ``coulomb_erf_shifted_force_smooth_pme`` but with undamped bare Coulomb
+    ``1/r`` instead of ``erf(r/sigma)/r``. The potential is ``1/r - erf(r/smearing)/r``,
+    used to obtain the undamped reference for computing damping corrections.
+
+    Args:
+        q: Partial charges, shape: (num_nodes).
+        rij: Pairwise distances, shape: (num_edges).
+        idx_i: Sender atom indices.
+        idx_j: Receiver atom indices.
+        ke: Coulomb constant in eV*Angstrom/e^2.
+        sigma: Unused (kept for API consistency).
+        cutoff: Real-space cutoff distance (Angstrom).
+        cuton: Distance at which the switching function begins.
+        smearing: Ewald smearing parameter (Angstrom).
+        neighborlist_format: ``'sparse'`` or ``'ordered_sparse'``.
+
+    Returns:
+        Pairwise electrostatic energies, shape: (num_edges).
+    """
 
     input_dtype = rij.dtype
 
@@ -676,7 +820,26 @@ def coulomb_erf_shifted_force_smooth(
         cuton: float,
         neighborlist_format: str = 'sparse'
 ) -> jnp.ndarray:
-    """ Pairwise Coulomb interaction with erf damping, using Shifted Force method """
+    """Pairwise Coulomb interaction with erf damping, shifted-force, and smooth switching.
+
+    Computes the erf-damped Coulomb potential ``erf(r/sigma)/r`` with a shifted-force
+    correction to ensure continuity at the cutoff, blended via a smooth switching
+    function between ``cuton`` and ``cutoff``.
+
+    Args:
+        q: Partial charges, shape: (num_nodes).
+        rij: Pairwise distances, shape: (num_edges).
+        idx_i: Sender atom indices.
+        idx_j: Receiver atom indices.
+        ke: Coulomb constant in eV*Angstrom/e^2.
+        sigma: Damping width for the erf function (Angstrom).
+        cutoff: Cutoff distance (Angstrom).
+        cuton: Distance at which the switching function begins (Angstrom).
+        neighborlist_format: ``'sparse'`` or ``'ordered_sparse'``.
+
+    Returns:
+        Pairwise electrostatic energies, shape: (num_edges).
+    """
 
     input_dtype = rij.dtype
 
@@ -727,7 +890,26 @@ def coulomb_erf_shifted_force_smooth_nosigma(
         cuton: float,
         neighborlist_format: str = 'sparse'
 ) -> jnp.ndarray:
-    """ Pairwise Coulomb interaction with erf damping, using Shifted Force method """
+    """Pairwise bare Coulomb interaction with shifted-force and smooth switching.
+
+    Same as ``coulomb_erf_shifted_force_smooth`` but without erf damping: the
+    potential is simply ``1/r``. Used to obtain the undamped reference for
+    computing damping corrections.
+
+    Args:
+        q: Partial charges, shape: (num_nodes).
+        rij: Pairwise distances, shape: (num_edges).
+        idx_i: Sender atom indices.
+        idx_j: Receiver atom indices.
+        ke: Coulomb constant in eV*Angstrom/e^2.
+        sigma: Unused (kept for API consistency).
+        cutoff: Cutoff distance (Angstrom).
+        cuton: Distance at which the switching function begins (Angstrom).
+        neighborlist_format: ``'sparse'`` or ``'ordered_sparse'``.
+
+    Returns:
+        Pairwise electrostatic energies, shape: (num_edges).
+    """
 
     input_dtype = rij.dtype
 
@@ -845,6 +1027,21 @@ class ElectrostaticEnergySparse(BaseSubModule):
 
     @nn.compact
     def __call__(self, inputs: Dict, *args, **kwargs) -> Dict[str, jnp.ndarray]:
+        """Compute per-atom electrostatic energy from partial charges and long-range neighbor list.
+
+        Selects the appropriate Coulomb kernel depending on whether Ewald (PME)
+        splitting is active (``k_smearing`` present) and whether sigma damping
+        is applied (``no_sigma`` flag). Sums pairwise contributions per atom.
+
+        Args:
+            inputs (Dict): Must contain ``node_mask``, ``idx_i_lr``, ``idx_j_lr``,
+                ``d_ij_lr``, ``partial_charges`` (or keys for computing them), and
+                optionally ``k_smearing`` and ``no_sigma``.
+
+        Returns:
+            Dict: ``{'electrostatic_energy': Array}`` with per-atom electrostatic
+                energies, shape: (num_nodes).
+        """
         node_mask = inputs['node_mask']  # (num_nodes)
         num_nodes = len(node_mask)
         idx_i_lr = inputs['idx_i_lr']
@@ -965,6 +1162,20 @@ class ElectrostaticEnergyKspace(BaseSubModule):
     
     @nn.compact
     def __call__(self, inputs: Dict, *args, **kwargs) -> Dict[str, jnp.ndarray]:
+        """Compute per-atom k-space electrostatic energy via Ewald or PME.
+
+        Evaluates the reciprocal-space contribution to the electrostatic energy
+        using either standard Ewald summation or Particle Mesh Ewald (PME),
+        depending on the ``do_ewald`` flag.
+
+        Args:
+            inputs (Dict): Must contain ``positions``, ``k_grid``, ``k_smearing``,
+                ``cell``, ``node_mask``, and ``partial_charges`` (or keys for computing them).
+
+        Returns:
+            Dict: ``{'electrostatic_energy_kspace': Array}`` with per-atom k-space
+                electrostatic energies, shape: (num_nodes).
+        """
         from jaxpme.kspace import generate_kvectors, get_reciprocal
 
         positions = inputs['positions']
@@ -1023,6 +1234,21 @@ class DispersionEnergySparse(nn.Module):
 
     @nn.compact
     def __call__(self, inputs: Dict, *args, **kwargs) -> Dict[str, jnp.ndarray]:
+        """Compute per-atom dispersion energy using Hirshfeld-scaled QDO model.
+
+        Calculates pairwise C6/C8/C10 dispersion interactions from Hirshfeld volume
+        ratios and free-atom reference data, with optional damping and a smooth
+        switching function to taper the interaction to zero at ``cutoff_lr``.
+
+        Args:
+            inputs (Dict): Must contain ``node_mask``, ``idx_i_lr``, ``idx_j_lr``,
+                ``d_ij_lr``, ``atomic_numbers``, ``hirshfeld_ratios`` (or keys for
+                computing them), and optionally ``no_sigma``.
+
+        Returns:
+            Dict: ``{'dispersion_energy': Array}`` with per-atom dispersion energies,
+                shape: (num_nodes).
+        """
         node_mask = inputs['node_mask']  # (num_nodes)
         num_nodes = len(node_mask)
         idx_i_lr = inputs['idx_i_lr']
