@@ -25,7 +25,7 @@ model:
     - 3
     - 4
   cutoff: 5.0  # Short-range cutoff in Angstrom. Defines the local neighborhood for message passing.
-  cutoff_fn: phys  # Cutoff function applied to short-range edges.
+  cutoff_fn: phys  # Cutoff function applied to short-range edges. Options: phys, cosine, polynomial, exponential.
   cutoff_lr: null  # Long-range cutoff in Angstrom for electrostatic and dispersion modules. Set to null to disable long-range truncation.
   cutoff_lr_damping: 2.0  # Damping width in Angstrom for the long-range cutoff function. Controls how smoothly interactions decay near cutoff_lr.
   num_radial_basis_fn: 32  # Number of radial basis functions for encoding interatomic distances.
@@ -91,7 +91,7 @@ training:
     forces: 0.99  # Loss weight for per-atom forces (MSE averaged per graph).
     # dipole_vec: 0.01  # Loss weight for per-structure dipole vector (MSE normalized by number of atoms). Should be defined in train file (e.g. ).
     # hirshfeld_ratios: 0.01  # Loss weight for per-atom Hirshfeld volume ratios (MSE averaged per graph). Should be defined in train file.
-  # Robust loss settings - choose ONE of: standard L2 (both false), fixed robust, or adaptive robust. See https://arxiv.org/abs/1701.03077.
+  # Loss function: standard L2 (use_adaptive_robust_loss and use_robust_loss false), fixed robust, or adaptive robust. See https://arxiv.org/abs/1701.03077.
   use_adaptive_robust_loss: true  # Use adaptive robust loss where alpha and scale are learned per target. Cannot be combined with use_robust_loss.
   adaptive_robust_loss_init_alpha: 1.0  # Initial alpha for adaptive robust loss. Range [0, 2]: 0=Cauchy (heavy-tailed), 2=L2 (standard MSE). Learned during training.
   adaptive_robust_loss_init_scale: 1.0  # Initial scale for adaptive robust loss. Must be > 0. Controls the transition between quadratic and robust regime. Learned during training.
