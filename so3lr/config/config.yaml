@@ -5,7 +5,7 @@ data:
   length_unit: Angstrom  # Unit of position/distance labels in the data file.
   electric_charge_unit: e  # Unit of charge labels in the data file.
   dipole_vec_unit: e * Angstrom  # Unit of dipole vector labels in the data file.
-  shift_mode: null  # How to compute per-element energy shifts subtracted before training. Options: null (no shifts), mean (compute from data), custom (use energy_shifts below).
+  shift_mode: null  # How to compute per-element energy shifts subtracted before training. Options: null (no shifts), mean (uniform per-atom shift), lse (per-element least-squares fit), custom (use energy_shifts below).
   energy_shifts: null  # Per-element energy shifts in eV, used only when shift_mode is custom. Dict mapping atomic number to shift value.
   split_seed: 42  # Random seed for splitting data into training, validation, and test sets. Change to get a different split.
   neighbors_lr_bool: false  # Whether to compute long-range neighbor lists during data loading. Required when using electrostatic or dispersion modules.
