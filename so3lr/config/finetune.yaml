@@ -6,7 +6,7 @@ data:
   length_unit: Angstrom  # Length unit.
   electric_charge_unit: e  # Electric charge unit.
   dipole_vec_unit: e * Angstrom  # Dipole vector unit.
-  shift_mode: null  # Options are null, mean, custom.
+  shift_mode: null  # Options: null (no shifts), mean (uniform per-atom shift), lse (per-element least-squares fit), custom (use energy_shifts below).
   energy_shifts: null  # Energy shifts in eV to subtract.
   split_seed: 42  # Seed using for splitting the data into training, validation and test.
   neighbors_lr_bool: true  # Calculate long-range neighborhood indices. Required for modules like DispersionEnergy.

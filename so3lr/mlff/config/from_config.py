@@ -1044,6 +1044,11 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
         num_nodes = data.transformations.calculate_average_number_of_nodes(training_data)
         energy_shifts = {str(a): float(energy_mean / num_nodes) for a in range(119)}
         config.data.energy_shifts = energy_shifts
+    elif config.data.shift_mode == 'lse':
+        config.data.energy_shifts = config_dict.placeholder(dict)
+        config.data.energy_shifts = data.transformations.calculate_lse_energy_shifts(
+            training_data, energy_unit=energy_unit
+        )
     elif config.data.shift_mode == 'custom':
         if config.data.energy_shifts is None:
             raise ValueError('For config.data.shift_mode == custom config.data.energy_shifts must be given.')
@@ -1051,6 +1056,15 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
         config.data.energy_shifts = {str(a): 0. for a in range(119)}
     # And lock again.
     config = config.lock()
+
+    # Print energy shifts
+    non_zero_shifts = {int(k): v for k, v in config.data.energy_shifts.items() if abs(v) > 1e-10}
+    if non_zero_shifts:
+        logging.mlff(f'Energy shifts (shift_mode={config.data.shift_mode}):')
+        for z in sorted(non_zero_shifts.keys()):
+            logging.mlff(f'  Z={z}: {non_zero_shifts[z]:.6f} eV')
+    else:
+        logging.mlff('No energy shifts applied.')
 
     if not tf_record_present:
         training_data = list(data.transformations.subtract_atomic_energy_shifts(
@@ -1073,7 +1087,7 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
             atomic_energy_shifts={int(k): v for (k, v) in config.data.energy_shifts.items()}
         ))
     else:
-        if config.data.shift_mode in ['custom', 'mean']:
+        if config.data.shift_mode in ['custom', 'mean', 'lse']:
             raise NotImplementedError(
                 'For TFDSDataSets, energy shifting is not supported yet.'
             )

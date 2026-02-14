@@ -106,6 +106,35 @@ def calculate_average_number_of_nodes(x: Sequence):
     return rolling_mean
 
 
+def calculate_lse_energy_shifts(x: Sequence, energy_unit: float = 1.0):
+    """Calculate per-element energy shifts via least-squares fit on training data.
+
+    Args:
+        x: Training data sequence of graphs (or (graph, long_range) tuples).
+        energy_unit: Conversion factor applied to raw energies before fitting.
+
+    Returns:
+        Dict mapping atomic number strings ('0' .. '118') to shift values in eV.
+    """
+    from so3lr.mlff.data import preprocessing
+
+    z_list = []
+    e_list = []
+    for item in x:
+        g, _ = _unpack_item(item)
+        z_list.append(np.array(g.nodes.get('atomic_numbers')))
+        e_list.append(float(np.squeeze(g.globals.get('energy'))) * energy_unit)
+
+    max_len = max(len(z) for z in z_list)
+    z_padded = np.zeros((len(z_list), max_len), dtype=np.int32)
+    for i, z in enumerate(z_list):
+        z_padded[i, :len(z)] = z
+    q = np.array(e_list)
+
+    shifts, _ = preprocessing.get_per_atom_shift(z=z_padded, q=q, pad_value=0)
+    return {str(a): float(shifts[a]) if a < len(shifts) else 0. for a in range(119)}
+
+
 def calculate_average_number_of_neighbors(x: Sequence):
     rolling_mean = np.asarray(0.)
     for n, item in enumerate(x):
