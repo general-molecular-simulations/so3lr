@@ -14,9 +14,9 @@ ArrayTree = Union[jnp.ndarray, Iterable['ArrayTree'], Mapping[Any, 'ArrayTree']]
 def jraph_to_ase_atoms(graph):
     """ Convert graph to ase.atoms object. """
 
-    cell = graph.edges.get('cell')
+    cell = graph.globals.get('cell')
     if cell is not None:
-        cell = cell[0]
+        cell = cell[0]  # (1, 3, 3) -> (3, 3)
         pbc = True
     else:
         pbc = False

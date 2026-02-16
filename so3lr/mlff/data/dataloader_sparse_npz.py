@@ -205,7 +205,6 @@ def entry_to_jraph(
     if mol.get_pbc().any():
         i, j, S = neighbor_list('ijS', mol, cutoff, self_interaction=self_interaction)
         edge_features = {
-            "cell": np.repeat(np.array(cell)[None], repeats=len(S), axis=0),
             "cell_offset": np.array(S)
         }
     else:
@@ -258,6 +257,9 @@ def entry_to_jraph(
         "num_unpaired_electrons": multiplicity.reshape(-1) - 1,
     }
 
+    if cell is not None and pbc is not None and np.any(pbc):
+        global_context["cell"] = np.array(cell).reshape(1, 3, 3)
+
     # Edges follow a similar convention where e.g. for positions and forces one has (num_nodes, 3) and for scalars
     # like hirshfeld volumes (num_nodes, ).
     node_features = {
@@ -276,10 +278,9 @@ def entry_to_jraph(
         n_edge=n_edge,
         globals=global_context,
     )
-    # Build LR edge features - needs both cell and cell_offsets for PBC support
+    # Build LR edge features - only cell_offsets needed (cell is in globals)
     if cell_offsets_lr is not None:
         lr_edge_features = {
-            "cell": np.repeat(np.array(cell)[None], repeats=len(cell_offsets_lr), axis=0),
             "cell_offsets": cell_offsets_lr
         }
     else:

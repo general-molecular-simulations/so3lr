@@ -186,9 +186,6 @@ atomic_numbers_pbc = jnp.array([6, 6, 6])  # Carbon atoms
 # Short-range pairs (direct, no offset needed - within same cell)
 idx_i_sr_pbc = jnp.array([0, 2])
 idx_j_sr_pbc = jnp.array([2, 0])
-num_sr_pairs_pbc = 2
-# Cell repeated for each short-range pair
-cell_sr_pbc = jnp.repeat(cell_matrix_pbc[None], num_sr_pairs_pbc, axis=0)  # (2, 3, 3)
 cell_offset_sr_pbc = jnp.array([[0, 0, 0], [0, 0, 0]])  # (2, 3)
 
 # Long-range pairs crossing PBC
@@ -202,8 +199,6 @@ cell_offset_sr_pbc = jnp.array([[0, 0, 0], [0, 0, 0]])  # (2, 3)
 #   Distance = 2 Å (correct PBC distance)
 idx_i_lr_pbc = jnp.array([0, 1])
 idx_j_lr_pbc = jnp.array([1, 0])
-num_lr_pairs_pbc = 2
-cell_lr_pbc = jnp.repeat(cell_matrix_pbc[None], num_lr_pairs_pbc, axis=0)  # (2, 3, 3)
 cell_offset_lr_pbc = jnp.array([[-1, 0, 0], [1, 0, 0]])  # (2, 3)
 
 # Expected distances with PBC: 2.0 Å (not 8.0 Å which would be the raw distance)
@@ -222,10 +217,10 @@ def test_add_cell_offsets_sparse_lr():
         [-8., 0., 0.],  # atom 1 -> atom 0: positions[0] - positions[1]
     ])
 
-    # Apply cell offsets
+    # Apply cell offsets using single (3, 3) cell
     r_ij_corrected = add_cell_offsets_sparse(
         r_ij=r_ij_raw,
-        cell=cell_lr_pbc,
+        cell=cell_matrix_pbc,
         cell_offsets=cell_offset_lr_pbc
     )
 
@@ -259,17 +254,16 @@ def test_apply_with_long_range_and_pbc():
         prop_keys=None
     )
 
-    # Build inputs with PBC data
+    # Build inputs with PBC data — cell is per-graph (3, 3), not per-edge
     inputs_pbc = dict(
         positions=positions_pbc,
         atomic_numbers=atomic_numbers_pbc,
         idx_i=idx_i_sr_pbc,
         idx_j=idx_j_sr_pbc,
-        cell=cell_sr_pbc,
+        cell=cell_matrix_pbc,
         cell_offset=cell_offset_sr_pbc,
         idx_i_lr=idx_i_lr_pbc,
         idx_j_lr=idx_j_lr_pbc,
-        cell_lr=cell_lr_pbc,
         cell_offset_lr=cell_offset_lr_pbc,
     )
 
@@ -316,15 +310,11 @@ def test_apply_with_long_range_pbc_non_orthogonal_cell():
     # Long-range pairs
     idx_i_lr_tri = jnp.array([0, 1])
     idx_j_lr_tri = jnp.array([1, 0])
-    num_lr_pairs_tri = 2
-    cell_lr_tri = jnp.repeat(cell_matrix_triclinic[None], num_lr_pairs_tri, axis=0)
     cell_offset_lr_tri = jnp.array([[-1, 0, 0], [1, 0, 0]])
 
     # Short-range pairs (no offset)
     idx_i_sr_tri = jnp.array([0, 2])
     idx_j_sr_tri = jnp.array([2, 0])
-    num_sr_pairs_tri = 2
-    cell_sr_tri = jnp.repeat(cell_matrix_triclinic[None], num_sr_pairs_tri, axis=0)
     cell_offset_sr_tri = jnp.array([[0, 0, 0], [0, 0, 0]])
 
     geometry_embed = GeometryEmbedSparse(
@@ -342,11 +332,10 @@ def test_apply_with_long_range_pbc_non_orthogonal_cell():
         atomic_numbers=atomic_numbers_pbc,
         idx_i=idx_i_sr_tri,
         idx_j=idx_j_sr_tri,
-        cell=cell_sr_tri,
+        cell=cell_matrix_triclinic,
         cell_offset=cell_offset_sr_tri,
         idx_i_lr=idx_i_lr_tri,
         idx_j_lr=idx_j_lr_tri,
-        cell_lr=cell_lr_tri,
         cell_offset_lr=cell_offset_lr_tri,
     )
 

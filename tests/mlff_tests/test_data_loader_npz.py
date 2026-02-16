@@ -145,7 +145,7 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
             atomic_numbers = graph.nodes.get('atomic_numbers')
             senders = graph.senders
             receivers = graph.receivers
-            cell = graph.edges.get('cell')
+            cell = graph.globals.get('cell')
             cell_offset = graph.edges.get('cell_offset')
             energy = graph.globals.get('energy')
             forces = graph.nodes.get('forces')
@@ -177,7 +177,7 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
             npt.assert_equal(positions.shape, (num_atoms, 3))
             npt.assert_equal(energy.shape, (1,))
             npt.assert_equal(forces.shape, (num_atoms, 3))
-            npt.assert_equal(cell.shape, (len(senders), 3, 3))
+            npt.assert_equal(cell.shape, (1, 3, 3))
             npt.assert_equal(len(senders), len(receivers))
             npt.assert_equal(cell_offset.shape, (len(senders), 3))
 

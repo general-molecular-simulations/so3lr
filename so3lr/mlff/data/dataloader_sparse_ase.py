@@ -274,12 +274,12 @@ def ASE_to_jraph(
         i, j, S = neighbor_list('ijS', mol, cutoff, self_interaction=self_interaction)
         cell = np.array(mol.get_cell())
         edge_features = {
-            "cell": np.repeat(np.array(cell)[None], repeats=len(S), axis=0),
             "cell_offset": np.array(S)
         }
         senders = np.array(j)
         receivers = np.array(i)
     else:
+        cell = None
         i, j = neighbor_list('ij', mol, cutoff, self_interaction=self_interaction)
         edge_features = dict()  # No edge features.
 
@@ -329,6 +329,9 @@ def ASE_to_jraph(
         "num_unpaired_electrons": multiplicity.reshape(-1) - 1,
     }
 
+    if cell is not None:
+        global_context["cell"] = np.array(cell).reshape(1, 3, 3)
+
     if residue_charge is not None:
         global_context.update({
             "residue_charge": residue_charge,
@@ -353,11 +356,9 @@ def ASE_to_jraph(
         n_edge=n_edge,
         globals=global_context,
     )
-    # Build LR edge features - needs both cell and cell_offsets for PBC support
+    # Build LR edge features - only cell_offsets needed (cell is in globals)
     if cell_offsets_lr is not None:
-        cell = np.array(mol.get_cell())
         lr_edge_features = {
-            "cell": np.repeat(cell[None], repeats=len(cell_offsets_lr), axis=0),
             "cell_offsets": cell_offsets_lr
         }
     else:
