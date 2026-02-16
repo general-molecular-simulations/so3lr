@@ -33,10 +33,10 @@ class GeometryEmbedE3x(BaseSubModule):
         idx_j = inputs['idx_j']  # shape: (num_pairs)
         idx_i_lr = inputs.get('idx_i_lr')  # shape: (num_pairs_lr)
         idx_j_lr = inputs.get('idx_j_lr')  # shape: (num_pairs_lr)
-        cell = inputs.get('cell')  # shape: (num_pairs, 3, 3)
+        cell = inputs.get('cell')  # shape: (n_graphs, 3, 3) or (3, 3)
         cell_offsets = inputs.get('cell_offset')  # shape: (num_pairs, 3)
-        cell_lr = inputs.get('cell_lr')  # shape: (num_pairs_lr, 3, 3)
         cell_offsets_lr = inputs.get('cell_offset_lr')  # shape: (num_pairs_lr, 3)
+        batch_segments = inputs.get('batch_segments')  # shape: (N,)
 
         if self.input_convention == 'positions':
             positions = inputs['positions']  # (N, 3)
@@ -67,23 +67,22 @@ class GeometryEmbedE3x(BaseSubModule):
                 r_ij = add_cell_offsets_sparse(
                     r_ij=r_ij,
                     cell=cell,
-                    cell_offsets=cell_offsets
+                    cell_offsets=cell_offsets,
+                    batch_segments=batch_segments,
+                    idx_i=idx_i,
                 )  # shape: (num_pairs,3)
 
-                if long_range_indices_present:
-                    if cell_lr is None or cell_offsets_lr is None:
-                        raise ValueError(
-                            '`cell_lr` and `cell_offset_lr` are required in GeometryEmbed when using long-range indices '
-                            'with periodic boundary conditions.'
-                        )
+                if long_range_indices_present and cell_offsets_lr is not None:
                     logging.warning(
                         'The use of long range indices with PBCs has not been tested thoroughly yet, so use with care!'
                     )
 
                     r_ij_lr = add_cell_offsets_sparse(
                         r_ij=r_ij_lr,
-                        cell=cell_lr,
-                        cell_offsets=cell_offsets_lr
+                        cell=cell,
+                        cell_offsets=cell_offsets_lr,
+                        batch_segments=batch_segments,
+                        idx_i=idx_i_lr,
                     )  # shape: (num_pairs_lr,3)
 
         # Here it is assumed that PBC (if present) have already been respected in displacement calculation.
@@ -165,8 +164,10 @@ class GeometryEmbedSparse(BaseSubModule):
                 positions (Array): Atomic positions, (N, 3)
                 idx_i (Array): Index centering atom, (num_pairs)
                 idx_j (Array): Index neighboring atom, (num_pairs)
-                cell (Array): Unit or super cell, (num_pairs, 3, 3)
-                cell_offsets: Cell offsets for PBCs, (num_pairs, 3)
+                cell (Array): Unit or super cell, (n_graphs, 3, 3) or (3, 3)
+                cell_offset: Cell offsets for short-range PBCs, (num_pairs, 3)
+                cell_offset_lr: Cell offsets for long-range PBCs, (num_pairs_lr, 3)
+                batch_segments (Array): Graph index for each atom, (N,)
 
         Returns:
         """
@@ -174,10 +175,10 @@ class GeometryEmbedSparse(BaseSubModule):
         idx_j = inputs['idx_j']  # shape: (num_pairs)
         idx_i_lr = inputs.get('idx_i_lr')  # shape: (num_pairs_lr)
         idx_j_lr = inputs.get('idx_j_lr')  # shape: (num_pairs_lr)
-        cell = inputs.get('cell')  # shape: (num_pairs, 3, 3)
+        cell = inputs.get('cell')  # shape: (n_graphs, 3, 3) or (3, 3)
         cell_offsets = inputs.get('cell_offset')  # shape: (num_pairs, 3)
-        cell_lr = inputs.get('cell_lr')  # shape: (num_pairs_lr, 3, 3)
         cell_offsets_lr = inputs.get('cell_offset_lr')  # shape: (num_pairs_lr, 3)
+        batch_segments = inputs.get('batch_segments')  # shape: (N,)
         if self.input_convention == 'positions':
             positions = inputs['positions']  # (N, 3)
 
@@ -191,7 +192,9 @@ class GeometryEmbedSparse(BaseSubModule):
                 r_ij = add_cell_offsets_sparse(
                     r_ij=r_ij,
                     cell=cell,
-                    cell_offsets=cell_offsets
+                    cell_offsets=cell_offsets,
+                    batch_segments=batch_segments,
+                    idx_i=idx_i,
                 )  # shape: (num_pairs,3)
 
             r_ij_lr = None
@@ -212,19 +215,16 @@ class GeometryEmbedSparse(BaseSubModule):
                 )(idx_i_lr, idx_j_lr)  # (num_pairs_lr, 3)
 
                 # Apply cell offsets for periodic boundary conditions if needed.
-                if cell_lr is not None:
-                    if cell_offsets_lr is None:
-                        raise ValueError(
-                            '`cell_offset_lr` is required in GeometryEmbed when using long-range indices with periodic '
-                            'boundary conditions.'
-                        )
+                if cell is not None and cell_offsets_lr is not None:
                     logging.warning(
                         'The use of long range indices with PBCs has not been tested thoroughly yet, so use with care!'
                     )
                     r_ij_lr = add_cell_offsets_sparse(
                         r_ij=r_ij_lr,
-                        cell=cell_lr,
-                        cell_offsets=cell_offsets_lr
+                        cell=cell,
+                        cell_offsets=cell_offsets_lr,
+                        batch_segments=batch_segments,
+                        idx_i=idx_i_lr,
                     )  # shape: (num_pairs_lr, 3)
 
         # Here it is assumed that PBC (if present) have already been respected in displacement calculation.
