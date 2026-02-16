@@ -7,11 +7,21 @@ on:
 
   # Allows to run this workflow manually from the Actions tab
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Test mode: short (skip slow tests) or full (run all tests)'
+        required: false
+        default: 'short'
+        type: choice
+        options:
+          - short
+          - full
 jobs:
   ci:
     strategy:
       fail-fast: false
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ github.event.inputs.test_mode == 'full' && 60 || 30 }}
     steps:
       - uses: actions/checkout@v2
       
@@ -35,5 +45,11 @@ jobs:
         run: |
           pip install .
           pip install pytest
-          pytest tests/
+          if [ "${{ github.event.inputs.test_mode }}" = "full" ] || [[ "${{ github.event.head_commit.message }}" == *"[full tests]"* ]]; then
+            echo "Running FULL test suite (including slow tests)"
+            pytest tests/ -v --tb=short --full
+          else
+            echo "Running SHORT test suite (skipping slow tests)"
+            pytest tests/ -v --tb=short
+          fi
       

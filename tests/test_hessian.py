@@ -156,7 +156,7 @@ class TestHessianSymmetry:
 class TestHessianNumerical:
     """Test Hessian against numerical (finite difference) Hessian."""
 
-    def _compute_numerical_hessian(self, atoms, calc, eps=1e-4):
+    def _compute_numerical_hessian(self, atoms, calc, n_displace=None, eps=1e-4):
         """
         Compute numerical Hessian using finite differences on forces.
 
@@ -165,16 +165,19 @@ class TestHessianNumerical:
         Args:
             atoms: ASE Atoms object
             calc: Calculator instance (reused for all displacements)
+            n_displace: Number of atoms to displace. If None, displace all atoms.
             eps: Finite difference step size
 
         Returns:
-            Numerical Hessian as numpy array of shape (n_atoms, 3, n_atoms, 3)
+            Numerical Hessian as numpy array of shape (n_displace, 3, n_atoms, 3)
         """
         n_atoms = len(atoms)
-        numerical_hessian = np.zeros((n_atoms, 3, n_atoms, 3))
+        if n_displace is None:
+            n_displace = n_atoms
+        numerical_hessian = np.zeros((n_displace, 3, n_atoms, 3))
         original_positions = atoms.get_positions().copy()
 
-        for i in range(n_atoms):
+        for i in range(n_displace):
             for a in range(3):
                 # Positive displacement
                 positions_plus = original_positions.copy()
@@ -197,10 +200,10 @@ class TestHessianNumerical:
         return numerical_hessian
 
     @pytest.mark.parametrize('name', ['atat'])
-    def test_full_hessian_numerical(self, name: str, package_dir):
+    def test_full_hessian_numerical(self, name: str, package_dir, full_test):
         """
         Test full Hessian against numerical Hessian.
-        Only testing on 'atat' to keep test time reasonable.
+        Without --full, only displaces first atom for a quick sanity check.
         """
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
         n_atoms = len(atoms)
@@ -231,19 +234,23 @@ class TestHessianNumerical:
         _ = atoms.get_potential_energy()
         analytical_hessian = calc_hessian.results['hessian']
 
+        # In short mode, only displace first atom; in full mode, displace all
+        n_displace = n_atoms if full_test else 1
+
         # Compute numerical Hessian (reuses calc_numerical)
         numerical_hessian = self._compute_numerical_hessian(
-            atoms, calc_numerical, eps=1e-4
+            atoms, calc_numerical, n_displace=n_displace, eps=1e-4
         )
 
-        print(f"\nMolecule: {name}")
-        print(f"Analytical Hessian shape: {analytical_hessian.shape}")
+        print(f"\nMolecule: {name} ({'full' if full_test else 'short'} mode)")
+        print(f"Displacing {n_displace}/{n_atoms} atoms")
+        print(f"Analytical Hessian shape: {analytical_hessian[:n_displace].shape}")
         print(f"Numerical Hessian shape: {numerical_hessian.shape}")
-        print(f"Max absolute difference: {np.max(np.abs(analytical_hessian - numerical_hessian)):.2e}")
-        print(f"Mean absolute difference: {np.mean(np.abs(analytical_hessian - numerical_hessian)):.2e}")
+        print(f"Max absolute difference: {np.max(np.abs(analytical_hessian[:n_displace] - numerical_hessian)):.2e}")
+        print(f"Mean absolute difference: {np.mean(np.abs(analytical_hessian[:n_displace] - numerical_hessian)):.2e}")
 
         npt.assert_allclose(
-            analytical_hessian,
+            analytical_hessian[:n_displace],
             numerical_hessian,
             rtol=1e-3,
             atol=1e-4,
@@ -254,7 +261,8 @@ class TestHessianNumerical:
 class TestSubsystemHessianNumerical:
     """Test subsystem Hessian against numerical calculations."""
 
-    def _compute_numerical_subsystem_hessian(self, atoms, calc, atom_indices, eps=1e-4):
+    def _compute_numerical_subsystem_hessian(self, atoms, calc, atom_indices,
+                                              n_displace=None, eps=1e-4):
         """
         Compute numerical Hessian for a subset of atoms.
 
@@ -262,16 +270,19 @@ class TestSubsystemHessianNumerical:
             atoms: ASE Atoms object
             calc: Calculator instance (reused for all displacements)
             atom_indices: List of atom indices for which to compute Hessian rows
+            n_displace: Number of subset atoms to displace. If None, displace all.
             eps: Finite difference step size
 
         Returns:
-            Numerical Hessian as numpy array of shape (n_subset, 3, n_subset, 3)
+            Numerical Hessian as numpy array of shape (n_displace, 3, n_subset, 3)
         """
         n_subset = len(atom_indices)
-        numerical_hessian = np.zeros((n_subset, 3, n_subset, 3))
+        if n_displace is None:
+            n_displace = n_subset
+        numerical_hessian = np.zeros((n_displace, 3, n_subset, 3))
         original_positions = atoms.get_positions().copy()
 
-        for idx, i in enumerate(atom_indices):
+        for idx, i in enumerate(atom_indices[:n_displace]):
             for a in range(3):
                 # Positive displacement
                 positions_plus = original_positions.copy()
@@ -294,9 +305,10 @@ class TestSubsystemHessianNumerical:
         return numerical_hessian
 
     @pytest.mark.parametrize('name', ['atat'])
-    def test_subsystem_hessian_numerical(self, name: str, package_dir):
+    def test_subsystem_hessian_numerical(self, name: str, package_dir, full_test):
         """
         Test subsystem Hessian against numerical Hessian.
+        Without --full, only displaces first atom for a quick sanity check.
         """
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
         n_atoms = len(atoms)
@@ -332,20 +344,24 @@ class TestSubsystemHessianNumerical:
         _ = atoms.get_potential_energy()
         analytical_hessian = calc_hessian.results['hessian']
 
+        # In short mode, only displace first atom; in full mode, displace all
+        n_displace = n_subset if full_test else 1
+
         # Compute numerical Hessian (reuses calc_numerical)
         numerical_hessian = self._compute_numerical_subsystem_hessian(
-            atoms, calc_numerical, output_atom_indices, eps=1e-4
+            atoms, calc_numerical, output_atom_indices,
+            n_displace=n_displace, eps=1e-4
         )
 
-        print(f"\nMolecule: {name}")
-        print(f"Subset indices: {output_atom_indices}")
-        print(f"Analytical Hessian shape: {analytical_hessian.shape}")
+        print(f"\nMolecule: {name} ({'full' if full_test else 'short'} mode)")
+        print(f"Displacing {n_displace}/{n_subset} subset atoms")
+        print(f"Analytical Hessian shape: {analytical_hessian[:n_displace].shape}")
         print(f"Numerical Hessian shape: {numerical_hessian.shape}")
-        print(f"Max absolute difference: {np.max(np.abs(analytical_hessian - numerical_hessian)):.2e}")
-        print(f"Mean absolute difference: {np.mean(np.abs(analytical_hessian - numerical_hessian)):.2e}")
+        print(f"Max absolute difference: {np.max(np.abs(analytical_hessian[:n_displace] - numerical_hessian)):.2e}")
+        print(f"Mean absolute difference: {np.mean(np.abs(analytical_hessian[:n_displace] - numerical_hessian)):.2e}")
 
         npt.assert_allclose(
-            analytical_hessian,
+            analytical_hessian[:n_displace],
             numerical_hessian,
             rtol=1e-3,
             atol=1e-4,
