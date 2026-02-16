@@ -110,7 +110,7 @@ def test_cli_finetune(workdir, test_config):
 
     _assert_finetuning_succeeded(result, workdir, max_loss=0.1)
 
-
+@pytest.mark.slow
 def test_cli_finetune_water_pbc(workdir, test_config_water):
     """Run `so3lr finetune` on periodic water box with 13 train / 2 valid and verify it completes."""
     result = subprocess.run(

@@ -20,12 +20,31 @@ jobs:
   ci:
     strategy:
       fail-fast: false
+      matrix:
+        include:
+          - group: 1
+            name: "mlff"
+            run_short: "pytest tests/mlff_tests/ -v --tb=short"
+            run_full: "pytest tests/mlff_tests/ -v --tb=short --full"
+          - group: 2
+            name: "so3lr-cli"
+            run_short: "pytest tests/test_cli_eval.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_cli.py -v --tb=short"
+            run_full: "pytest tests/test_cli_eval.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_cli.py -v --tb=short --full"
+          - group: 3
+            name: "integration"
+            run_short: "pytest tests/test_integration.py -v --tb=short"
+            run_full: "pytest tests/test_integration.py -v --tb=short --full"
+          - group: 4
+            name: "so3lr-other"
+            run_short: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py -v --tb=short"
+            run_full: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_hessian.py -v --tb=short --full"
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ github.event.inputs.test_mode == 'full' && 90 || 60 }}
+    name: "${{ matrix.name }}"
+    timeout-minutes: ${{ (github.event.inputs.test_mode == 'full' || contains(github.event.head_commit.message, '[full tests]')) && 90 || 60 }}
     steps:
-      - uses: actions/checkout@v2
-      
-      - uses: actions/setup-python@v2
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
         with:
           python-version: 3.12
 
@@ -33,23 +52,22 @@ jobs:
         id: pip-cache
         run: |
           python -m pip install --upgrade pip wheel
-          echo "::set-output name=dir::$(pip cache dir)"
+          echo "dir=$(pip cache dir)" >> $GITHUB_OUTPUT
 
       - name: pip cache
         uses: actions/cache@v4
         with:
           path: ${{ steps.pip-cache.outputs.dir }}
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/setup.py') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
 
       - name: Test with pytest
         run: |
           pip install .
           pip install pytest
           if [ "${{ github.event.inputs.test_mode }}" = "full" ] || [[ "${{ github.event.head_commit.message }}" == *"[full tests]"* ]]; then
-            echo "Running FULL test suite (including slow tests)"
-            pytest tests/ -v --tb=short --full
+            echo "Running FULL test suite"
+            ${{ matrix.run_full }}
           else
-            echo "Running SHORT test suite (skipping slow tests: test_hessian.py)"
-            pytest tests/ -v --tb=short --ignore=tests/test_hessian.py
+            echo "Running SHORT test suite"
+            ${{ matrix.run_short }}
           fi
-      

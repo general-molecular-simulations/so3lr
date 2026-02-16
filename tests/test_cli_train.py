@@ -115,7 +115,7 @@ def test_cli_train_forces_and_energy_with_lse_shifts(workdir, tmp_path):
         f"Carbon (Z=6) energy shift {carbon_shift} does not match expected value"
     )
 
-
+@pytest.mark.slow
 def test_cli_train_water_pbc_forces_only(workdir, tmp_path):
     """Train on periodic water box with forces-only loss."""
     cfg = _base_config(workdir)
