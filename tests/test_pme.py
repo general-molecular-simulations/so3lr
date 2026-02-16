@@ -17,7 +17,7 @@ from functools import partial
 from ase import Atoms
 from ase.io import read
 
-from mlff.md.calculator_sparse import mlffCalculatorSparse
+from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 from so3lr import So3lrCalculator, So3lrPotential, to_jax_md
 import jax_md
 
@@ -88,8 +88,8 @@ class TestPMEDirectComparison:
         atoms.info['k_smearing'] = np.array(k_smearing)
 
         # Create SO3LR calculator with observables
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -178,8 +178,8 @@ class TestPMEDirectComparison:
         atoms.info['k_grid'] = np.array(k_grid)
         atoms.info['k_smearing'] = np.array([smearing])
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -244,8 +244,8 @@ class TestPMEEnergyDecomposition:
         atoms.info['k_smearing'] = np.array([smearing])
 
         # Get calculation with both short-range and k-space electrostatics
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,

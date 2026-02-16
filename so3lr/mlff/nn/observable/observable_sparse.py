@@ -1182,6 +1182,7 @@ class ElectrostaticEnergyKspace(BaseSubModule):
         k_grid = inputs['k_grid']
         k_smearing = inputs['k_smearing']
         cell = inputs['cell']
+        pbc = jnp.array([True, True, True])
         node_mask = inputs["node_mask"]
         # Calculate partial charges
         partial_charges = inputs.get('partial_charges')
@@ -1204,9 +1205,9 @@ class ElectrostaticEnergyKspace(BaseSubModule):
         #    partial_charges *= node_mask
 
         if self.do_ewald:
-            potentials = self.solver.kspace(k_smearing, partial_charges, kvectors, positions, volume)
+            potentials = self.solver.kspace(k_smearing, partial_charges, kvectors, positions, volume, cell, pbc)
         else:
-            potentials = self.solver.kspace(k_smearing, partial_charges, reciprocal_cell, k_grid, kvectors, positions, volume)
+            potentials = self.solver.kspace(k_smearing, partial_charges, reciprocal_cell, k_grid, kvectors, positions, volume, cell, pbc)
 
         #if node_mask is not None:
         #    potentials *= node_mask

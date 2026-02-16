@@ -12,7 +12,7 @@ import numpy.testing as npt
 import pathlib
 import pytest
 from ase.io import read
-from mlff.md.calculator_sparse import mlffCalculatorSparse
+from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 
 
 # List of available observables
@@ -56,8 +56,8 @@ class TestObservablesExtraction:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         # Create calculator with observables output
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -119,8 +119,8 @@ class TestObservablesExtraction:
         atoms = read(package_dir / f'tests/test_data/water_64.xyz') * [2, 2, 2]
 
         # Create calculator with observables output
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -170,8 +170,8 @@ class TestPartialChargesExtraction:
         """Test that partial charges can be extracted."""
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -211,8 +211,8 @@ class TestPartialChargesExtraction:
         """
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -251,8 +251,8 @@ class TestHirshfeldRatiosExtraction:
         """Test that Hirshfeld ratios can be extracted and are positive."""
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -298,8 +298,8 @@ class TestUndampedObservables:
         """
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -339,8 +339,8 @@ class TestUndampedObservables:
         """
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -392,8 +392,8 @@ class TestMultipleObservablesSimultaneous:
             'hirshfeld_ratios',
         ]
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -429,8 +429,8 @@ class TestConsistencyBetweenCalculators:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         # Calculator without observables
-        calc_no_obs = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_no_obs = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -438,8 +438,8 @@ class TestConsistencyBetweenCalculators:
         )
 
         # Calculator with observables
-        calc_with_obs = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_with_obs = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -484,8 +484,8 @@ class TestForceConsistencyWithObservables:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         # Calculator without observables
-        calc_no_obs = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_no_obs = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -493,8 +493,8 @@ class TestForceConsistencyWithObservables:
         )
 
         # Calculator with observables
-        calc_with_obs = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_with_obs = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,

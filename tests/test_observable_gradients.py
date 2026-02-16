@@ -14,7 +14,7 @@ import numpy.testing as npt
 import pathlib
 import pytest
 from ase.io import read
-from mlff.md.calculator_sparse import mlffCalculatorSparse
+from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 
 
 def get_package_dir():
@@ -43,8 +43,8 @@ class TestObservableGradients:
         # Select a subset of atoms for gradient calculation
         output_atom_indices = list(range(min(3, n_atoms)))
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -96,8 +96,8 @@ class TestObservableGradients:
 
         output_atom_indices = list(range(min(3, n_atoms)))
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -137,8 +137,8 @@ class TestObservableGradients:
 
         output_atom_indices = list(range(min(3, n_atoms)))
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -180,8 +180,8 @@ class TestObservableGradients:
 
         output_atom_indices = list(range(min(3, n_atoms)))
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -239,8 +239,8 @@ class TestOutputAtomIndices:
         single_atom_idx = min(n_atoms // 2, n_atoms - 1)
         output_atom_indices = [single_atom_idx]
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -286,8 +286,8 @@ class TestOutputAtomIndices:
         if len(output_atom_indices) < 2:
             pytest.skip(f"Not enough atoms in {name} for non-contiguous test")
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -328,8 +328,8 @@ class TestOutputAtomIndices:
 
         output_atom_indices = list(range(min(2, n_atoms)))
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -373,8 +373,8 @@ class TestOutputAtomIndices:
 
         output_atom_indices = list(range(min(3, n_atoms)))
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -475,8 +475,8 @@ class TestObservableGradientsNumerical:
         output_atom_indices = [test_atom_idx]
 
         # Calculator for analytical gradient
-        calc_with_grad = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_with_grad = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -487,8 +487,8 @@ class TestObservableGradientsNumerical:
         )
 
         # Calculator for numerical gradient (reused)
-        calc_numerical = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_numerical = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -538,8 +538,8 @@ class TestObservableGradientsNumerical:
         output_atom_indices = [test_atom_idx]
 
         # Calculator for analytical gradient
-        calc_with_grad = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_with_grad = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -550,8 +550,8 @@ class TestObservableGradientsNumerical:
         )
 
         # Calculator for numerical gradient (reused)
-        calc_numerical = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_numerical = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -598,8 +598,8 @@ class TestObservableGradientsNumerical:
         output_atom_indices = [test_atom_idx]
 
         # Calculator for analytical gradient
-        calc_with_grad = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_with_grad = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -610,8 +610,8 @@ class TestObservableGradientsNumerical:
         )
 
         # Calculator for numerical gradient (reused)
-        calc_numerical = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_numerical = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -658,8 +658,8 @@ class TestObservableGradientsNumerical:
         # Test first 3 atoms or all if fewer
         output_atom_indices = list(range(min(3, n_atoms)))
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -679,8 +679,8 @@ class TestObservableGradientsNumerical:
         print(f"Testing atoms: {output_atom_indices}")
 
         # Calculator for numerical gradient (reused across all atoms)
-        calc_numerical = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_numerical = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -771,8 +771,8 @@ class TestObservableJacobiansNumerical:
         output_atom_indices = [test_atom_idx]
 
         # Calculator for analytical Jacobian
-        calc_with_jac = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_with_jac = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -783,8 +783,8 @@ class TestObservableJacobiansNumerical:
         )
 
         # Calculator for numerical Jacobian (reused)
-        calc_numerical = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_numerical = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -832,8 +832,8 @@ class TestObservableJacobiansNumerical:
         output_atom_indices = [test_atom_idx]
 
         # Calculator for analytical Jacobian
-        calc_with_jac = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_with_jac = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -844,8 +844,8 @@ class TestObservableJacobiansNumerical:
         )
 
         # Calculator for numerical Jacobian (reused)
-        calc_numerical = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_numerical = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,

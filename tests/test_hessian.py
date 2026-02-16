@@ -14,7 +14,7 @@ import numpy.testing as npt
 import pathlib
 import pytest
 from ase.io import read
-from mlff.md.calculator_sparse import mlffCalculatorSparse
+from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 
 
 def get_package_dir():
@@ -39,8 +39,8 @@ class TestHessianShape:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
         n_atoms = len(atoms)
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -79,8 +79,8 @@ class TestHessianShape:
         n_subset = min(5, n_atoms)
         output_atom_indices = list(range(n_subset))
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -121,8 +121,8 @@ class TestHessianSymmetry:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
         n_atoms = len(atoms)
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -208,8 +208,8 @@ class TestHessianNumerical:
         atoms.pbc = False
 
         # Calculator for analytical Hessian
-        calc_hessian = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_hessian = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -218,8 +218,8 @@ class TestHessianNumerical:
         )
 
         # Calculator for numerical Hessian (reused)
-        calc_numerical = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_numerical = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -308,8 +308,8 @@ class TestSubsystemHessianNumerical:
         output_atom_indices = list(range(n_subset))
 
         # Calculator for analytical Hessian
-        calc_hessian = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_hessian = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -319,8 +319,8 @@ class TestSubsystemHessianNumerical:
         )
 
         # Calculator for numerical Hessian (reused)
-        calc_numerical = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_numerical = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -365,8 +365,8 @@ class TestSubsystemHessianNumerical:
         output_atom_indices = list(range(n_subset))
 
         # Get full Hessian
-        calc_full = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_full = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -382,8 +382,8 @@ class TestSubsystemHessianNumerical:
         full_hessian = calc_full.results['hessian']
 
         # Get subsystem Hessian
-        calc_sub = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_sub = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -430,8 +430,8 @@ class TestHessianConsistency:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         # Calculator without Hessian
-        calc_no_hess = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_no_hess = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -439,8 +439,8 @@ class TestHessianConsistency:
         )
 
         # Calculator with Hessian
-        calc_with_hess = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_with_hess = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -480,8 +480,8 @@ class TestHessianConsistency:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         # Calculator without Hessian
-        calc_no_hess = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_no_hess = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -489,8 +489,8 @@ class TestHessianConsistency:
         )
 
         # Calculator with Hessian
-        calc_with_hess = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc_with_hess = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -538,8 +538,8 @@ class TestDifferentSubsystemRanges:
         end = min(start + 5, n_atoms)
         output_atom_indices = list(range(start, end))
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -579,8 +579,8 @@ class TestDifferentSubsystemRanges:
         start = n_atoms - n_subset
         output_atom_indices = list(range(start, n_atoms))
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -617,8 +617,8 @@ class TestDifferentSubsystemRanges:
         # Select just one atom
         output_atom_indices = [n_atoms // 2]
 
-        calc = mlffCalculatorSparse.create_from_ckpt_dir(
-            ckpt_dir=package_dir / 'so3lr' / 'params',
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,

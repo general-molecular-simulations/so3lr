@@ -5,18 +5,19 @@ import logging
 
 from collections import namedtuple
 from functools import partial, partialmethod
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from ase.calculators.calculator import Calculator
-from glp import atoms_to_system
-from glp import System
-from glp.calculators.utils import get_strain
-from glp.calculators.utils import strain_system
-from glp.graph import system_to_graph
-from glp.neighborlist import quadratic_neighbor_list
 
-from .potential import PotentialSparse
+from so3lr.mlff.utils.structures import Graph
+from so3lr.mlff.calculators.potential import PotentialSparse
 
+try:
+    from glp.calculators.utils import strain_graph, get_strain, strain_system
+    from glp import System, atoms_to_system
+    from glp.graph import system_to_graph
+except ImportError:
+    raise ImportError('Please install GLP package for running MD.')
 
 SpatialPartitioning = namedtuple(
     "SpatialPartitioning",
@@ -39,71 +40,135 @@ logging.mlff = partial(logging.log, logging.MLFF)
 StackNet = Any
 
 
+def matrix_to_voigt(matrix):
+    """
+    Convert a 3x3 matrix to a 6-component stress vector in Voigt notation.
+
+    Args:
+        matrix (jnp.ndarray): A 3x3 matrix.
+
+    Returns:
+        jnp.ndarray: A 6-component stress vector in Voigt notation.
+    """
+
+    # Check input
+    if matrix.shape != (3, 3):
+        raise ValueError("Input must be a 3x3 matrix. Shape is ", matrix.shape)
+
+    # Form Voigt vector
+    voigt_vector = jnp.array(
+        [
+            matrix[0, 0],
+            matrix[1, 1],
+            matrix[2, 2],
+            (matrix[1, 2] + matrix[2, 1]) / 2,
+            (matrix[0, 2] + matrix[2, 0]) / 2,
+            (matrix[0, 1] + matrix[1, 0]) / 2
+        ]
+    )
+
+    return voigt_vector
+
+
 class AseCalculatorSparse(Calculator):
-    implemented_properties = ['energy', 'forces', 'stress', 'free_energy']
+    implemented_properties = ['energy', 'forces', 'stress', 'free_energy', 'hessian']
 
     @classmethod
     def create_from_workdir(
             cls,
             workdir: str,
             calculate_stress: bool = False,
-            lr_cutoff: Optional[float] = 10.,
-            dispersion_energy_cutoff_lr_damping: Optional[float] = 2.,
+            calculate_hessian: bool = False,
+            lr_neighbors_bool: bool = True,
+            lr_cutoff: float = 10.,
+            dispersion_energy_cutoff_lr_damping: float = 2.,
             capacity_multiplier: float = 1.25,
             buffer_size_multiplier: float = 1.25,
-            use_cell_list: bool = False,
             skin: float = 0.,
             add_energy_shift: bool = False,
             dtype: np.dtype = np.float64,
             model: str = 'so3krates',
             has_aux: bool = False,
-            from_file: bool = False
+            from_file: bool = False,
+            observables: Optional[Sequence[str]] = None,
+            output_atom_indices: Optional[Sequence[int]] = None,
+            hessian_slice: bool = False,
+            **kwargs
     ):
+        if observables is not None and len(observables) > 0:
+            output_intermediate_quantities = [o.replace('_grad','').replace('_jac','') for o in (observables)]
+        else:
+            output_intermediate_quantities = None
 
-        potential = PotentialSparse.create_from_workdir(
+        mlff_potential = PotentialSparse.create_from_workdir(
             workdir=workdir,
             add_shift=add_energy_shift,
             long_range_kwargs=dict(
                 cutoff_lr=lr_cutoff,
                 dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
                 neighborlist_format_lr='sparse',  # ASECalculator has sparse format.
+                **kwargs
             ),
             dtype=dtype,
             model=model,
-            from_file=from_file
+            from_file=from_file,
+            output_intermediate_quantities=output_intermediate_quantities
         )
 
-        return cls(
-            potential=potential,
-            calculate_stress=calculate_stress,
-            capacity_multiplier=capacity_multiplier,
-            buffer_size_multiplier=buffer_size_multiplier,
-            use_cell_list=use_cell_list,
-            skin=skin,
-            dtype=dtype,
-            has_aux=has_aux
-        )
+        return cls(potential=mlff_potential,
+                   calculate_stress=calculate_stress,
+                   calculate_hessian=calculate_hessian,
+                   capacity_multiplier=capacity_multiplier,
+                   buffer_size_multiplier=buffer_size_multiplier,
+                   skin=skin,
+                   lr_neighbors_bool=lr_neighbors_bool,
+                   lr_cutoff=lr_cutoff,
+                   dtype=dtype,
+                   has_aux=has_aux,
+                   observables=observables,
+                   output_atom_indices=output_atom_indices,
+                   hessian_slice=hessian_slice
+                   )
 
     def __init__(
             self,
             potential,
-            calculate_stress: bool,
             capacity_multiplier: float,
             buffer_size_multiplier: float,
-            use_cell_list: bool,
             skin: float,
+            calculate_stress: bool,
+            calculate_hessian: bool,
             dtype: np.dtype,
             has_aux: bool,
+            observables: Optional[Sequence[str]] = None,
+            output_atom_indices: Optional[Sequence[int]] = None,
+            hessian_slice: bool = False,
             *args,
             **kwargs
     ):
+        """
+        ASE calculator given a StackNet and parameters.
+        """
+
         super(AseCalculatorSparse, self).__init__(*args, **kwargs)
+
+        calculate_obs_grads = False
+        if observables is not None and any(obs.endswith('_grad') or obs.endswith('_jac') for obs in observables):
+            calculate_obs_grads = True
+            print("Calculating observables gradients")
+            if output_atom_indices is None:
+                raise ValueError("When calculating observables gradients, output_atom_indices must be provided.")
+            print(f'Observables: {observables}, output_atom_indices: {output_atom_indices}')
+
+        assert not (calculate_stress and calculate_hessian), "Calculating stress and hessian at the same time is not supported."
+        assert not (calculate_stress and calculate_obs_grads), "Calculating stress and observables gradients at the same time is not supported."
+        assert not (calculate_hessian and calculate_obs_grads), "Calculating hessian and observables gradients at the same time is not supported."
 
         if calculate_stress:
             def energy_fn(system, strain: jnp.ndarray, neighbors):
                 system = strain_system(system, strain)
                 graph = system_to_graph(system, neighbors)
-
+                
                 out = potential(graph, has_aux=has_aux)
                 if isinstance(out, tuple):
                     atomic_energy = out[0]
@@ -124,7 +189,7 @@ class AseCalculatorSparse(Calculator):
                 )(
                     system,
                     strain,
-                    neighbors
+                    neighbors,
                 )
 
                 forces = - grads[0].R
@@ -140,9 +205,187 @@ class AseCalculatorSparse(Calculator):
                 else:
                     return {'energy': out, 'forces': forces, 'stress': stress}
 
-        else:
-            def energy_fn(system, neighbors):
-                graph = system_to_graph(system, neighbors)
+        elif calculate_hessian:
+
+                def energy_fn(R, system, neighbors):
+                    local_system = System(R, system.Z, system.cell, system.total_charge, system.num_unpaired_electrons, system.k_grid, system.k_smearing, system.theory_mask)
+                    graph = system_to_graph(local_system, neighbors)
+                    out = potential(graph, has_aux=has_aux)
+                    if isinstance(out, tuple):
+                        if not has_aux:
+                            raise ValueError
+
+                        atomic_energy = out[0]
+                        aux = out[1]
+                        return atomic_energy.sum(), aux
+                    else:
+                        atomic_energy = out
+                        return atomic_energy.sum()
+
+                if output_atom_indices is not None:
+
+                    assert len(output_atom_indices) > 0, "output_atom_indices should be non-empty if specified."
+                    assert np.all(np.diff(output_atom_indices) == 1), "For partial hessian calculation, output_atom_indices should be a contiguous range of indices."
+
+                    start_index = output_atom_indices[0]
+                    end_index = output_atom_indices[-1] + 1  # exclusive
+
+                    if hessian_slice is True:
+
+                        # @partial(jax.jit, static_argnames=('start_index', 'end_index', 'inner_start_index', 'inner_end_index'))
+                        # def energy_hessian_slice_fn(R, system, neighbors, start_index, end_index, inner_start_index=inner_start_index, inner_end_index=inner_end_index):
+                        #     penergy_fn = partial(energy_fn, system=system, neighbors=neighbors)
+
+                        #     @partial(jax.jit, static_argnames=('start_index', 'inner_start_index', 'inner_end_index'))
+                        #     def grad_fn_for_slice(slice_positions, all_position, start_index, inner_start_index=inner_start_index, inner_end_index=inner_end_index):
+                        #         position = jax.lax.dynamic_update_slice_in_dim(
+                        #             all_position, slice_positions, start_index, axis=0
+                        #         )
+                        #         return jax.value_and_grad(
+                        #                     penergy_fn,
+                        #                         has_aux=has_aux
+                        #                     )(position)[1][inner_start_index:inner_end_index]
+
+                        #     return jax.jacobian(grad_fn_for_slice)(R[start_index:end_index],  R, start_index)
+
+                        @partial(jax.jit, static_argnames=('inner_start_index', 'inner_end_index'))
+                        def energy_hessian_slice_fn(R, system, neighbors, index, inner_start_index, inner_end_index):
+                            penergy_fn = partial(energy_fn, system=system, neighbors=neighbors)
+
+                            @partial(jax.jit, static_argnames=('inner_start_index', 'inner_end_index'))
+                            def grad_fn_for_index(index_position, all_position, index, inner_start_index=inner_start_index, inner_end_index=inner_end_index):
+                                position = jax.lax.dynamic_update_index_in_dim(
+                                    all_position, index_position, index, axis=0
+                                )
+                                return jax.value_and_grad(
+                                            penergy_fn,
+                                                has_aux=has_aux
+                                            )(position)[1][inner_start_index:inner_end_index]
+
+                            return jax.jacobian(grad_fn_for_index, has_aux=has_aux)(R[index],  R, index)
+
+
+                        # @partial(jax.jit, static_argnames=('start_index',))
+                        # def energy_fn_for_slice(slice_positions, all_position, start_index, system, neighbors):
+                        #     position = jax.lax.dynamic_update_slice_in_dim(
+                        #         all_position, slice_positions, start_index, axis=0
+                        #     )
+                        #     return energy_fn(position, system=system, neighbors=neighbors)
+
+                        # @partial(jax.jit, static_argnames=('inner_start_index', 'inner_end_index'))
+                        # def energy_hessian_slice_fn(R, system, neighbors, index, inner_start_index, inner_end_index):
+                        #     penergy_fn = partial(energy_fn, system=system, neighbors=neighbors)
+
+                        #     @partial(jax.jit, static_argnames=('inner_start_index', 'inner_end_index'))
+                        #     def grad_fn_for_index(index_position, all_position, index, inner_start_index=inner_start_index, inner_end_index=inner_end_index):
+
+                        #         position = jax.lax.dynamic_update_index_in_dim(
+                        #             all_position, index_position, index, axis=0
+                        #         )
+                        #         return jax.value_and_grad(
+                        #                     energy_fn_for_slice,
+                        #                         has_aux=has_aux
+                        #                     )(position[inner_start_index:inner_end_index], all_position, start_index=inner_start_index, system=system, neighbors=neighbors)[1]
+
+                        #     return jax.jacobian(grad_fn_for_index, has_aux=has_aux)(R[index],  R, index)
+
+                        @jax.jit
+                        def calculate_fn(system, neighbors, hessian_slice_index):
+                            penergy_fn = partial(energy_fn, system=system, neighbors=neighbors)
+
+                            out, grads = jax.value_and_grad(
+                                penergy_fn,
+                                allow_int=True,
+                                has_aux=has_aux
+                            )(
+                                system.R
+                            )
+                            forces = - grads[start_index:end_index]
+
+                            hessian = energy_hessian_slice_fn(system.R, system, neighbors, hessian_slice_index,
+                                                             inner_start_index=start_index, inner_end_index=end_index)
+
+                            if isinstance(out, tuple):
+                                if not has_aux:
+                                    raise ValueError
+
+                                return {'energy': out[0], 'forces': forces, 'hessian': hessian, 'aux': out[1]}
+                            else:
+                                return {'energy': out, 'forces': forces, 'hessian': hessian }
+
+                    else:
+
+                        @partial(jax.jit, static_argnames=('start_index', 'end_index'))
+                        def energy_hessian_sub_fn(R, system, neighbors, start_index, end_index):
+                            penergy_fn = partial(energy_fn, system=system, neighbors=neighbors)
+
+                            @partial(jax.jit, static_argnames=('start_index',))
+                            def energy_fn_for_slice(slice_positions, all_position, start_index ):
+                                position = jax.lax.dynamic_update_slice_in_dim(
+                                    all_position, slice_positions, start_index, axis=0
+                                )
+                                return penergy_fn(
+                                        position,
+                                    )
+
+                            return jax.hessian(energy_fn_for_slice, has_aux=has_aux)(R[start_index:end_index],  R, start_index)
+
+                        @jax.jit
+                        def calculate_fn(system, neighbors):
+                            penergy_fn = partial(energy_fn, system=system, neighbors=neighbors)
+
+                            out, grads = jax.value_and_grad(
+                                penergy_fn,
+                                allow_int=True,
+                                has_aux=has_aux
+                            )(
+                                system.R
+                            )
+                            forces = -grads[start_index:end_index]
+
+                            hessian = energy_hessian_sub_fn(system.R, system, neighbors, start_index, end_index)
+
+                            if isinstance(out, tuple):
+                                if not has_aux:
+                                    raise ValueError
+
+                                return {'energy': out[0], 'forces': forces, 'hessian': hessian, 'aux': out[1]}
+                            else:
+                                return {'energy': out, 'forces': forces, 'hessian': hessian }
+
+                else:
+
+                    @jax.jit
+                    def calculate_fn(system, neighbors):
+                        penergy_fn = partial(energy_fn, system=system, neighbors=neighbors)
+
+                        out, grads = jax.value_and_grad(
+                            penergy_fn,
+                            allow_int=True,
+                            has_aux=has_aux
+                        )(
+                            system.R
+                        )
+                        forces = - grads
+
+                        hessian = jax.hessian(penergy_fn, has_aux=has_aux)(system.R)
+
+                        if isinstance(out, tuple):
+                            if not has_aux:
+                                raise ValueError
+
+                            return {'energy': out[0], 'forces': forces, 'hessian': hessian, 'aux': out[1]}
+                        else:
+                            return {'energy': out, 'forces': forces, 'hessian': hessian }
+
+        
+        elif calculate_obs_grads:
+
+            # Elementary functions:
+
+            def energy_fn(R, system, neighbors, has_aux=False):
+                local_system = System(R, system.Z, system.cell, system.total_charge, system.num_unpaired_electrons, system.k_grid, system.k_smearing, system.theory_mask)
+                graph = system_to_graph(local_system, neighbors)
                 out = potential(graph, has_aux=has_aux)
                 if isinstance(out, tuple):
                     if not has_aux:
@@ -155,25 +398,155 @@ class AseCalculatorSparse(Calculator):
                     atomic_energy = out
                     return atomic_energy.sum()
 
-            @jax.jit
-            def calculate_fn(system, neighbors):
-                out, grads = jax.value_and_grad(
-                    energy_fn,
-                    allow_int=True,
-                    has_aux=has_aux
-                )(
-                    system,
-                    neighbors
+            @partial(jax.jit, static_argnames=('obs_name',))
+            def obs_fn_for_name(position, system, neighbors, obs_name):
+                return energy_fn(
+                        position,
+                        system,
+                        neighbors,
+                        has_aux=True
+                    )[1][obs_name]
+
+            @partial(jax.jit, static_argnames=('obs_name',))
+            def summed_obs_fn_for_name(position, system, neighbors, obs_name):
+                return energy_fn(
+                        position,
+                        system,
+                        neighbors,
+                        has_aux=True
+                    )[1][obs_name].sum()
+
+            # Masking functions to calculate gradients/Jacobians for specific atoms only:
+
+            @partial(jax.jit, static_argnames=('obs_name',))
+            def atomic_obs_fn_for_name_and_index(index_position, all_position, system, neighbors, obs_name, index):
+                position = jax.lax.dynamic_update_index_in_dim(
+                    all_position, index_position, index, axis=0
                 )
-                forces = - grads.R
+                return energy_fn(
+                        position,
+                        system,
+                        neighbors,
+                        has_aux=True
+                    )[1][obs_name][index]
 
-                if isinstance(out, tuple):
-                    if not has_aux:
-                        raise ValueError
+            @partial(jax.jit, static_argnames=('obs_name',))
+            def summed_obs_fn_for_name_and_index(index_position, all_position, system, neighbors, obs_name, index):
+                position = jax.lax.dynamic_update_index_in_dim(
+                    all_position, index_position, index, axis=0
+                )
+                return energy_fn(
+                        position,
+                        system,
+                        neighbors,
+                        has_aux=True
+                    )[1][obs_name].sum()
 
-                    return {'energy': out[0], 'forces': forces, 'aux': out[1]}
-                else:
-                    return {'energy': out, 'forces': forces}
+            @partial(jax.jit, static_argnames=('obs_name',))
+            def obs_fn_for_name_and_index(index_position, all_position, system, neighbors, obs_name, index):
+                position = jax.lax.dynamic_update_index_in_dim(
+                    all_position, index_position, index, axis=0
+                )
+                return energy_fn(
+                        position,
+                        system,
+                        neighbors,
+                        has_aux=True
+                    )[1][obs_name]
+
+            # Value and gradient of a scalar-valued function:
+
+            @partial(jax.jit, static_argnames=('obs_name',))
+            def summed_obs_value_and_grad_fn( system, neighbors, obs_name, index):
+                return jax.value_and_grad(
+                            summed_obs_fn_for_name_and_index,
+                        )(system.R[index],  system.R, system, neighbors, obs_name, index)
+
+            @partial(jax.jit, static_argnames=('obs_name',))
+            def atomic_obs_value_and_grad_fn( system, neighbors, obs_name, index):
+                return jax.value_and_grad(
+                            atomic_obs_fn_for_name_and_index,
+                        )(system.R[index],  system.R, system, neighbors, obs_name, index)
+
+            # Jacobian of a vector-valued functions:
+
+            # @partial(jax.jit, static_argnames=('index', 'obs_name',))
+            # def atomic_obs_jacobian_fn( system, neighbors, obs_name, index):
+            #     return jax.jacobian(
+            #                 atomic_obs_fn_for_name_and_index,
+            #             )(system.R[index],  system.R, system, neighbors, obs_name, index)
+
+            @partial(jax.jit, static_argnames=('obs_name',))
+            def obs_jacobian_fn( system, neighbors, obs_name, index):
+                return jax.jacobian(
+                            obs_fn_for_name_and_index,
+                        )(system.R[index],  system.R, system, neighbors, obs_name, index)
+
+            def calculate_fn(system, neighbors):
+                obs_grad_dict = {}
+                for o in observables:
+                    # if o == 'dipole_vec':
+                    #     obs_grad_dict[o+'_grad'] = {index: atomic_obs_jacobian_fn(system, neighbors, o, index) for index in output_atom_indices}
+                    # elif 'energy' in o:
+                    #     obs_grad_dict[o+'_grad'] = {index: atomic_obs_value_and_grad_fn(system, neighbors, o, index) for index in output_atom_indices}
+                    #     #obs_grad_dict[o+'_grad'] = {index: summed_obs_value_and_grad_fn(system, neighbors, o, index) for index in output_atom_indices}
+                    #     #obs_grad_dict[o+'_grad'] = jax.value_and_grad(summed_obs_fn_for_name, allow_int=True)(system.R, system, neighbors, o)
+                    # else:
+                    #     obs_grad_dict[o+'_grad'] = {index: obs_jacobian_fn(system, neighbors, o, index) for index in output_atom_indices}
+                    obase=o.replace('_grad','').replace('_jac','')
+                    values = obs_fn_for_name(system.R, system, neighbors, obase)
+                    if o.endswith('_grad'):
+                        obs_grad_dict[o] = {index: [values[index], summed_obs_value_and_grad_fn(system, neighbors, obase, index)[1]] for index in output_atom_indices}
+                        # Note that the forces computed from atomic energies need to be scaled by 2 for a correct gradient of the total energy
+                        # Using the total energy to compute the gradient is more stable but more expensive and we dont get the atomic energies for free
+                        #obs_grad_dict[o] = {index: atomic_obs_value_and_grad_fn(system, neighbors, obase, index) for index in output_atom_indices}
+                        ##obs_grad_dict[o+'_grad'] = jax.value_and_grad(summed_obs_fn_for_name, allow_int=True)(system.R, system, neighbors, o)
+                    else:
+                        if o.endswith('_jac'):
+                            if 'energy' in o:
+                                raise NotImplementedError("Energy is a scalar observable, its Jacobian is not defined.")
+                            obs_grad_dict[o] = {index: [values[index], obs_jacobian_fn(system, neighbors, obase, index)] for index in output_atom_indices}
+                        else:
+                            obs_grad_dict[o] = values[output_atom_indices]
+
+                return {'energy': None, 'aux': obs_grad_dict}
+
+
+        else:
+
+                def energy_fn(system, neighbors):
+                    graph = system_to_graph(system, neighbors)
+                    out = potential(graph, has_aux=has_aux)
+                    if isinstance(out, tuple):
+                        if not has_aux:
+                            raise ValueError
+
+                        atomic_energy = out[0]
+                        aux = out[1]
+                        return atomic_energy.sum(), aux
+                    else:
+                        atomic_energy = out
+                        return atomic_energy.sum()
+
+                @jax.jit
+                def calculate_fn(system, neighbors):
+                    out, grads = jax.value_and_grad(
+                        energy_fn,
+                        allow_int=True,
+                        has_aux=has_aux
+                    )(
+                        system,
+                        neighbors
+                    )
+                    forces = - grads.R
+
+                    if isinstance(out, tuple):
+                        if not has_aux:
+                            raise ValueError
+
+                        return {'energy': out[0], 'forces': forces, 'aux': out[1]}
+                    else:
+                        return {'energy': out, 'forces': forces}
 
         self.calculate_fn = calculate_fn
         self.neighbors = None
@@ -182,7 +555,7 @@ class AseCalculatorSparse(Calculator):
         self.buffer_size_multiplier = buffer_size_multiplier
         self.skin = skin
         self.cutoff = potential.cutoff  # cutoff for the local neighbor list
-        self.use_cell_list = use_cell_list
+        self.hessian_slice = hessian_slice
 
         # Check if the ML potential has long-range components
         long_range_bool = potential.long_range_bool
@@ -220,7 +593,7 @@ class AseCalculatorSparse(Calculator):
 
         self.dtype = dtype
 
-    def calculate(self, atoms=None, *args, **kwargs):
+    def calculate(self, atoms=None, hessian_slice_index=None, *args, **kwargs):
         super(AseCalculatorSparse, self).calculate(atoms, *args, **kwargs)
 
         system = atoms_to_system(atoms, dtype=self.dtype)
@@ -239,52 +612,29 @@ class AseCalculatorSparse(Calculator):
                 capacity_multiplier=self.capacity_multiplier,
                 buffer_size_multiplier=self.buffer_size_multiplier,
                 lr_cutoff=self.lr_cutoff,
-                use_cell_list=self.use_cell_list
             )
 
-        neighbors = self.spatial_partitioning.update_fn(
-            system.R,
-            self.neighbors,
-            new_cell=cell
-        )
-
-        # Check if the neighbor list overflowed.
+        neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
         if neighbors.overflow:
-            # If so, do re-allocation. This will also re-allocate the cell list if there is one.
-            logging.mlff('Re-allocating neighbours due to buffer size overflow in neighborlist.')
-
+            logging.mlff('Re-allocating neighbours. ') 
             self.neighbors, self.spatial_partitioning = neighbor_list(
-                positions=system.R,
-                cell=cell,
-                cutoff=self.cutoff,
-                skin=self.skin,
-                capacity_multiplier=self.capacity_multiplier,
-                buffer_size_multiplier=self.buffer_size_multiplier,
-                lr_cutoff=self.lr_cutoff,
-                use_cell_list=self.use_cell_list
+                        positions=system.R,
+                        cell=cell,
+                        cutoff=self.cutoff,
+                        skin=self.skin,
+                        capacity_multiplier=self.capacity_multiplier,
+                        buffer_size_multiplier=self.buffer_size_multiplier,
+                        lr_cutoff=self.lr_cutoff,
             )
-
-            neighbors = self.spatial_partitioning.update_fn(
-                system.R,
-                self.neighbors,
-                new_cell=cell
-            )
-
-            assert not neighbors.overflow, f'Something went badly wrong, likely due to a bug. Please report.'
-
+            neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
+            assert not neighbors.overflow
             self.neighbors = neighbors
-
         else:
-            # Else, update the neighbors.
             self.neighbors = neighbors
-
-        # Check if a cell list is present.
         if neighbors.cell_list is not None:
-            # Check if cell needs re-allocation.
+            # If cell list needs to be reallocated, then reallocate neighbors
             if neighbors.cell_list.reallocate:
-                logging.mlff('Re-allocating neighbours due to buffer size overflow in cell list.')
-
-                # Re-allocate cell list.
+                # self.neighbors now contains Neighbors namedtuple with idx_i_lr etc.
                 self.neighbors, self.spatial_partitioning = neighbor_list(
                     positions=system.R,
                     cell=cell,
@@ -292,52 +642,54 @@ class AseCalculatorSparse(Calculator):
                     skin=self.skin,
                     capacity_multiplier=self.capacity_multiplier,
                     buffer_size_multiplier=self.buffer_size_multiplier,
-                    lr_cutoff=self.lr_cutoff,
-                    use_cell_list=self.use_cell_list
+                    lr_cutoff=self.lr_cutoff
                 )
-
-                assert not neighbors.overflow, f'Something went badly wrong, likely due to a bug. Please report.'
-                assert not neighbors.cell_list.reallocate, f'Something went badly wrong, likely due to a bug. Please report.'
-
-        # Calculate the results.
-        output = self.calculate_fn(
-            system,
-            neighbors
-        )
-
+        if self.hessian_slice is True and 'hessian' in self.implemented_properties:
+            assert hessian_slice_index is not None, "Hessian slice requested, please provide hessian_slice_index keyword argument."
+            output = self.calculate_fn(system, neighbors, hessian_slice_index=hessian_slice_index)
+        else:
+            output = self.calculate_fn(system, neighbors)
         self.results = jax.tree_util.tree_map(lambda x: np.array(x, self.dtype), output)
 
 
-def matrix_to_voigt(
-        matrix: jnp.ndarray
-):
+def to_displacement(cell):
     """
-    Convert a 3x3 matrix to a 6-component stress vector in Voigt notation.
+    Returns function to calculate replacement. Returned function takes Ra and Rb as input and return Ra - Rb
 
     Args:
-        matrix (jnp.ndarray): A 3x3 matrix.
+        cell ():
 
     Returns:
-        jnp.ndarray: A 6-component stress vector in Voigt notation.
+
+    """
+    from glp.periodic import make_displacement
+
+    displacement = make_displacement(cell)
+    # displacement(Ra, Rb) calculates Rb - Ra
+
+    # reverse sign convention bc feels more natural
+    return lambda Ra, Rb: displacement(Rb, Ra)
+
+
+@jax.jit
+def to_graph(atomic_numbers, positions, cell, neighbors):
+    """
+    Transform the atomsX object to a glp.graph.
+
+    Returns: glp.graph
+
     """
 
-    # Check input
-    if matrix.shape != (3, 3):
-        raise ValueError("Input must be a 3x3 matrix. Shape is ", matrix.shape)
+    displacement_fn = to_displacement(cell)
+    # displacement_fn(Ra, Rb) calculates Ra - Rb
 
-    # Form Voigt vector
-    voigt_vector = jnp.array(
-        [
-            matrix[0, 0],
-            matrix[1, 1],
-            matrix[2, 2],
-            (matrix[1, 2] + matrix[2, 1]) / 2,
-            (matrix[0, 2] + matrix[2, 0]) / 2,
-            (matrix[0, 1] + matrix[1, 0]) / 2
-        ]
+    edges = jax.vmap(displacement_fn)(
+        positions[neighbors.others], positions[neighbors.centers]
     )
 
-    return voigt_vector
+    mask = neighbors.centers != positions.shape[0]
+
+    return Graph(edges=edges, nodes=atomic_numbers, centers=neighbors.centers, others=neighbors.others, mask=mask)
 
 
 @jax.jit
@@ -352,8 +704,7 @@ def neighbor_list(
         skin: float = 0.,
         cell: jnp.ndarray = None,
         capacity_multiplier: float = 1.25,
-        buffer_size_multiplier: float = 1.25,
-        use_cell_list: bool = False
+        buffer_size_multiplier: float = 1.25
 ):
     """
 
@@ -365,24 +716,25 @@ def neighbor_list(
         cell (): ASE cell.
         capacity_multiplier ():
         buffer_size_multiplier ():
-        use_cell_list ():
 
     Returns:
 
     """
+    try:
+        from glp.neighborlist import quadratic_neighbor_list
+    except ImportError:
+        raise ImportError('For neighborhood list, please install the glp package from ...')
 
     allocate, update = quadratic_neighbor_list(
         cell,
         cutoff,
         skin,
         capacity_multiplier=capacity_multiplier,
-        use_cell_list=use_cell_list,
+        use_cell_list=True,
         lr_cutoff=lr_cutoff,
         buffer_size_multiplier=buffer_size_multiplier
     )
-
     neighbors = allocate(positions)
-
     return neighbors, SpatialPartitioning(allocate_fn=allocate,
                                           update_fn=jax.jit(update),
                                           cutoff=cutoff,

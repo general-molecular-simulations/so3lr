@@ -69,7 +69,7 @@ def init_expansion_fn(degrees: Sequence[int], cg: jnp.ndarray) -> Callable[[jnp.
 
     Examples:
         >>> from ramses.utils.geometric.spherical_harmonics import init_sph_fn
-        >>> from mlff.src. import coordinates_to_distance_vectors_normalized
+        >>> from so3lr.mlff.geometric.metric import coordinates_to_distance_vectors_normalized
         >>> # Calculate the normalized distance vectors given some points in Euclidean space.
         >>> n = 4
         >>> p0 = generate_points(n=n, d_min=1, d_max=3)

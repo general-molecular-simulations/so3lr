@@ -321,7 +321,7 @@ def init_hdf5_store(
         if o == "dipole_vec":
             dataset['dipole_vec'] = DataSetEntry(
                 chunk_length=1,
-                shape=(batch_size, 1, 1),
+                shape=(batch_size, 1, 3),
                 dtype=np.float32
             )
         elif o in   ['partial_charges',
