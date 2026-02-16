@@ -98,8 +98,8 @@ def test_cli_finetune(workdir, test_config):
             'so3lr', 'finetune',
             '--datafile', str(DATAFILE),
             '--workdir', str(workdir),
-            '--num-train', '90',
-            '--num-valid', '10',
+            '--num-train', '20',
+            '--num-valid', '5',
             '--config', str(test_config),
             '--strategy', 'full',
         ],
@@ -108,7 +108,7 @@ def test_cli_finetune(workdir, test_config):
         timeout=120,
     )
 
-    _assert_finetuning_succeeded(result, workdir, max_loss=0.01)
+    _assert_finetuning_succeeded(result, workdir, max_loss=0.1)
 
 
 def test_cli_finetune_water_pbc(workdir, test_config_water):

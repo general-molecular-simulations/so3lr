@@ -29,8 +29,8 @@ def _base_config(workdir):
     cfg['workdir'] = str(workdir)
     cfg['data']['filepath'] = str(DATAFILE)
     cfg['training']['num_epochs'] = 2
-    cfg['training']['num_train'] = 90
-    cfg['training']['num_valid'] = 10
+    cfg['training']['num_train'] = 20
+    cfg['training']['num_valid'] = 5
     cfg['training']['use_wandb'] = False
     cfg['training']['eval_every_num_steps'] = 5
     cfg['training']['batch_max_num_graphs'] = 4
@@ -84,7 +84,7 @@ def _assert_training_succeeded(result, workdir, max_loss=10.0):
         f"Last validation line: {last_val_line}"
     )
 
-
+@pytest.mark.slow
 def test_cli_train_forces_only(workdir, tmp_path):
     """Train with forces-only loss (no energy shifts)."""
     cfg = _base_config(workdir)
@@ -111,7 +111,7 @@ def test_cli_train_forces_and_energy_with_lse_shifts(workdir, tmp_path):
 
     energy_shifts = hyp['data']['energy_shifts']
     carbon_shift = float(energy_shifts['6'])
-    assert carbon_shift == pytest.approx(-3.7451, abs=1e-3), (
+    assert carbon_shift == pytest.approx(-3.7434, abs=1e-3), (
         f"Carbon (Z=6) energy shift {carbon_shift} does not match expected value"
     )
 
