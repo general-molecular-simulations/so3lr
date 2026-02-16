@@ -29,6 +29,10 @@ glp = { git = "https://github.com/kabylda/glp.git", branch = "electrostatics_nei
 jax-pme = { git = "https://github.com/fbruenig/jax-pme", branch = "main" , optional = false }
 
 
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
