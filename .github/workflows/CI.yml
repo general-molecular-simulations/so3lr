@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ github.event.inputs.test_mode == 'full' && 60 || 30 }}
+    timeout-minutes: ${{ github.event.inputs.test_mode == 'full' && 90 || 60 }}
     steps:
       - uses: actions/checkout@v2
       
@@ -49,7 +49,7 @@ jobs:
             echo "Running FULL test suite (including slow tests)"
             pytest tests/ -v --tb=short --full
           else
-            echo "Running SHORT test suite (skipping slow tests)"
-            pytest tests/ -v --tb=short
+            echo "Running SHORT test suite (skipping slow tests: test_hessian.py)"
+            pytest tests/ -v --tb=short --ignore=tests/test_hessian.py
           fi
       
