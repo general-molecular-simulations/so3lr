@@ -1119,8 +1119,8 @@ def create_langevin_fn(
         shift,
         dt=dt,
         kT=T,
-        box=box,
-        thermostat_kwargs=langevin_kwargs
+        gamma=langevin_kwargs['gamma'],
+        center_velocity=langevin_kwargs['center_velocity']
     )
     init_fn = jax.jit(init_fn)
     apply_fn = jax.jit(apply_fn)
