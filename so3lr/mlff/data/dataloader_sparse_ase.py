@@ -216,7 +216,7 @@ def ASE_to_jraph(
         energy = np.array([np.nan])
 
     max_num_theory_levels = 16
-    theory_level = np.reshape(0, (1,))
+    theory_level = np.reshape(5, (1,))
     theory_mask = np.eye(max_num_theory_levels)[theory_level] # (1, num_theory_levels)
 
     # Dipoles are NaN when not present.

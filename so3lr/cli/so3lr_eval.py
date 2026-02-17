@@ -116,12 +116,12 @@ def calculate_metrics(
 
     for target in targets:
         # Skip targets that have no ground truth in the dataset (e.g., observables)
-        if target not in inputs:
+        if target not in inputs or inputs[target] is None:
             continue
 
         mask = assign_mask(target, inputs=inputs)
-        y_pred = output_prediction[target]
         y_true = inputs[target]
+        y_pred = output_prediction[target]
 
         diff = np.asarray(y_pred) - np.asarray(y_true)
 
@@ -419,10 +419,11 @@ def evaluate_so3lr_on(
 
             # Accumulate (only for targets that had ground truth)
             for t in target_list:
-                if f"{t}_abs_sum" in batch_metrics:
-                    tot_abs[t] += batch_metrics[f"{t}_abs_sum"]
-                    tot_sq[t]  += batch_metrics[f"{t}_sq_sum"]
-                    tot_n[t]   += batch_metrics[f"{t}_count"]
+                if f"{t}_abs_sum" not in batch_metrics:
+                    continue
+                tot_abs[t] += batch_metrics[f"{t}_abs_sum"]
+                tot_sq[t]  += batch_metrics[f"{t}_sq_sum"]
+                tot_n[t]   += batch_metrics[f"{t}_count"]
 
             # Process predictions if saving is enabled
             if save_predictions_bool:
