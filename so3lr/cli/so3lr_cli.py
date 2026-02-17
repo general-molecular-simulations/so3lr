@@ -1551,6 +1551,7 @@ def tune_ewald(
 
 def main() -> None:
     """Entry point for the command line interface."""
+    os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2') # Suppress TF logging
 
     cli(standalone_mode=False)
 

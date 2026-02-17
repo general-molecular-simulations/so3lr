@@ -191,7 +191,7 @@ class EnergySparse(BaseSubModule):
 
         for imq_key in self.output_intermediate_quantities:
             # Skip the intermediate quantities that are already defined as observables
-            if imq_key in ['dipole_vec', 'energy', 'hirshfeld_ratios']:
+            if imq_key in ['dipole_vec', 'energy', 'hirshfeld_ratios', 'c6_ratios']:
                 continue
             imq = inputs.get(imq_key)
             if imq is None:

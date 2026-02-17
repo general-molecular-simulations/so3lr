@@ -5,6 +5,8 @@ import orbax.checkpoint as ocp
 from pathlib import Path
 from typing import Optional
 
+from .logging_utils import suppress_absl_warnings
+
 
 def load_params_from_checkpoint(
         ckpt_dir: str
@@ -33,9 +35,10 @@ def load_params_from_checkpoint(
 
     loaded_mngr = make_checkpoint_manager(ckpt_dir=ckpt_dir_cleaned)
 
-    mngr_state = loaded_mngr.restore(
-        loaded_mngr.latest_step(),
-    )
+    with suppress_absl_warnings():
+        mngr_state = loaded_mngr.restore(
+            loaded_mngr.latest_step(),
+        )
     params = mngr_state.get("params")
 
     if params is None:
