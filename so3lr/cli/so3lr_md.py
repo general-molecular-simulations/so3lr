@@ -531,6 +531,9 @@ def write_to_extxyz(
                 elif o == "hirshfeld_ratios":
                     atoms_copy.set_array('hirsh_ratios', np.asarray(obs_dict['hirshfeld_ratios'][i]).flatten())
 
+                elif o == "c6_ratios":
+                    atoms_copy.set_array('c6_ratios', np.asarray(obs_dict['c6_ratios'][i]).flatten())
+
                 elif o == "dipole_vec" :
                     atoms_copy.info['dipole_vec'] = np.asarray(obs_dict['dipole_vec'][i]).flatten()
 
@@ -787,7 +790,7 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
             cell=box,  # Will be None for free boundary conditions
             k_grid=k_grid,
             k_smearing=k_smearing,
-            theory_mask=jnp.eye(16)[0].reshape(1, -1)
+            theory_mask=jnp.eye(16)[5].reshape(1, -1)
         )
 
         return graph

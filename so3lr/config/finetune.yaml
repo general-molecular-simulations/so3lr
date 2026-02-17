@@ -50,6 +50,7 @@ training:
     # energy: 0.01  # Loss weight for the energy.
     # dipole_vec: 0.01 
     # hirshfeld_ratios: 0.01
+    # c6_ratios: 0.01
   use_robust_loss: false  # Use robust loss function. See https://arxiv.org/abs/1701.03077.
   robust_loss_alpha: 1.00 # Alpha parameter for the robust loss function.
   model_seed: 42  # Seed used for the initialization of the model parameters.

@@ -69,7 +69,7 @@ def process_predictions(
     main_graph.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
     main_graph.globals['energy_so3lr'] = output_prediction['energy']
     main_graph.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
-    # main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
+    main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
 
     # Remove non-standard global fields that don't have one row per graph
     # (residue_charge has shape (2,) per graph, residue_segments has shape
@@ -531,8 +531,8 @@ def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:
         return graph_mask
     elif x == 'hirshfeld_ratios':
         return node_mask
-    # elif x == 'c6_ratios':
-    #     return node_mask
+    elif x == 'c6_ratios':
+        return node_mask
     elif x in OBSERVABLES:
         return node_mask
     else:

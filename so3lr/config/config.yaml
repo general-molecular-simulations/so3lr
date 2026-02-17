@@ -90,7 +90,8 @@ training:
     energy: 0.01  # Loss weight for per-structure energy (MSE normalized by number of atoms).
     forces: 0.99  # Loss weight for per-atom forces (MSE averaged per graph).
     # dipole_vec: 0.01  # Loss weight for per-structure dipole vector (MSE normalized by number of atoms). Should be defined in train file (e.g. ).
-    # hirshfeld_ratios: 0.01  # Loss weight for per-atom Hirshfeld volume ratios (MSE averaged per graph). Should be defined in train file.
+    # hirshfeld_ratios: 0.01  # Loss weight for per-atom Hirshfeld volume ratios (per-atom MSE). Should be defined in train file.
+    # c6_ratios: 0.01  # Loss weight for per-atom C6 coefficient ratios (per-atom MSE). Should be defined in train file.
   # Loss function: standard L2 (use_adaptive_robust_loss and use_robust_loss false), fixed robust, or adaptive robust. See https://arxiv.org/abs/1701.03077.
   use_adaptive_robust_loss: true  # Use adaptive robust loss where alpha and scale are learned per target. Cannot be combined with use_robust_loss.
   adaptive_robust_loss_init_alpha: 1.0  # Initial alpha for adaptive robust loss. Range [0, 2]: 0=Cauchy (heavy-tailed), 2=L2 (standard MSE). Learned during training.

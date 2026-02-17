@@ -134,9 +134,12 @@ def create_graph_tuple_tf(
     if 'theory_level' in properties:
         theory_level = tf.reshape(element['theory_level'], (1,))
 
-        theory_level0 = theory_level #real levels
-        theory_level0 = tf.where(tf.equal(theory_level0, 1), 0, theory_level0) #merge PBE0+MBD and PBE0+MBD-NL heads, for the final head only
-        theory_level0 = tf.reshape(5, (1,)) #for final head level = 5 or 6
+        # theory level 0 - PBE0+MBD-NL, 1 - PBE+MBD, 4 - OMol level
+        # use real levels for training
+        # theory_level0 = theory_level #real levels
+        # theory_level0 = tf.where(tf.equal(theory_level0, 1), 0, theory_level0) #merge PBE0+MBD and PBE0+MBD-NL heads, for the final head only
+        # use final fine-tuned head for inference
+        theory_level0 = tf.reshape(5, (1,))
 
         globals_dict['theory_level'] = theory_level0
         theory_mask = tf.one_hot(theory_level0, depth=max_num_theory_levels)  # (1, num_theory_levels)
@@ -161,7 +164,7 @@ def create_graph_tuple_tf(
         )
         nodes_dict['c6_ratios'] = c6_ratios
 
-    if 'energy' in properties and theory_level[0] != 4:
+    if 'energy' in properties and theory_level[0] != 4: #do not use omol energies
     #if 'energy' in properties:
         en = tf.reshape(element['energy'], (1,))
         globals_dict['energy'] = en

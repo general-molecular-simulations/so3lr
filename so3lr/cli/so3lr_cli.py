@@ -1274,7 +1274,7 @@ def eval_model(
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Finetuning settings.
-@click.option('--strategy', type=click.Choice(['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer']),
+@click.option('--strategy', type=click.Choice(['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer','obs_0','obs_023','obs_23','obs_3','ll_fmlp','ll_obs_023']),
               default='full', help='Strategy for finetuning. [default: full]')
 @click.option('--config', '--config_path', 'config_path', type=click.Path(exists=False), default=None,
               help='Path to the finetuning config. If not provided is defaults to the one pre-defined in the SO3LR repo. [default: None]')

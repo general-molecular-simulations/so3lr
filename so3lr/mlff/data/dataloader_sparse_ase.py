@@ -327,7 +327,7 @@ def ASE_to_jraph(
     global_context = {
         "energy": energy.reshape(-1),
         "theory_level": theory_level.reshape(-1),
-        "theory_mask": theory_mask, #.reshape(1, max_num_theory_levels),
+        "theory_mask": theory_mask, #.reshape(1, max_num_theory_levels), TODO: double check if I need to add .reshape...
         "stress": stress.reshape(1, 6),
         "dipole_vec": dipole.reshape(1, 3),
         "total_charge": total_charge.reshape(-1),

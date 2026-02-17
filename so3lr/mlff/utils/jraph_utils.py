@@ -54,6 +54,7 @@ def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict):
         total_charge=graph.globals.get('total_charge'),
         dipole_vec=graph.globals.get('dipole_vec'),
         hirshfeld_ratios=graph.nodes.get('hirshfeld_ratios'),
+        c6_ratios=graph.nodes.get('c6_ratios'),
         idx_i_lr=lr_batch['idx_i_lr'],
         idx_j_lr=lr_batch['idx_j_lr'],
         cell_offset_lr=lr_batch.get('cell_offsets_lr'),

@@ -197,7 +197,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
         use_adaptive_robust_loss=use_adaptive_robust_loss,
     )
 
-    val_fn = training_utils.make_val_fn( #maybe not needed for val_fn - want to see rmse
+    val_fn = training_utils.make_val_fn( #TODO: maybe not needed for val_fn - want to see rmse
         force_fn,
         weights=config.training.loss_weights,
         use_robust_loss=config.training.get('use_robust_loss_validation', use_robust_loss),
@@ -564,27 +564,57 @@ def run_fine_tuning(
     if strategy == 'full':
         # All parameters are re-fined.
         trainable_subset_keys = None
-    elif strategy == 'final_mlp':
+    elif strategy == 'obs_0':
         # Only the final MLP is refined
         trainable_subset_keys = ['observables_0']
+    elif strategy == 'final_mlp':
+        # Only specific parameters from observables_0 are refined
+        trainable_subset_keys = [
+            'observables_0/atomic_scales',
+            'observables_0/energy_dense_final',
+            'observables_0/energy_dense_regression', 
+            'observables_0/energy_offset'
+        ]
+    elif strategy == 'll_fmlp':
+        # Only specific parameters from observables_0 are refined
+        trainable_subset_keys = [
+            f'layers_{config.model.num_layers - 1}',
+            'observables_0/atomic_scales',
+            'observables_0/energy_dense_final',
+            'observables_0/energy_dense_regression', 
+            'observables_0/energy_offset'
+        ]
     elif strategy == 'final_mlp_and_hirshfeld':
         # Only the final MLP and the Hirshfeld are refined
         trainable_subset_keys = ['observables_0', 'observables_2']
+    elif strategy == 'obs_023':
+        # Only the final MLP and the Hirshfeld are refined
+        trainable_subset_keys = ['observables_0', 'observables_2', 'observables_3']
+    elif strategy == 'obs_23':
+        # Only the final MLP and the Hirshfeld are refined
+        trainable_subset_keys = ['observables_2', 'observables_3']
     elif strategy == 'hirshfeld':
         # Only the Hirshfeld is refined
         trainable_subset_keys = ['observables_2']
+    elif strategy == 'obs_3':
+        # Only the C6 ratios are refined
+        trainable_subset_keys = ['observables_3']
     elif strategy == 'last_layer':
         # Only the last MP layer is refined.
-        trainable_subset_keys = [f'layers_{config_start_from_workdir.model.num_layers - 1}']
+        trainable_subset_keys = [f'layers_{config.model.num_layers - 1}']
     elif strategy == 'last_layer_and_final_mlp':
         # Only the last layer and the final MLP are refined.
-        trainable_subset_keys = [f'layers_{config_start_from_workdir.model.num_layers - 1}', 'observables_0']
+        trainable_subset_keys = [f'layers_{config.model.num_layers - 1}', 'observables_0']
+    #elif strategy == 'last_layer_and_final_mlp023':
+    elif strategy == 'll_obs_023':
+        # Only the last layer and the final MLP are refined.
+        trainable_subset_keys = [f'layers_{config.model.num_layers - 1}', 'observables_0', 'observables_2', 'observables_3']
     elif strategy == 'first_layer':
         # Only the first layer is refined.
         trainable_subset_keys = ['layers_0']
     elif strategy == 'first_layer_and_last_layer':
         # Only the first and layer MP layer are refined.
-        trainable_subset_keys = ['layers_0', f'layers_{config_start_from_workdir.model.num_layers - 1}']
+        trainable_subset_keys = ['layers_0', f'layers_{config.model.num_layers - 1}']
     else:
         raise ValueError(
             f'--strategy {strategy} is unknown. Select one of '
@@ -593,7 +623,14 @@ def run_fine_tuning(
             f'`last_layer`, '
             f'`last_layer_and_final_mlp`, '
             f'`first_layer`, '
-            f'`first_layer_and_last_layer`)'
+            f'`first_layer_and_last_layer`, '
+            f'`obs_0`, '
+            f'`obs_023`, '
+            f'`obs_23`, '
+            f'`obs_3`, '
+            f'`hirshfeld`, '
+            f'`ll_fmlp`, '
+            f'`ll_obs_023`)'
         )
     
     # Finalize the config for IO
@@ -686,6 +723,33 @@ def run_fine_tuning(
         loader=loader,
         tf_record_present=tf_record_present
     )
+
+    # Check that message normalization has not change from original model to fine-tuning model.
+    hyperparams_path = start_from_workdir / 'hyperparameters.json'
+    with open(hyperparams_path, mode='r') as fp:
+        config_start_from_workdir = config_dict.ConfigDict(json.load(fp=fp))
+
+    if config_start_from_workdir.model.message_normalization != config.model.message_normalization:
+        raise ValueError(
+            f'Message normalization must be the same. '
+            f'Found {config_start_from_workdir.model.message_normalization} for the original config '
+            f'and {config.model.message_normalization} for the fine tuning config.'
+        )
+
+    # If messages are normalized by the average number of neighbors, we need to load it from the old config file.
+    if config.model.message_normalization == 'avg_num_neighbors':
+        if config.data.avg_num_neighbors is not None:
+            logging.warning(
+                'Running fine tuning with config.model.message_normalization: avg_num_neighbors does not allow to '
+                'reset the avg_num_neighbors in the fine tuning config and must be set to null. It will be loaded from '
+                'the config in the workdir that is starting point for the fine tuning.'
+            )
+
+        config.data.avg_num_neighbors = config_start_from_workdir.data.avg_num_neighbors
+        logging.mlff(
+            f'Read average number of neighbors = {config.data.avg_num_neighbors} from original config at '
+            f'{start_from_workdir}.'
+        )
 
     opt = make_optimizer_from_config(config)
 
@@ -831,7 +895,7 @@ def run_fine_tuning(
             training_data=training_data,
             validation_data=validation_data,
             params=params,
-            ckpt_dir=ckpt_dir,
+            ckpt_dir=ckpt_dir, #TODO: or ckpt_dir=workdir / 'checkpoints',?
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             num_epochs=config.training.num_epochs,

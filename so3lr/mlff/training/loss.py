@@ -35,7 +35,8 @@ masks = {pn.energy: lambda u: jnp.ones(len(u)).astype(bool)[:, None],
          pn.stress: lambda u: jnp.ones(len(u)).astype(bool)[:, None, None],
          pn.partial_charge: lambda u: u[..., None],
          pn.hirshfeld_volume: lambda u: u[..., None],
-         pn.hirshfeld_volume_ratio: lambda u: u[..., None]
+         pn.hirshfeld_volume_ratio: lambda u: u[..., None],
+         pn.c6_coef_ratio: lambda u: u[..., None]
          }
 
 

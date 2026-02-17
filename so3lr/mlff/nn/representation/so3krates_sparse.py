@@ -9,6 +9,7 @@ from so3lr.mlff.nn.observable import DispersionEnergySparse
 from so3lr.mlff.nn.observable import ZBLRepulsionSparse
 from so3lr.mlff.nn.observable import DipoleVecSparse
 from so3lr.mlff.nn.observable import HirshfeldSparse
+from so3lr.mlff.nn.observable import C6RatiosSparse
 from so3lr.mlff.nn.observable import PartialChargesSparse
 
 from typing import Optional, Sequence, Any
@@ -112,9 +113,19 @@ def init_so3krates_sparse(
         ) if energy_activation_fn != 'identity' else lambda u: u,
     ) 
 
+    c6_ratios = C6RatiosSparse(
+        prop_keys=None,
+        output_is_zero_at_init=output_is_zero_at_init,
+        regression_dim=energy_regression_dim,
+        activation_fn=getattr(
+            nn.activation, energy_activation_fn
+        ) if energy_activation_fn != 'identity' else lambda u: u,
+    )
+
     dispersion_energy = DispersionEnergySparse(
         prop_keys=None,
         hirshfeld_ratios=hirshfeld_ratios,
+        c6_ratios=c6_ratios,
         cutoff_lr=cutoff_lr,
         cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
         dispersion_energy_scale=dispersion_energy_scale,
@@ -172,7 +183,7 @@ def init_so3krates_sparse(
         geometry_embeddings=[geometry_embed],
         feature_embeddings=embedding_modules,
         layers=layers,
-        observables=[energy, dipole_vec, hirshfeld_ratios],
+        observables=[energy, dipole_vec, hirshfeld_ratios, c6_ratios], #TODO: should there be forces?
         return_representations_bool=return_representations_bool,
         use_residual_scalars=use_residual_scalars,
         prop_keys=None
