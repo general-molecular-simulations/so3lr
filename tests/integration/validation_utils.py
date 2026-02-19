@@ -313,6 +313,7 @@ class Validator:
             'restart_reset',      # not logged as-is
             'ensemble',           # logged as NVT/NPT/etc, not as-is
             'nhc_baro',
+            'langevin_gamma',
             'kspace_electrostatics',
             'kspace_smearing',
             'kspace_spacing',
