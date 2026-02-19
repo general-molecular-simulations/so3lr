@@ -17,7 +17,7 @@ from functools import partial, partialmethod
 import jax.numpy as jnp
 
 from ..utils import checkpoint_utils
-from ..utils.param_utils import print_param_shapes, count_params
+from ..utils.param_utils import print_param_shapes, count_params, count_trainable_params
 
 logging.MLFF = 35
 logging.addLevelName(logging.MLFF, 'MLFF')
@@ -661,7 +661,15 @@ def run_fine_tuning(
     print("=" * 50)
 
     total_params = count_params(params)
+    trainable_params = count_trainable_params(params, trainable_subset_keys)
+
     print(f"\nTotal number of parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    if trainable_params != total_params:
+        print(f"Frozen parameters: {total_params - trainable_params:,}")
+        print(f"Fine-tuning strategy: {strategy}")
+        if trainable_subset_keys:
+            print(f"Trainable modules: {trainable_subset_keys}")
 
     # Get data filepath.
     data_filepath = data_path_from_config(config=config)
