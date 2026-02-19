@@ -1,6 +1,7 @@
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import jaxpme
 
 from ase.units import Bohr, Hartree
 from ase.units import alpha as fine_structure
@@ -1152,15 +1153,13 @@ class ElectrostaticEnergyKspace(BaseSubModule):
     module_name: str = "electrostatic_energy_kspace"
 
     def setup(self):
-        from jaxpme.solvers import ewald, pme, p3m
-        from jaxpme.potentials import potential as get_potential
 
         if self.kspace_method == 'ewald':
-            self.solver = ewald(get_potential())
+            self.solver =  jaxpme.solvers.ewald(jaxpme.potentials.potential())
         elif self.kspace_method == 'pme':
-            self.solver = pme(get_potential(), interpolation_nodes=self.interpolation_nodes)
+            self.solver =  jaxpme.solvers.pme(jaxpme.potentials.potential(), interpolation_nodes=self.interpolation_nodes)
         elif self.kspace_method == 'p3m':
-            self.solver = p3m(get_potential(), interpolation_nodes=self.interpolation_nodes)
+            self.solver = jaxpme.solvers.p3m(jaxpme.potentials.potential(), interpolation_nodes=self.interpolation_nodes)
         else:
             raise ValueError(
                 f"Invalid kspace_method: {self.kspace_method}. Must be 'ewald', 'pme', or 'p3m'."
@@ -1182,13 +1181,11 @@ class ElectrostaticEnergyKspace(BaseSubModule):
             Dict: ``{'electrostatic_energy_kspace': Array}`` with per-atom k-space
                 electrostatic energies, shape: (num_nodes).
         """
-        from jaxpme.kspace import generate_kvectors, get_reciprocal
 
         positions = inputs['positions']
         k_grid = inputs['k_grid']
         k_smearing = inputs['k_smearing']
         cell = inputs['cell']
-        pbc = jnp.array([True, True, True])
         node_mask = inputs["node_mask"]
         # Calculate partial charges
         partial_charges = inputs.get('partial_charges')
@@ -1202,8 +1199,8 @@ class ElectrostaticEnergyKspace(BaseSubModule):
         assert cell.shape == (3, 3), f"Invalid cell shape {cell.shape}. Expected (3, 3)."
 
         volume = jnp.abs(jnp.linalg.det(cell))
-        reciprocal_cell = get_reciprocal(cell)
-        kvectors = generate_kvectors(
+        reciprocal_cell = jaxpme.kspace.get_reciprocal(cell)
+        kvectors = jaxpme.kspace.generate_kvectors(
             reciprocal_cell, k_grid.shape, dtype=positions.dtype, for_ewald=(self.kspace_method == 'ewald')
         )
         pbc = jnp.array([True, True, True])
