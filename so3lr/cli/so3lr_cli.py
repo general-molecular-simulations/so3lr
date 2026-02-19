@@ -753,8 +753,6 @@ def cli(ctx: click.Context,
 
     if dt is not None:
         ctx.params['dt'] = dt/1000
-    else:
-        ctx.params['dt'] = ctx.params['dt']/1000
           
     for key in ctx.params:
         settings_dict = update_settings_from_defaults(ctx, settings_dict, key)
