@@ -507,7 +507,7 @@ class AseCalculatorSparse(Calculator):
                                 raise NotImplementedError("Energy is a scalar observable, its Jacobian is not defined.")
                             obs_grad_dict[o] = {index: [values[index], obs_jacobian_fn(system, neighbors, obase, index)] for index in output_atom_indices}
                         else:
-                            obs_grad_dict[o] = values[output_atom_indices]
+                            obs_grad_dict[o] = values[jnp.array(output_atom_indices)]
 
                 return {'energy': None, 'aux': obs_grad_dict}
 
