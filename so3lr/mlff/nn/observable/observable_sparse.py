@@ -1206,14 +1206,15 @@ class ElectrostaticEnergyKspace(BaseSubModule):
         kvectors = generate_kvectors(
             reciprocal_cell, k_grid.shape, dtype=positions.dtype, for_ewald=(self.kspace_method == 'ewald')
         )
+        pbc = jnp.array([True, True, True])
 
         #if node_mask is not None:
         #    partial_charges *= node_mask
 
         if self.kspace_method == 'ewald':
-            potentials = self.solver.kspace(k_smearing, partial_charges, kvectors, positions, volume)
+            potentials = self.solver.kspace(k_smearing, partial_charges, kvectors, positions, volume, cell, pbc)
         else:  # 'pme' or 'p3m'
-            potentials = self.solver.kspace(k_smearing, partial_charges, reciprocal_cell, k_grid, kvectors, positions, volume)
+            potentials = self.solver.kspace(k_smearing, partial_charges, reciprocal_cell, k_grid, kvectors, positions, volume, cell, pbc)
 
         #if node_mask is not None:
         #    potentials *= node_mask
