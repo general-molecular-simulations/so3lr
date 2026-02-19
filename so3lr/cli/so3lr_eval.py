@@ -298,9 +298,10 @@ def evaluate_so3lr_on(
 
     # Ensure all graphs have consistent global keys for batching.
     # Some graphs (dimers) may have residue_charge/residue_segments while others don't.
-    has_residue = any('residue_charge' in g.globals for g in data)
+    # Note: data is a list of (graph, long_range) tuples
+    has_residue = any('residue_charge' in g[0].globals for g in data)
     if has_residue:
-        for g in data:
+        for g, _ in data:
             if 'residue_charge' not in g.globals:
                 n_nodes = int(g.n_node[0])
                 g.globals['residue_charge'] = np.zeros(1, dtype=np.int16)
@@ -308,7 +309,7 @@ def evaluate_so3lr_on(
 
     # Check for allowed atom types
     allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
-    for i, graph in enumerate(data):
+    for i, (graph, _) in enumerate(data):
         if hasattr(graph, 'nodes') and isinstance(graph.nodes, dict) and 'atomic_numbers' in graph.nodes:
              atomic_nums = graph.nodes['atomic_numbers']
         elif isinstance(graph, dict) and 'nodes' in graph and 'atomic_numbers' in graph['nodes']:
