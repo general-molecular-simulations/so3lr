@@ -1806,6 +1806,12 @@ def perform_md(
         nhc_barostat_kwargs = nhc_kwargs.copy()
         nhc_barostat_kwargs['tau'] = md_dt * nhc_baro
 
+    if ensemble == 'nvt-langevin':
+        langevin_kwargs = {
+            'gamma': langevin_thermo,
+            'center_velocity': langevin_removecmmotion
+        }
+
     # Setting up the thermostat and/or barostat jax functions
 
     if ensemble == 'nve':
