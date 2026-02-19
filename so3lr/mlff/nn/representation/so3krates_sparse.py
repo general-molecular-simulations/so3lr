@@ -48,7 +48,7 @@ def init_so3krates_sparse(
         energy_learn_atomic_type_shifts: bool = False,
         electrostatic_energy_bool: bool = False,
         electrostatic_energy_scale: float = 1.0,
-        electrostatic_energy_kspace_do_ewald_bool: bool = False,
+        electrostatic_energy_kspace_method: str = 'pme',
         electrostatic_energy_kspace_interp_nodes: int = 4,
         dispersion_energy_bool: bool = False,
         dispersion_energy_cutoff_lr_damping: Optional[float] = None,
@@ -124,7 +124,7 @@ def init_so3krates_sparse(
     electrostatic_energy_kspace = ElectrostaticEnergyKspace(
         prop_keys=None,
         partial_charges=partial_charges,
-        do_ewald=electrostatic_energy_kspace_do_ewald_bool,
+        kspace_method=electrostatic_energy_kspace_method,
         electrostatic_energy_scale=electrostatic_energy_scale,
         interpolation_nodes=electrostatic_energy_kspace_interp_nodes
     )

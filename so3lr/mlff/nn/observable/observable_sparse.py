@@ -1145,20 +1145,26 @@ class ElectrostaticEnergySparse(BaseSubModule):
 class ElectrostaticEnergyKspace(BaseSubModule):
     prop_keys: Dict
     partial_charges: Any
-    do_ewald: bool = False
+    kspace_method: str = 'pme'  # 'ewald', 'pme', or 'p3m'
     interpolation_nodes: int = 4
     ke: float = 14.399645351950548
     electrostatic_energy_scale: float = 1.0
     module_name: str = "electrostatic_energy_kspace"
 
     def setup(self):
-        from jaxpme.solvers import ewald, pme
+        from jaxpme.solvers import ewald, pme, p3m
         from jaxpme.potentials import potential as get_potential
 
-        if self.do_ewald:
+        if self.kspace_method == 'ewald':
             self.solver = ewald(get_potential())
-        else:
+        elif self.kspace_method == 'pme':
             self.solver = pme(get_potential(), interpolation_nodes=self.interpolation_nodes)
+        elif self.kspace_method == 'p3m':
+            self.solver = p3m(get_potential(), interpolation_nodes=self.interpolation_nodes)
+        else:
+            raise ValueError(
+                f"Invalid kspace_method: {self.kspace_method}. Must be 'ewald', 'pme', or 'p3m'."
+            )
     
     @nn.compact
     def __call__(self, inputs: Dict, *args, **kwargs) -> Dict[str, jnp.ndarray]:
@@ -1166,7 +1172,7 @@ class ElectrostaticEnergyKspace(BaseSubModule):
 
         Evaluates the reciprocal-space contribution to the electrostatic energy
         using either standard Ewald summation or Particle Mesh Ewald (PME),
-        depending on the ``do_ewald`` flag.
+        depending on the ``kspace_method`` attribute.
 
         Args:
             inputs (Dict): Must contain ``positions``, ``k_grid``, ``k_smearing``,
@@ -1198,16 +1204,16 @@ class ElectrostaticEnergyKspace(BaseSubModule):
         volume = jnp.abs(jnp.linalg.det(cell))
         reciprocal_cell = get_reciprocal(cell)
         kvectors = generate_kvectors(
-            reciprocal_cell, k_grid.shape, dtype=positions.dtype, for_ewald=self.do_ewald
+            reciprocal_cell, k_grid.shape, dtype=positions.dtype, for_ewald=(self.kspace_method == 'ewald')
         )
 
         #if node_mask is not None:
         #    partial_charges *= node_mask
 
-        if self.do_ewald:
-            potentials = self.solver.kspace(k_smearing, partial_charges, kvectors, positions, volume, cell, pbc)
-        else:
-            potentials = self.solver.kspace(k_smearing, partial_charges, reciprocal_cell, k_grid, kvectors, positions, volume, cell, pbc)
+        if self.kspace_method == 'ewald':
+            potentials = self.solver.kspace(k_smearing, partial_charges, kvectors, positions, volume)
+        else:  # 'pme' or 'p3m'
+            potentials = self.solver.kspace(k_smearing, partial_charges, reciprocal_cell, k_grid, kvectors, positions, volume)
 
         #if node_mask is not None:
         #    potentials *= node_mask
