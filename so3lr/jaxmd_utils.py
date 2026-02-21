@@ -24,6 +24,8 @@ def neighbor_list_featurizer(displacement_fn, species, fractional_coordinates=Tr
         positions = None
         k_smearing = None
         k_grid = None
+        k_grid_disp = None
+        k_smearing_disp = None
         if 'box' in kwargs:
             box = kwargs.get('box')
             if box is not None:
@@ -44,6 +46,16 @@ def neighbor_list_featurizer(displacement_fn, species, fractional_coordinates=Tr
                 positions = R
         if 'k_smearing' in kwargs:
             k_smearing = kwargs.get('k_smearing')
+
+        if 'k_grid_disp' in kwargs:
+            k_grid_disp = kwargs.get('k_grid_disp')
+            if positions is None:
+                if fractional_coordinates:
+                    positions = transform(box, R)
+                else:
+                    positions = R
+        if 'k_smearing_disp' in kwargs:
+            k_smearing_disp = kwargs.get('k_smearing_disp')
 
         if 'perturbation' in kwargs:
             pert = kwargs.get('perturbation')
@@ -70,6 +82,8 @@ def neighbor_list_featurizer(displacement_fn, species, fractional_coordinates=Tr
             cell=box,  # will raise an error if box not in kwargs.
             k_grid=k_grid,
             k_smearing=k_smearing,
+            k_grid_disp=k_grid_disp,
+            k_smearing_disp=k_smearing_disp,
             theory_mask=jnp.eye(16)[5].reshape(1, -1)
         )
 

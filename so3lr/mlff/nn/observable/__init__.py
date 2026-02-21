@@ -7,5 +7,6 @@ from .observable_sparse import C6RatiosSparse
 from .observable_sparse import PartialChargesSparse
 from .observable_sparse import ElectrostaticEnergySparse
 from .observable_sparse import ElectrostaticEnergyKspace
+from .observable_sparse import DispersionEnergyKspace
 from .observable_sparse import DispersionEnergySparse
 from .observable_sparse import ZBLRepulsionSparse

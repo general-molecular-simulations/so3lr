@@ -5,6 +5,7 @@ from so3lr.mlff.nn.layer import SO3kratesLayerSparse
 from so3lr.mlff.nn.observable import EnergySparse
 from so3lr.mlff.nn.observable import ElectrostaticEnergySparse
 from so3lr.mlff.nn.observable import ElectrostaticEnergyKspace
+from so3lr.mlff.nn.observable import DispersionEnergyKspace
 from so3lr.mlff.nn.observable import DispersionEnergySparse
 from so3lr.mlff.nn.observable import ZBLRepulsionSparse
 from so3lr.mlff.nn.observable import DipoleVecSparse
@@ -54,6 +55,8 @@ def init_so3krates_sparse(
         dispersion_energy_bool: bool = False,
         dispersion_energy_cutoff_lr_damping: Optional[float] = None,
         dispersion_energy_scale: float = 1.0,
+        dispersion_energy_kspace_do_ewald_bool: bool = False,
+        dispersion_energy_kspace_interp_nodes: int = 4,
         zbl_repulsion_bool: bool = False,
         use_final_bias_bool: bool = True,
         return_representations_bool: bool = False,
@@ -122,6 +125,11 @@ def init_so3krates_sparse(
         ) if energy_activation_fn != 'identity' else lambda u: u,
     )
 
+    # do_dispersion_kspace is True when dispersion_energy_kspace_do_ewald_bool
+    # is explicitly set (even to False, meaning PME not Ewald). The flag is None
+    # when dispersion kspace is not configured at all.
+    _do_disp_kspace = dispersion_energy_kspace_do_ewald_bool is not None
+
     dispersion_energy = DispersionEnergySparse(
         prop_keys=None,
         hirshfeld_ratios=hirshfeld_ratios,
@@ -129,7 +137,16 @@ def init_so3krates_sparse(
         cutoff_lr=cutoff_lr,
         cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
         dispersion_energy_scale=dispersion_energy_scale,
-        neighborlist_format=neighborlist_format_lr
+        neighborlist_format=neighborlist_format_lr,
+        do_dispersion_kspace=_do_disp_kspace,
+    )
+
+    dispersion_energy_kspace = DispersionEnergyKspace(
+        prop_keys=None,
+        hirshfeld_ratios=hirshfeld_ratios,
+        c6_ratios=c6_ratios,
+        do_ewald=dispersion_energy_kspace_do_ewald_bool if dispersion_energy_kspace_do_ewald_bool is not None else False,
+        interpolation_nodes=dispersion_energy_kspace_interp_nodes,
     )
 
     electrostatic_energy_kspace = ElectrostaticEnergyKspace(
@@ -169,6 +186,7 @@ def init_so3krates_sparse(
         electrostatic_energy=electrostatic_energy,
         electrostatic_energy_kspace=electrostatic_energy_kspace,
         dispersion_energy=dispersion_energy,
+        dispersion_energy_kspace=dispersion_energy_kspace,
         partial_charges=partial_charges,
         hirshfeld_ratios=hirshfeld_ratios,
         zbl_repulsion=zbl_repulsion,

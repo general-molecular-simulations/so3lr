@@ -33,6 +33,7 @@ class EnergySparse(BaseSubModule):
     electrostatic_energy_kspace: Optional[Any] = None
     dispersion_energy_bool: bool = False
     dispersion_energy: Optional[Any] = None
+    dispersion_energy_kspace: Optional[Any] = None
     partial_charges: Optional[Any] = None
     hirshfeld_ratios: Optional[Any] = None
     zbl_repulsion_bool: bool = False
@@ -111,13 +112,15 @@ class EnergySparse(BaseSubModule):
             atomic_energy = nn.Dense(
                 num_theory_levels,
                 kernel_init=self.kernel_init,
-                use_bias=self.use_final_bias_bool,
+                # use_bias=self.use_final_bias_bool,
+                use_bias=False,
                 name='energy_dense_final'
             )(y)  # (num_nodes, num_levels_of_theory)
         else:
             atomic_energy = nn.Dense(
                 num_theory_levels,
-                use_bias=self.use_final_bias_bool,
+                # use_bias=self.use_final_bias_bool,
+                use_bias=False,
                 kernel_init=self.kernel_init,
                 name='energy_dense_final'
             )(x) # (num_nodes, num_levels_of_theory)
@@ -156,6 +159,9 @@ class EnergySparse(BaseSubModule):
             del inputs['no_sigma']
             inputs.update(**self.dispersion_energy(inputs))
             atomic_energy += inputs['dispersion_energy']
+            if inputs.get('k_smearing_disp', None) is not None:
+                inputs.update(**self.dispersion_energy_kspace(inputs))
+                atomic_energy += inputs['dispersion_energy_kspace']
 
         if self.output_convention == 'per_structure':
             energy = segment_sum(
@@ -287,18 +293,18 @@ class HirshfeldSparse(BaseSubModule):
         #         kernel_init=nn.initializers.lecun_normal(),
         #         name='hirshfeld_ratios_dense_regression'
         #     )(x)  # (num_nodes, regression_dim)
-        #     y = self.activation_fn(y)  # (num_nodes, regression_dim)
+        #     y = self.activation_fn(y)  # (num_nodes, regression_dim/2)
         #     k = nn.Dense(
         #         int(num_features / 2),
         #         kernel_init=self.kernel_init,
         #         name='hirshfeld_ratios_dense_final'
-        #     )(y)  # (num_nodes)
+        #     )(y)  # (num_nodes, num_features/2)
         # else:
         #     k = nn.Dense(
         #         int(num_features / 2),
         #         kernel_init=self.kernel_init,
         #         name='hirshfeld_ratios_dense_final'
-        #     )(x)  # (num_nodes)
+        #     )(x)  # (num_nodes, num_features/2)
 
         # qk = (q * k / jnp.sqrt(k.shape[-1])).sum(axis=-1)
 
@@ -475,8 +481,9 @@ class PartialChargesSparse(BaseSubModule):
         
         # Unified charge conservation calculation
         predicted_charge = segment_sum(x_q, segment_ids=batch_segments, num_segments=num_graphs) # (num_graphs)
-        atom_counts = jnp.bincount(batch_segments, length=num_graphs)
-        charge_conservation = jnp.reciprocal(atom_counts) * (total_charge - predicted_charge)
+        atom_counts = jnp.bincount(batch_segments, length=num_graphs).astype(x_q.dtype)
+        safe_atom_counts = jnp.where(atom_counts > 0, atom_counts, jnp.ones_like(atom_counts))
+        charge_conservation = (total_charge - predicted_charge) / safe_atom_counts
         partial_charges = x_q + charge_conservation[batch_segments] # (num_nodes)
 
         return dict(partial_charges=partial_charges)
@@ -514,7 +521,7 @@ class DipoleVecSparse(BaseSubModule):
 
         batch_segments = inputs['batch_segments']  # (num_nodes)
         graph_mask = inputs['graph_mask']  # (num_graphs)
-        positions = inputs['positions']  # (num_nodes, 3)
+        positions = inputs.get('positions')  # (num_nodes, 3)
 
         num_graphs = len(graph_mask)
 
@@ -655,13 +662,223 @@ def vdw_QDO_disp_damp_nosigma(
 
     return c * V3 * jnp.asarray(Hartree, dtype=input_dtype)
 
+
+def compute_avg_dispersion_coefficients(
+        atomic_numbers: jnp.ndarray,
+        hirshfeld_ratios: jnp.ndarray,
+        c6_ratios: jnp.ndarray,
+):
+    """Compute species-weighted average C6, C8, C10 coefficients in atomic units.
+
+    Uses all-pairs mixing rules and gamma fitting to derive average dispersion
+    coefficients for use in the analytical tail correction.
+
+    Args:
+        atomic_numbers: Atomic numbers, shape ``(N,)``.
+        hirshfeld_ratios: Per-atom Hirshfeld volume ratios, shape ``(N,)``.
+        c6_ratios: Per-atom C6 ratios, shape ``(N,)``.
+
+    Returns:
+        Tuple ``(C6_avg, C8_avg, C10_avg)`` in atomic units (float).
+    """
+    N = len(atomic_numbers)
+    idx_i, idx_j = jnp.triu_indices(N, k=1)
+    alpha_ij, C6_ij = mixing_rules(atomic_numbers, idx_i, idx_j, hirshfeld_ratios, c6_ratios)
+    gamma_ij = gamma_cubic_fit(alpha_ij)
+    C8_ij = 5 / gamma_ij * C6_ij
+    C10_ij = 245 / 8 / gamma_ij ** 2 * C6_ij
+
+    # Also include self-interaction (i==i) pairs
+    idx_self = jnp.arange(N)
+    alpha_self, C6_self = mixing_rules(atomic_numbers, idx_self, idx_self, hirshfeld_ratios, c6_ratios)
+    gamma_self = gamma_cubic_fit(alpha_self)
+    C8_self = 5 / gamma_self * C6_self
+    C10_self = 245 / 8 / gamma_self ** 2 * C6_self
+
+    # Total: sum of all unique pairs (i<j) counted twice + self pairs
+    # For the tail correction we need <C_n> = (1/N^2) * sum_{i,j} C_n_ij
+    C6_avg = float((2 * jnp.sum(C6_ij) + jnp.sum(C6_self)) / N ** 2)
+    C8_avg = float((2 * jnp.sum(C8_ij) + jnp.sum(C8_self)) / N ** 2)
+    C10_avg = float((2 * jnp.sum(C10_ij) + jnp.sum(C10_self)) / N ** 2)
+
+    return C6_avg, C8_avg, C10_avg
+
+
+def dispersion_tail_correction_energy(
+        box,
+        N: int,
+        C6_avg: float,
+        C8_avg: float,
+        C10_avg: float,
+        r_on: float,
+        r_off: float,
+        n_quad: int = 20,
+):
+    """Analytical dispersion tail correction energy for NPT simulations.
+
+    Computes the mean-field tail correction for dispersion energy beyond the
+    switching region, assuming g(r) = 1 beyond ``r_on``. The correction includes:
+
+    1. A numerical integral over the switching region ``[r_on, r_off]`` where
+       dispersion is partially suppressed by ``switching_fn``.
+    2. An analytical integral beyond ``r_off`` where dispersion is fully cut off.
+
+    The result is volume-dependent through ``N/V``, so JAX autodiff produces the
+    correct pressure correction when used with NPT barostats.
+
+    Args:
+        box: Box matrix or diagonal, in Angstrom. Must be differentiable.
+        N: Number of atoms.
+        C6_avg: Species-averaged C6 coefficient (a.u.).
+        C8_avg: Species-averaged C8 coefficient (a.u.).
+        C10_avg: Species-averaged C10 coefficient (a.u.).
+        r_on: Start of switching region in Angstrom.
+        r_off: End of switching region (cutoff) in Angstrom.
+        n_quad: Number of Gauss-Legendre quadrature points. Defaults to 20.
+
+    Returns:
+        Tail correction energy in eV (scalar, differentiable w.r.t. box).
+    """
+    _Bohr = jnp.asarray(Bohr, dtype=box.dtype)
+    _Hartree = jnp.asarray(Hartree, dtype=box.dtype)
+    _pi = jnp.asarray(jnp.pi, dtype=box.dtype)
+
+    # Volume in Bohr^3
+    if box.ndim == 1:
+        V_ang = box[0] * box[1] * box[2]
+    else:
+        V_ang = jnp.abs(jnp.linalg.det(box))
+    V_bohr = V_ang / (_Bohr ** 3)
+
+    # Number density in Bohr^-3
+    rho = jnp.asarray(N, dtype=box.dtype) / V_bohr
+
+    # Convert cutoffs to Bohr
+    r_on_bohr = jnp.asarray(r_on, dtype=box.dtype) / _Bohr
+    r_off_bohr = jnp.asarray(r_off, dtype=box.dtype) / _Bohr
+
+    _C6 = jnp.asarray(C6_avg, dtype=box.dtype)
+    _C8 = jnp.asarray(C8_avg, dtype=box.dtype)
+    _C10 = jnp.asarray(C10_avg, dtype=box.dtype)
+
+    # --- Analytical integral beyond r_off (where w=1 so contribution is fully missing) ---
+    # int_{r_off}^{inf} 4*pi*r^2 * (-C6/r^6 - C8/r^8 - C10/r^10) dr
+    # = -4*pi * (C6/(3*r_off^3) + C8/(5*r_off^5) + C10/(7*r_off^7))
+    I_beyond = -4 * _pi * (
+        _C6 / (3 * r_off_bohr ** 3) +
+        _C8 / (5 * r_off_bohr ** 5) +
+        _C10 / (7 * r_off_bohr ** 7)
+    )
+
+    # --- Numerical integral over switching region [r_on, r_off] ---
+    # In this region the switching function w(r) suppresses the dispersion.
+    # The missing energy is: int 4*pi*r^2 * [1-w(r)] * (-C6/r^6 - C8/r^8 - C10/r^10) dr
+    # Use Gauss-Legendre quadrature.
+    nodes, weights = _gauss_legendre_nodes_weights(n_quad, box.dtype)
+    # Map from [-1, 1] to [r_on_bohr, r_off_bohr]
+    half_width = (r_off_bohr - r_on_bohr) / 2
+    mid = (r_off_bohr + r_on_bohr) / 2
+    r_quad = mid + half_width * nodes  # quadrature points in Bohr
+
+    # switching_fn expects Angstrom inputs
+    r_quad_ang = r_quad * _Bohr
+    w = switching_fn(r_quad_ang, r_on, r_off)
+
+    integrand = (1 - w) * 4 * _pi * r_quad ** 2 * (
+        -_C6 / r_quad ** 6 - _C8 / r_quad ** 8 - _C10 / r_quad ** 10
+    )
+    I_switch = jnp.sum(weights * integrand) * half_width
+
+    # E_tail = 0.5 * N * rho * (I_switch + I_beyond) in Hartree, convert to eV
+    E_tail = 0.5 * jnp.asarray(N, dtype=box.dtype) * rho * (I_switch + I_beyond) * _Hartree
+
+    return E_tail
+
+
+def c6_raw_potential():
+    """Return a jaxpme RawPotential for the C6/r^6 dispersion interaction.
+
+    Uses numerically stable formulas for the Ewald splitting of 1/r^6:
+    - Short-range: exp(-x)*(1 + x + x^2/2) / r^6  where x = r^2/(2*sigma^2)
+    - Long-range real-space: [1 - exp(-x)*(1 + x + x^2/2)] / r^6
+    - Long-range k-space: via upper incomplete gamma Gamma(-3/2, x) computed
+      through recursion from Gamma(1/2, x) = sqrt(pi)*erfc(sqrt(x))
+    - Self correction: 1 / (6*(2*sigma^2)^3)
+    - Background: pi^(3/2) * (2*sigma^2)^(-3/2) / (-6)
+    """
+    from jaxpme.potentials import RawPotential
+
+    def sr_r(smearing, distances):
+        sigma = smearing
+        two_sigma2 = 2.0 * sigma ** 2
+        x = distances ** 2 / two_sigma2
+        exp_neg_x = jnp.exp(-x)
+        return exp_neg_x * (1.0 + x + 0.5 * x ** 2) / distances ** 6
+
+    def lr_r(smearing, distances):
+        sigma = smearing
+        two_sigma2 = 2.0 * sigma ** 2
+        x = distances ** 2 / two_sigma2
+        exp_neg_x = jnp.exp(-x)
+        return (1.0 - exp_neg_x * (1.0 + x + 0.5 * x ** 2)) / distances ** 6
+
+    def lr_k2(smearing, k2):
+        sigma = smearing
+        two_sigma2 = 2.0 * sigma ** 2
+        x = sigma ** 2 * k2 / 2.0  # = two_sigma2 * k2 / 4
+
+        sqrt_x = jnp.sqrt(jnp.maximum(x, 1e-30))
+        # Gamma(1/2, x) = sqrt(pi) * erfc(sqrt(x))
+        G12 = jnp.sqrt(jnp.pi) * jax.lax.erfc(sqrt_x)
+        # Recursion: Gamma(a-1, x) = (Gamma(a, x) - x^(a-1)*exp(-x)) / (a - 1)
+        # Gamma(-1/2, x) = (Gamma(1/2, x) - x^(-1/2)*exp(-x)) / (-1/2)
+        #                 = -2 * (G12 - exp(-x) / sqrt(x))
+        exp_neg_x = jnp.exp(-x)
+        G_neg12 = -2.0 * (G12 - exp_neg_x / sqrt_x)
+        # Gamma(-3/2, x) = (Gamma(-1/2, x) - x^(-3/2)*exp(-x)) / (-3/2)
+        #                 = -2/3 * (G_neg12 - exp(-x) / x^(3/2))
+        G_neg32 = -2.0 / 3.0 * (G_neg12 - exp_neg_x / (x * sqrt_x))
+
+        # lr_k2 = (pi^(3/2) / 2) * (2*sigma^2)^(-3/2) * G_neg32 * x^(3/2)
+        factor = jnp.pi ** 1.5 / 2.0 * two_sigma2 ** (-1.5)
+        return factor * G_neg32 * x ** 1.5
+
+    def correction_self(smearing):
+        sigma = smearing
+        two_sigma2 = 2.0 * sigma ** 2
+        return 1.0 / (6.0 * two_sigma2 ** 3)
+
+    def correction_background(smearing):
+        sigma = smearing
+        two_sigma2 = 2.0 * sigma ** 2
+        return jnp.pi ** 1.5 * two_sigma2 ** (-1.5) / (-6.0)
+
+    def real(distances):
+        return 1.0 / distances ** 6
+
+    def correction_pbc(positions, cell, charges, pbc):
+        return jnp.zeros(positions.shape[0], dtype=positions.dtype)
+
+    return RawPotential(
+        sr_r, lr_r, lr_k2, real,
+        correction_background, correction_self, correction_pbc,
+    )
+
+
+def _gauss_legendre_nodes_weights(n: int, dtype=jnp.float64):
+    """Return Gauss-Legendre quadrature nodes and weights on [-1, 1]."""
+    import numpy as _np
+    nodes, weights = _np.polynomial.legendre.leggauss(n)
+    return jnp.asarray(nodes, dtype=dtype), jnp.asarray(weights, dtype=dtype)
+
+
 @jax.jit
 def mixing_rules(
         atomic_numbers: jnp.ndarray,
         idx_i: jnp.ndarray,
         idx_j: jnp.ndarray,
         hirshfeld_ratios: jnp.ndarray,
-        c6_ratios: Optional[jnp.ndarray] = None
+        c6_ratios: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Apply Casimir-Polder mixing rules to obtain pairwise dispersion parameters.
 
@@ -730,6 +947,32 @@ def gamma_cubic_fit(alpha):
     sigma = b3 * jnp.power(vdW_radius, 3) + b2 * jnp.square(vdW_radius) + b1 * vdW_radius + b0
     gamma = jnp.asarray(1. / 2, dtype=input_dtype) / jnp.square(sigma)
     return gamma
+
+
+@partial(jax.jit, static_argnames=('neighborlist_format',))
+def coulomb_bare(
+        q: jnp.ndarray,
+        rij: jnp.ndarray,
+        idx_i: jnp.ndarray,
+        idx_j: jnp.ndarray,
+        ke: float,
+        neighborlist_format: str = 'sparse'
+) -> jnp.ndarray:
+    """ Pairwise bare Coulomb interaction (undamped 1/r) """
+    input_dtype = rij.dtype
+
+    if neighborlist_format == 'sparse':
+        c = jnp.asarray(0.5, dtype=input_dtype)
+    elif neighborlist_format == 'ordered_sparse':
+        c = jnp.asarray(1.0, dtype=input_dtype)
+    else:
+        raise ValueError(
+            f"neighborlist_format must be one of either 'ordered_sparse' or 'sparse'. "
+            f"received {neighborlist_format=}"
+        )
+
+    _ke = jnp.asarray(ke, dtype=input_dtype)
+    return c * _ke * q[idx_i] * q[idx_j] / rij
 
 
 @partial(jax.jit, static_argnames=('neighborlist_format',))
@@ -1033,7 +1276,6 @@ def coulomb_erf_shifted_force_smooth_nosigma(
         )
 
     # Cast the constants to input dtype
-    _sigma = jnp.asarray(sigma, dtype=input_dtype)
     _ke = jnp.asarray(ke, dtype=input_dtype)
     _cutoff = jnp.asarray(cutoff, dtype=input_dtype)
     _cuton = jnp.asarray(cuton, dtype=input_dtype)
@@ -1043,7 +1285,6 @@ def coulomb_erf_shifted_force_smooth_nosigma(
 
     def force(r):
         return - 1.0 / r ** 2
-    
 
     f = switching_fn(rij, _cuton, _cutoff)
     pairwise = potential(rij)
@@ -1269,7 +1510,7 @@ class ElectrostaticEnergySparse(BaseSubModule):
                     ke=self.ke,
                     sigma=self.electrostatic_energy_scale,
                     cutoff=self.cutoff_lr,
-                    cuton=4.5,
+                    cuton=self.cutoff_lr * 0.45,
                     smearing=k_smearing,
                     neighborlist_format=self.neighborlist_format
                     )
@@ -1282,24 +1523,35 @@ class ElectrostaticEnergySparse(BaseSubModule):
                     ke=self.ke,
                     sigma=self.electrostatic_energy_scale,
                     cutoff=self.cutoff_lr,
-                    cuton=4.5,
+                    cuton=self.cutoff_lr * 0.45,
                     smearing=k_smearing,
                     neighborlist_format=self.neighborlist_format
                     )
 
         # If no cutoff is set, we just apply damping with error function and no explicit smoothing to zero.
         else:
-            # Calculate electrostatic energies per long-range edge
-            atomic_electrostatic_energy_ij = coulomb_erf(
-                partial_charges,
-                d_ij_lr,
-                idx_i_lr,
-                idx_j_lr,
-                ke=self.ke,
-                sigma=self.electrostatic_energy_scale,
-                cutoff=None,
-                neighborlist_format=self.neighborlist_format
-            )            
+            if no_sigma is not None:
+                # Undamped bare Coulomb (no erf, no cutoff)
+                atomic_electrostatic_energy_ij = coulomb_bare(
+                    partial_charges,
+                    d_ij_lr,
+                    idx_i_lr,
+                    idx_j_lr,
+                    ke=self.ke,
+                    neighborlist_format=self.neighborlist_format
+                )
+            else:
+                # Calculate electrostatic energies per long-range edge
+                atomic_electrostatic_energy_ij = coulomb_erf(
+                    partial_charges,
+                    d_ij_lr,
+                    idx_i_lr,
+                    idx_j_lr,
+                    ke=self.ke,
+                    sigma=self.electrostatic_energy_scale,
+                    cutoff=None,
+                    neighborlist_format=self.neighborlist_format
+                )            
 
         # Calculate electrostatic atomic energies via summing over long-range neighbors
         atomic_electrostatic_energy = segment_sum(
@@ -1400,6 +1652,106 @@ class ElectrostaticEnergyKspace(BaseSubModule):
     def reset_output_convention(self, output_convention):
         pass
 
+
+class DispersionEnergyKspace(BaseSubModule):
+    """K-space dispersion energy via PME or Ewald for the C6/r^6 interaction.
+
+    Uses geometric-mean charges q_i = sqrt(C6_free[Z_i] * c6_ratio_i) for PME,
+    with the Casimir-Polder mixing-rule residual handled in real space by
+    DispersionEnergySparse.
+    """
+    prop_keys: Dict
+    hirshfeld_ratios: Optional[Any] = None
+    c6_ratios: Optional[Any] = None
+    do_ewald: bool = False
+    interpolation_nodes: int = 4
+    module_name: str = "dispersion_energy_kspace"
+
+    def setup(self):
+        from jaxpme.solvers import ewald, pme
+        from jaxpme.potentials import potential as get_potential
+
+        custom_pot = c6_raw_potential()
+        if self.do_ewald:
+            self.solver = ewald(get_potential(custom_potential=custom_pot))
+        else:
+            self.solver = pme(
+                get_potential(custom_potential=custom_pot),
+                interpolation_nodes=self.interpolation_nodes,
+            )
+
+    @nn.compact
+    def __call__(self, inputs: Dict, *args, **kwargs) -> Dict[str, jnp.ndarray]:
+        """Compute per-atom k-space C6 dispersion energy via Ewald or PME.
+
+        Args:
+            inputs (Dict): Must contain ``positions``, ``k_grid_disp``,
+                ``k_smearing_disp``, ``cell``, ``node_mask``, ``atomic_numbers``,
+                and ``c6_ratios`` (or keys for computing them).
+
+        Returns:
+            Dict: ``{'dispersion_energy_kspace': Array}`` with per-atom k-space
+                dispersion energies in eV, shape: (num_nodes).
+        """
+        from jaxpme.kspace import generate_kvectors, get_reciprocal
+
+        positions = inputs['positions']
+        k_grid_disp = inputs['k_grid_disp']
+        k_smearing_disp = inputs['k_smearing_disp']
+        cell = inputs['cell']
+        pbc = jnp.array([True, True, True])
+        node_mask = inputs['node_mask']
+        atomic_numbers = inputs['atomic_numbers']
+
+        # Get c6_ratios
+        c6_ratios = inputs.get('c6_ratios')
+        if c6_ratios is None:
+            c6_ratios = self.c6_ratios(inputs)['c6_ratios']
+
+        # Dispersion charges: q_i = sqrt(C6_free[Z_i] * c6_ratio_i)
+        # C6_coef is indexed from 0, atomic_numbers from 1
+        C6_free = jnp.asarray(C6_coef, dtype=positions.dtype)
+        C6_i = C6_free[atomic_numbers - 1] * c6_ratios
+        q_disp = jnp.sqrt(jnp.maximum(C6_i, 0.0))
+
+        # Convert positions and cell from Angstrom to Bohr (C6 is in a.u.)
+        _Bohr = jnp.asarray(Bohr, dtype=positions.dtype)
+        _Hartree = jnp.asarray(Hartree, dtype=positions.dtype)
+        positions_bohr = positions / _Bohr
+        cell_bohr = cell / _Bohr
+        smearing_bohr = k_smearing_disp / _Bohr
+
+        volume_bohr = jnp.abs(jnp.linalg.det(cell_bohr))
+        reciprocal_cell_bohr = get_reciprocal(cell_bohr)
+        kvectors = generate_kvectors(
+            reciprocal_cell_bohr, k_grid_disp.shape,
+            dtype=positions.dtype, for_ewald=self.do_ewald,
+        )
+
+        if self.do_ewald:
+            potentials = self.solver.kspace(
+                smearing_bohr, q_disp, kvectors,
+                positions_bohr, volume_bohr, cell_bohr, pbc,
+            )
+        else:
+            potentials = self.solver.kspace(
+                smearing_bohr, q_disp, reciprocal_cell_bohr,
+                k_grid_disp, kvectors,
+                positions_bohr, volume_bohr, cell_bohr, pbc,
+            )
+
+        # Energy = -q_i * potential_i  (negative = attractive dispersion)
+        # Convert from Hartree to eV
+        energies = -q_disp * potentials * _Hartree
+
+        energies = safe_scale(energies, node_mask)
+
+        return dict(dispersion_energy_kspace=energies)
+
+    def reset_output_convention(self, output_convention):
+        pass
+
+
 class DispersionEnergySparse(nn.Module):
     prop_keys: Dict
     cutoff_lr: float
@@ -1407,6 +1759,7 @@ class DispersionEnergySparse(nn.Module):
     hirshfeld_ratios: Optional[Any]
     c6_ratios: Optional[Any] = None
     dispersion_energy_scale: float = 1.0
+    do_dispersion_kspace: bool = False
 
     neighborlist_format: str = 'sparse'  # or 'ordered_sparse'
     module_name = 'dispersion_energy'
@@ -1419,10 +1772,15 @@ class DispersionEnergySparse(nn.Module):
         ratios and free-atom reference data, with optional damping and a smooth
         switching function to taper the interaction to zero at ``cutoff_lr``.
 
+        When ``do_dispersion_kspace`` is True and ``k_smearing_disp`` is present in
+        inputs, the C6 term is split: the real-space part becomes the short-range
+        residual (Casimir-Polder C6 minus geometric-mean C6 long-range), while
+        C8+C10 keep the switching function.
+
         Args:
             inputs (Dict): Must contain ``node_mask``, ``idx_i_lr``, ``idx_j_lr``,
                 ``d_ij_lr``, ``atomic_numbers``, ``hirshfeld_ratios`` (or keys for
-                computing them), and optionally ``no_sigma``.
+                computing them), and optionally ``no_sigma``, ``k_smearing_disp``.
 
         Returns:
             Dict: ``{'dispersion_energy': Array}`` with per-atom dispersion energies,
@@ -1434,6 +1792,7 @@ class DispersionEnergySparse(nn.Module):
         idx_j_lr = inputs['idx_j_lr']
         d_ij_lr = inputs['d_ij_lr']
         no_sigma = inputs.get('no_sigma',None)
+        k_smearing_disp = inputs.get('k_smearing_disp', None)
 
         # Determine input dtype
         input_dtype = d_ij_lr.dtype
@@ -1442,7 +1801,7 @@ class DispersionEnergySparse(nn.Module):
         hirshfeld_ratios = inputs.get('hirshfeld_ratios')
         if hirshfeld_ratios is None:
             hirshfeld_ratios =  self.hirshfeld_ratios(inputs)['hirshfeld_ratios']
-    
+
         c6_ratios = inputs.get('c6_ratios')
         if c6_ratios is None:
             c6_ratios = self.c6_ratios(inputs)['c6_ratios']
@@ -1462,42 +1821,99 @@ class DispersionEnergySparse(nn.Module):
         # Use cubic fit for gamma
         gamma_ij = gamma_cubic_fit(alpha_ij)
 
-        # Get dispersion energy, positions are converted to to a.u.
-        if no_sigma is not None:
-            dispersion_energy_ij = vdw_QDO_disp_damp_nosigma(
-            d_ij_lr / jnp.asarray(Bohr, dtype=input_dtype),
-            gamma_ij,
-            C6_ij,
-            alpha_ij,
-            jnp.asarray(self.dispersion_energy_scale, dtype=input_dtype),
-            self.neighborlist_format
-            )
-        else:
-            dispersion_energy_ij = vdw_QDO_disp_damp(
-            d_ij_lr / jnp.asarray(Bohr, dtype=input_dtype),
-            gamma_ij,
-            C6_ij,
-            alpha_ij,
-            jnp.asarray(self.dispersion_energy_scale, dtype=input_dtype),
-            self.neighborlist_format
-            )
+        # Check if dispersion PME is active
+        use_disp_pme = self.do_dispersion_kspace and (k_smearing_disp is not None)
 
-        # If long-range cutoff is given, one needs to damp dispersion smoothly to zero at cutoff_lr.
-        if self.cutoff_lr is not None:
-            if self.cutoff_lr_damping is None:
-                raise ValueError(
-                    f"cutoff_lr is but cutoff_lr_damping is not set. "
-                    f"received {self.cutoff_lr=} and {self.cutoff_lr_damping=}."
+        if use_disp_pme:
+            # --- PME-aware real-space splitting ---
+            # C6 real-space residual: full damped Casimir-Polder C6 minus geometric-mean LR
+            # The geometric-mean LR part is what PME adds back in k-space.
+            _Bohr = jnp.asarray(Bohr, dtype=input_dtype)
+            _Hartree = jnp.asarray(Hartree, dtype=input_dtype)
+            R_bohr = d_ij_lr / _Bohr
+
+            if self.neighborlist_format == 'sparse':
+                c = jnp.asarray(0.5, dtype=input_dtype)
+            else:
+                c = jnp.asarray(1.0, dtype=input_dtype)
+
+            C8_ij = 5 / gamma_ij * C6_ij
+            C10_ij = 245 / 8 / gamma_ij ** 2 * C6_ij
+            p = jnp.asarray(self.dispersion_energy_scale, dtype=input_dtype) * 2 * 2.54 * alpha_ij ** (1.0 / 7)
+            p = jnp.asarray(p, dtype=input_dtype)
+
+            # Full damped C6 (Casimir-Polder mixing rule)
+            V_C6_full = -C6_ij / (jnp.power(R_bohr, 6) + jnp.power(p, 6))
+
+            # Geometric-mean C6 for PME subtraction
+            C6_free = jnp.asarray(C6_coef, dtype=input_dtype)
+            C6_i = C6_free[atomic_numbers[idx_i_lr] - 1] * c6_ratios[idx_i_lr]
+            C6_j = C6_free[atomic_numbers[idx_j_lr] - 1] * c6_ratios[idx_j_lr]
+            C6_geom_ij = jnp.sqrt(C6_i * C6_j)
+
+            # lr_r(sigma, R) from the c6_raw_potential: the long-range part that PME handles
+            smearing_bohr = k_smearing_disp / _Bohr
+            two_sigma2 = 2.0 * smearing_bohr ** 2
+            x = R_bohr ** 2 / two_sigma2
+            exp_neg_x = jnp.exp(-x)
+            R_bohr_safe = jnp.where(R_bohr > 0, R_bohr, 1.0)
+            lr_r_val = (1.0 - exp_neg_x * (1.0 + x + 0.5 * x ** 2)) / jnp.power(R_bohr_safe, 6)
+
+            # C6 residual = full damped C6 + geometric-mean * lr_r (subtract LR part that PME adds)
+            V_C6_residual = V_C6_full + C6_geom_ij * lr_r_val
+
+            # C8 + C10 with switching (not in PME)
+            V_C8C10 = -C8_ij / (jnp.power(R_bohr, 8) + jnp.power(p, 8)) - C10_ij / (jnp.power(R_bohr, 10) + jnp.power(p, 10))
+
+            # Apply switching to C8+C10 only
+            if self.cutoff_lr is not None:
+                w = safe_mask(
+                    d_ij_lr > 0,
+                    partial(switching_fn, x_on=self.cutoff_lr - self.cutoff_lr_damping, x_off=self.cutoff_lr),
+                    d_ij_lr,
+                    0.
+                )
+                V_C8C10 = safe_scale(V_C8C10, w, 0.)
+
+            dispersion_energy_ij = c * (V_C6_residual + V_C8C10) * _Hartree
+
+        else:
+            # --- Original code path (no PME) ---
+            if no_sigma is not None:
+                dispersion_energy_ij = vdw_QDO_disp_damp_nosigma(
+                d_ij_lr / jnp.asarray(Bohr, dtype=input_dtype),
+                gamma_ij,
+                C6_ij,
+                alpha_ij,
+                jnp.asarray(self.dispersion_energy_scale, dtype=input_dtype),
+                self.neighborlist_format
+                )
+            else:
+                dispersion_energy_ij = vdw_QDO_disp_damp(
+                d_ij_lr / jnp.asarray(Bohr, dtype=input_dtype),
+                gamma_ij,
+                C6_ij,
+                alpha_ij,
+                jnp.asarray(self.dispersion_energy_scale, dtype=input_dtype),
+                self.neighborlist_format
                 )
 
-            w = safe_mask(
-                d_ij_lr > 0,
-                partial(switching_fn, x_on=self.cutoff_lr - self.cutoff_lr_damping, x_off=self.cutoff_lr),
-                d_ij_lr,
-                0.
-            )
+            # If long-range cutoff is given, damp dispersion smoothly to zero at cutoff_lr.
+            if self.cutoff_lr is not None:
+                if self.cutoff_lr_damping is None:
+                    raise ValueError(
+                        f"cutoff_lr is but cutoff_lr_damping is not set. "
+                        f"received {self.cutoff_lr=} and {self.cutoff_lr_damping=}."
+                    )
 
-            dispersion_energy_ij = safe_scale(dispersion_energy_ij, w, 0.)
+                w = safe_mask(
+                    d_ij_lr > 0,
+                    partial(switching_fn, x_on=self.cutoff_lr - self.cutoff_lr_damping, x_off=self.cutoff_lr),
+                    d_ij_lr,
+                    0.
+                )
+
+                dispersion_energy_ij = safe_scale(dispersion_energy_ij, w, 0.)
 
         atomic_dispersion_energy = segment_sum(
             dispersion_energy_ij,

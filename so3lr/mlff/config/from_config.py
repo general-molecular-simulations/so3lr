@@ -74,6 +74,8 @@ def make_so3krates_sparse_from_config(
         electrostatic_energy_bool=model_config.electrostatic_energy_bool,
         electrostatic_energy_kspace_method=getattr(config, 'electrostatic_energy_kspace_method', 'pme'),
         electrostatic_energy_kspace_interp_nodes=getattr(config, 'electrostatic_energy_kspace_interp_nodes', 4),
+        dispersion_energy_kspace_do_ewald_bool = getattr(config, 'dispersion_energy_kspace_do_ewald_bool', None),
+        dispersion_energy_kspace_interp_nodes = getattr(config, 'dispersion_energy_kspace_interp_nodes', 4),
         electrostatic_energy_scale=model_config.electrostatic_energy_scale,
         dispersion_energy_bool=model_config.dispersion_energy_bool,
         dispersion_energy_cutoff_lr_damping=model_config.dispersion_energy_cutoff_lr_damping,
