@@ -31,7 +31,7 @@ def package_dir():
 class TestHessianShape:
     """Test that Hessian has the correct shape."""
 
-    @pytest.mark.parametrize('name', ['atat'])  # Only test on smallest molecule for speed
+    @pytest.mark.parametrize('name', ['acetone'])  # Only test on smallest molecule for speed
     def test_full_hessian_shape(self, name: str, package_dir):
         """
         Test that full Hessian has shape (n_atoms, 3, n_atoms, 3).
@@ -67,7 +67,7 @@ class TestHessianShape:
         assert hessian.shape == expected_shape, \
             f"Expected Hessian shape {expected_shape}, got {hessian.shape}"
 
-    @pytest.mark.parametrize('name', ['atat'])  # Only test on smallest molecule for speed
+    @pytest.mark.parametrize('name', ['acetone'])  # Only test on smallest molecule for speed
     def test_subsystem_hessian_shape(self, name: str, package_dir):
         """
         Test that subsystem Hessian has shape (n_subset, 3, n_subset, 3).
@@ -113,7 +113,7 @@ class TestHessianShape:
 class TestHessianSymmetry:
     """Test that Hessian has expected symmetry properties."""
 
-    @pytest.mark.parametrize('name', ['atat'])  # Only test on smallest molecule for speed
+    @pytest.mark.parametrize('name', ['acetone'])  # Only test on smallest molecule for speed
     def test_hessian_symmetry(self, name: str, package_dir):
         """
         Test that full Hessian is symmetric: H[i,a,j,b] = H[j,b,i,a].
@@ -199,7 +199,7 @@ class TestHessianNumerical:
         atoms.set_positions(original_positions)
         return numerical_hessian
 
-    @pytest.mark.parametrize('name', ['atat'])
+    @pytest.mark.parametrize('name', ['acetone'])
     def test_full_hessian_numerical(self, name: str, package_dir, full_test):
         """
         Test full Hessian against numerical Hessian.
@@ -304,7 +304,7 @@ class TestSubsystemHessianNumerical:
         atoms.set_positions(original_positions)
         return numerical_hessian
 
-    @pytest.mark.parametrize('name', ['atat'])
+    @pytest.mark.parametrize('name', ['acetone'])
     def test_subsystem_hessian_numerical(self, name: str, package_dir, full_test):
         """
         Test subsystem Hessian against numerical Hessian.
@@ -368,7 +368,7 @@ class TestSubsystemHessianNumerical:
             err_msg=f"Subsystem Hessian mismatch for {name}"
         )
 
-    @pytest.mark.parametrize('name', ['atat'])
+    @pytest.mark.parametrize('name', ['acetone'])
     def test_subsystem_matches_full_hessian(self, name: str, package_dir):
         """
         Test that subsystem Hessian matches the corresponding block of full Hessian.
@@ -438,7 +438,7 @@ class TestSubsystemHessianNumerical:
 class TestHessianConsistency:
     """Test consistency between Hessian and forces."""
 
-    @pytest.mark.parametrize('name', ['atat'])  # Only test on smallest molecule for speed
+    @pytest.mark.parametrize('name', ['acetone'])  # Only test on smallest molecule for speed
     def test_energy_unchanged_with_hessian(self, name: str, package_dir):
         """
         Test that energy is the same whether or not Hessian is calculated.
@@ -488,7 +488,7 @@ class TestHessianConsistency:
             err_msg=f"Energy differs with Hessian calculation for {name}"
         )
 
-    @pytest.mark.parametrize('name', ['atat'])  # Only test on smallest molecule for speed
+    @pytest.mark.parametrize('name', ['acetone'])  # Only test on smallest molecule for speed
     def test_forces_unchanged_with_hessian(self, name: str, package_dir):
         """
         Test that forces are the same whether or not Hessian is calculated.
@@ -541,7 +541,7 @@ class TestHessianConsistency:
 class TestDifferentSubsystemRanges:
     """Test Hessian with different subsystem ranges."""
 
-    @pytest.mark.parametrize('name', ['atat'])
+    @pytest.mark.parametrize('name', ['acetone'])
     def test_middle_atoms_subset(self, name: str, package_dir):
         """
         Test Hessian for atoms in the middle of the molecule.
@@ -582,7 +582,7 @@ class TestDifferentSubsystemRanges:
         assert hessian.shape == expected_shape, \
             f"Expected Hessian shape {expected_shape}, got {hessian.shape}"
 
-    @pytest.mark.parametrize('name', ['atat'])
+    @pytest.mark.parametrize('name', ['acetone'])
     def test_last_atoms_subset(self, name: str, package_dir):
         """
         Test Hessian for atoms at the end of the molecule.
@@ -622,7 +622,7 @@ class TestDifferentSubsystemRanges:
         assert hessian.shape == expected_shape, \
             f"Expected Hessian shape {expected_shape}, got {hessian.shape}"
 
-    @pytest.mark.parametrize('name', ['atat'])
+    @pytest.mark.parametrize('name', ['acetone'])
     def test_single_atom_hessian(self, name: str, package_dir):
         """
         Test Hessian for a single atom.
