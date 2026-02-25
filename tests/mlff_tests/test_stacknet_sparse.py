@@ -66,14 +66,12 @@ graph1 = jraph.GraphsTuple(
     n_node=jnp.array([3]),
     n_edge=jnp.array([4]),
 )
-lr1 = jraph.GraphsTuple(
-    nodes=None, edges=None,
-    senders=jnp.array([], dtype=jnp.int64),
-    receivers=jnp.array([], dtype=jnp.int64),
-    n_node=jnp.array([3]),
-    n_edge=jnp.array([0]),
-    globals=None,
-)
+lr1 = {
+    'idx_i_lr': jnp.array([], dtype=jnp.int64),
+    'idx_j_lr': jnp.array([], dtype=jnp.int64),
+    'cell_offsets_lr': None,
+    'n_pairs': jnp.array([0]),
+}
 
 graph2 = jraph.GraphsTuple(
     nodes=dict(
@@ -93,14 +91,12 @@ graph2 = jraph.GraphsTuple(
     n_node=jnp.array([2]),
     n_edge=jnp.array([2]),
 )
-lr2 = jraph.GraphsTuple(
-    nodes=None, edges=None,
-    senders=jnp.array([], dtype=jnp.int64),
-    receivers=jnp.array([], dtype=jnp.int64),
-    n_node=jnp.array([2]),
-    n_edge=jnp.array([0]),
-    globals=None,
-)
+lr2 = {
+    'idx_i_lr': jnp.array([], dtype=jnp.int64),
+    'idx_j_lr': jnp.array([], dtype=jnp.int64),
+    'cell_offsets_lr': None,
+    'n_pairs': jnp.array([0]),
+}
 
 graph3 = jraph.GraphsTuple(
     nodes=dict(
@@ -122,14 +118,12 @@ graph3 = jraph.GraphsTuple(
     n_node=jnp.array([4]),
     n_edge=jnp.array([6]),
 )
-lr3 = jraph.GraphsTuple(
-    nodes=None, edges=None,
-    senders=jnp.array([], dtype=jnp.int64),
-    receivers=jnp.array([], dtype=jnp.int64),
-    n_node=jnp.array([4]),
-    n_edge=jnp.array([0]),
-    globals=None,
-)
+lr3 = {
+    'idx_i_lr': jnp.array([], dtype=jnp.int64),
+    'idx_j_lr': jnp.array([], dtype=jnp.int64),
+    'cell_offsets_lr': None,
+    'n_pairs': jnp.array([0]),
+}
 
 num_features = 64
 num_layers = 2

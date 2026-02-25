@@ -26,14 +26,12 @@ graph1 = jraph.GraphsTuple(
     n_node=jnp.array([3]),
     n_edge=jnp.array([4]),
 )
-lr1 = jraph.GraphsTuple(
-    nodes=None, edges=None,
-    senders=jnp.array([], dtype=jnp.int32),
-    receivers=jnp.array([], dtype=jnp.int32),
-    n_node=jnp.array([3]),
-    n_edge=jnp.array([0]),
-    globals=None,
-)
+lr1 = {
+    'idx_i_lr': jnp.array([], dtype=jnp.int32),
+    'idx_j_lr': jnp.array([], dtype=jnp.int32),
+    'cell_offsets_lr': None,
+    'n_pairs': jnp.array([0]),
+}
 
 graph2 = jraph.GraphsTuple(
     nodes=dict(
@@ -52,14 +50,12 @@ graph2 = jraph.GraphsTuple(
     n_node=jnp.array([2]),
     n_edge=jnp.array([2]),
 )
-lr2 = jraph.GraphsTuple(
-    nodes=None, edges=None,
-    senders=jnp.array([], dtype=jnp.int32),
-    receivers=jnp.array([], dtype=jnp.int32),
-    n_node=jnp.array([2]),
-    n_edge=jnp.array([0]),
-    globals=None,
-)
+lr2 = {
+    'idx_i_lr': jnp.array([], dtype=jnp.int32),
+    'idx_j_lr': jnp.array([], dtype=jnp.int32),
+    'cell_offsets_lr': None,
+    'n_pairs': jnp.array([0]),
+}
 
 graph3 = jraph.GraphsTuple(
     nodes=dict(
@@ -80,14 +76,12 @@ graph3 = jraph.GraphsTuple(
     n_node=jnp.array([4]),
     n_edge=jnp.array([6]),
 )
-lr3 = jraph.GraphsTuple(
-    nodes=None, edges=None,
-    senders=jnp.array([], dtype=jnp.int32),
-    receivers=jnp.array([], dtype=jnp.int32),
-    n_node=jnp.array([4]),
-    n_edge=jnp.array([0]),
-    globals=None,
-)
+lr3 = {
+    'idx_i_lr': jnp.array([], dtype=jnp.int32),
+    'idx_j_lr': jnp.array([], dtype=jnp.int32),
+    'cell_offsets_lr': None,
+    'n_pairs': jnp.array([0]),
+}
 
 
 @pytest.mark.parametrize("max_num_graphs", [2, 3, 4])
@@ -189,15 +183,13 @@ graph_with_lr = jraph.GraphsTuple(
     n_edge=jnp.array([2]),
 )
 
-# Long-range graph with actual neighbors (all pairs beyond short-range cutoff)
-lr_with_neighbors = jraph.GraphsTuple(
-    nodes=None, edges=None,
-    senders=jnp.array([0, 1, 2]),  # 3 long-range pairs
-    receivers=jnp.array([2, 0, 1]),
-    n_node=jnp.array([3]),
-    n_edge=jnp.array([3]),  # 3 pairs
-    globals=None,
-)
+# Long-range data with actual neighbors (all pairs beyond short-range cutoff)
+lr_with_neighbors = {
+    'idx_i_lr': jnp.array([2, 0, 1]),  # receivers
+    'idx_j_lr': jnp.array([0, 1, 2]),  # senders
+    'cell_offsets_lr': None,
+    'n_pairs': jnp.array([3]),
+}
 
 
 def test_lr_batching_preserves_indices():
@@ -213,11 +205,10 @@ def test_lr_batching_preserves_indices():
     assert len(batched) == 1
     g, lr = batched[0]
     
-    # Long-range graph should have the original 3 pairs
-    # Check that the receivers/senders are preserved (first 3 values)
-    npt.assert_array_equal(lr.receivers[:3], jnp.array([2, 0, 1]))
-    npt.assert_array_equal(lr.senders[:3], jnp.array([0, 1, 2]))
-    npt.assert_equal(lr.n_edge[0], 3)  # First graph has 3 pairs
+    # LR dict should have the original 3 pairs
+    # Check that idx_i_lr/idx_j_lr are preserved (first 3 values)
+    npt.assert_array_equal(lr['idx_i_lr'][:3], jnp.array([2, 0, 1]))
+    npt.assert_array_equal(lr['idx_j_lr'][:3], jnp.array([0, 1, 2]))
 
 
 def test_lr_n_pairs_budget_constraint():
@@ -258,17 +249,15 @@ def test_lr_multiple_graphs_batch():
         n_node=jnp.array([2]),
         n_edge=jnp.array([1]),
     )
-    lr2 = jraph.GraphsTuple(
-        nodes=None, edges=None,
-        senders=jnp.array([0, 1]),  # 2 pairs
-        receivers=jnp.array([1, 0]),
-        n_node=jnp.array([2]),
-        n_edge=jnp.array([2]),
-        globals=None,
-    )
+    lr2_local = {
+        'idx_i_lr': jnp.array([1, 0]),   # receivers
+        'idx_j_lr': jnp.array([0, 1]),   # senders
+        'cell_offsets_lr': None,
+        'n_pairs': jnp.array([2]),
+    }
     
     batches = list(dynamically_batch_with_lr(
-        iter([(graph_with_lr, lr_with_neighbors), (graph2_with_lr, lr2)]),
+        iter([(graph_with_lr, lr_with_neighbors), (graph2_with_lr, lr2_local)]),
         n_node=10,
         n_edge=10,
         n_graph=3,
@@ -282,9 +271,11 @@ def test_lr_multiple_graphs_batch():
     num_graphs = jnp.sum(jraph.get_graph_padding_mask(g))
     npt.assert_equal(num_graphs.item(), 2)
     
-    # Long-range graph should have 5 pairs total (3 + 2)
-    total_lr_pairs = sum(lr.n_edge[:2])  # First two graphs
-    npt.assert_equal(total_lr_pairs, 5)
+    # LR dict should be padded to n_pairs=10 total length
+    npt.assert_equal(len(lr['idx_i_lr']), 10)
+    # First 3 pairs from graph1, next 2 from graph2 (offset by 3 nodes)
+    npt.assert_array_equal(lr['idx_i_lr'][:3], jnp.array([2, 0, 1]))
+    npt.assert_array_equal(lr['idx_i_lr'][3:5], jnp.array([1+3, 0+3]))
 
 
 def test_lr_empty_raises_on_single_graph_too_large():

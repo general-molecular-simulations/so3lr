@@ -13,7 +13,7 @@ from so3lr.mlff.utils import jraph_utils
 from so3lr.mlff.utils.jraph_utils import dynamically_batch_with_lr
 
 
-def graph_to_input(graph: jraph.GraphsTuple, long_range: jraph.GraphsTuple = None):
+def graph_to_input(graph: jraph.GraphsTuple, lr_data: dict = None):
     return dict(
         positions=graph.nodes.get('positions'),
         atomic_numbers=graph.nodes.get('atomic_numbers'),
@@ -25,12 +25,12 @@ def graph_to_input(graph: jraph.GraphsTuple, long_range: jraph.GraphsTuple = Non
         graph_mask=jnp.ones((1,)).astype(jnp.bool_),
         node_mask=jnp.ones((graph.n_node.item(),)).astype(jnp.bool_),
         theory_mask=jnp.ones((1, 1)).astype(jnp.bool_),
-        idx_i_lr=long_range.receivers if long_range is not None else jnp.array([]),
-        idx_j_lr=long_range.senders if long_range is not None else jnp.array([]),
+        idx_i_lr=lr_data['idx_i_lr'] if lr_data is not None else jnp.array([]),
+        idx_j_lr=lr_data['idx_j_lr'] if lr_data is not None else jnp.array([]),
     )
 
 
-def batched_graph_to_input(graph: jraph.GraphsTuple, long_range: jraph.GraphsTuple = None):
+def batched_graph_to_input(graph: jraph.GraphsTuple, lr_data: dict = None):
     inputs = dict(
         positions=graph.nodes.get('positions'),
         atomic_numbers=graph.nodes.get('atomic_numbers'),
@@ -38,8 +38,8 @@ def batched_graph_to_input(graph: jraph.GraphsTuple, long_range: jraph.GraphsTup
         idx_j=graph.senders,
         cell=None,
         cell_offset=None,
-        idx_i_lr=long_range.receivers if long_range is not None else jnp.array([]),
-        idx_j_lr=long_range.senders if long_range is not None else jnp.array([]),
+        idx_i_lr=lr_data['idx_i_lr'] if lr_data is not None else jnp.array([]),
+        idx_j_lr=lr_data['idx_j_lr'] if lr_data is not None else jnp.array([]),
     )
     batch_info = jraph_utils.batch_info_fn(graph)
     inputs.update(
@@ -72,14 +72,12 @@ graph1 = jraph.GraphsTuple(
     n_node=jnp.array([3]),
     n_edge=jnp.array([4]),
 )
-lr1 = jraph.GraphsTuple(
-    nodes=None, edges=None,
-    senders=jnp.array([], dtype=jnp.int64),
-    receivers=jnp.array([], dtype=jnp.int64),
-    n_node=jnp.array([3]),
-    n_edge=jnp.array([0]),
-    globals=None,
-)
+lr1 = {
+    'idx_i_lr': jnp.array([], dtype=jnp.int64),
+    'idx_j_lr': jnp.array([], dtype=jnp.int64),
+    'cell_offsets_lr': None,
+    'n_pairs': jnp.array([0]),
+}
 
 graph2 = jraph.GraphsTuple(
     nodes=dict(
@@ -99,14 +97,12 @@ graph2 = jraph.GraphsTuple(
     n_node=jnp.array([2]),
     n_edge=jnp.array([2]),
 )
-lr2 = jraph.GraphsTuple(
-    nodes=None, edges=None,
-    senders=jnp.array([], dtype=jnp.int64),
-    receivers=jnp.array([], dtype=jnp.int64),
-    n_node=jnp.array([2]),
-    n_edge=jnp.array([0]),
-    globals=None,
-)
+lr2 = {
+    'idx_i_lr': jnp.array([], dtype=jnp.int64),
+    'idx_j_lr': jnp.array([], dtype=jnp.int64),
+    'cell_offsets_lr': None,
+    'n_pairs': jnp.array([0]),
+}
 
 graph3 = jraph.GraphsTuple(
     nodes=dict(
@@ -128,14 +124,12 @@ graph3 = jraph.GraphsTuple(
     n_node=jnp.array([4]),
     n_edge=jnp.array([6]),
 )
-lr3 = jraph.GraphsTuple(
-    nodes=None, edges=None,
-    senders=jnp.array([], dtype=jnp.int64),
-    receivers=jnp.array([], dtype=jnp.int64),
-    n_node=jnp.array([4]),
-    n_edge=jnp.array([0]),
-    globals=None,
-)
+lr3 = {
+    'idx_i_lr': jnp.array([], dtype=jnp.int64),
+    'idx_j_lr': jnp.array([], dtype=jnp.int64),
+    'cell_offsets_lr': None,
+    'n_pairs': jnp.array([0]),
+}
 
 # Define the StackNetSparse model.
 num_features = 32

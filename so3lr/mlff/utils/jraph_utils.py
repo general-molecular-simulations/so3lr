@@ -39,7 +39,7 @@ def batch_info_fn(batched_graph: jraph.GraphsTuple):
 
 
 @jax.jit
-def graph_to_batch_fn(graph: jraph.GraphsTuple, long_range: jraph.GraphsTuple):
+def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict):
     batch = dict(
         positions=graph.nodes.get('positions'),
         atomic_numbers=graph.nodes.get('atomic_numbers'),
@@ -54,9 +54,9 @@ def graph_to_batch_fn(graph: jraph.GraphsTuple, long_range: jraph.GraphsTuple):
         total_charge=graph.globals.get('total_charge'),
         dipole_vec=graph.globals.get('dipole_vec'),
         hirshfeld_ratios=graph.nodes.get('hirshfeld_ratios'),
-        idx_i_lr=long_range.receivers,
-        idx_j_lr=long_range.senders,
-        cell_offset_lr=long_range.edges.get('cell_offsets') if long_range.edges is not None else None,
+        idx_i_lr=lr_batch['idx_i_lr'],
+        idx_j_lr=lr_batch['idx_j_lr'],
+        cell_offset_lr=lr_batch.get('cell_offsets_lr'),
         theory_level=graph.globals.get('theory_level'),
         theory_mask=graph.globals.get('theory_mask'),
         residue_charge=graph.globals.get('residue_charge'),
@@ -67,19 +67,19 @@ def graph_to_batch_fn(graph: jraph.GraphsTuple, long_range: jraph.GraphsTuple):
     return batch
 
 
-def graph_to_inputs_fn(graph: jraph.GraphsTuple, long_range: jraph.GraphsTuple):
+def graph_to_inputs_fn(graph: jraph.GraphsTuple, lr_batch: dict):
     """
     Wrapper around graph_to_batch_fn.
 
     Args:
         graph: Batched jraph.GraphsTuple.
-        long_range: Batched jraph.GraphsTuple for long-range neighbors.
+        lr_batch: Dict with LR index arrays ('idx_i_lr', 'idx_j_lr', 'cell_offsets_lr').
 
     Returns:
         Dictionary representation of the graph.
 
     """
-    return graph_to_batch_fn(graph, long_range)
+    return graph_to_batch_fn(graph, lr_batch)
 
 
 def dynamically_batch_with_lr(
@@ -89,37 +89,48 @@ def dynamically_batch_with_lr(
     n_graph: int,
     n_pairs: int,
 ):
-    """Batch graphs + long-range graphs respecting both budgets.
-
-    This wraps jraph's batching logic to simultaneously track both
-    short-range (n_node/n_edge) and long-range (n_pairs) budgets when
-    deciding how many graphs fit in one batch.
+    """Batch graphs + long-range data respecting both budgets.
 
     Args:
-        data_iterator: Iterator yielding (graph, long_range_graph) tuples,
-            where both are jraph.GraphsTuple objects.
+        data_iterator: Iterator yielding (graph, lr_data) tuples,
+            where graph is a jraph.GraphsTuple and lr_data is a dict
+            with keys 'idx_i_lr', 'idx_j_lr', 'cell_offsets_lr', 'n_pairs'.
         n_node: Maximum number of nodes in a batch (including padding graph).
         n_edge: Maximum number of edges in a batch.
         n_graph: Maximum number of graphs in a batch (including padding graph).
         n_pairs: Maximum number of long-range pairs in a batch.
 
     Yields:
-        (padded_graph, padded_long_range_graph) tuples with fixed sizes.
+        (padded_graph, lr_batch_dict) tuples with fixed sizes.
     """
+    # Fast path: no LR budget — use native jraph batching.
+    if n_pairs == 0:
+        empty_lr = {
+            'idx_i_lr': np.array([], dtype=np.int32),
+            'idx_j_lr': np.array([], dtype=np.int32),
+            'cell_offsets_lr': None,
+        }
+        graphs_only = [g for g, _ in data_iterator]
+        for batched in jraph.dynamically_batch(
+            iter(graphs_only), n_node=n_node, n_edge=n_edge, n_graph=n_graph
+        ):
+            yield batched, empty_lr
+        return
+
     accumulated = []
     acc_nodes = 0
     acc_edges = 0
     acc_graphs = 0
     acc_pairs = 0
 
-    for graph, lr in data_iterator:
+    for graph, lr_data in data_iterator:
         elem_nodes = int(np.sum(graph.n_node))
         elem_edges = int(np.sum(graph.n_edge))
-        elem_pairs = int(np.sum(lr.n_edge))  # n_edge in lr graph = n_pairs
+        elem_pairs = int(lr_data['n_pairs'][0])
         elem_graphs = len(graph.n_node)
 
         if not accumulated:
-            accumulated = [(graph, lr)]
+            accumulated = [(graph, lr_data)]
             acc_nodes = elem_nodes
             acc_edges = elem_edges
             acc_graphs = elem_graphs
@@ -133,17 +144,16 @@ def dynamically_batch_with_lr(
             or acc_edges + elem_edges > n_edge
             or acc_pairs + elem_pairs > n_pairs
         ):
-            # Yield current batch.
             yield _finalize_batch(
                 accumulated, n_node, n_edge, n_graph, n_pairs
             )
-            accumulated = [(graph, lr)]
+            accumulated = [(graph, lr_data)]
             acc_nodes = elem_nodes
             acc_edges = elem_edges
             acc_graphs = elem_graphs
             acc_pairs = elem_pairs
         else:
-            accumulated.append((graph, lr))
+            accumulated.append((graph, lr_data))
             acc_nodes += elem_nodes
             acc_edges += elem_edges
             acc_graphs += elem_graphs
@@ -154,18 +164,46 @@ def dynamically_batch_with_lr(
 
 
 def _finalize_batch(items, n_node, n_edge, n_graph, n_pairs):
-    """Batch and pad both graph and long-range graph structures."""
+    """Batch main graph and manually concatenate/offset/pad LR indices."""
     graphs = [g for g, _ in items]
-    lrs = [lr for _, lr in items]
+    lr_datas = [lr for _, lr in items]
 
-    # Batch main graphs using standard jraph
+    # Batch main graph (single batch + pad)
     batched_graph = jraph.batch(graphs)
     batched_graph = jraph.pad_with_graphs(batched_graph, n_node, n_edge, n_graph)
 
-    # Batch long-range graphs using standard jraph
-    batched_lr = jraph.batch(lrs)
-    # Pad with n_pairs as n_edge budget for the long-range graph
-    # Use n_node=n_node since lr.n_node mirrors the main graph
-    batched_lr = jraph.pad_with_graphs(batched_lr, n_node, n_pairs, n_graph)
+    # Manually concatenate + offset LR indices
+    node_cumsum = np.cumsum([0] + [int(np.sum(g.n_node)) for g in graphs[:-1]])
+    lr_i_parts = [lr['idx_i_lr'] + offset for lr, offset in zip(lr_datas, node_cumsum)]
+    lr_j_parts = [lr['idx_j_lr'] + offset for lr, offset in zip(lr_datas, node_cumsum)]
 
-    return batched_graph, batched_lr
+    all_lr_i = np.concatenate(lr_i_parts) if lr_i_parts else np.array([], dtype=np.int32)
+    all_lr_j = np.concatenate(lr_j_parts) if lr_j_parts else np.array([], dtype=np.int32)
+
+    if len(all_lr_i) > n_pairs:
+        raise RuntimeError(
+            f"Batch has {len(all_lr_i)} LR pairs but n_pairs budget is {n_pairs}. "
+            f"Increase batch_max_num_pairs."
+        )
+
+    # Pad to fixed n_pairs length, pointing to the padding node (n_node - 1)
+    # so that padded pairs have zero contribution (same as jraph.pad_with_graphs)
+    pad_len = n_pairs - len(all_lr_i)
+    pad_idx = n_node - 1
+    padded_lr_i = np.pad(all_lr_i, (0, pad_len), constant_values=pad_idx).astype(np.int32)
+    padded_lr_j = np.pad(all_lr_j, (0, pad_len), constant_values=pad_idx).astype(np.int32)
+
+    # Handle cell_offsets_lr if present
+    if lr_datas[0].get('cell_offsets_lr') is not None:
+        lr_offsets_parts = [lr['cell_offsets_lr'] for lr in lr_datas]
+        all_offsets = np.concatenate(lr_offsets_parts)
+        padded_offsets = np.pad(all_offsets, ((0, pad_len), (0, 0)), constant_values=0)
+    else:
+        padded_offsets = None
+
+    lr_batch = {
+        'idx_i_lr': padded_lr_i,
+        'idx_j_lr': padded_lr_j,
+        'cell_offsets_lr': padded_offsets,
+    }
+    return batched_graph, lr_batch

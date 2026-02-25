@@ -27,7 +27,7 @@ def test_data_load(calculate_neighbors_lr: bool):
     # all_data is now a list of (graph, long_range) tuples
     graph0, lr0 = all_data[0]
     npt.assert_(isinstance(graph0, jraph.GraphsTuple))
-    npt.assert_(isinstance(lr0, jraph.GraphsTuple))
+    npt.assert_(isinstance(lr0, dict))
 
     for i in range(0, 100)[::10]:
         graph, lr = all_data[i]
@@ -45,9 +45,9 @@ def test_data_load(calculate_neighbors_lr: bool):
         num_unpaired_electrons = graph.globals['num_unpaired_electrons']
         dipole_vec = graph.globals['dipole_vec']
 
-        num_pairs = lr.n_edge
-        idx_i_lr = lr.receivers
-        idx_j_lr = lr.senders
+        num_pairs = lr['n_pairs']
+        idx_i_lr = lr['idx_i_lr']
+        idx_j_lr = lr['idx_j_lr']
 
         npt.assert_(isinstance(forces, np.ndarray))
         npt.assert_(isinstance(energy, np.ndarray))
@@ -124,9 +124,9 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
 
         graph0, lr0 = all_data[0]
         npt.assert_(isinstance(graph0, jraph.GraphsTuple))
-        npt.assert_(isinstance(lr0, jraph.GraphsTuple))
+        npt.assert_(isinstance(lr0, dict))
         # PBC long-range should have cell_offsets
-        npt.assert_(lr0.edges is not None and lr0.edges.get('cell_offsets') is not None)
+        npt.assert_(lr0.get('cell_offsets_lr') is not None)
     else:
         all_data, data_stats = loader.load(
             cutoff=4.,
@@ -213,12 +213,8 @@ def test_jraph_dynamically_batch(calculate_neighbors_lr: bool):
             n_graph=10,
             n_pairs=0
         ):
-            npt.assert_equal(
-                lr.n_edge,
-                np.zeros(len(jraph.get_graph_padding_mask(x)))
-            )
-            npt.assert_equal(lr.receivers.shape, (0, ))
-            npt.assert_equal(lr.senders.shape, (0, ))
+            npt.assert_equal(lr['idx_i_lr'].shape, (0, ))
+            npt.assert_equal(lr['idx_j_lr'].shape, (0, ))
     else:
         # Too small n_pairs - single graph won't fit
         with npt.assert_raises(RuntimeError):

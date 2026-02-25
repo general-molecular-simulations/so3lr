@@ -97,10 +97,10 @@ class NpzDataLoaderSparse:
                     calculate_neighbors_lr=calculate_neighbors_lr,
                     cutoff_lr=cutoff_lr
                 )
-                graph, long_range = result
+                graph, lr_data = result
                 num_nodes = len(graph.nodes['atomic_numbers'])
                 num_edges = len(graph.receivers)
-                num_pairs = int(long_range.n_edge[0])
+                num_pairs = int(lr_data['n_pairs'][0])
                 max_num_of_nodes = max_num_of_nodes if num_nodes <= max_num_of_nodes else num_nodes
                 max_num_of_edges = max_num_of_edges if num_edges <= max_num_of_edges else num_edges
                 max_num_of_pairs = max_num_of_pairs if num_pairs <= max_num_of_pairs else num_pairs
@@ -115,6 +115,11 @@ class NpzDataLoaderSparse:
                     f'`max(pick_idx) = {max(pick_idx)} >= cardinality = {i} of the dataset`.'
                 )
         logging.mlff("... done!")
+        logging.mlff(
+            f"Data stats: max_num_of_nodes={max_num_of_nodes}, "
+            f"max_num_of_edges={max_num_of_edges}, "
+            f"max_num_of_pairs={max_num_of_pairs}"
+        )
 
         return loaded_data, {'max_num_of_nodes': max_num_of_nodes, 'max_num_of_edges': max_num_of_edges, 'max_num_of_pairs': max_num_of_pairs}
 
@@ -169,7 +174,7 @@ def entry_to_jraph(
         energy = np.nan
 
     max_num_theory_levels = 16
-    theory_level = np.reshape(1, (1,))
+    theory_level = np.reshape(0, (1,))
     theory_mask = np.eye(max_num_theory_levels)[theory_level] # (1, num_theory_levels)
 
     # Dipoles are NaN when not present.
@@ -278,21 +283,10 @@ def entry_to_jraph(
         n_edge=n_edge,
         globals=global_context,
     )
-    # Build LR edge features - only cell_offsets needed (cell is in globals)
-    if cell_offsets_lr is not None:
-        lr_edge_features = {
-            "cell_offsets": cell_offsets_lr
-        }
-    else:
-        lr_edge_features = None
-
-    long_range = jraph.GraphsTuple(
-        nodes=None,
-        edges=lr_edge_features,
-        senders=idx_j_lr,
-        receivers=idx_i_lr,
-        n_node=n_node,
-        n_edge=n_pairs,
-        globals=None,
-    )
-    return graph, long_range
+    lr_data = {
+        'idx_i_lr': idx_i_lr,
+        'idx_j_lr': idx_j_lr,
+        'cell_offsets_lr': cell_offsets_lr,
+        'n_pairs': n_pairs,
+    }
+    return graph, lr_data
