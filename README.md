@@ -263,14 +263,14 @@ print(f"Partial charges: {partial_charges}")
 **Available observables:**
 | Observable | Description | Shape |
 |------------|-------------|-------|
-| `nn_energy` | Neural network energy contribution | `(n_atoms,)` |
-| `electrostatic_energy` | Damped electrostatic energy | `(n_atoms,)` |
-| `dispersion_energy` | Damped dispersion energy | `(n_atoms,)` |
-| `zbl_repulsion` | ZBL short-range repulsion | `(n_atoms,)` |
+| `nn_energy` | Neural network energy contribution | `()` |
+| `electrostatic_energy` | Damped electrostatic energy | `()` |
+| `dispersion_energy` | Damped dispersion energy | `()` |
+| `zbl_repulsion` | ZBL short-range repulsion | `()` |
 | `partial_charges` | Atomic partial charges | `(n_atoms,)` |
 | `hirshfeld_ratios` | Hirshfeld volume ratios | `(n_atoms,)` |
-| `electrostatic_energy_undamped` | Undamped electrostatic energy | `(n_atoms,)` |
-| `dispersion_energy_undamped` | Undamped dispersion energy | `(n_atoms,)` |
+| `electrostatic_energy_undamped` | Undamped electrostatic energy | `()` |
+| `dispersion_energy_undamped` | Undamped dispersion energy | `()` |
 
 ### Observable Gradients
 
@@ -311,7 +311,7 @@ for idx in [0, 1, 2]:
 
 **Gradient/Jacobian suffixes:**
 - `_grad`: For scalar observables (energies). Returns gradient of shape `(3,)`.
-- `_jac`: For vector observables (charges, ratios). Returns Jacobian of shape `(n_atoms, 3)`.
+- `_jac`: For vector observables (charges, Hirshfeld ratios). Returns Jacobian of shape `(n_atoms, 3)`.
 
 ### Hessian Calculation
 
@@ -456,13 +456,6 @@ high-level perspective, all that needs to be done is to define some function `sy
 whatever input structure one has to a `Graph` object. When passed to `so3lr_potential` one gets the potential energy of 
 the system.
 
-## Coming soon!
-
-- Fast TFDS dataloader
-- General robust loss
-- Multi-head fine-tuning
-- Extract embeddings
-
 ## Long-Range Electrostatics (Ewald/PME/P3M)
 
 For periodic systems, SO3LR supports long-range electrostatic calculations using three different k-space methods powered by [jax-pme](https://github.com/lab-cosmo/jax-pme/) (a JAX port of [torch-pme](https://github.com/lab-cosmo/torch-pme/)):
@@ -587,6 +580,13 @@ The `k_spacing` controls the k-space grid density:
 - **Smaller spacing** → Finer grid, higher accuracy, more computation
 - For PME/P3M: `k_spacing ≈ smearing / 8` is a good starting point
 - For Ewald: `k_spacing ≈ smearing / 2` is typical
+
+## Coming soon!
+
+- Fast TFDS dataloader
+- General robust loss
+- Multi-head fine-tuning
+- Extract embeddings
 
 If you would like to see new features, add your own functionality, or share ideas, please reach out or open an issue. We are always happy to collaborate and hear your thoughts!
 
