@@ -584,392 +584,129 @@ def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
              help="Run molecular dynamics using SO3LR Machine Learned Force Field.",
              context_settings={"help_option_names": []})
 @click.option('--settings', type=click.Path(exists=False), default=None,
-              help='Path to YAML settings file.')
-# Input/Output
-@click.option('--input', 'input_file', type=click.Path(exists=False), default=None,
-              help='Input geometry file (any ASE-readable format).')
-@click.option('--output', 'output_file', type=click.Path(), default=None,
-              help='Output trajectory file (.hdf5 or .xyz).')
-@click.option('--log-file', default=None, type=click.Path(),
-              help=f'File to write logs to [default: None].')
-# Model settings
-@click.option('--model', 'model_path', type=click.Path(exists=False), default=None,
-              help='Path to MLFF model directory. If not provided, pretrained SO3LR model is used.')
-@click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
-              help=f'Numerical precision for calculations [default: {DEFAULT_PRECISION}].')
-@click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
-              help=f'Long-range cutoff distance in Å [default: {DEFAULT_LR_CUTOFF} Å].')
-@click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
-              help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}].')
-@click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
-              help=f'Buffer size multiplier for short-range interactions [default: {DEFAULT_BUFFER_MULTIPLIER}].')
-@click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
-              help=f'Buffer size multiplier for long-range interactions [default: {DEFAULT_BUFFER_MULTIPLIER}].')
-@click.option('--save-buffer', default=DEFAULT_SAVE_BUFFER, type=int,
-              help=f'Number of frames to buffer before writing [default: {DEFAULT_SAVE_BUFFER}].')
-@click.option('--total-charge', default=DEFAULT_TOTAL_CHARGE, type=int,
-              help=f'Total charge of the system [default: {DEFAULT_TOTAL_CHARGE}].')
-# MD settings
-@click.option('--dt', default=DEFAULT_TIMESTEP, type=float,
-              help=f'MD timestep in femtoseconds [default: {DEFAULT_TIMESTEP} fs].')
-@click.option('--temperature', default=DEFAULT_TEMPERATURE, type=float,
-              help=f'Simulation temperature in Kelvin [default: {DEFAULT_TEMPERATURE} K].')
-@click.option('--pressure', default=None, type=float,
-              help='Simulation pressure in atmospheres (enables NPT) [default: None].')
-@click.option('--md-cycles', default=DEFAULT_MD_CYCLES, type=int,
-              help=f'Number of MD cycles to run [default: {DEFAULT_MD_CYCLES}].')
-@click.option('--md-steps', default=DEFAULT_MD_STEPS_PER_CYCLE, type=int,
-              help=f'Number of steps per MD cycle [default: {DEFAULT_MD_STEPS_PER_CYCLE}].')
-# Optimization settings
-@click.option('--min-cycles', '--min_cycles', 'min_cycles', default=DEFAULT_MIN_CYCLES, type=int,
-              help=f'Number of minimization cycles to perform. [default: {DEFAULT_MIN_CYCLES}]')
-@click.option('--min-steps', '--min_steps', 'min_steps', default=DEFAULT_MIN_STEPS, type=int,
-              help=f'Number of steps per minimization cycle. [default: {DEFAULT_MIN_STEPS}]')
-@click.option('--min-start-dt', default=DEFAULT_MIN_START_DT, type=float,
-              help=f'Minimum initial timestep for minimization [default: {DEFAULT_MIN_START_DT}].')
-@click.option('--min-max-dt', default=DEFAULT_MIN_MAX_DT, type=float,
-              help=f'Maximum timestep for minimization [default: {DEFAULT_MIN_MAX_DT}].')
-@click.option('--min-n-min', default=DEFAULT_MIN_N_MIN, type=int,
-              help=f'Minimum number of minimization steps [default: {DEFAULT_MIN_N_MIN}].')
-@click.option('--force-conv', default=None, type=float,
-              help='Force convergence criterion in eV/Å for initial relaxation [default: None].')
-# Nose-Hoover Thermostat/Barostat settings
-@click.option('--nhc-chain', default=DEFAULT_NHC_CHAIN_LENGTH, type=int,
-              help=f'Length of the Nose-Hoover thermostat chain [default: {DEFAULT_NHC_CHAIN_LENGTH}].')
-@click.option('--nhc-steps', default=DEFAULT_NHC_INTEGRATION_STEPS, type=int,
-              help=f'Number of integration steps per MD step [default: {DEFAULT_NHC_INTEGRATION_STEPS}].')
-@click.option('--nhc-thermo', default=DEFAULT_NHC_THERMO, type=float,
-              help=f'Thermostat damping factor in units of timestep, i.e. dt*nhc_thermo [default: {DEFAULT_NHC_THERMO}].')
-@click.option('--nhc-baro', default=DEFAULT_NHC_BARO, type=float,
-              help=f'Barostat damping factor in units of timestep,  i.e. dt*nhc_baro [default: {DEFAULT_NHC_BARO}].')
-@click.option('--nhc-sy-steps', default=DEFAULT_SUZUKI_YOSHIDA_STEPS, type=int,
-              help=f'Number of Suzuki-Yoshida integration steps [default: {DEFAULT_SUZUKI_YOSHIDA_STEPS}].')
-# Langevin Thermostat settings
-@click.option('--langevin-removecmmotion', default=DEFAULT_LANGEVIN_REMOVECMMOTION, type=bool,
-              help=f'Removal of the Center of Mass Motion [default: {DEFAULT_LANGEVIN_REMOVECMMOTION}].')
-@click.option('--langevin-thermo', default=DEFAULT_LANGEVIN_THERMO, type=float,
-              help=f'Friction (Gamma) coefficient for the Langevin thermostat [default: {DEFAULT_LANGEVIN_THERMO}].')
-# Restart options
-@click.option('--restart-save', type=click.Path(), default=None,
-              help='Path to save restart data.')
-@click.option('--restart-load', type=click.Path(exists=False), default=None,
-              help='Path to load restart data from a previous run.')
-# Additional options
-@click.option('--relax/--no-relax', default=True,
-              help='Perform geometry relaxation before MD [default: enabled].')
-@click.option('--seed', default=DEFAULT_SEED, type=int,
-              help=f'Random seed for MD [default: {DEFAULT_SEED}].')
-@click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
-              help=f'Observables [default: {DEFAULT_OBSERVABLES}].')
-# Help options
+              help='Path to YAML settings file. All simulation parameters are read from this file.')
 @click.option('--help-full', is_flag=True,
               help='Show detailed information about MD settings.')
 @click.option('--help', '-h', is_flag=True,
               help='Show brief command overview.')
 @click.pass_context
-def cli(ctx: click.Context,
-        settings: Optional[str],
-        # Input/Output
-        input_file: Optional[str],
-        output_file: Optional[str],
-        log_file: Optional[str],
-        # Model settings
-        model_path: Optional[str],
-        precision: str,
-        lr_cutoff: float,
-        dispersion_damping: float,
-        buffer_sr: float,
-        buffer_lr: float,
-        save_buffer: int,
-        total_charge: int,
-        # MD settings
-        dt: float,
-        temperature: float,
-        pressure: Optional[float],
-        md_cycles: int,
-        md_steps: int,
-        # Optimization settings
-        min_cycles: int,
-        min_steps: int,
-        min_start_dt: float,
-        min_max_dt: float,
-        min_n_min: int,
-        force_conv: Optional[float],
-        # Nose-Hoover Thermostat/Barostat settings
-        nhc_chain: int,
-        nhc_steps: int,
-        nhc_thermo: float,
-        nhc_baro: float,
-        nhc_sy_steps: int,
-        # Langevin Thermostat settings
-        langevin_removecmmotion: bool,
-        langevin_thermo: float,
-        # Restart options
-        restart_save: Optional[str],
-        restart_load: Optional[str],
-        # Additional options
-        relax: bool,
-        seed: int,
-        observable: Optional[tuple],
-        # Help options
-        help_full: bool,
-        help: bool,
-        # Optional arguments:
-        ) -> None:
+def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool) -> None:
     """
     Run molecular dynamics simulations with SO3LR or MLFF models.
 
-    This command provides three subcommands:
-
     \b
-    opt: Run geometry optimization
-    nvt: Run NVT (constant volume and temperature) MD simulation with Nose-Hoover integrator
-    nvt-langevin: Run NVT (constant volume and temperature) MD simulation with Langevin integrator
-    npt: Run NPT (constant pressure and temperature) MD simulation
-    nve: Run NVE (constant volume and energy) MD simulation
+    Subcommands:
+      opt           Run geometry optimization
+      nvt           Run NVT MD (Nose-Hoover thermostat)
+      nvt-langevin  Run NVT MD (Langevin thermostat)
+      npt           Run NPT MD
+      nve           Run NVE MD
 
-    If run without a subcommand, it performs a full MD simulation
-    with options specified via command line or settings file.
+    When called without a subcommand, all settings are read from a YAML file:
 
-    Use --help-full to see detailed information about all settings.
+      so3lr --settings settings.yaml
     """
-    # Handle help flags
     if help or help_full:
-        # The format_help function in CustomCommandClass handles this
         ctx.info_name = ctx.command.name
         click.echo(ctx.get_help())
         return
 
-    # No arguments provided shows help
-    if ctx.invoked_subcommand is None and not any([settings, input_file]):
-        click.echo(ctx.get_help())
-        return
-
-    # Skip execution if used in a command group context
     if ctx.invoked_subcommand is not None:
         return
 
-    logger.info("=" * 60)
-    logger.info(f"SO3LR Molecular Dynamics Simulation (v{__version__})")
-    logger.info("=" * 60)
+    if not settings:
+        click.echo(ctx.get_help())
+        return
 
-    # Load settings from file if provided
-    settings_dict: Dict[str, Any] = {}
-    if settings is not None:
-        try:
-            settings_path = Path(settings).expanduser().resolve()
-            if not settings_path.exists():
-                raise FileNotFoundError(f'Settings file not found: {settings}')
-
-            with open(settings_path, 'r') as f:
-                settings_dict = yaml.safe_load(f)
-
-            # Use standard logging initially for any errors
-            logger.info(f"Loading settings from {settings}")
-
-            # Convert md_dt from fs (user-facing) to ps (internal)
-            if 'md_dt' in settings_dict:
-                settings_dict['md_dt'] = settings_dict['md_dt'] / 1000
-
-        except (FileNotFoundError, yaml.YAMLError) as e:
-            logger.error(f"Error loading settings file: {str(e)}")
-            sys.exit(1)
-
-    if dt is not None:
-        ctx.params['dt'] = dt/1000
-          
-    for key in ctx.params:
-        settings_dict = update_settings_from_defaults(ctx, settings_dict, key)
-
-    # # Override settings with command line arguments if provided
-    # if input_file is not None:
-    #     settings_dict['input_file'] = input_file
-    # if output_file is not None:
-    #     settings_dict['output_file'] = output_file
-    # if model_path is not None:
-    #     settings_dict['model_path'] = model_path
-    # if precision is not None:
-    #     settings_dict['precision'] = precision
-    # if lr_cutoff is not None:
-    #     settings_dict['lr_cutoff'] = lr_cutoff
-    # if dispersion_damping is not None:
-    #     settings_dict['dispersion_damping'] = dispersion_damping
-    # if buffer_sr is not None:
-    #     settings_dict['buffer_size_multiplier_sr'] = buffer_sr
-    # if buffer_lr is not None:
-    #     settings_dict['buffer_size_multiplier_lr'] = buffer_lr
-    # if save_buffer is not None:
-    #     settings_dict['save_buffer'] = save_buffer
-    # if restart_save is not None:
-    #     settings_dict['restart_save_path'] = restart_save
-    # if restart_load is not None:
-    #     settings_dict['restart_load_path'] = restart_load
-    # if dt is not None:
-    #     settings_dict['md_dt'] = dt/1000
-    # if temperature is not None:
-    #     settings_dict['md_T'] = temperature
-    #     if settings_dict.get('nve') == True:
-    #         settings_dict['md_T'] = None
-    #         settings_dict['init_T'] = None
-    # if pressure is not None:
-    #     settings_dict['md_P'] = pressure
-    # if md_cycles is not None:
-    #     settings_dict['md_cycles'] = md_cycles
-    # if md_steps is not None:
-    #     settings_dict['md_steps'] = md_steps
-    # if min_cycles is not None:
-    #     settings_dict['min_cycles'] = min_cycles
-    # if min_steps is not None:
-    #     settings_dict['min_steps'] = min_steps
-    # if nhc_chain is not None:
-    #     settings_dict['nhc_chain_length'] = nhc_chain
-    # if nhc_steps is not None:
-    #     settings_dict['nhc_steps'] = nhc_steps
-    # if nhc_thermo is not None:
-    #     settings_dict['nhc_thermo'] = nhc_thermo
-    # if nhc_baro is not None:
-    #     settings_dict['nhc_baro'] = nhc_baro
-    # if nhc_sy_steps is not None:
-    #     settings_dict['nhc_sy_steps'] = nhc_sy_steps
-    # if total_charge is not None:
-    #     settings_dict['total_charge'] = total_charge
-    # if seed is not None:
-    #     settings_dict['seed'] = seed
-    # if relax is not None:
-    #     settings_dict['relax_before_run'] = relax
-    # if force_conv is not None:
-    #     settings_dict['force_convergence'] = force_conv
-    # if min_start_dt is not None:
-    #     settings_dict['min_start_dt'] = min_start_dt
-    # if min_max_dt is not None:
-    #     settings_dict['min_max_dt'] = min_max_dt
-    # if min_n_min is not None:
-    #     settings_dict['min_n_min'] = min_n_min
-
-    # Validate required settings
-    if 'input_file' not in settings_dict:
-        logger.error("Error: Initial geometry file must be specified either in settings file or with --input")
+    try:
+        settings_path = Path(settings).expanduser().resolve()
+        with open(settings_path, 'r') as f:
+            settings_dict = yaml.safe_load(f)
+    except (FileNotFoundError, yaml.YAMLError) as e:
+        logger.error(f"Error loading settings file: {str(e)}")
         sys.exit(1)
 
-    # Set default output file if not specified
-    if 'output_file' not in settings_dict:
-        input_name = Path(settings_dict['input_file']).stem
-        settings_dict['output_file'] = f'{input_name}_trajectory.xyz'
-        logger.info(f"No output file specified, using default: {settings_dict['output_file']}")
-
-    settings_dict['output_format'] = infer_output_format(settings_dict['output_file'])
-
-    # Set default log file based on output file if not explicitly provided
-    if 'log_file' not in settings_dict:
-        output_path = Path(settings_dict['output_file'])
-        log_file_output = f"{output_path.stem}.log"
-        if log_file is not None:
-            settings_dict['log_file'] = log_file
-        else:
-            log_file = log_file_output
-            settings_dict['log_file'] = log_file
-            logger.info(f"No log file specified, using default: {log_file_output}")
-    else:
-        if settings_dict['log_file'] is None:
-            log_file = log_file_output
-            settings_dict['log_file'] = log_file
-            logger.info(f"No log file specified, using default: {log_file_output}")
-        else:
-            log_file = settings_dict['log_file']
-
-    # # Add log settings to the settings dictionary
-    # settings_dict['log_file'] = log_file
-
-    # Setup logging with default levels
-    setup_logger(log_file)
-
-    # Log the ASCII art
-    logger.info(SO3LR_ASCII)
-
-    # Log that we loaded settings from file
-    if settings is not None:
-        logger.info(f"Loading settings from {settings}")
+    # md_dt is written in fs in the YAML but run() expects ps
+    if 'md_dt' in settings_dict:
+        settings_dict['md_dt'] = settings_dict['md_dt'] / 1000
 
     settings_dict = canonicalize_ensemble(settings_dict)
+    settings_dict['output_format'] = infer_output_format(settings_dict.get('output_file', ''))
 
-    # Print simulation details
-    logger.info(f"Initial geometry:          {settings_dict['input_file']}")
-    logger.info(f"Output file:               {settings_dict['output_file']}")
-    logger.info(f"Log file:                  {log_file}")
-    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
-    if model_path is not None:
-        logger.info(f"Model path:                {settings_dict['model_path']}")
-    logger.info(f"Long-range cutoff:         {settings_dict.get('lr_cutoff', DEFAULT_LR_CUTOFF)} Å")
-    logger.info(f"Dispersion damping:        {settings_dict.get('dispersion_damping', DEFAULT_DISPERSION_DAMPING)} Å")
-    logger.info(f"Short-range buffer:        {settings_dict.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)}")
-    logger.info(f"Long-range buffer:         {settings_dict.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)}")
-    logger.info(f"Total charge:              {settings_dict.get('total_charge', DEFAULT_TOTAL_CHARGE)}")
-    logger.info(f"Precision:                 {settings_dict.get('precision', DEFAULT_PRECISION)}")
+    setup_logger(settings_dict.get('log_file'))
+    logger.info(SO3LR_ASCII)
+    logger.info(f"Loading settings from {settings}")
 
-    logger.info(f"Temperature:               {settings_dict.get('md_T', DEFAULT_TEMPERATURE)} K")
-
-    if settings_dict.get('ensemble') == 'npt':
-        logger.info(f"Pressure:                  {settings_dict.get('md_P')} atm")
-        logger.info(f"Ensemble:                  NPT")
-    elif settings_dict.get('ensemble') == 'nvt':
-        logger.info(f"Ensemble:                  NVT (NH)")
-    elif settings_dict.get('ensemble') == 'nvt-langevin':
-        logger.info(f"Ensemble:                  NVT (L)")
-    else:
-        logger.info(f"Ensemble:                  NVE")
-
-    total_steps = settings_dict.get('md_cycles', DEFAULT_MD_CYCLES) * settings_dict.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)
-    simulation_time = total_steps * settings_dict.get('md_dt', DEFAULT_TIMESTEP)  # in ps
-
-    logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
-    logger.info(f"MD cycles:                 {settings_dict.get('md_cycles', DEFAULT_MD_CYCLES)}")
-    logger.info(f"Steps per cycle:           {settings_dict.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)}")
-    logger.info(f"Timestep:                  {settings_dict.get('md_dt', DEFAULT_TIMESTEP)} fs")
-    logger.info(f"NHC length:                {settings_dict.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)}")
-    logger.info(f"NHC steps:                 {settings_dict.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)}")
-    logger.info(f"NHC thermo:                {settings_dict.get('nhc_thermo', DEFAULT_NHC_THERMO)}")
-    logger.info(f"Langevin CMMotion Removal: {settings_dict.get('langevin_removecmmotion', DEFAULT_LANGEVIN_REMOVECMMOTION)}")
-    logger.info(f"Langevin Gamma:            {settings_dict.get('langevin_thermo', DEFAULT_LANGEVIN_THERMO)}")
-    logger.info(f"Seed:                      {settings_dict.get('seed', DEFAULT_SEED)}")
-    logger.info(f"Observables:               {settings_dict.get('observables', DEFAULT_OBSERVABLES)}")
-
-    if settings_dict.get('relax_before_run', False):
-        logger.info(f"Geometry relaxation:       Enabled")
-        if force_conv is not None:
-            logger.info(f"Force convergence:         {force_conv} eV/Å")
-        else:
-            logger.info(f"Optimization cycles:       {settings_dict.get('min_cycles', DEFAULT_MIN_CYCLES)} cycles, each {settings_dict.get('min_steps', DEFAULT_MIN_STEPS)} steps")
-    else:
-        logger.info(f"Geometry relaxation:       Disabled")
-
-    logger.info("=" * 60)
-
-    # Log hardware info
+    log_simulation_settings(settings_dict)
     get_hardware_info()
 
-    # Run the simulation
     time_start = time.time()
     run(settings_dict)
     time_end = time.time()
-    logger.info("=" * 60)
     logger.info('Simulation completed successfully!')
     logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
 
 
 
-class SubcommandHelpGroup(click.Group):
-    """Custom Group class for subcommands to handle help displays appropriately."""
 
-    def get_help(self, ctx: click.Context) -> str:
-        """Format and return help text for the subcommand."""
-        # Set short help mode for top-level options
-        formatted_help = click.formatting.HelpFormatter()
-        formatted_help.write(SO3LR_ASCII)
-        self.format_usage(ctx, formatted_help)
-        self.format_help_text(ctx, formatted_help)
-        self.format_options(ctx, formatted_help)
-        self.format_epilog(ctx, formatted_help)
-        return formatted_help.getvalue()
+# ============================================================================
+# Settings logging
+# ============================================================================
+
+def log_simulation_settings(s: Dict[str, Any]) -> None:
+    """Log all simulation settings from the internal settings dict."""
+    ensemble = s.get('ensemble', 'nvt')
+    _label = {'nvt': 'NVT', 'nvt-langevin': 'NVT (Langevin)', 'npt': 'NPT', 'nve': 'NVE'}
+    dt_fs = s.get('md_dt', DEFAULT_TIMESTEP / 1000) * 1000  # ps → fs for display
+    total_steps = s.get('md_cycles', DEFAULT_MD_CYCLES) * s.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)
+    simulation_time = total_steps * s.get('md_dt', DEFAULT_TIMESTEP / 1000)  # ps
+
+    logger.info("=" * 60)
+    logger.info(f"SO3LR {_label.get(ensemble, ensemble)} Molecular Dynamics Simulation (v{__version__})")
+    logger.info("=" * 60)
+    logger.info(f"Initial geometry:          {s.get('input_file')}")
+    logger.info(f"Output file:               {s.get('output_file')}")
+    logger.info(f"Log file:                  {s.get('log_file')}")
+    logger.info(f"Force field:               {'Custom MLFF' if s.get('model_path') else 'SO3LR'}")
+    if s.get('model_path'):
+        logger.info(f"Model path:                {s['model_path']}")
+    logger.info(f"Precision:                 {s.get('precision', DEFAULT_PRECISION)}")
+    logger.info(f"Long-range cutoff:         {s.get('lr_cutoff', DEFAULT_LR_CUTOFF)} Å")
+    logger.info(f"Dispersion damping:        {s.get('dispersion_damping', DEFAULT_DISPERSION_DAMPING)} Å")
+    logger.info(f"Short-range buffer:        {s.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)}")
+    logger.info(f"Long-range buffer:         {s.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)}")
+    logger.info(f"Total charge:              {s.get('total_charge', DEFAULT_TOTAL_CHARGE)}")
+    logger.info(f"Temperature:               {s.get('md_T', s.get('init_T', DEFAULT_TEMPERATURE))} K")
+    if ensemble == 'npt':
+        logger.info(f"Pressure:                  {s.get('md_P')} atm")
+    logger.info(f"Ensemble:                  {_label.get(ensemble, ensemble)}")
+    logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
+    logger.info(f"MD cycles:                 {s.get('md_cycles', DEFAULT_MD_CYCLES)}")
+    logger.info(f"Steps per cycle:           {s.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)}")
+    logger.info(f"Timestep:                  {dt_fs} fs")
+    logger.info(f"Saving buffer size:        {s.get('save_buffer', DEFAULT_SAVE_BUFFER)}")
+    if ensemble in ('nvt', 'npt'):
+        logger.info(f"NHC chain length:          {s.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)}")
+        logger.info(f"Nose-Hoover steps:         {s.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)}")
+        logger.info(f"Nose-Hoover Tdamp:         {s.get('nhc_thermo', DEFAULT_NHC_THERMO) * dt_fs} fs")
+    if ensemble == 'npt':
+        logger.info(f"Nose-Hoover Pdamp:         {s.get('nhc_baro', DEFAULT_NHC_BARO) * dt_fs} fs")
+    if ensemble == 'nvt-langevin':
+        logger.info(f"Center of Mass Motion Removal: {s.get('langevin_removecmmotion', DEFAULT_LANGEVIN_REMOVECMMOTION)}")
+        logger.info(f"Langevin friction value:   {s.get('langevin_thermo', DEFAULT_LANGEVIN_THERMO) * dt_fs}")
+    logger.info(f"Random seed:               {s.get('seed', DEFAULT_SEED)}")
+    logger.info(f"Observables:               {s.get('observables', DEFAULT_OBSERVABLES)}")
+    if s.get('restart_load_path'):
+        logger.info(f"Restart from:              {s['restart_load_path']}")
+    if s.get('restart_save_path'):
+        logger.info(f"Save restart to:           {s['restart_save_path']}")
+    if s.get('relax_before_run'):
+        logger.info(f"Geometry relaxation:       Enabled")
+        if s.get('force_convergence'):
+            logger.info(f"Force convergence:         {s['force_convergence']} eV/Å")
+    else:
+        logger.info(f"Geometry relaxation:       Disabled")
+    logger.info("=" * 60)
 
 # ============================================================================
 # Shared MD simulation runner
@@ -1029,59 +766,6 @@ def run_md_simulation(
     setup_logger(log_file)
     logger.info(SO3LR_ASCII)
 
-    total_steps = md_cycles * md_steps
-    simulation_time = total_steps * dt / 1000  # ps
-    _label = {'nvt': 'NVT', 'nvt-langevin': 'NVT (Langevin)', 'npt': 'NPT', 'nve': 'NVE'}
-
-    logger.info("=" * 60)
-    logger.info(f"SO3LR {_label[ensemble]} Molecular Dynamics Simulation (v{__version__})")
-    logger.info("=" * 60)
-    logger.info(f"Initial geometry:          {input_file}")
-    logger.info(f"Output file:               {output_file}")
-    logger.info(f"Log file:                  {log_file}")
-    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
-    if model_path is not None:
-        logger.info(f"Model path:                {model_path}")
-    logger.info(f"Precision:                 {precision}")
-    logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
-    logger.info(f"Dispersion damping:        {dispersion_damping} Å")
-    logger.info(f"Short-range buffer:        {buffer_sr}")
-    logger.info(f"Long-range buffer:         {buffer_lr}")
-    logger.info(f"Total charge:              {total_charge}")
-    logger.info(f"Temperature:               {temperature} K")
-    if ensemble == 'npt':
-        logger.info(f"Pressure:                  {pressure} atm")
-    logger.info(f"Ensemble:                  {_label[ensemble]}")
-    logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
-    logger.info(f"MD cycles:                 {md_cycles}")
-    logger.info(f"Steps per cycle:           {md_steps}")
-    logger.info(f"Timestep:                  {dt} fs")
-    logger.info(f"Saving buffer size:        {save_buffer}")
-    if ensemble in ('nvt', 'npt'):
-        logger.info(f"NHC chain length:          {nhc_chain}")
-        logger.info(f"Nose-Hoover steps:         {nhc_steps}")
-        logger.info(f"Nose-Hoover Tdamp:         {nhc_thermo * dt} fs")
-    if ensemble == 'npt':
-        logger.info(f"Nose-Hoover Pdamp:         {nhc_baro * dt} fs")
-    if ensemble == 'nvt-langevin':
-        logger.info(f"Center of Mass Motion Removal: {langevin_removecmmotion}")
-        logger.info(f"Langevin friction value:   {dt * langevin_thermo}")
-    logger.info(f"Random seed:               {seed}")
-    logger.info(f"Observables:               {observable}")
-    if restart_load:
-        logger.info(f"Restart from:              {restart_load}")
-    if restart_save:
-        logger.info(f"Save restart to:           {restart_save}")
-    if relax:
-        logger.info(f"Geometry relaxation:       Enabled")
-        if force_conv is not None:
-            logger.info(f"Force convergence:         {force_conv} eV/Å")
-    else:
-        logger.info(f"Geometry relaxation:       Disabled")
-    logger.info("=" * 60)
-
-    get_hardware_info()
-
     settings = {
         'input_file': input_file,
         'output_file': output_file,
@@ -1132,6 +816,9 @@ def run_md_simulation(
     if ensemble == 'nvt-langevin':
         settings['langevin_removecmmotion'] = langevin_removecmmotion
         settings['langevin_thermo'] = langevin_thermo
+
+    log_simulation_settings(settings)
+    get_hardware_info()
 
     time_start = time.time()
     run(settings)
@@ -1632,29 +1319,10 @@ def train_model(
 
 # Define the 'tune-ewald' subcommand
 @cli.command(name='tune-ewald', help="Tune k-space electrostatics parameters (Ewald/PME/P3M): `so3lr tune-ewald --input geometry.xyz`.")
-# Input/Output group
-# Input/Output
 @click.option('--settings', type=click.Path(exists=False), default=None,
               help='Path to YAML settings file.')
-@click.option('--input', '--input_file', 'input_file', type=click.Path(exists=False),
-              help='Input geometry file (any ASE-readable format). [default: None]')
-@click.option('--log-file', default=None, type=click.Path(),
-              help=f'File to write logs to [default: None].')
-# Model settings
-@click.option('--model', 'model_path', type=click.Path(exists=False),
-              help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
-@click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
-              help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
-@click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
-              help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')
-@click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
-              help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}]')
-@click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
-              help=f'Buffer size multiplier for short-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
-@click.option('--buffer-lr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
-              help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')
-@click.option('--total-charge', default=DEFAULT_TOTAL_CHARGE, type=int,
-              help=f'Total charge of the system. [default: {DEFAULT_TOTAL_CHARGE}]')
+@common_io_options
+@common_model_options
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
               help='Use JIT compilation for speed. [default: enabled]')
 # Tuning settings
@@ -1668,6 +1336,7 @@ def tune_ewald(
     settings: Optional[str],
     # Input/Output group
     input_file: str,
+    output_file: Optional[str],
     log_file: Optional[str],
     # Model settings group
     model_path: Optional[str],
