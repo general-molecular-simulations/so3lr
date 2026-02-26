@@ -296,17 +296,6 @@ def evaluate_so3lr_on(
     except Exception as e:
         raise RuntimeError(f"Error loading data: {str(e)}")
 
-    # Ensure all graphs have consistent global keys for batching.
-    # Some graphs (dimers) may have residue_charge/residue_segments while others don't.
-    # Note: data is a list of (graph, long_range) tuples
-    has_residue = any('residue_charge' in g[0].globals for g in data)
-    if has_residue:
-        for g, _ in data:
-            if 'residue_charge' not in g.globals:
-                n_nodes = int(g.n_node[0])
-                g.globals['residue_charge'] = np.zeros(1, dtype=np.int16)
-                g.globals['residue_segments'] = np.arange(n_nodes, dtype=np.int32)
-
     # Check for allowed atom types
     allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
     for i, (graph, _) in enumerate(data):
