@@ -401,47 +401,6 @@ Evaluate SO3LR on a dataset with all options:
 # output_atom_indices: null                    # Optional list of atom indices to output
 # ```
 
-PARAM_MAP = {
-    'input_file': 'input_file',
-    'output_file': 'output_file',
-    'log_file': 'log_file',
-    'model_path': 'model_path',
-    'precision': 'precision',
-    'dt':'md_dt',
-    'temperature': 'md_T',
-    'pressure':'md_P',
-    'md_cycles': 'md_cycles',
-    'md_steps': 'md_steps',
-    'lr_cutoff': 'lr_cutoff',
-    'dispersion_damping': 'dispersion_damping',
-    'buffer_sr':'buffer_size_multiplier_sr',
-    'buffer_lr':'buffer_size_multiplier_lr',
-    'save_buffer': 'save_buffer',
-    'total_charge': 'total_charge',
-    'seed': 'seed',
-    'restart_load': 'restart_load_path',
-    'restart_save': 'restart_save_path',
-    'relax': 'relax_before_run',
-    'force_conv': 'force_convergence',
-    # Additional MD settings
-    'nhc_chain': 'nhc_chain_length',
-    'nhc_steps': 'nhc_steps',
-    'nhc_thermo': 'nhc_thermo',
-    'nhc_baro': 'nhc_baro',
-    'nhc_sy_steps': 'nhc_sy_steps',
-    'langevin_removecmmotion': 'langevin_removecmmotion',
-    'langevin_thermo': 'langevin_thermo',
-    'observable': 'observables',
-    # Use default optimization settings
-    'min_n_min': 'min_n_min',
-    'min_start_dt': 'min_start_dt',
-    'min_max_dt': 'min_max_dt',
-    'min_cycles': 'min_cycles',
-    'min_steps': 'min_steps',
-    'kspace_electrostatics': 'kspace_electrostatics',
-    'jit_compile': 'jit_compile'
-}
-
 
 BASIC_HELP_STRING = """
 Run simulations using SO3LR Machine Learned Force Field.
@@ -497,22 +456,6 @@ def infer_output_format(output_file):
         logger.warning(f"Unknown output extension for {output_file}, defaulting to extxyz format")
         return 'extxyz'
 
-def update_settings_from_defaults(ctx: click.Context, settings_dict: Dict[str, Any], key= str) -> None:
-    """Update settings dictionary with default values."""
-    param = ctx.params[key]
-    if key in PARAM_MAP:
-        if PARAM_MAP[key] in settings_dict:
-            if ctx._parameter_source[key] == click.core.ParameterSource.COMMANDLINE:
-                if param != settings_dict[PARAM_MAP[key]]:
-                    logger.warning(f"settings.yaml: {PARAM_MAP[key]} is overridden by explicit command line argument.")
-                    settings_dict[PARAM_MAP[key]] = param
-                # Override settings with command line arguments if provided
-                settings_dict[PARAM_MAP[key]] = param
-        else:
-            # If not provided, set default values
-            if param is not None:
-                settings_dict[PARAM_MAP[key]] = param
-    return settings_dict
 
 # ============================================================================
 # Decorator factories for common CLI options
@@ -1486,14 +1429,34 @@ def tune_ewald(
             with open(settings_path, 'r') as f:
                 settings_dict = yaml.safe_load(f)
 
-            # Use standard logging initially for any errors
             logger.info(f"Loading settings from {settings}")
         except (FileNotFoundError, yaml.YAMLError) as e:
             logger.error(f"Error loading settings file: {str(e)}")
             sys.exit(1)
 
-    for key in ctx.params:
-        settings_dict = update_settings_from_defaults(ctx, settings_dict, key)
+    # CLI params with internal names; buffer_sr/buffer_lr map to longer internal names
+    _cli_params = {
+        'input_file':                input_file,
+        'output_file':               output_file,
+        'log_file':                  log_file,
+        'model_path':                model_path,
+        'precision':                 precision,
+        'lr_cutoff':                 lr_cutoff,
+        'dispersion_damping':        dispersion_damping,
+        'buffer_size_multiplier_sr': buffer_sr,
+        'buffer_size_multiplier_lr': buffer_lr,
+        'total_charge':              total_charge,
+        'jit_compile':               jit_compile,
+        'kspace_electrostatics':     kspace_electrostatics,
+    }
+    # CLI param names that differ from their internal key
+    _cli_key_for = {'buffer_size_multiplier_sr': 'buffer_sr', 'buffer_size_multiplier_lr': 'buffer_lr'}
+    for internal_key, val in _cli_params.items():
+        cli_key = _cli_key_for.get(internal_key, internal_key)
+        if ctx._parameter_source[cli_key] == click.core.ParameterSource.COMMANDLINE:
+            settings_dict[internal_key] = val
+        else:
+            settings_dict.setdefault(internal_key, val)
 
     # Generate default log file name based on output file if not explicitly provided
     if settings_dict.get('log_file') is None:
