@@ -130,6 +130,11 @@ DEFAULT_MIN_MAX_DT = 0.1
 DEFAULT_MIN_N_MIN = 2
 DEFAULT_SUZUKI_YOSHIDA_STEPS = 3
 
+# K-space electrostatics parameters
+DEFAULT_KSPACE_SMEARING = 4.0       # Å
+DEFAULT_KSPACE_SPACING = 2.0        # Å
+DEFAULT_KSPACE_INTERP_NODES = 4
+
 # Additional parameters
 DEFAULT_OBSERVABLES = ()
 
@@ -550,6 +555,21 @@ def langevin_options(f: Callable) -> Callable:
     return f
 
 
+def kspace_options(f: Callable) -> Callable:
+    """K-space electrostatics options for periodic systems."""
+    f = click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None, type=str,
+                     help='K-space method for long-range electrostatics: "ewald", "pme", or "p3m". [default: None]')(f)
+    f = click.option('--kspace-smearing', 'kspace_smearing', default=DEFAULT_KSPACE_SMEARING, type=float,
+                     help=f'Smearing width for k-space summation in Å. [default: {DEFAULT_KSPACE_SMEARING}]')(f)
+    f = click.option('--kspace-spacing', 'kspace_spacing', default=DEFAULT_KSPACE_SPACING, type=float,
+                     help=f'Grid spacing for k-space summation in Å. [default: {DEFAULT_KSPACE_SPACING}]')(f)
+    f = click.option('--kspace-interp-nodes', 'kspace_interp_nodes', default=DEFAULT_KSPACE_INTERP_NODES, type=int,
+                     help=f'Number of interpolation nodes for PME/P3M. [default: {DEFAULT_KSPACE_INTERP_NODES}]')(f)
+    f = click.option('--kspace-npt-cycles', 'kspace_npt_cycles', default=None, type=int,
+                     help='Frequency (in MD cycles) to re-tune k-space grid in NPT. [default: None]')(f)
+    return f
+
+
 class CustomCommandClass(click.Group):
     """Custom Group class that displays the correct help based on flags."""
 
@@ -797,6 +817,12 @@ def run_md_simulation(
     # Langevin thermostat (NVT-Langevin)
     langevin_removecmmotion: Optional[bool] = None,
     langevin_thermo: Optional[float] = None,
+    # K-space electrostatics
+    kspace_electrostatics: Optional[str] = None,
+    kspace_smearing: float = DEFAULT_KSPACE_SMEARING,
+    kspace_spacing: float = DEFAULT_KSPACE_SPACING,
+    kspace_interp_nodes: int = DEFAULT_KSPACE_INTERP_NODES,
+    kspace_npt_cycles: Optional[int] = None,
 ) -> None:
     """Shared runner for NVT, NVT-Langevin, NPT, and NVE MD simulations."""
     if not input_file or help:
@@ -844,6 +870,11 @@ def run_md_simulation(
         'ensemble': ensemble,
         'observables': observable,
         'output_format': infer_output_format(output_file),
+        'kspace_electrostatics': kspace_electrostatics,
+        'kspace_smearing': kspace_smearing,
+        'kspace_spacing': kspace_spacing,
+        'kspace_interp_nodes': kspace_interp_nodes,
+        'kspace_npt_cycles': kspace_npt_cycles,
     }
 
     if ensemble == 'nve':
@@ -882,6 +913,7 @@ def run_md_simulation(
 @cli.command(name='opt', help="Run geometry optimization with `so3lr opt --input geometry.xyz`.")
 @common_io_options
 @common_model_options
+@kspace_options
 # Optimization settings
 @click.option('--min-cycles', '--min_cycles', 'min_cycles', default=DEFAULT_MIN_CYCLES, type=int,
               help=f'Number of minimization cycles to perform. [default: {DEFAULT_MIN_CYCLES}]')
@@ -913,6 +945,11 @@ def fire_optimization(
     min_max_dt: float,
     min_n_min: int,
     force_conv: Optional[float],
+    kspace_electrostatics: Optional[str],
+    kspace_smearing: float,
+    kspace_spacing: float,
+    kspace_interp_nodes: int,
+    kspace_npt_cycles: Optional[int],
     help: bool,
 ) -> None:
     """
@@ -994,6 +1031,10 @@ def fire_optimization(
         'buffer_size_multiplier_sr': buffer_sr,
         'buffer_size_multiplier_lr': buffer_lr,
         'total_charge': total_charge,
+        'kspace_electrostatics': kspace_electrostatics,
+        'kspace_smearing': kspace_smearing,
+        'kspace_spacing': kspace_spacing,
+        'kspace_interp_nodes': kspace_interp_nodes,
     }
 
     # Add log settings to the settings dictionary
@@ -1014,6 +1055,7 @@ def fire_optimization(
 @cli.command(name='nvt', help="Run NVT molecular dynamics simulation with `so3lr nvt --input geometry.xyz`.")
 @common_io_options
 @common_model_options
+@kspace_options
 @common_md_options
 @thermostat_options
 def nvt_md(**kwargs) -> None:
@@ -1030,6 +1072,7 @@ def nvt_md(**kwargs) -> None:
 @cli.command(name='nvt-langevin', help="Run NVT (Langevin thermostat) molecular dynamics simulation with `so3lr nvt-langevin --input geometry.xyz`.")
 @common_io_options
 @common_model_options
+@kspace_options
 @common_md_options
 @langevin_options
 def nvt_langevin_md(**kwargs) -> None:
@@ -1046,6 +1089,7 @@ def nvt_langevin_md(**kwargs) -> None:
 @cli.command(name='npt', help="Run NPT molecular dynamics simulation with `so3lr npt --input geometry.xyz`.")
 @common_io_options
 @common_model_options
+@kspace_options
 @common_md_options
 @thermostat_options
 @barostat_options
@@ -1065,6 +1109,7 @@ def npt_md(**kwargs) -> None:
 @cli.command(name='nve', help="Run NVE molecular dynamics simulation with `so3lr nve --input geometry.xyz`.")
 @common_io_options
 @common_model_options
+@kspace_options
 @common_md_options
 def nve_md(**kwargs) -> None:
     """
@@ -1373,12 +1418,9 @@ def train_model(
               help='Path to YAML settings file.')
 @common_io_options
 @common_model_options
+@kspace_options
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
               help='Use JIT compilation for speed. [default: enabled]')
-# Tuning settings
-@click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None, type=str,
-              help='K-space method for long-range electrostatics: "ewald", "pme", or "p3m". [default: None]')
-# Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 @click.pass_context
 def tune_ewald(
