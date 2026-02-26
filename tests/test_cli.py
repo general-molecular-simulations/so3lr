@@ -7,7 +7,7 @@ import pathlib
 import pytest
 from click.testing import CliRunner
 
-from so3lr.cli.so3lr_cli import cli, PARAM_MAP, BASIC_HELP_STRING
+from so3lr.cli.so3lr_cli import cli, BASIC_HELP_STRING
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -131,35 +131,6 @@ class TestHelpTextConsistency:
 
 
 # ---------------------------------------------------------------------------
-# PARAM_MAP
-# ---------------------------------------------------------------------------
-
-class TestParamMap:
-    """PARAM_MAP should map all expected CLI options to settings keys."""
-
-    EXPECTED_MAPPINGS = {
-        "input_file": "input_file",
-        "output_file": "output_file",
-        "log_file": "log_file",
-        "dt": "md_dt",
-        "temperature": "md_T",
-        "pressure": "md_P",
-        "md_cycles": "md_cycles",
-        "md_steps": "md_steps",
-        "lr_cutoff": "lr_cutoff",
-        "buffer_sr": "buffer_size_multiplier_sr",
-        "buffer_lr": "buffer_size_multiplier_lr",
-        "seed": "seed",
-        "total_charge": "total_charge",
-    }
-
-    @pytest.mark.parametrize("cli_key,settings_key", EXPECTED_MAPPINGS.items())
-    def test_mapping_exists(self, cli_key, settings_key):
-        assert cli_key in PARAM_MAP, f"PARAM_MAP missing key '{cli_key}'"
-        assert PARAM_MAP[cli_key] == settings_key
-
-
-# ---------------------------------------------------------------------------
 # md_settings.yaml
 # ---------------------------------------------------------------------------
 
@@ -182,10 +153,10 @@ class TestMdSettingsYaml:
         for key in required:
             assert key in settings, f"md_settings.yaml missing key '{key}'"
 
-    def test_buffer_keys_use_underscores(self, settings):
-        """Buffer keys should use underscores to match PARAM_MAP values."""
-        assert "buffer_sr" in settings
-        assert "buffer_lr" in settings
+    def test_buffer_keys_are_internal_names(self, settings):
+        """Buffer keys in the YAML should use the internal (long-form) names."""
+        assert "buffer_size_multiplier_sr" in settings
+        assert "buffer_size_multiplier_lr" in settings
         assert "buffer-sr" not in settings
         assert "buffer-lr" not in settings
 
