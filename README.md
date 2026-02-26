@@ -287,17 +287,19 @@ print(f"  ZBL repulsion: {zbl_repulsion:.6f} eV")
 print(f"Partial charges: {partial_charges}")
 ```
 
+> **Note:** All energy-related observables (`nn_energy`, `electrostatic_energy`, `dispersion_energy`, `zbl_repulsion`, `electrostatic_energy_undamped`, `dispersion_energy_undamped`) are returned as **per-atom arrays**. Sum over atoms to obtain the total contribution: `np.sum(aux['nn_energy'])`.
+
 **Available observables:**
 | Observable | Description | Shape |
 |------------|-------------|-------|
-| `nn_energy` | Neural network energy contribution | `()` |
-| `electrostatic_energy` | Damped electrostatic energy | `()` |
-| `dispersion_energy` | Damped dispersion energy | `()` |
-| `zbl_repulsion` | ZBL short-range repulsion | `()` |
+| `nn_energy` | Neural network energy contribution | `(n_atoms,)` |
+| `electrostatic_energy` | Damped electrostatic energy | `(n_atoms,)` |
+| `dispersion_energy` | Damped dispersion energy | `(n_atoms,)` |
+| `zbl_repulsion` | ZBL short-range repulsion | `(n_atoms,)` |
 | `partial_charges` | Atomic partial charges | `(n_atoms,)` |
 | `hirshfeld_ratios` | Hirshfeld volume ratios | `(n_atoms,)` |
-| `electrostatic_energy_undamped` | Undamped electrostatic energy | `()` |
-| `dispersion_energy_undamped` | Undamped dispersion energy | `()` |
+| `electrostatic_energy_undamped` | Undamped electrostatic energy | `(n_atoms,)` |
+| `dispersion_energy_undamped` | Undamped dispersion energy | `(n_atoms,)` |
 | `x` | Final-layer per-atom embeddings | `(n_atoms, features)` |
 
 ### Observable Gradients
@@ -340,6 +342,8 @@ for idx in [0, 1, 2]:
 **Gradient/Jacobian suffixes:**
 - `_grad`: For scalar observables (energies). Returns gradient of shape `(3,)`.
 - `_jac`: For vector observables (charges, Hirshfeld ratios). Returns Jacobian of shape `(n_atoms, 3)`.
+
+> **Note:** The `_grad` and `_jac` suffixes are only supported through the ASE calculator (`So3lrCalculator`) and are **not currently supported** via the `so3lr eval` CLI or `make_so3lr`.
 
 ### Hessian Calculation
 
