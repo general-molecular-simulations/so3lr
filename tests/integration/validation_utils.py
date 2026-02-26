@@ -312,7 +312,8 @@ class Validator:
             'restart_save_path',  # not logged as-is
             'restart_reset',      # not logged as-is
             'ensemble',           # logged as NVT/NPT/etc, not as-is
-            'nhc_baro',
+            'nhc_thermo',         # logged as nhc_thermo * dt_fs (fs)
+            'nhc_baro',           # logged as nhc_baro * dt_fs (fs)
             'langevin_gamma',
             'kspace_electrostatics',
             'kspace_smearing',

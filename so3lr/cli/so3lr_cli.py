@@ -877,10 +877,9 @@ def run_md_simulation(
         'kspace_npt_cycles': kspace_npt_cycles,
     }
 
+    settings['md_T'] = temperature
     if ensemble == 'nve':
         settings['init_T'] = temperature
-    else:
-        settings['md_T'] = temperature
 
     if ensemble in ('nvt', 'npt'):
         settings.update({
@@ -1440,6 +1439,10 @@ def tune_ewald(
     total_charge: int,
     jit_compile: bool,
     kspace_electrostatics: str,
+    kspace_smearing: float,
+    kspace_spacing: float,
+    kspace_interp_nodes: int,
+    kspace_npt_cycles: Optional[int],
     # Help option
     help: bool
 ) -> None:

@@ -20,7 +20,7 @@ def validate():
     # Validate log contains success message and NVT indication
     v.check_log_contains(
         'stderr.log',
-        required_strings=['completed successfully', 'NVT (L)'],
+        required_strings=['completed successfully', 'NVT (Langevin)'],
     )
 
     # Validate HDF5 structure
