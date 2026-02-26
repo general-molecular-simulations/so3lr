@@ -566,81 +566,21 @@ class CustomCommandClass(click.Group):
             formatter.write(FULL_HELP_STRING)
 
 
-class NVTNPTGroup(CustomCommandClass):
-    """Custom group to handle --nve, --nvt and --npt flags that set appropriate defaults."""
+def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Determine ensemble from settings dict, defaulting to NVT.
 
-    def parse_args(self, ctx: click.Context, args: List[str]) -> List[str]:
-        """Parse arguments with special handling for --nvt and --npt flags."""
-        # Check for simulation mode flags and modify args accordingly
-        if '--nve' in args:
-            args.remove('--nve')
-            if '--pressure' in args:
-                # Remove any pressure argument to ensure NVT mode
-                pressure_index = args.index('--pressure')
-                if pressure_index < len(args) - 1 and not args[pressure_index + 1].startswith('--'):
-                    # Remove the value too
-                    args.pop(pressure_index + 1)
-                args.remove('--pressure')
-                ctx.command.params_map['pressure'].default = None
-        if '--nvt' in args:
-            args.remove('--nvt')
-            if '--pressure' in args:
-                # Remove any pressure argument to ensure NVT mode
-                pressure_index = args.index('--pressure')
-                if pressure_index < len(args) - 1 and not args[pressure_index + 1].startswith('--'):
-                    # Remove the value too
-                    args.pop(pressure_index + 1)
-                args.remove('--pressure')
-                ctx.command.params_map['pressure'].default = None
-        
-        if '--nvt-langevin' in args:
-            args.remove('--nvt-langevin')
-            if '--pressure' in args:
-                # Remove any pressure argument to ensure NVT mode
-                pressure_index = args.index('--pressure')
-                if pressure_index < len(args) - 1 and not args[pressure_index + 1].startswith('--'):
-                    # Remove the value too
-                    args.pop(pressure_index + 1)
-                args.remove('--pressure')
-                ctx.command.params_map['pressure'].default = None
-              
-        if '--npt' in args:
-            args.remove('--npt')
-            # If no pressure specified, use default of 1.0 atm
-            if '--pressure' not in args:
-                args.extend(['--pressure', str(DEFAULT_PRESSURE)])
+    Ensemble can be set explicitly via ``settings_dict['ensemble']`` (e.g. from a
+    YAML settings file), or is inferred: presence of ``md_P`` implies NPT, otherwise
+    NVT is used as the default.
+    """
+    if settings_dict.get('ensemble') is None:
+        if settings_dict.get('md_P') is not None:
+            settings_dict['ensemble'] = 'npt'
+        else:
+            settings_dict['ensemble'] = 'nvt'
+    return settings_dict
 
-        # Call the super parse_args
-        return super().parse_args(ctx, args)
-
-    def get_command(self, ctx: click.Context, cmd_name: str) -> Optional[click.Command]:
-        """Get a command from this group and set appropriate help options."""
-        cmd = super().get_command(ctx, cmd_name)
-        if cmd is not None:
-            cmd.context_settings["help_option_names"] = ["--help"]
-        return cmd
-
-
-
-    def canonicalize_ensemble(self, settings_dict: Dict[str, Any]):
-        """Canonicalize the ensemble based on the provided settings."""
-        if int(settings_dict.get('nve', False)) + int(settings_dict.get('nvt', False)) + int(settings_dict.get('nvt-langevin', False)) + int(settings_dict.get('npt', False)) > 1:
-            raise ValueError("Only one of --nve, --nvt, --nvt-langevin or --npt can be specified.")
-        if settings_dict.get('ensemble') is None:
-            if settings_dict.get('npt') is True or settings_dict.get('md_P') is not None:
-                if settings_dict.get('md_P') is not None:
-                    settings_dict['ensemble'] = 'npt'
-                else:
-                    raise ValueError("Pressure must be specified for NPT ensemble.")
-            elif settings_dict.get('nve') is True:
-                settings_dict['ensemble'] = 'nve'
-            elif settings_dict.get('nvt-langevin') is True:
-                settings_dict['ensemble'] = 'nvt-langevin'
-            else: # NVT is default
-                settings_dict['ensemble'] = 'nvt'
-        return settings_dict
-
-@click.group(cls=NVTNPTGroup, invoke_without_command=True,
+@click.group(cls=CustomCommandClass, invoke_without_command=True,
              help="Run molecular dynamics using SO3LR Machine Learned Force Field.",
              context_settings={"help_option_names": []})
 @click.option('--settings', type=click.Path(exists=False), default=None,
@@ -726,12 +666,6 @@ class NVTNPTGroup(CustomCommandClass):
               help='Show detailed information about MD settings.')
 @click.option('--help', '-h', is_flag=True,
               help='Show brief command overview.')
-@click.option('--nve', is_flag=True, hidden=True,
-              help='Run NVE simulation.')
-@click.option('--nvt', is_flag=True, hidden=True,
-              help='Run NVT simulation (default).')
-@click.option('--npt', is_flag=True, hidden=True,
-              help='Run NPT simulation with default pressure of 1.0 atm.')
 @click.pass_context
 def cli(ctx: click.Context,
         settings: Optional[str],
@@ -780,9 +714,6 @@ def cli(ctx: click.Context,
         # Help options
         help_full: bool,
         help: bool,
-        nve: bool,
-        nvt: bool,
-        npt: bool,
         # Optional arguments:
         ) -> None:
     """
@@ -959,7 +890,7 @@ def cli(ctx: click.Context,
     if settings is not None:
         logger.info(f"Loading settings from {settings}")
 
-    settings_dict = ctx.command.canonicalize_ensemble(settings_dict)
+    settings_dict = canonicalize_ensemble(settings_dict)
 
     # Print simulation details
     logger.info(f"Initial geometry:          {settings_dict['input_file']}")
