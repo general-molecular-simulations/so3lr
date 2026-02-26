@@ -114,6 +114,33 @@ The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fy
 
 The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld ratios are optional. If they are not present in the data, the metrics will simply be `NaN`.
 
+**Observable targets** — intermediate model quantities (no ground truth required) can be added to `--targets`. They are saved to the output extxyz file alongside the standard predictions:
+
+```shell script
+so3lr eval --datafile dataset.extxyz --lr-cutoff 100 --save-to predictions.extxyz \
+    --targets forces,dipole_vec,nn_energy,partial_charges,electrostatic_energy,dispersion_energy
+```
+
+**Atom embeddings** — the final-layer per-atom feature vectors (`x`) are written to a separate compressed NumPy file `<output>_x.npz` because of their size:
+
+```shell script
+so3lr eval --datafile dataset.extxyz --lr-cutoff 100 --save-to predictions.extxyz \
+    --targets forces,x
+# creates: predictions.extxyz  (standard predictions)
+#          predictions_x.npz   (atom embeddings)
+```
+
+```python
+import numpy as np
+
+data = np.load('predictions_x.npz')
+embeddings = data['embeddings']  # shape: (total_atoms, features)
+n_atoms    = data['n_atoms']     # shape: (n_structures,)
+
+# Split back into per-structure arrays
+per_structure = np.split(embeddings, np.cumsum(n_atoms[:-1]))
+```
+
 The predictions can be analyzed in Python:
 
 ```python
@@ -260,17 +287,20 @@ print(f"  ZBL repulsion: {zbl_repulsion:.6f} eV")
 print(f"Partial charges: {partial_charges}")
 ```
 
+> **Note:** All energy-related observables (`nn_energy`, `electrostatic_energy`, `dispersion_energy`, `zbl_repulsion`, `electrostatic_energy_undamped`, `dispersion_energy_undamped`) are returned as **per-atom arrays**. Sum over atoms to obtain the total contribution: `np.sum(aux['nn_energy'])`.
+
 **Available observables:**
 | Observable | Description | Shape |
 |------------|-------------|-------|
-| `nn_energy` | Neural network energy contribution | `()` |
-| `electrostatic_energy` | Damped electrostatic energy | `()` |
-| `dispersion_energy` | Damped dispersion energy | `()` |
-| `zbl_repulsion` | ZBL short-range repulsion | `()` |
+| `nn_energy` | Neural network energy contribution | `(n_atoms,)` |
+| `electrostatic_energy` | Damped electrostatic energy | `(n_atoms,)` |
+| `dispersion_energy` | Damped dispersion energy | `(n_atoms,)` |
+| `zbl_repulsion` | ZBL short-range repulsion | `(n_atoms,)` |
 | `partial_charges` | Atomic partial charges | `(n_atoms,)` |
 | `hirshfeld_ratios` | Hirshfeld volume ratios | `(n_atoms,)` |
-| `electrostatic_energy_undamped` | Undamped electrostatic energy | `()` |
-| `dispersion_energy_undamped` | Undamped dispersion energy | `()` |
+| `electrostatic_energy_undamped` | Undamped electrostatic energy | `(n_atoms,)` |
+| `dispersion_energy_undamped` | Undamped dispersion energy | `(n_atoms,)` |
+| `x` | Final-layer per-atom embeddings | `(n_atoms, features)` |
 
 ### Observable Gradients
 
@@ -312,6 +342,8 @@ for idx in [0, 1, 2]:
 **Gradient/Jacobian suffixes:**
 - `_grad`: For scalar observables (energies). Returns gradient of shape `(3,)`.
 - `_jac`: For vector observables (charges, Hirshfeld ratios). Returns Jacobian of shape `(n_atoms, 3)`.
+
+> **Note:** The `_grad` and `_jac` suffixes are only supported through the ASE calculator (`So3lrCalculator`) and are **not currently supported** via the `so3lr eval` CLI or `make_so3lr`.
 
 ### Hessian Calculation
 
@@ -586,7 +618,6 @@ The `k_spacing` controls the k-space grid density:
 - Fast TFDS dataloader
 - General robust loss
 - Multi-head fine-tuning
-- Extract embeddings
 
 If you would like to see new features, add your own functionality, or share ideas, please reach out or open an issue. We are always happy to collaborate and hear your thoughts!
 

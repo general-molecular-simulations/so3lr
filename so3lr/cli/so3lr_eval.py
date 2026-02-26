@@ -23,6 +23,15 @@ from .so3lr_md import load_model, setup_logger
 # Get logger
 logger = logging.getLogger("SO3LR")
 
+# Observable quantities that require output_intermediate_quantities from the model.
+# All observables are per-atom (node-level) quantities.
+OBSERVABLES = {
+    'nn_energy', 'partial_charges', 'electrostatic_energy',
+    'dispersion_energy', 'zbl_repulsion',
+    'electrostatic_energy_undamped', 'dispersion_energy_undamped',
+    'x',  # final-layer atom embeddings; saved to _x.npz, not extxyz
+}
+
 
 def process_predictions(
     save_to: Optional[str],
@@ -69,6 +78,12 @@ def process_predictions(
     for field in ('residue_charge', 'residue_segments'):
         main_graph.globals.pop(field, None)
 
+    # Add any observable quantities that are present in the predictions.
+    # 'x' (atom embeddings) is excluded here — it's saved separately to an NPZ file.
+    for obs_key in OBSERVABLES:
+        if obs_key in output_prediction and obs_key != 'x':
+            main_graph.nodes[f'{obs_key}_so3lr'] = output_prediction[obs_key]
+
     # Unbatch the graphs and filter out padding using jraph's standard unbatch
     unbatched_graphs = jraph.unbatch_np(main_graph)
     graph_mask = np.array(inputs['graph_mask'])
@@ -100,6 +115,10 @@ def calculate_metrics(
     metrics = {}
 
     for target in targets:
+        # Skip targets that have no ground truth in the dataset (e.g., observables)
+        if target not in inputs:
+            continue
+
         mask = assign_mask(target, inputs=inputs)
         y_pred = output_prediction[target]
         y_true = inputs[target]
@@ -208,6 +227,19 @@ def evaluate_so3lr_on(
     target_list = targets.split(',')
     logger.info(f"Evaluating targets: {', '.join(target_list)}")
 
+    # Determine which targets are observables (need output_intermediate_quantities)
+    observable_targets = [t for t in target_list if t in OBSERVABLES]
+    output_intermediate_quantities = observable_targets if observable_targets else None
+    if observable_targets:
+        logger.info(f"Observable targets (no ground truth expected): {', '.join(observable_targets)}")
+
+    # Embeddings ('x') are large and saved to a separate compressed NPZ file.
+    save_x_bool = 'x' in target_list
+    if save_x_bool:
+        base_path = save_to if save_to is not None else datafile
+        npz_path = Path(base_path).with_name(Path(base_path).stem + '_x.npz')
+        all_x = []  # accumulates (n_atoms_i, features) per structure
+
     # Process input file path
     datafile = Path(datafile).resolve().expanduser()
     if not datafile.exists():
@@ -235,8 +267,9 @@ def evaluate_so3lr_on(
         so3lr_calc = make_so3lr(
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            calculate_forces=True
-        ) 
+            calculate_forces=True,
+            output_intermediate_quantities=output_intermediate_quantities
+        )
         cutoff = 4.5 # Default cutoff for SO3LR
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
@@ -244,7 +277,8 @@ def evaluate_so3lr_on(
             workdir=model_path,
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            calculate_forces=True
+            calculate_forces=True,
+            output_intermediate_quantities=output_intermediate_quantities
         )
 
         with open(Path(model_path) / "hyperparameters.json", "r") as fp:
@@ -273,7 +307,7 @@ def evaluate_so3lr_on(
 
     # Check for allowed atom types
     allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
-    for i, graph in enumerate(data):
+    for i, (graph, _) in enumerate(data):
         if hasattr(graph, 'nodes') and isinstance(graph.nodes, dict) and 'atomic_numbers' in graph.nodes:
              atomic_nums = graph.nodes['atomic_numbers']
         elif isinstance(graph, dict) and 'nodes' in graph and 'atomic_numbers' in graph['nodes']:
@@ -372,14 +406,23 @@ def evaluate_so3lr_on(
             total_num_structures += batch_size
             progress_bar.update(batch_size)
 
+            # Accumulate atom embeddings per structure into all_x
+            if save_x_bool and 'x' in output_prediction:
+                node_mask = np.array(inputs['node_mask'], dtype=bool)
+                x_real = output_prediction['x'][node_mask]  # (total_real_atoms, features)
+                n_node_per_graph = graph_batch[0].n_node[:batch_size]
+                splits = np.cumsum(n_node_per_graph[:-1]).tolist() if batch_size > 1 else []
+                all_x.extend(np.split(x_real, splits))
+
             # Calculate batch metrics (sums & counts)
             batch_metrics = calculate_metrics(output_prediction, inputs, target_list)
 
-            # Accumulate
+            # Accumulate (only for targets that had ground truth)
             for t in target_list:
-                tot_abs[t] += batch_metrics[f"{t}_abs_sum"]
-                tot_sq[t]  += batch_metrics[f"{t}_sq_sum"]
-                tot_n[t]   += batch_metrics[f"{t}_count"]
+                if f"{t}_abs_sum" in batch_metrics:
+                    tot_abs[t] += batch_metrics[f"{t}_abs_sum"]
+                    tot_sq[t]  += batch_metrics[f"{t}_sq_sum"]
+                    tot_n[t]   += batch_metrics[f"{t}_count"]
 
             # Process predictions if saving is enabled
             if save_predictions_bool:
@@ -394,11 +437,22 @@ def evaluate_so3lr_on(
         
         logger.info(f'Completed evaluation on {total_num_structures} / {num_data} structures')
         logger.info(f'Pure evaluation time: {total_time:.3f} seconds')
+
+        # Save embeddings to compressed NPZ
+        if save_x_bool and all_x:
+            x_concat = np.concatenate(all_x, axis=0)  # (total_atoms, features)
+            n_atoms = np.array([xi.shape[0] for xi in all_x], dtype=np.int32)
+            np.savez_compressed(npz_path, embeddings=x_concat, n_atoms=n_atoms)
+            logger.info(f'Embeddings saved to: {npz_path}  '
+                        f'(shape: {x_concat.shape}, {len(all_x)} structures)')
+
         logger.info('-' * 50)
 
-        # Compute final metrics from totals (global per-atom/per-structure)
+        # Compute final metrics from totals (only for targets with ground truth)
         test_metrics = {}
         for t in target_list:
+            if t not in tot_n:
+                continue
             n = tot_n[t]
             if n <= 0:
                 # Avoid division by zero; report NaNs if nothing was counted
@@ -479,5 +533,7 @@ def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:
         return node_mask
     # elif x == 'c6_ratios':
     #     return node_mask
+    elif x in OBSERVABLES:
+        return node_mask
     else:
         raise ValueError(f"Evaluation not implemented for target='{x}'.")
