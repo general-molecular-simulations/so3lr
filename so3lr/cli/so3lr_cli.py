@@ -244,6 +244,48 @@ Evaluate SO3LR on a dataset with all options:
 # # Additional settings
 # total_charge: 0                              # Total charge of the system
 # seed: 42                                     # Random seed for MD
+# observables: []                              # List of observable quantities to compute and save
+# output_atom_indices: null                    # Optional list of atom indices to include in output
+
+# # K-space electrostatics (optional, for periodic systems)
+# kspace_electrostatics: null                  # K-space method: null/"ewald"/"pme"/"p3m"
+# kspace_smearing: 4.0                         # Smearing width for k-space summation (Å)
+# kspace_spacing: 2.0                          # Grid spacing for k-space summation (Å)
+# kspace_interp_nodes: 4                       # Number of interpolation nodes for PME/P3M
+
+# # Restart settings
+# restart_save_path: "restart.npz"             # Path to save restart data
+# restart_load_path: "previous.npz"            # Path to load restart data from previous run
+# restart_reset: false                         # Reset accumulated thermostat/barostat state on restart
+# ```
+
+# Example settings file for NVE simulation (nve_settings.yaml):
+# ```yaml
+# # Input/Output
+# input_file: "path/to/structure.xyz"          # Path to the initial geometry file
+# output_file: "nve_trajectory.hdf5"           # Output trajectory file in 'hdf5' or 'extxyz' format
+# log_file: "nve_md.log"                       # File to write logs to
+
+# # Model settings
+# model_path: "/path/to/model"                 # Optional path to custom MLFF model
+# precision: "float32"                         # Numerical precision: 'float32' or 'float64'
+# lr_cutoff: 12.0                              # Long-range cutoff distance in Å
+# dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
+# buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
+# buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
+# save_buffer: 50                              # Number of frames to buffer before writing
+
+# # MD settings
+# md_dt: 0.5                                   # MD timestep in femtoseconds
+# init_T: 300.0                                # Initial temperature for velocity initialization (NVE only)
+# md_cycles: 100                               # Number of MD cycles to run
+# md_steps: 100                                # Number of steps per MD cycle
+# relax_before_run: true                       # Whether to perform geometry relaxation before MD
+# force_convergence: 0.05                      # Force convergence criterion in eV/Å for initial relaxation
+
+# # Additional settings
+# total_charge: 0                              # Total charge of the system
+# seed: 42                                     # Random seed for MD
 # ```
 
 # Example settings file for NPT simulation (npt_settings.yaml):
@@ -285,6 +327,20 @@ Evaluate SO3LR on a dataset with all options:
 # # Additional settings
 # total_charge: 0                              # Total charge of the system
 # seed: 42                                     # Random seed for MD
+# observables: []                              # List of observable quantities to compute and save
+# output_atom_indices: null                    # Optional list of atom indices to include in output
+
+# # K-space electrostatics (optional, for periodic systems)
+# kspace_electrostatics: null                  # K-space method: null/"ewald"/"pme"/"p3m"
+# kspace_smearing: 4.0                         # Smearing width for k-space summation (Å)
+# kspace_spacing: 2.0                          # Grid spacing for k-space summation (Å)
+# kspace_interp_nodes: 4                       # Number of interpolation nodes for PME/P3M
+# kspace_npt_cycles: 10                        # Frequency (in MD cycles) to re-tune k-space grid for NPT
+
+# # Restart settings
+# restart_save_path: "restart.npz"             # Path to save restart data
+# restart_load_path: "previous.npz"            # Path to load restart data from previous run
+# restart_reset: false                         # Reset accumulated thermostat/barostat state on restart
 # ```
 
 # Example settings file for geometry optimization (opt_settings.yaml):
@@ -382,7 +438,7 @@ PARAM_MAP = {
     'min_max_dt': 'min_max_dt',
     'min_cycles': 'min_cycles',
     'min_steps': 'min_steps',
-    'kspace_type': 'kspace_electrostatics',
+    'kspace_electrostatics': 'kspace_electrostatics',
     'jit_compile': 'jit_compile'
 }
 
@@ -566,6 +622,39 @@ class CustomCommandClass(click.Group):
             formatter.write(FULL_HELP_STRING)
 
 
+# Default values applied to the settings dict when using the YAML pathway.
+# These mirror the CLI option defaults so that omitting a key from the YAML
+# produces the same result as not passing the corresponding CLI flag.
+YAML_DEFAULTS: Dict[str, Any] = {
+    'precision':                  DEFAULT_PRECISION,
+    'lr_cutoff':                  DEFAULT_LR_CUTOFF,
+    'dispersion_damping':         DEFAULT_DISPERSION_DAMPING,
+    'buffer_size_multiplier_sr':  DEFAULT_BUFFER_MULTIPLIER,
+    'buffer_size_multiplier_lr':  DEFAULT_BUFFER_MULTIPLIER,
+    'total_charge':               DEFAULT_TOTAL_CHARGE,
+    'seed':                       DEFAULT_SEED,
+    'save_buffer':                DEFAULT_SAVE_BUFFER,
+    'md_dt':                      DEFAULT_TIMESTEP / 1000,  # stored in ps
+    'md_T':                       DEFAULT_TEMPERATURE,
+    'md_cycles':                  DEFAULT_MD_CYCLES,
+    'md_steps':                   DEFAULT_MD_STEPS_PER_CYCLE,
+    'nhc_chain_length':           DEFAULT_NHC_CHAIN_LENGTH,
+    'nhc_steps':                  DEFAULT_NHC_INTEGRATION_STEPS,
+    'nhc_thermo':                 DEFAULT_NHC_THERMO,
+    'nhc_baro':                   DEFAULT_NHC_BARO,
+    'nhc_sy_steps':               DEFAULT_SUZUKI_YOSHIDA_STEPS,
+    'langevin_removecmmotion':    DEFAULT_LANGEVIN_REMOVECMMOTION,
+    'langevin_thermo':            DEFAULT_LANGEVIN_THERMO,
+    'relax_before_run':           True,
+    'min_cycles':                 DEFAULT_MIN_CYCLES,
+    'min_steps':                  DEFAULT_MIN_STEPS,
+    'min_start_dt':               DEFAULT_MIN_START_DT,
+    'min_max_dt':                 DEFAULT_MIN_MAX_DT,
+    'min_n_min':                  DEFAULT_MIN_N_MIN,
+    'observables':                list(DEFAULT_OBSERVABLES),
+}
+
+
 def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Determine ensemble from settings dict, defaulting to NVT.
 
@@ -629,6 +718,10 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     # md_dt is written in fs in the YAML but run() expects ps
     if 'md_dt' in settings_dict:
         settings_dict['md_dt'] = settings_dict['md_dt'] / 1000
+
+    # Apply defaults for any keys not present in the YAML
+    for key, default in YAML_DEFAULTS.items():
+        settings_dict.setdefault(key, default)
 
     settings_dict = canonicalize_ensemble(settings_dict)
     settings_dict['output_format'] = infer_output_format(settings_dict.get('output_file', ''))
@@ -706,6 +799,20 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
             logger.info(f"Force convergence:         {s['force_convergence']} eV/Å")
     else:
         logger.info(f"Geometry relaxation:       Disabled")
+    if s.get('kspace_electrostatics'):
+        logger.info(f"K-space method:            {s['kspace_electrostatics']}")
+        if s.get('kspace_smearing'):
+            logger.info(f"K-space smearing:          {s['kspace_smearing']}")
+        if s.get('kspace_spacing'):
+            logger.info(f"K-space spacing:           {s['kspace_spacing']}")
+        if s.get('kspace_interp_nodes'):
+            logger.info(f"K-space interp nodes:      {s['kspace_interp_nodes']}")
+        if s.get('kspace_npt_cycles'):
+            logger.info(f"K-space NPT cycles:        {s['kspace_npt_cycles']}")
+    if s.get('output_atom_indices') is not None:
+        logger.info(f"Output atom indices:       {s['output_atom_indices']}")
+    if s.get('restart_reset'):
+        logger.info(f"Restart reset:             {s['restart_reset']}")
     logger.info("=" * 60)
 
 # ============================================================================
@@ -1326,8 +1433,8 @@ def train_model(
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
               help='Use JIT compilation for speed. [default: enabled]')
 # Tuning settings
-@click.option('--kspace_type', default=None, type=str,
-              help='Type of k-space calculation: "ewald", "pme", or "p3m". [default: "pme"]')
+@click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None, type=str,
+              help='K-space method for long-range electrostatics: "ewald", "pme", or "p3m". [default: None]')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 @click.pass_context
@@ -1347,7 +1454,7 @@ def tune_ewald(
     buffer_lr: float,
     total_charge: int,
     jit_compile: bool,
-    kspace_type: str,
+    kspace_electrostatics: str,
     # Help option
     help: bool
 ) -> None:
@@ -1360,7 +1467,7 @@ def tune_ewald(
     - p3m: Particle-Particle Particle-Mesh (uses B-spline interpolation)
 
     Example:
-        so3lr tune-ewald --input geometry.xyz --kspace_type pme
+        so3lr tune-ewald --input geometry.xyz --kspace-electrostatics pme
     """
      # Print help if needed
     if help:
