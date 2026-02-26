@@ -527,5 +527,120 @@ class TestForceConsistencyWithObservables:
         )
 
 
+class TestEmbeddingsExtraction:
+    """Test extraction and properties of atom embeddings ('x')."""
+
+    @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
+    def test_embeddings_shape(self, name: str, package_dir):
+        """Test that 'x' embeddings have the correct per-atom shape."""
+        atoms = read(package_dir / f'tests/test_data/{name}.xyz')
+
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
+            lr_cutoff=12.,
+            dispersion_energy_cutoff_lr_damping=2.,
+            from_file=True,
+            dtype=np.float64,
+            has_aux=True,
+            observables=['x']
+        )
+
+        atoms.calc = calc
+        atoms.cell = None
+        atoms.pbc = False
+
+        _ = atoms.get_potential_energy()
+
+        results = calc.results.get('aux', {})
+
+        assert 'x' in results, "'x' embeddings not found in observables"
+
+        x = results['x']
+        assert x.ndim == 2, f"Expected 2D embeddings, got shape {x.shape}"
+        assert x.shape[0] == len(atoms), (
+            f"Expected {len(atoms)} atom embeddings, got {x.shape[0]}"
+        )
+        assert x.shape[1] > 0, "Feature dimension must be non-zero"
+
+        print(f"\nMolecule: {name}")
+        print(f"Number of atoms: {len(atoms)}")
+        print(f"Embeddings shape: {x.shape}  (n_atoms, features)")
+
+    @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
+    def test_embeddings_consistent_across_runs(self, name: str, package_dir):
+        """Test that 'x' embeddings are identical across two identical forward passes."""
+        atoms = read(package_dir / f'tests/test_data/{name}.xyz')
+
+        calc = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
+            lr_cutoff=12.,
+            dispersion_energy_cutoff_lr_damping=2.,
+            from_file=True,
+            dtype=np.float64,
+            has_aux=True,
+            observables=['x']
+        )
+
+        atoms.calc = calc
+        atoms.cell = None
+        atoms.pbc = False
+
+        _ = atoms.get_potential_energy()
+        x1 = calc.results['aux']['x'].copy()
+
+        # Reset and run again
+        atoms.calc.reset()
+        _ = atoms.get_potential_energy()
+        x2 = calc.results['aux']['x'].copy()
+
+        npt.assert_array_equal(x1, x2,
+            err_msg=f"Embeddings differ between two identical runs for {name}")
+
+    @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
+    def test_energy_unchanged_when_requesting_embeddings(self, name: str, package_dir):
+        """Test that requesting 'x' does not change the computed energy."""
+        atoms = read(package_dir / f'tests/test_data/{name}.xyz')
+
+        calc_no_x = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
+            lr_cutoff=12.,
+            dispersion_energy_cutoff_lr_damping=2.,
+            from_file=True,
+            dtype=np.float64,
+        )
+
+        calc_with_x = AseCalculatorSparse.create_from_workdir(
+            workdir=package_dir / 'so3lr' / 'params',
+            lr_cutoff=12.,
+            dispersion_energy_cutoff_lr_damping=2.,
+            from_file=True,
+            dtype=np.float64,
+            has_aux=True,
+            observables=['x']
+        )
+
+        atoms_a = atoms.copy()
+        atoms_a.calc = calc_no_x
+        atoms_a.cell = None
+        atoms_a.pbc = False
+
+        atoms_b = atoms.copy()
+        atoms_b.calc = calc_with_x
+        atoms_b.cell = None
+        atoms_b.pbc = False
+
+        energy_no_x = atoms_a.get_potential_energy()
+        energy_with_x = atoms_b.get_potential_energy()
+
+        print(f"\nMolecule: {name}")
+        print(f"Energy without 'x': {energy_no_x:.8f} eV")
+        print(f"Energy with 'x':    {energy_with_x:.8f} eV")
+
+        npt.assert_allclose(
+            energy_no_x, energy_with_x, rtol=1e-10,
+            err_msg=f"Energy changed when requesting embeddings for {name}"
+        )
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
