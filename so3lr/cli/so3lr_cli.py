@@ -2016,6 +2016,7 @@ def nve_md(
                    'Observables (saved to output, metrics only if ground truth exists): '
                    'nn_energy, partial_charges, electrostatic_energy, dispersion_energy, '
                    'zbl_repulsion, electrostatic_energy_undamped, dispersion_energy_undamped. '
+                   'Embeddings: x (final-layer per-atom features, saved to <output>_x.npz). '
                    '[default: forces,dipole_vec,hirshfeld_ratios]')
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
               help='Use JIT compilation for speed. [default: enabled]')

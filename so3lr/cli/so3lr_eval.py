@@ -29,6 +29,7 @@ OBSERVABLES = {
     'nn_energy', 'partial_charges', 'electrostatic_energy',
     'dispersion_energy', 'zbl_repulsion',
     'electrostatic_energy_undamped', 'dispersion_energy_undamped',
+    'x',  # final-layer atom embeddings; saved to _x.npz, not extxyz
 }
 
 
@@ -77,9 +78,10 @@ def process_predictions(
     for field in ('residue_charge', 'residue_segments'):
         main_graph.globals.pop(field, None)
 
-    # Add any observable quantities that are present in the predictions
+    # Add any observable quantities that are present in the predictions.
+    # 'x' (atom embeddings) is excluded here — it's saved separately to an NPZ file.
     for obs_key in OBSERVABLES:
-        if obs_key in output_prediction:
+        if obs_key in output_prediction and obs_key != 'x':
             main_graph.nodes[f'{obs_key}_so3lr'] = output_prediction[obs_key]
 
     # Unbatch the graphs and filter out padding using jraph's standard unbatch
@@ -230,6 +232,13 @@ def evaluate_so3lr_on(
     output_intermediate_quantities = observable_targets if observable_targets else None
     if observable_targets:
         logger.info(f"Observable targets (no ground truth expected): {', '.join(observable_targets)}")
+
+    # Embeddings ('x') are large and saved to a separate compressed NPZ file.
+    save_x_bool = 'x' in target_list
+    if save_x_bool:
+        base_path = save_to if save_to is not None else datafile
+        npz_path = Path(base_path).with_name(Path(base_path).stem + '_x.npz')
+        all_x = []  # accumulates (n_atoms_i, features) per structure
 
     # Process input file path
     datafile = Path(datafile).resolve().expanduser()
@@ -397,6 +406,14 @@ def evaluate_so3lr_on(
             total_num_structures += batch_size
             progress_bar.update(batch_size)
 
+            # Accumulate atom embeddings per structure into all_x
+            if save_x_bool and 'x' in output_prediction:
+                node_mask = np.array(inputs['node_mask'], dtype=bool)
+                x_real = output_prediction['x'][node_mask]  # (total_real_atoms, features)
+                n_node_per_graph = graph_batch[0].n_node[:batch_size]
+                splits = np.cumsum(n_node_per_graph[:-1]).tolist() if batch_size > 1 else []
+                all_x.extend(np.split(x_real, splits))
+
             # Calculate batch metrics (sums & counts)
             batch_metrics = calculate_metrics(output_prediction, inputs, target_list)
 
@@ -420,6 +437,15 @@ def evaluate_so3lr_on(
         
         logger.info(f'Completed evaluation on {total_num_structures} / {num_data} structures')
         logger.info(f'Pure evaluation time: {total_time:.3f} seconds')
+
+        # Save embeddings to compressed NPZ
+        if save_x_bool and all_x:
+            x_concat = np.concatenate(all_x, axis=0)  # (total_atoms, features)
+            n_atoms = np.array([xi.shape[0] for xi in all_x], dtype=np.int32)
+            np.savez_compressed(npz_path, embeddings=x_concat, n_atoms=n_atoms)
+            logger.info(f'Embeddings saved to: {npz_path}  '
+                        f'(shape: {x_concat.shape}, {len(all_x)} structures)')
+
         logger.info('-' * 50)
 
         # Compute final metrics from totals (only for targets with ground truth)
