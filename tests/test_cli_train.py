@@ -51,6 +51,7 @@ def _run_train(config_path):
         capture_output=True,
         text=True,
         timeout=300,
+        cwd=config_path.parent,
     )
 
 
