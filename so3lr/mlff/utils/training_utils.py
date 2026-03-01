@@ -91,14 +91,18 @@ def set_seeds(seed=0):
     np.random.seed(seed)
 
 
-def print_metrics(epoch, eval_metrics):
-    formatted_output = f"{epoch}: "
-    for key, value in eval_metrics.items():
-        if isinstance(value, np.ndarray) and value.size == 1:
-            formatted_output += f"{key}={value.item():.4f}, "
-        else:
-            formatted_output += f"{key}={', '.join(map('{:.4f}'.format, value))}, " if isinstance(value, np.ndarray) else f"{key}={value:.4f}, "
-    return formatted_output.rstrip(", ")
+def print_metrics_header(eval_metrics):
+    """Print table header row. Call once before training loop."""
+    cols = ['epoch', 'step'] + [k.removeprefix('eval_') for k in eval_metrics]
+    header = ' | '.join(f'{c:>14s}' for c in cols)
+    sep = '-+-'.join('-' * 14 for _ in cols)
+    return f"\n{header}\n{sep}"
+
+
+def print_metrics_row(epoch, step, eval_metrics):
+    """Print one table row for a validation checkpoint."""
+    vals = [f'{epoch:>14d}', f'{step:>14d}'] + [f'{v:>14.4f}' for v in eval_metrics.values()]
+    return ' | '.join(vals)
 
 def graph_mse_loss(
     y, y_label, batch_segments, graph_mask, scale,
@@ -878,6 +882,7 @@ def fit(
     processed_graphs = 0
     processed_nodes = 0
     step = 0
+    header_printed = False
 
     opt_state = None
     for epoch in range(num_epochs):
@@ -1061,8 +1066,11 @@ def fit(
                     f'eval_{k}': float(v) for k, v in eval_metrics.items()
                 }
 
-                # Print eval_metrics
-                logger.info(print_metrics(f"val_{epoch}_{step}:", eval_metrics))
+                # Print eval_metrics as table
+                if not header_printed:
+                    logger.info(print_metrics_header(eval_metrics))
+                    header_printed = True
+                logger.info(print_metrics_row(epoch, step, eval_metrics))
 
                 # Save checkpoint.
                 ckpt_mngr.save(
@@ -1186,6 +1194,7 @@ def fit_from_iterator(
     processed_graphs = 0
     processed_nodes = 0
     step = 0
+    header_printed = False
 
     opt_state = None
 
@@ -1356,7 +1365,10 @@ def fit_from_iterator(
                     f'eval_{k}': float(v) for k, v in eval_metrics.items()
                 }
 
-                logger.info(print_metrics(f"val_{epoch}_{step}:", eval_metrics))
+                if not header_printed:
+                    logger.info(print_metrics_header(eval_metrics))
+                    header_printed = True
+                logger.info(print_metrics_row(epoch, step, eval_metrics))
                 eval_loss = eval_metrics['eval_loss']
 
                 # Only save if loss is finite
