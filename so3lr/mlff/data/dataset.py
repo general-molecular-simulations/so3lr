@@ -12,7 +12,6 @@ from so3lr.mlff.indexing.indices import get_indices, get_pbc_neighbors
 from so3lr.mlff.utils.training_utils import set_seeds
 from so3lr.mlff.io import read_json, save_dict, merge_dicts
 from so3lr.mlff.data.preprocessing import get_per_atom_shift
-from so3lr.mlff.properties import properties as pn
 
 
 class DataSet:
@@ -38,7 +37,7 @@ class DataSet:
 
         # if energy exists in data, make sure it has the correct dimensions
         try:
-            q_data[self.prop_keys[pn.energy]] = q_data[self.prop_keys[pn.energy]].reshape(-1, 1)
+            q_data[self.prop_keys['energy']] = q_data[self.prop_keys['energy']].reshape(-1, 1)
         except KeyError:
             pass
 
@@ -77,8 +76,8 @@ class DataSet:
         save_dict(path=path, filename=filename, data=self.scales, exists_ok=True)
 
     def neighborhood_list(self, r_cut):
-        R_key = self.prop_keys[pn.atomic_position]
-        z_key = self.prop_keys[pn.atomic_type]
+        R_key = self.prop_keys['atomic_position']
+        z_key = self.prop_keys['atomic_type']
         neigh_idx = get_indices(R=self.data[R_key], z=self.data[z_key], r_cut=r_cut)
         return neigh_idx
 
@@ -91,7 +90,7 @@ class DataSet:
         return neighs.mean().item()
 
     def number_of_atoms(self) -> int:
-        _n_atoms = (self.data_split['train'][self.prop_keys[pn.atomic_type]] != -1).sum(-1)  # shape: (D)
+        _n_atoms = (self.data_split['train'][self.prop_keys['atomic_type']] != -1).sum(-1)  # shape: (D)
         if _n_atoms.std() != 0:
             logging.warning('Dataset contains structures with different structure sizes. Number of atoms is thus not'
                             'well defined.')
@@ -125,7 +124,7 @@ class DataSet:
             _d = {}
             for k, v in self.data.items():
 
-                if k == self.prop_keys.get(pn.node_mask):
+                if k == self.prop_keys.get('node_mask'):
                     node_mask_present = True
 
                 if len(v.shape) <= 1:
@@ -138,12 +137,12 @@ class DataSet:
 
                 d.update({i_n: _d})
 
-        z_key = self.prop_keys.get(pn.atomic_type)
+        z_key = self.prop_keys.get('atomic_type')
         node_msk_needed = node_mask_required(self.data[z_key])
 
         if r_cut is not None:
-            R_key = self.prop_keys.get(pn.atomic_position)
-            n_msk_key = self.prop_keys.get(pn.node_mask)
+            R_key = self.prop_keys.get('atomic_position')
+            n_msk_key = self.prop_keys.get('node_mask')
 
             if training:
                 R_dat = np.concatenate([d['train'][R_key], d['valid'][R_key]])
@@ -164,8 +163,8 @@ class DataSet:
                     n_msk_dat = np.ones_like(z_dat).astype(bool)
 
             if mic:
-                uc_key = self.prop_keys.get(pn.unit_cell)
-                pbc_key = self.prop_keys.get(pn.pbc)
+                uc_key = self.prop_keys.get('unit_cell')
+                pbc_key = self.prop_keys.get('pbc')
 
                 unit_cell_dat = np.concatenate([d['train'][uc_key], d['valid'][uc_key], d['test'][uc_key]])
                 pbc_dat = np.concatenate([d['train'][pbc_key], d['valid'][pbc_key], d['test'][pbc_key]])
@@ -300,7 +299,7 @@ class DataSet:
         return idx_train, idx_valid, idx_test
 
     def shift_x_by_mean_x(self, x):
-        n_atoms = self.data[self.prop_keys[pn.atomic_type]].shape[-1]
+        n_atoms = self.data[self.prop_keys['atomic_type']].shape[-1]
         if x in self.track_shift_x_by_mean_x:
             logging.warning(f'You already called `shift_x_by_mean` for `x={x}`. It is not shifted again.')
         else:
@@ -336,7 +335,7 @@ class DataSet:
             logging.warning(f'You already called `shift_x_by_type` for `x={x}`. It is not shifted again.')
         else:
             x_key = self.prop_keys[x]
-            z_key = self.prop_keys[pn.atomic_type]
+            z_key = self.prop_keys['atomic_type']
 
             shifts_arr = np.zeros(int(max(list(shifts.keys()))) + 1)
             for k, v in shifts.items():
@@ -362,7 +361,7 @@ class DataSet:
             logging.warning(f'You already called `shift_x_by_type` for `x={x}`. It is not shifted again.')
         else:
             x_key = self.prop_keys[x]
-            z_key = self.prop_keys[pn.atomic_type]
+            z_key = self.prop_keys['atomic_type']
 
             z = self.data_split['train'][z_key]
 
