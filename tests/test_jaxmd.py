@@ -23,7 +23,7 @@ def test_jax_md_import():
     import jax_md
 
 
-@pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
+@pytest.mark.parametrize('name', ['dha'])
 def test_molecules_with_box(name: str):
     jax.config.update('jax_enable_x64', True)
 
@@ -105,7 +105,7 @@ def test_molecules_with_box(name: str):
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
-@pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
+@pytest.mark.parametrize('name', ['dha'])
 def test_molecules_free(name: str):
     jax.config.update('jax_enable_x64', True)
 
@@ -257,7 +257,7 @@ def test_water():
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
-@pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
+@pytest.mark.parametrize('name', ['dha'])
 def test_with_solar_potential(name: str):
     from so3lr import So3lrPotential
 

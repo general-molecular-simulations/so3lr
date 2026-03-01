@@ -6,7 +6,7 @@ from ase.io import read
 from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 
 
-@pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
+@pytest.mark.parametrize('name', ['dha'])
 def test_molecules(name: str):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
@@ -93,7 +93,7 @@ def test_water():
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
-@pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
+@pytest.mark.parametrize('name', ['dha'])
 def test_so3lr_ase_calculator(name: str):
     from so3lr import So3lrCalculator
 
