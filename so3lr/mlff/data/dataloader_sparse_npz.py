@@ -10,12 +10,7 @@ from typing import Optional
 
 import logging
 
-from functools import partial, partialmethod
-
-logging.MLFF = 35
-logging.addLevelName(logging.MLFF, 'MLFF')
-logging.Logger.trace = partialmethod(logging.Logger.log, logging.MLFF)
-logging.mlff = partial(logging.log, logging.MLFF)
+logger = logging.getLogger("SO3LR")
 
 
 @dataclass
@@ -77,14 +72,14 @@ class NpzDataLoaderSparse:
         max_num_of_edges = 0
         max_num_of_pairs = 0
 
-        logging.mlff(
+        logger.info(
             f"Load data from {self.input_file}."
         )
-        logging.mlff(
+        logger.info(
             f"Calculate short range neighbors within cutoff={cutoff} Ang."
         )
         if calculate_neighbors_lr:
-            logging.mlff(
+            logger.info(
                 f"Calculate long-range neighbors within cutoff_lr={cutoff_lr} Ang."
             )
         i = 0
@@ -114,8 +109,8 @@ class NpzDataLoaderSparse:
                 raise RuntimeError(
                     f'`max(pick_idx) = {max(pick_idx)} >= cardinality = {i} of the dataset`.'
                 )
-        logging.mlff("... done!")
-        logging.mlff(
+        logger.info("... done!")
+        logger.info(
             f"Data stats: max_num_of_nodes={max_num_of_nodes}, "
             f"max_num_of_edges={max_num_of_edges}, "
             f"max_num_of_pairs={max_num_of_pairs}"

@@ -13,16 +13,12 @@ from typing import Sequence, Optional
 import yaml
 import logging
 import os
-from functools import partial, partialmethod
 import jax.numpy as jnp
 
 from ..utils import checkpoint_utils
 from ..utils.param_utils import print_param_shapes, count_params, count_trainable_params
 
-logging.MLFF = 35
-logging.addLevelName(logging.MLFF, 'MLFF')
-logging.Logger.trace = partialmethod(logging.Logger.log, logging.MLFF)
-logging.mlff = partial(logging.log, logging.MLFF)
+logger = logging.getLogger("SO3LR")
 
 def make_so3krates_sparse_from_config(
         config: config_dict.ConfigDict = None,
@@ -160,14 +156,14 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             config.data.avg_num_neighbors = None
 
         if config.data.avg_num_neighbors is not None:
-            logging.mlff(
+            logger.info(
                 f'Read average number of neighbors = {config.data.avg_num_neighbors} from config.'
             )
         else:
-            logging.mlff('Calculate average number of neighbors ...')
+            logger.info('Calculate average number of neighbors ...')
             avg_num_neighbors = np.array(data.transformations.calculate_average_number_of_neighbors(training_data))
             config.data.avg_num_neighbors = np.array(avg_num_neighbors).item()
-            logging.mlff('... done.')
+            logger.info('... done.')
 
     opt = make_optimizer_from_config(config)
     if model == 'so3krates':
@@ -256,7 +252,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)
     adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
 
-    logging.mlff('Training is starting!')
+    logger.info('Training is starting!')
     if not tf_record_present:
         training_utils.fit(
             model=net,
@@ -311,7 +307,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             adaptive_robust_loss_init_alpha=adaptive_robust_loss_init_alpha,
             adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale
         )
-    logging.mlff('Training has finished!')
+    logger.info('Training has finished!')
 
 
 def run_evaluation(
@@ -459,7 +455,7 @@ def run_evaluation(
 
     ckpt_dir = Path(config.workdir) / 'checkpoints'
     ckpt_dir = ckpt_dir.expanduser().resolve()
-    logging.mlff(f'Restore parameters from {ckpt_dir} ...')
+    logger.info(f'Restore parameters from {ckpt_dir} ...')
 
     params = checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir)
 
@@ -504,7 +500,7 @@ def run_evaluation(
     total_params = count_params(params)
     print(f"\nTotal number of parameters: {total_params:,}")
 
-    logging.mlff(f'... done.')
+    logger.info(f'... done.')
 
     if model == 'so3krates':
         net = make_so3krates_sparse_from_config(config)
@@ -512,7 +508,7 @@ def run_evaluation(
         raise ValueError(
             f'{model=} is not a valid model.'
         )
-    logging.mlff(f'Evaluate on {data_filepath} for targets {targets}.')
+    logger.info(f'Evaluate on {data_filepath} for targets {targets}.')
 
     return evaluation_utils.evaluate(
         model=net,
@@ -748,7 +744,7 @@ def run_fine_tuning(
             )
 
         config.data.avg_num_neighbors = config_start_from_workdir.data.avg_num_neighbors
-        logging.mlff(
+        logger.info(
             f'Read average number of neighbors = {config.data.avg_num_neighbors} from original config at '
             f'{start_from_workdir}.'
         )
@@ -840,7 +836,7 @@ def run_fine_tuning(
         import wandb
         wandb.init(config=config.to_dict(), **config.training.wandb_init_args)
 
-    logging.mlff(
+    logger.info(
         f'Fine tuning model from {start_from_workdir} on {data_filepath}!'
     )
 
@@ -911,7 +907,7 @@ def run_fine_tuning(
             adaptive_robust_loss_init_alpha=adaptive_robust_loss_init_alpha,
             adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale
         )
-    logging.mlff('Training has finished!')
+    logger.info('Training has finished!')
 
 
 def data_loader_from_config(config):
@@ -952,13 +948,6 @@ def data_loader_from_config(config):
         if data_filepath.is_file():
             if data_filepath.suffix == '.npz':
                 loader = data.NpzDataLoaderSparse(input_file=data_filepath)
-            elif data_filepath.stem[:5].lower() == 'spice':
-                logging.mlff(f'Found SPICE dataset at {data_filepath}.')
-                if data_filepath.suffix != '.hdf5':
-                    raise ValueError(
-                        f'Loader assumes that SPICE is in hdf5 format. Found {data_filepath.suffix} as'
-                        f'suffix.')
-                loader = data.SpiceDataLoaderSparse(input_file=data_filepath)
             else:
                 loader = data.AseDataLoaderSparse(input_file=data_filepath)
         elif data_filepath.is_dir():
@@ -1129,11 +1118,11 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
     # Print energy shifts
     non_zero_shifts = {int(k): v for k, v in config.data.energy_shifts.items() if abs(v) > 1e-10}
     if non_zero_shifts:
-        logging.mlff(f'Energy shifts (shift_mode={config.data.shift_mode}):')
+        logger.info(f'Energy shifts (shift_mode={config.data.shift_mode}):')
         for z in sorted(non_zero_shifts.keys()):
-            logging.mlff(f'  Z={z}: {non_zero_shifts[z]:.6f} eV')
+            logger.info(f'  Z={z}: {non_zero_shifts[z]:.6f} eV')
     else:
-        logging.mlff('No energy shifts applied.')
+        logger.info('No energy shifts applied.')
 
     if not tf_record_present:
         training_data = list(data.transformations.subtract_atomic_energy_shifts(

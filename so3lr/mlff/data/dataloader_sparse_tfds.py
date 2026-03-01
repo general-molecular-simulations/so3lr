@@ -4,7 +4,6 @@ import numpy as np
 from so3lr.mlff.utils.jraph_utils import dynamically_batch_with_lr
 
 from dataclasses import dataclass
-from functools import partial, partialmethod
 from typing import Optional
 import queue
 import wandb
@@ -25,10 +24,7 @@ except ModuleNotFoundError:
     )
 
 
-logging.MLFF = 35
-logging.addLevelName(logging.MLFF, 'MLFF')
-logging.Logger.trace = partialmethod(logging.Logger.log, logging.MLFF)
-logging.mlff = partial(logging.log, logging.MLFF)
+logger = logging.getLogger("SO3LR")
 
 
 def compute_edges_tf(

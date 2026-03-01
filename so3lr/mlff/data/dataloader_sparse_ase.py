@@ -13,12 +13,7 @@ from pathlib import Path
 
 import logging
 
-from functools import partial, partialmethod
-
-logging.MLFF = 35
-logging.addLevelName(logging.MLFF, 'MLFF')
-logging.Logger.trace = partialmethod(logging.Logger.log, logging.MLFF)
-logging.mlff = partial(logging.log, logging.MLFF)
+logger = logging.getLogger("SO3LR")
 
 
 def compute_senders_and_receivers_np(
@@ -106,18 +101,18 @@ class AseDataLoaderSparse:
 
         file_list = self.make_file_list()
 
-        logging.mlff(f"Loading data from file_list: {file_list} ...")
+        logger.info(f"Loading data from file_list: {file_list} ...")
 
         i = 0
         for file_path in file_list:
-            logging.mlff(
+            logger.info(
                 f"Load data from {file_path}."
             )
-            logging.mlff(
+            logger.info(
                 f"Calculate short range neighbors within cutoff={cutoff} Ang."
             )
             if calculate_neighbors_lr:
-                logging.mlff(
+                logger.info(
                     f"Calculate long-range neighbors within cutoff_lr={cutoff_lr} Ang."
                 )
             for a in tqdm(iread(file_path), mininterval=60, maxinterval=600):
@@ -148,8 +143,8 @@ class AseDataLoaderSparse:
                 raise RuntimeError(
                     f'`max(pick_idx) = {max(pick_idx)} >= cardinality = {i} of the dataset`.'
                 )
-        logging.mlff("... done!")
-        logging.mlff(
+        logger.info("... done!")
+        logger.info(
             f"Data stats: max_num_of_nodes={max_num_of_nodes}, "
             f"max_num_of_edges={max_num_of_edges}, "
             f"max_num_of_pairs={max_num_of_pairs}"

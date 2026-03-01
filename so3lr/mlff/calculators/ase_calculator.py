@@ -4,7 +4,7 @@ import numpy as np
 import logging
 
 from collections import namedtuple
-from functools import partial, partialmethod
+from functools import partial
 from typing import Any, Optional, Sequence
 
 from ase.calculators.calculator import Calculator
@@ -32,10 +32,7 @@ SpatialPartitioning = namedtuple(
     )
 )
 
-logging.MLFF = 35
-logging.addLevelName(logging.MLFF, 'MLFF')
-logging.Logger.trace = partialmethod(logging.Logger.log, logging.MLFF)
-logging.mlff = partial(logging.log, logging.MLFF)
+logger = logging.getLogger("SO3LR")
 
 StackNet = Any
 
@@ -572,7 +569,7 @@ class AseCalculatorSparse(Calculator):
         # Determine the cutoff for the neighborlist.
         if long_range_bool is False:
             # Corresponds to having a (semi)-local ML potential as constructed by MPNN.
-            logging.mlff(
+            logger.info(
                 f'Running a local model with local cutoff {potential.cutoff}.'
             )
             self.lr_cutoff = -1.
@@ -584,7 +581,7 @@ class AseCalculatorSparse(Calculator):
             # of electrostatics and/or dispersion energy.
 
             if potential.long_range_cutoff is None:
-                logging.mlff(
+                logger.info(
                     f'Running a model with long-range corrections. The local cutoff is {potential.cutoff} Ang and '
                     f'no explicit long-range cutoff.'
                 )
@@ -592,7 +589,7 @@ class AseCalculatorSparse(Calculator):
                 # but is long-ranged. Can only be applied for structures in vacuum.
                 self.lr_cutoff = 1e6
             else:
-                logging.mlff(
+                logger.info(
                     f'Running a model with long-range corrections. The local cutoff is {potential.cutoff} Ang and '
                     f'the long-range cutoff is {potential.long_range_cutoff}.'
                 )
@@ -677,7 +674,7 @@ class AseCalculatorSparse(Calculator):
 
         neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
         if neighbors.overflow:
-            logging.mlff('Re-allocating neighbours. ') 
+            logger.info('Re-allocating neighbours. ') 
             self.neighbors, self.spatial_partitioning = neighbor_list(
                         positions=system.R,
                         cell=cell,
