@@ -1,4 +1,5 @@
 from ase.units import *
+import functools
 import json
 from so3lr.mlff import nn
 from so3lr.mlff import training_utils
@@ -6,6 +7,7 @@ from so3lr.mlff import evaluation_utils
 from so3lr.mlff import data
 from so3lr.mlff import jraph_utils
 from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_force_fn_sparse
+from so3lr.mlff.utils.kspace_utils import setup_kspace_grid
 from ml_collections import config_dict
 import numpy as np
 from pathlib import Path
@@ -19,6 +21,87 @@ from ..utils import checkpoint_utils
 from ..utils.param_utils import print_param_shapes, count_params, count_trainable_params
 
 logger = logging.getLogger("SO3LR")
+
+
+def _compute_kspace_constants(config, training_data, tf_record_present):
+    """Compute k-space grid constants from config and the first periodic cell in training data.
+
+    Returns a dict with k_grid, k_smearing, k_grid_disp, k_smearing_disp as jnp arrays,
+    or None if kspace is disabled.
+    """
+    kspace_method = config.model.get('kspace_electrostatics', None)
+    if kspace_method is None:
+        return None
+
+    kspace_smearing = config.model.get('kspace_smearing', 2.0)
+    kspace_spacing = config.model.get('kspace_spacing', 1.0)
+
+    # Get a cell from the first periodic structure in training data.
+    if tf_record_present:
+        # For TFDS, peek at the first batch to get the cell.
+        first_iter = training_data.next_epoch(split='train', mode='train')
+        for graph_batch, _ in first_iter:
+            cell = graph_batch.globals.get('cell')
+            if cell is not None:
+                # cell shape: (num_graphs, 3, 3) — take the first non-zero cell
+                for g in range(cell.shape[0]):
+                    c = cell[g]
+                    if np.any(c != 0):
+                        cell_3x3 = jnp.array(c)
+                        break
+                else:
+                    continue
+                break
+        else:
+            raise ValueError(
+                "kspace_electrostatics is enabled but no periodic cell found in training data."
+            )
+    else:
+        # For ASE/Npz data, training_data is a list of (graph, lr_data) tuples.
+        cell_3x3 = None
+        for graph, _ in training_data:
+            cell = graph.globals.get('cell')
+            if cell is not None and np.any(cell != 0):
+                # cell shape: (1, 3, 3) for a single graph
+                cell_3x3 = jnp.array(cell[0])
+                break
+        if cell_3x3 is None:
+            raise ValueError(
+                "kspace_electrostatics is enabled but no periodic cell found in training data."
+            )
+
+    logger.info(f'Computing k-space grid for training with method={kspace_method}, '
+                f'smearing={kspace_smearing}, spacing={kspace_spacing}')
+    logger.info(f'Using cell: {cell_3x3}')
+
+    k_grid, k_smearing = setup_kspace_grid(
+        kspace_electrostatics=kspace_method,
+        kspace_smearing=kspace_smearing,
+        kspace_spacing=kspace_spacing,
+        box=cell_3x3,
+    )
+
+    logger.info(f'K-space grid shape: {k_grid.shape}, smearing: {k_smearing}')
+
+    # Electrostatic and dispersion use the same grid and smearing
+    return {
+        'k_grid': k_grid,
+        'k_smearing': k_smearing,
+        'k_grid_disp': k_grid,
+        'k_smearing_disp': k_smearing,
+    }
+
+
+def _make_graph_to_batch_fn(config, training_data, tf_record_present):
+    """Build graph_to_batch_fn, optionally binding kspace constants via functools.partial."""
+    kspace_constants = _compute_kspace_constants(config, training_data, tf_record_present)
+    if kspace_constants is not None:
+        return functools.partial(
+            jraph_utils.graph_to_batch_fn,
+            kspace_constants=kspace_constants,
+        )
+    return jraph_utils.graph_to_batch_fn
+
 
 def make_so3krates_sparse_from_config(
         config: config_dict.ConfigDict = None,
@@ -35,6 +118,7 @@ def make_so3krates_sparse_from_config(
         SO3krates flax model.
     """
     model_config = config.model
+    kspace_method = model_config.get('kspace_electrostatics', None)
 
     return nn.SO3kratesSparse(
         num_layers=model_config.num_layers,
@@ -68,10 +152,10 @@ def make_so3krates_sparse_from_config(
         energy_learn_atomic_type_scales=model_config.energy_learn_atomic_type_scales,
         energy_learn_atomic_type_shifts=model_config.energy_learn_atomic_type_shifts,
         electrostatic_energy_bool=model_config.electrostatic_energy_bool,
-        electrostatic_energy_kspace_method=getattr(config, 'electrostatic_energy_kspace_method', 'pme'),
+        electrostatic_energy_kspace_method=kspace_method or getattr(config, 'electrostatic_energy_kspace_method', 'pme'),
         electrostatic_energy_kspace_interp_nodes=getattr(config, 'electrostatic_energy_kspace_interp_nodes', 4),
-        dispersion_energy_kspace_do_ewald_bool = getattr(config, 'dispersion_energy_kspace_do_ewald_bool', None),
-        dispersion_energy_kspace_interp_nodes = getattr(config, 'dispersion_energy_kspace_interp_nodes', 4),
+        dispersion_energy_kspace_do_ewald_bool=(kspace_method == 'ewald') if kspace_method else getattr(config, 'dispersion_energy_kspace_do_ewald_bool', None),
+        dispersion_energy_kspace_interp_nodes=getattr(config, 'dispersion_energy_kspace_interp_nodes', 4),
         electrostatic_energy_scale=model_config.electrostatic_energy_scale,
         dispersion_energy_bool=model_config.dispersion_energy_bool,
         dispersion_energy_cutoff_lr_damping=model_config.dispersion_energy_cutoff_lr_damping,
@@ -252,6 +336,8 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)
     adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
 
+    _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)
+
     logger.info('Training is starting!')
     if not tf_record_present:
         training_utils.fit(
@@ -259,7 +345,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             optimizer=opt,
             loss_fn=loss_fn,
             val_fn=val_fn,
-            graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
+            graph_to_batch_fn=_graph_to_batch_fn,
             batch_max_num_edges=config.training.batch_max_num_edges,
             batch_max_num_nodes=config.training.batch_max_num_nodes,
             batch_max_num_graphs=config.training.batch_max_num_graphs,
@@ -286,7 +372,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             optimizer=opt,
             loss_fn=loss_fn,
             val_fn=val_fn,
-            graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
+            graph_to_batch_fn=_graph_to_batch_fn,
             batch_max_num_edges=config.training.batch_max_num_edges,
             batch_max_num_nodes=config.training.batch_max_num_nodes,
             batch_max_num_graphs=config.training.batch_max_num_graphs,
@@ -851,13 +937,15 @@ def run_fine_tuning(
             f"Checkpoint directory {ckpt_dir} already exists."
         )
 
+    _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)
+
     if tf_record_present is True:
         training_utils.fit_from_iterator(
             model=net,
             optimizer=opt,
             loss_fn=loss_fn,
             val_fn=val_fn,
-            graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
+            graph_to_batch_fn=_graph_to_batch_fn,
             batch_max_num_edges=config.training.batch_max_num_edges,
             batch_max_num_nodes=config.training.batch_max_num_nodes,
             batch_max_num_graphs=config.training.batch_max_num_graphs,
@@ -885,7 +973,7 @@ def run_fine_tuning(
             optimizer=opt,
             loss_fn=loss_fn,
             val_fn=val_fn,
-            graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
+            graph_to_batch_fn=_graph_to_batch_fn,
             batch_max_num_edges=config.training.batch_max_num_edges,
             batch_max_num_nodes=config.training.batch_max_num_nodes,
             batch_max_num_graphs=config.training.batch_max_num_graphs,

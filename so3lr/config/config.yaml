@@ -56,6 +56,9 @@ model:
   dispersion_energy_scale: 1.2  # Damping for the dispersion energy contribution.
   zbl_repulsion_bool: true  # Add a Ziegler-Biersack-Littmark (ZBL) short-range repulsion term. Prevents unphysical atom overlap.
   use_final_bias_bool: false  # Include a bias term in the final linear layer of the energy readout MLP.
+  kspace_electrostatics: null  # K-space method for electrostatic + dispersion during training. Options: null (disabled), pme, p3m, ewald.
+  kspace_smearing: 2.0  # Smearing parameter (Angstrom) for Ewald splitting. Controls real-space vs k-space partition.
+  kspace_spacing: 1.0  # Mesh spacing (Angstrom) for PME/P3M grid, or wavelength for Ewald. Smaller = finer grid = more accurate.
 optimizer:
   name: muon  # Optimizer name. Any optimizer from optax (adam, adamw, sgd, etc.) or optax.contrib (muon) is supported.
   optimizer_args:  # Additional keyword arguments passed to the optimizer constructor. Set to null for default optimizer settings.

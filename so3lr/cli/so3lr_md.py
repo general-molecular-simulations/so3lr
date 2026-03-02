@@ -39,6 +39,7 @@ from so3lr.mlff.nn.observable.observable_sparse import (
 
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
+from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
 
 import jaxpme
 
@@ -1588,37 +1589,15 @@ def setup_kspace_grid(
     )-> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Setup the k-space grid for Ewald summation.
-    Args:
-        kspace_electrostatics (str): Type of k-space electrostatics (None or 'ewald' or 'pme').
-        kspace_smearing (float): Smearing value for the k-space grid.
-        kspace_spacing (float): Spacing for the k-space grid.
-    Returns:
-        Tuple[jnp.ndarray, jnp.ndarray]: k-space grid and smearing values.
+    Delegates to so3lr.mlff.utils.kspace_utils.setup_kspace_grid.
     """
-
-    k_spacing = jnp.array([kspace_spacing])
-    k_smearing = jnp.array([kspace_smearing])
-    if box.shape == (3, 3):
-        cell = box
-    elif box.shape == (3, ):
-        cell = jnp.diag(box)
-    elif box.shape == (1,):
-        cell = jnp.diag(jnp.repeat(box, 3))
-    else:
-        raise ValueError(f"k-space grid setup: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
-
-    if kspace_electrostatics == 'ewald':
-        if k_grid is None or k_grid.shape != jaxpme.kspace.get_kgrid_ewald_shape(cell,lr_wavelength=k_spacing):
-            k_grid = jaxpme.kspace.get_kgrid_ewald(cell,lr_wavelength=k_spacing)
-            logger.info(f'Doing Ewald with k-grid shape: {k_grid.shape}')
-    elif kspace_electrostatics == 'pme' or kspace_electrostatics == 'p3m':
-        if k_grid is None or k_grid.shape != jaxpme.kspace.get_kgrid_mesh_shape(cell,mesh_spacing=k_spacing):
-            k_grid = jaxpme.kspace.get_kgrid_mesh(cell, mesh_spacing=k_spacing)
-            logger.info(f'Doing {kspace_electrostatics.upper()} with k-grid shape: {k_grid.shape}')
-    else:
-        k_grid = None
-        k_smearing = None
-    return k_grid, k_smearing
+    return _setup_kspace_grid(
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_smearing=kspace_smearing,
+        kspace_spacing=kspace_spacing,
+        box=box,
+        k_grid=k_grid,
+    )
 
 def check_kspace_grid(
     k_grid: jnp.array,

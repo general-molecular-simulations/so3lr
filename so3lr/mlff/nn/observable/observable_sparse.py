@@ -17,6 +17,145 @@ from so3lr.mlff.masking.mask import safe_scale
 from so3lr.mlff.nn.activation_function import softplus_inverse, softplus
 
 
+def _flat_to_padded(flat_array, batch_segments, num_graphs, max_atoms_per_graph, local_idx, pad_value=0.0):
+    """Reshape a flat (N,) or (N, D) array into (num_graphs, max_atoms_per_graph, ...) padded array."""
+    if flat_array.ndim == 1:
+        padded = jnp.full((num_graphs, max_atoms_per_graph), pad_value, dtype=flat_array.dtype)
+    else:
+        padded = jnp.full((num_graphs, max_atoms_per_graph) + flat_array.shape[1:], pad_value, dtype=flat_array.dtype)
+    padded = padded.at[batch_segments, local_idx].set(flat_array)
+    return padded
+
+
+def _padded_to_flat(padded_array, batch_segments, node_mask, local_idx):
+    """Reshape a (num_graphs, max_atoms_per_graph) padded array back to flat (N,)."""
+    return padded_array[batch_segments, local_idx] * node_mask
+
+
+def _vmap_kspace_per_graph(solve_fn, inputs, per_atom_arrays, output_key):
+    """Generic per-graph kspace processing: pad, vmap, mask PBC, unpad.
+
+    Args:
+        solve_fn: Callable(cell_g, *per_graph_arrays) -> (max_atoms,) energies for one graph.
+        inputs: Full batched inputs dict (for batch_segments, node_mask, cell, etc.).
+        per_atom_arrays: List of flat (N,) or (N,D) arrays to pad per-graph and pass to solve_fn.
+        output_key: Key name for the result dict.
+    """
+    batch_segments = inputs['batch_segments']
+    node_mask = inputs['node_mask']
+    num_graphs = inputs['graph_mask'].shape[0]
+    num_atoms_total = node_mask.shape[0]
+    cell = inputs['cell']  # (num_graphs, 3, 3)
+
+    # Use num_atoms_total as the static padded dimension (safe upper bound)
+    max_atoms = num_atoms_total
+
+    # Compute local indices once
+    counts = jnp.bincount(batch_segments, length=num_graphs)
+    graph_starts = jnp.zeros(num_graphs + 1, dtype=jnp.int32).at[1:].set(jnp.cumsum(counts))
+    local_idx = jnp.arange(num_atoms_total) - graph_starts[batch_segments]
+
+    # Pad all per-atom arrays to (num_graphs, max_atoms, ...)
+    padded_arrays = [
+        _flat_to_padded(a, batch_segments, num_graphs, max_atoms, local_idx)
+        for a in per_atom_arrays
+    ]
+
+    has_pbc = jnp.any(cell.reshape(num_graphs, -1) != 0, axis=-1)  # (num_graphs,)
+
+    # vmap the solver over graphs — solver must be pure JAX (no Flax state)
+    energies_padded = jax.vmap(solve_fn)(cell, *padded_arrays)
+
+    # Zero out non-PBC graphs and scatter back to flat array
+    energies_padded = energies_padded * has_pbc[:, None]
+    energies_flat = _padded_to_flat(energies_padded, batch_segments, node_mask, local_idx)
+
+    return {output_key: energies_flat}
+
+
+def _batched_kspace_electrostatic(kspace_module, inputs):
+    """Run electrostatic kspace per-graph using vmap on the solver, then scatter back."""
+    k_grid = inputs['k_grid']
+    k_smearing = inputs['k_smearing']
+    solver = kspace_module.solver
+    ke = kspace_module.ke
+    is_ewald = (kspace_module.kspace_method == 'ewald')
+    pbc = jnp.array([True, True, True])
+
+    def _solve_single(cell_g, pos_g, charges_g, mask_g):
+        charges_g = charges_g * mask_g
+        volume = jnp.abs(jnp.linalg.det(cell_g))
+        reciprocal_cell = jaxpme.kspace.get_reciprocal(cell_g)
+        kvectors = jaxpme.kspace.generate_kvectors(
+            reciprocal_cell, k_grid.shape, dtype=pos_g.dtype, for_ewald=is_ewald
+        )
+        if is_ewald:
+            potentials = solver.kspace(k_smearing, charges_g, kvectors, pos_g, volume, cell_g, pbc)
+        else:
+            potentials = solver.kspace(k_smearing, charges_g, reciprocal_cell, k_grid, kvectors, pos_g, volume, cell_g, pbc)
+        return safe_scale(charges_g * potentials * ke, mask_g)
+
+    node_mask = inputs['node_mask']
+    return _vmap_kspace_per_graph(
+        _solve_single, inputs,
+        per_atom_arrays=[
+            inputs['positions'],
+            inputs['partial_charges'],
+            node_mask.astype(inputs['positions'].dtype),
+        ],
+        output_key='electrostatic_energy_kspace',
+    )
+
+
+def _batched_kspace_dispersion(kspace_module, inputs):
+    """Run dispersion kspace per-graph using vmap on the solver, then scatter back."""
+    k_grid_disp = inputs['k_grid_disp']
+    k_smearing_disp = inputs['k_smearing_disp']
+    solver = kspace_module.solver
+    is_ewald = kspace_module.do_ewald
+    pbc = jnp.array([True, True, True])
+
+    _Bohr = jnp.asarray(Bohr, dtype=inputs['positions'].dtype)
+    _Hartree = jnp.asarray(Hartree, dtype=inputs['positions'].dtype)
+    C6_free = jnp.asarray(C6_coef, dtype=inputs['positions'].dtype)
+
+    def _solve_single(cell_g, pos_g, z_g, mask_g, c6_g):
+        C6_i = C6_free[z_g - 1] * c6_g
+        q_disp = jnp.sqrt(jnp.maximum(C6_i, 0.0)) * mask_g
+
+        pos_bohr = pos_g / _Bohr
+        cell_bohr = cell_g / _Bohr
+        smearing_bohr = k_smearing_disp / _Bohr
+
+        volume_bohr = jnp.abs(jnp.linalg.det(cell_bohr))
+        reciprocal_cell_bohr = jaxpme.kspace.get_reciprocal(cell_bohr)
+        kvectors = jaxpme.kspace.generate_kvectors(
+            reciprocal_cell_bohr, k_grid_disp.shape,
+            dtype=pos_g.dtype, for_ewald=is_ewald,
+        )
+        if is_ewald:
+            potentials = solver.kspace(smearing_bohr, q_disp, kvectors, pos_bohr, volume_bohr, cell_bohr, pbc)
+        else:
+            potentials = solver.kspace(smearing_bohr, q_disp, reciprocal_cell_bohr, k_grid_disp, kvectors, pos_bohr, volume_bohr, cell_bohr, pbc)
+        return safe_scale(-q_disp * potentials * _Hartree, mask_g)
+
+    node_mask = inputs['node_mask']
+    c6_ratios = inputs.get('c6_ratios')
+    if c6_ratios is None:
+        c6_ratios = jnp.zeros_like(node_mask, dtype=inputs['positions'].dtype)
+
+    return _vmap_kspace_per_graph(
+        _solve_single, inputs,
+        per_atom_arrays=[
+            inputs['positions'],
+            inputs['atomic_numbers'],
+            node_mask.astype(inputs['positions'].dtype),
+            c6_ratios,
+        ],
+        output_key='dispersion_energy_kspace',
+    )
+
+
 class EnergySparse(BaseSubModule):
     prop_keys: Dict
     zmax: int = 118
@@ -149,7 +288,16 @@ class EnergySparse(BaseSubModule):
             inputs.update(**self.electrostatic_energy(inputs))
             atomic_energy += inputs['electrostatic_energy']
             if inputs.get('k_smearing', None) is not None:
-                inputs.update(**self.electrostatic_energy_kspace(inputs))
+                cell = inputs['cell']
+                if cell.ndim == 3:
+                    # Batched training: cell is (num_graphs, 3, 3). Process kspace per-graph.
+                    kspace_e = _batched_kspace_electrostatic(
+                        self.electrostatic_energy_kspace,
+                        inputs,
+                    )
+                    inputs.update(kspace_e)
+                else:
+                    inputs.update(**self.electrostatic_energy_kspace(inputs))
                 atomic_energy += inputs['electrostatic_energy_kspace']
 
         if self.dispersion_energy_bool:
@@ -160,7 +308,16 @@ class EnergySparse(BaseSubModule):
             inputs.update(**self.dispersion_energy(inputs))
             atomic_energy += inputs['dispersion_energy']
             if inputs.get('k_smearing_disp', None) is not None:
-                inputs.update(**self.dispersion_energy_kspace(inputs))
+                cell = inputs['cell']
+                if cell.ndim == 3:
+                    # Batched training: cell is (num_graphs, 3, 3). Process kspace per-graph.
+                    kspace_d = _batched_kspace_dispersion(
+                        self.dispersion_energy_kspace,
+                        inputs,
+                    )
+                    inputs.update(kspace_d)
+                else:
+                    inputs.update(**self.dispersion_energy_kspace(inputs))
                 atomic_energy += inputs['dispersion_energy_kspace']
 
         if self.output_convention == 'per_structure':
