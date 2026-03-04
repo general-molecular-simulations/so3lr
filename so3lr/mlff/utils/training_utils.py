@@ -1120,7 +1120,8 @@ def fit_from_iterator(
         use_adaptive_robust_loss: bool = False,
         adaptive_robust_loss_targets: list = None,
         adaptive_robust_loss_init_alpha: float = 1.5,
-        adaptive_robust_loss_init_scale: float = 1.0
+        adaptive_robust_loss_init_scale: float = 1.0,
+        dataset_info: dict = None,
 ):
     """
     Fit model.
@@ -1155,6 +1156,8 @@ def fit_from_iterator(
         adaptive_robust_loss_targets (list): List of target names for adaptive robust loss.
         adaptive_robust_loss_init_alpha (float): Initial alpha for adaptive robust loss. Defaults to 1.5.
         adaptive_robust_loss_init_scale (float): Initial scale for adaptive robust loss. Defaults to 1.0.
+        dataset_info (dict): Per-dataset info from dataloader.dataset_info() with keys
+            'names', 'sizes', 'weights'. Used to log effective epochs per dataset.
     Returns:
 
     """
@@ -1334,10 +1337,18 @@ def fit_from_iterator(
 
             # Log training metrics.
             if use_wandb:
-                wandb.log(
-                    {f'train_{k}': v for (k, v) in train_metrics_np.items()},
-                    step=step
-                )
+                log_dict = {f'train_{k}': v for (k, v) in train_metrics_np.items()}
+                log_dict['processed_graphs'] = processed_graphs
+                log_dict['processed_nodes'] = processed_nodes
+                # Log effective epochs per dataset
+                if dataset_info is not None:
+                    for name, size, weight in zip(
+                        dataset_info['names'], dataset_info['sizes'], dataset_info['weights']
+                    ):
+                        if size > 0:
+                            eff_epoch = processed_graphs * weight / size
+                            log_dict[f'effective_epoch/{name}'] = eff_epoch
+                wandb.log(log_dict, step=step)
 
             # Start validation process.
             if step % eval_every_num_steps == 0:

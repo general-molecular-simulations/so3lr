@@ -407,6 +407,42 @@ class QCMLDataLoaderSparseParallel:
         self._cardinality = total_examples
         return total_examples
 
+    def dataset_info(self):
+        """Return per-dataset training sizes and normalized weights for epoch tracking.
+
+        Returns:
+            dict with keys:
+                'names': list of dataset folder basenames
+                'sizes': list of per-dataset training set sizes
+                'weights': normalized sampling weights (sum to 1.0)
+        """
+        import os
+        names = [os.path.basename(f.rstrip('/')) for f in self.input_folders]
+        sizes = []
+        for i, folder in enumerate(self.input_folders):
+            builder = tfds.builder_from_directory(folder)
+            if i < len(self.num_train) and self.num_train[i] is not None:
+                split_str = f'train[:{self.num_train[i]}]'
+            else:
+                split_str = 'train'
+            try:
+                dataset = builder.as_dataset(split=split_str)
+                count = tf.data.experimental.cardinality(dataset).numpy()
+                sizes.append(int(count))
+            except Exception:
+                sizes.append(0)
+
+        # Normalize weights
+        raw_weights = self.dataset_weights if self.dataset_weights is not None else [1.0] * len(self.input_folders)
+        total_weight = sum(raw_weights)
+        normalized_weights = [w / total_weight for w in raw_weights]
+
+        return {
+            'names': names,
+            'sizes': sizes,
+            'weights': normalized_weights,
+        }
+
     @staticmethod
     def _preprocess(dataset,
                     batch_max_num_nodes,

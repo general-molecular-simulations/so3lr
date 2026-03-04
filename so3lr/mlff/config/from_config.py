@@ -391,7 +391,9 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             use_adaptive_robust_loss=use_adaptive_robust_loss,
             adaptive_robust_loss_targets=adaptive_robust_loss_targets,
             adaptive_robust_loss_init_alpha=adaptive_robust_loss_init_alpha,
-            adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale
+            adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale,
+            # Dataset info for effective epoch tracking
+            dataset_info=training_data.dataset_info() if hasattr(training_data, 'dataset_info') else None,
         )
     logger.info('Training has finished!')
 
@@ -965,7 +967,9 @@ def run_fine_tuning(
             use_adaptive_robust_loss=use_adaptive_robust_loss,
             adaptive_robust_loss_targets=adaptive_robust_loss_targets,
             adaptive_robust_loss_init_alpha=adaptive_robust_loss_init_alpha,
-            adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale
+            adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale,
+            # Dataset info for effective epoch tracking
+            dataset_info=training_data.dataset_info() if hasattr(training_data, 'dataset_info') else None,
         )
     else:
         training_utils.fit(
