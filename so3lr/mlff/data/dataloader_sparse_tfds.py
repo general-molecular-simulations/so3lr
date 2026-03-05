@@ -416,8 +416,8 @@ class QCMLDataLoaderSparseParallel:
                 'sizes': list of per-dataset training set sizes
                 'weights': normalized sampling weights (sum to 1.0)
         """
-        import os
-        names = [os.path.basename(f.rstrip('/')) for f in self.input_folders]
+        from pathlib import Path
+        names = [Path(f).name for f in self.input_folders]
         sizes = []
         for i, folder in enumerate(self.input_folders):
             builder = tfds.builder_from_directory(folder)

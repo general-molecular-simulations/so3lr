@@ -968,6 +968,13 @@ def process_model(
     return neighbor_fn, neighbor_fn_lr, energy_or_obs_fn
 
 
+def box_to_diag(box):
+    """Extract diagonal from box matrix, or return as-is if already 1D."""
+    if box is not None and hasattr(box, 'ndim') and box.ndim == 2:
+        return jnp.diag(box)
+    return box
+
+
 def check_overflow(
     neighbor_fn: callable,
     neighbor_fn_lr: callable,
@@ -994,12 +1001,13 @@ def check_overflow(
     """
 
     overflown = False
+    box_diag = box_to_diag(box)
     if nbrs.did_buffer_overflow:
         overflown = True
         logger.info('Neighbor list overflowed, reallocating.')
         nbrs = neighbor_fn.allocate(
             state.position,
-            box=box
+            box=box_diag
         )
     if nbrs_lr is not None:
         if nbrs_lr.did_buffer_overflow:
@@ -1007,7 +1015,7 @@ def check_overflow(
             logger.info('Long-range neighbor list overflowed, reallocating.')
             nbrs_lr = neighbor_fn_lr.allocate(
                 state.position,
-                box=box
+                box=box_diag
             )
     return nbrs, nbrs_lr, overflown
 
@@ -1076,16 +1084,28 @@ def compute_quantities(
         elif ensemble == 'nvt-langevin':
             H = KE + PE
         elif ensemble == 'npt':
-            H = jax_md.simulate.npt_nose_hoover_invariant(
-                energy_fn,
-                state,
-                pressure=P,
-                kT=T,
-                neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
+            if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState):
+                H = jax_md.simulate.npt_nose_hoover_flex_invariant(
+                    energy_fn,
+                    state,
+                    pressure=P,
+                    kT=T,
+                    neighbor=nbrs.idx,
+                    neighbor_lr=nbrs_lr.idx,
+                    k_grid=k_grid,
+                    k_grid_disp=k_grid_disp
+                )
+            else:
+                H = jax_md.simulate.npt_nose_hoover_invariant(
+                    energy_fn,
+                    state,
+                    pressure=P,
+                    kT=T,
+                    neighbor=nbrs.idx,
+                    neighbor_lr=nbrs_lr.idx,
+                    k_grid=k_grid,
+                    k_grid_disp=k_grid_disp
+                )
         else:
             H = None
 
@@ -1277,21 +1297,36 @@ def create_npt_nhc_fn(
     P,
     nhc_kwargs,
     barostat_kwargs,
-    lr
+    lr,
+    npt_coupling='isotropic'
 ):
-    init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
-        energy_fn,
-        shift,
-        dt=dt,
-        kT=T,
-        pressure=P,
-        barostat_kwargs=barostat_kwargs,
-        thermostat_kwargs=nhc_kwargs
-    )
-    init_fn = jax.jit(init_fn)
-    apply_fn = jax.jit(apply_fn)
-
-    step_md_fn = create_md_fn("npt", lr, apply_fn, T, P)
+    if npt_coupling == 'isotropic':
+        init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
+            energy_fn,
+            shift,
+            dt=dt,
+            kT=T,
+            pressure=P,
+            barostat_kwargs=barostat_kwargs,
+            thermostat_kwargs=nhc_kwargs
+        )
+        init_fn = jax.jit(init_fn)
+        apply_fn = jax.jit(apply_fn)
+        step_md_fn = create_md_fn("npt", lr, apply_fn, T, P)
+    else:
+        init_fn, apply_fn = jax_md.simulate.npt_nose_hoover_flex(
+            energy_fn,
+            shift,
+            dt=dt,
+            kT=T,
+            pressure=P,
+            coupling=npt_coupling,
+            barostat_kwargs=barostat_kwargs,
+            thermostat_kwargs=nhc_kwargs
+        )
+        init_fn = jax.jit(init_fn)
+        apply_fn = jax.jit(apply_fn)
+        step_md_fn = create_md_fn("npt_flex", lr, apply_fn, T, P)
 
     return init_fn, step_md_fn
 
@@ -1497,6 +1532,83 @@ def create_npt_step_fn(
         return step_npt_fn
 
 
+def create_npt_flex_step_fn(
+    lr: bool,
+    apply_fn: callable,
+    T: float,
+    P: float
+) -> callable:
+    """
+    Create the NPT step function for flexible cell (anisotropic/semi-isotropic).
+
+    Args:
+        lr (bool): Whether to use long-range interactions.
+        apply_fn (callable): Function that applies the MD step.
+        T (float): Target temperature.
+        P (float): Target pressure.
+
+    Returns:
+        callable: NPT flex step function.
+    """
+
+    if lr:
+        @jax.jit
+        def step_npt_flex_fn(i, state):
+            state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = state
+
+            state = apply_fn(
+                state,
+                neighbor=nbrs.idx,
+                neighbor_lr=nbrs_lr.idx,
+                kT=T,
+                pressure=P,
+                k_grid=k_grid,
+                k_grid_disp=k_grid_disp
+            )
+
+            box = jax_md.simulate.npt_box_flex(state)
+            box_diag = box_to_diag(box)
+
+            nbrs = nbrs.update(
+                state.position,
+                neighbor=nbrs.idx,
+                box=box_diag
+            )
+
+            nbrs_lr = nbrs_lr.update(
+                state.position,
+                neighbor=nbrs_lr.idx,
+                box=box_diag
+            )
+
+            return state, nbrs, nbrs_lr, box, k_grid, k_grid_disp
+        return step_npt_flex_fn
+    else:
+        @jax.jit
+        def step_npt_flex_fn(i, state):
+            state, nbrs, box, k_grid, k_grid_disp = state
+
+            state = apply_fn(
+                state,
+                neighbor=nbrs.idx,
+                kT=T,
+                pressure=P,
+                k_grid=k_grid,
+                k_grid_disp=k_grid_disp
+            )
+
+            box = jax_md.simulate.npt_box_flex(state)
+
+            nbrs = nbrs.update(
+                state.position,
+                neighbor=nbrs.idx,
+                box=box_to_diag(box)
+            )
+
+            return state, nbrs, box, k_grid, k_grid_disp
+        return step_npt_flex_fn
+
+
 def create_md_fn(
     ensemble: str,
     lr: bool,
@@ -1527,6 +1639,8 @@ def create_md_fn(
         return create_nvt_step_fn(lr, apply_fn, T)
     elif ensemble == 'npt':
         return create_npt_step_fn(lr, apply_fn, T, P)
+    elif ensemble == 'npt_flex':
+        return create_npt_flex_step_fn(lr, apply_fn, T, P)
     else:
         raise NotImplementedError(
             f'Ensemble "{ensemble}" is not supported. Only NVE, NVT and NPT ensembles are currently implemented.')
@@ -1700,6 +1814,9 @@ def perform_md(
     nhc_thermo = all_settings.get('nhc_thermo')
     nhc_baro = all_settings.get('nhc_baro')
     nhc_sy_steps = all_settings.get('nhc_sy_steps')
+
+    # NPT coupling mode: 'isotropic', 'semi-isotropic', or 'anisotropic'
+    npt_coupling = all_settings.get('npt_coupling', 'isotropic')
 
     # Langevin thermostat parameters
     langevin_removecmmotion = all_settings.get('langevin_removecmmotion')
@@ -2002,6 +2119,9 @@ def perform_md(
                 pert = kwargs.get('perturbation', None)
                 if pert is not None:
                     box_kw = box_kw * pert
+                # dispersion_tail_correction_energy expects 1D box
+                if hasattr(box_kw, 'ndim') and box_kw.ndim == 2:
+                    box_kw = jnp.diag(box_kw)
                 E_tail = dispersion_tail_correction_energy(
                     box_kw, _N, C6_avg, C8_avg, C10_avg, _r_on, _r_off
                 )
@@ -2082,6 +2202,7 @@ def perform_md(
             lr
         )
     else:
+        logger.info(f"NPT coupling mode:         {npt_coupling}")
         init_fn, step_md_fn = create_npt_nhc_fn(
             energy_fn,
             shift,
@@ -2090,7 +2211,8 @@ def perform_md(
             md_P,
             nhc_kwargs,
             nhc_barostat_kwargs,
-            lr
+            lr,
+            npt_coupling=npt_coupling
         )
 
     rng_key = jax.random.PRNGKey(seed)
@@ -2154,11 +2276,12 @@ def perform_md(
         k_grid_disp=k_grid_disp
     )
     if ensemble == 'npt':
-        if len(box) == 1:
-            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box[0]:.3f}\t{0.0:.2e}')
+        box_disp = box_to_diag(box)
+        if len(box_disp) == 1:
+            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box_disp[0]:.3f}\t{0.0:.2e}')
         else:
             logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t'+
-                        f'({box[0]:.3f},{box[1]:.3f},{box[2]:.3f})\t{0.0:.2e}')
+                        f'({box_disp[0]:.3f},{box_disp[1]:.3f},{box_disp[2]:.3f})\t{0.0:.2e}')
     else:
         logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
 
@@ -2255,11 +2378,12 @@ def perform_md(
             box = new_box
 
             if (ensemble == 'npt') and (current_cycle % kspace_npt_cycles == 0):
+                box_for_kgrid = box_to_diag(box)
                 k_grid,_ = setup_kspace_grid(
                     kspace_electrostatics,
                     kspace_smearing,
                     kspace_spacing,
-                    box,
+                    box_for_kgrid,
                     k_grid=k_grid
                 )
                 if kspace_dispersion is not None:
@@ -2267,7 +2391,7 @@ def perform_md(
                         kspace_dispersion,
                         kspace_dispersion_smearing,
                         kspace_dispersion_spacing,
-                        box,
+                        box_for_kgrid,
                         k_grid=k_grid_disp
                     )
 
@@ -2287,18 +2411,19 @@ def perform_md(
             )
 
             if ensemble == 'npt':
-                if len(box) == 1:
-                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box[0]:.3f}\t{time_per_step:.2e}')
+                box_disp = box_to_diag(box)
+                if len(box_disp) == 1:
+                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box_disp[0]:.3f}\t{time_per_step:.2e}')
                 else:
                     logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t'+
-                                f'({box[0]:.3f},{box[1]:.3f},{box[2]:.3f})\t{time_per_step:.2e}')
+                                f'({box_disp[0]:.3f},{box_disp[1]:.3f},{box_disp[2]:.3f})\t{time_per_step:.2e}')
             else:
                 logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{time_per_step:.2e}')
 
             positions.append(np.array(state.position))
             momenta.append(np.array(state.momentum))
             if box is not None:
-                boxes.append(np.array(box))
+                boxes.append(np.array(box_to_diag(box)))
 
             # Calculate observables
             if len(observables)>0:
@@ -2753,6 +2878,7 @@ def save_state(
         )
 
     if ensemble.lower() == 'npt':
+        is_flex = isinstance(state, jax_md.simulate.NPTNoseHooverFlexState)
         state_dict.update(
             thermostat_position=state.thermostat.position,
             thermostat_momentum=state.thermostat.momentum,
@@ -2770,7 +2896,10 @@ def save_state(
             box_position=state.box_position,
             box_momentum=state.box_momentum,
             box_mass=state.box_mass,
+            npt_flex=is_flex,
         )
+        if is_flex:
+            state_dict['stress_tensor'] = state.stress_tensor
     state_dict.update(ensemble=ensemble)
     np.savez(path_to_save, **state_dict)
 
@@ -2833,32 +2962,53 @@ def load_state(
         )
 
     elif ensemble.lower() == 'npt':
-        state = jax_md.simulate.NPTNoseHooverState(
-            position=jnp.array(loaded_state['position']),
-            momentum=jnp.array(loaded_state['momentum']),
-            force=jnp.array(loaded_state['force']),
-            mass=jnp.array(loaded_state['mass']),
-            reference_box=loaded_state['reference_box'],
-            box_position=loaded_state['box_position'],
-            box_momentum=loaded_state['box_momentum'],
-            box_mass=loaded_state['box_mass'],
-            barostat=jax_md.simulate.NoseHooverChain(
-                position=loaded_state['barostat_position'],
-                momentum=loaded_state['barostat_momentum'],
-                mass=loaded_state['barostat_mass'],
-                tau=loaded_state['barostat_tau'],
-                kinetic_energy=loaded_state['barostat_kinetic_energy'],
-                degrees_of_freedom=loaded_state['barostat_degrees_of_freedom']
-            ),
-            thermostat=jax_md.simulate.NoseHooverChain(
-                position=loaded_state['thermostat_position'],
-                momentum=loaded_state['thermostat_momentum'],
-                mass=loaded_state['thermostat_mass'],
-                tau=loaded_state['thermostat_tau'],
-                kinetic_energy=loaded_state['thermostat_kinetic_energy'],
-                degrees_of_freedom=loaded_state['thermostat_degrees_of_freedom']
-            )
+        is_flex = bool(loaded_state.get('npt_flex', False))
+        nhc_barostat = jax_md.simulate.NoseHooverChain(
+            position=loaded_state['barostat_position'],
+            momentum=loaded_state['barostat_momentum'],
+            mass=loaded_state['barostat_mass'],
+            tau=loaded_state['barostat_tau'],
+            kinetic_energy=loaded_state['barostat_kinetic_energy'],
+            degrees_of_freedom=loaded_state['barostat_degrees_of_freedom']
         )
+        nhc_thermostat = jax_md.simulate.NoseHooverChain(
+            position=loaded_state['thermostat_position'],
+            momentum=loaded_state['thermostat_momentum'],
+            mass=loaded_state['thermostat_mass'],
+            tau=loaded_state['thermostat_tau'],
+            kinetic_energy=loaded_state['thermostat_kinetic_energy'],
+            degrees_of_freedom=loaded_state['thermostat_degrees_of_freedom']
+        )
+        if is_flex:
+            mass = loaded_state['mass']
+            if mass.ndim == 1:
+                mass = mass.reshape(-1, 1)
+            state = jax_md.simulate.NPTNoseHooverFlexState(
+                position=loaded_state['position'],
+                velocity=loaded_state['momentum'] / mass,
+                force=loaded_state['force'],
+                mass=mass,
+                reference_box=loaded_state['reference_box'],
+                box_position=loaded_state['box_position'],
+                box_velocity=loaded_state['box_momentum'] / loaded_state['box_mass'],
+                box_mass=loaded_state['box_mass'],
+                barostat=nhc_barostat,
+                thermostat=nhc_thermostat,
+                stress_tensor=loaded_state.get('stress_tensor', None),
+            )
+        else:
+            state = jax_md.simulate.NPTNoseHooverState(
+                position=loaded_state['position'],
+                momentum=loaded_state['momentum'],
+                force=loaded_state['force'],
+                mass=loaded_state['mass'],
+                reference_box=loaded_state['reference_box'],
+                box_position=loaded_state['box_position'],
+                box_momentum=loaded_state['box_momentum'],
+                box_mass=loaded_state['box_mass'],
+                barostat=nhc_barostat,
+                thermostat=nhc_thermostat,
+            )
     else:
         raise NotImplementedError('Only NVE, NVT and NPT ensembles are supported')
 

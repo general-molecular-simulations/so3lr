@@ -616,6 +616,7 @@ YAML_DEFAULTS: Dict[str, Any] = {
     'nhc_thermo':                 DEFAULT_NHC_THERMO,
     'nhc_baro':                   DEFAULT_NHC_BARO,
     'nhc_sy_steps':               DEFAULT_SUZUKI_YOSHIDA_STEPS,
+    'npt_coupling':               'isotropic',
     'langevin_removecmmotion':    DEFAULT_LANGEVIN_REMOVECMMOTION,
     'langevin_thermo':            DEFAULT_LANGEVIN_THERMO,
     'relax_before_run':           True,
@@ -1350,7 +1351,6 @@ def finetune_model(
         logger.error(f"Error: Dataset file not found: {datafile}")
         sys.exit(1)
 
-    # Call the evaluate_so3lr_on function from so3lr_eval.py
     finetune_so3lr(
         datafile=datafile,
         workdir=workdir,
