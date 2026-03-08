@@ -975,6 +975,34 @@ def box_to_diag(box):
     return box
 
 
+def format_pressure_tensor(state, npt_coupling, pressure_unit):
+    """Format instantaneous pressure tensor for logging.
+
+    Returns (header_str, value_str) appropriate for the coupling mode:
+    - isotropic: 1 number (scalar pressure = trace/3)
+    - semi-isotropic: 3 numbers (Pxx, Pyy, Pzz)
+    - anisotropic: 9 numbers (full tensor, row-major)
+    """
+    if not isinstance(state, jax_md.simulate.NPTNoseHooverFlexState):
+        return '', ''
+
+    P_tensor = jax_md.simulate.pressure_tensor_flex(state)
+    P_tensor = P_tensor / pressure_unit
+
+    coupling = jax_md.simulate._normalize_coupling(npt_coupling)
+    if coupling == 'isotropic':
+        p_scalar = float(jnp.trace(P_tensor) / 3)
+        return 'P [bar]', f'{p_scalar:.1f}'
+    elif coupling == 'semi_isotropic':
+        pxx, pyy, pzz = float(P_tensor[0, 0]), float(P_tensor[1, 1]), float(P_tensor[2, 2])
+        return 'P [bar] (xx,yy,zz)', f'({pxx:.1f},{pyy:.1f},{pzz:.1f})'
+    else:  # anisotropic
+        vals = [float(P_tensor[i, j]) for i in range(3) for j in range(3)]
+        header = 'P [bar] (xx,xy,xz,yx,yy,yz,zx,zy,zz)'
+        val_str = '(' + ','.join(f'{v:.1f}' for v in vals) + ')'
+        return header, val_str
+
+
 def check_overflow(
     neighbor_fn: callable,
     neighbor_fn_lr: callable,
@@ -1886,9 +1914,6 @@ def perform_md(
         raise ValueError(f"Input geometry file {input_file_path} contains no atoms.")
     if initial_geometry.get_atomic_numbers() is None or len(initial_geometry.get_atomic_numbers()) == 0:
         raise ValueError(f"Input geometry file {input_file_path} has no atomic numbers.")
-    pbc_str = "PBC" if np.any(initial_geometry.get_pbc()) else "no PBC"
-    logger.info(f"Read {len(initial_geometry)} atoms ({initial_geometry.get_chemical_formula()}) from {input_file_path} [{pbc_str}]")
-
     if opt_structure is not None:
         initial_geometry.set_positions(opt_structure)
 
@@ -2256,8 +2281,14 @@ def perform_md(
 
     # Running the MD
     logger.info('Starting MD simulation...')
+    pressure_unit = units.metal_unit_system()['pressure']
+    is_flex_npt = isinstance(state, jax_md.simulate.NPTNoseHooverFlexState)
     if ensemble == 'npt':
-        logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\t\t\tBox [A]\t\t\ttime/step [s]')
+        if is_flex_npt:
+            p_header, _ = format_pressure_tensor(state, npt_coupling, pressure_unit)
+            logger.info(f'Step\tE [eV]\tKE\tPE\tH\tTemp [K]\t{p_header}\t\t\tBox [A]\t\t\ttime/step [s]')
+        else:
+            logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\t\t\tBox [A]\t\t\ttime/step [s]')
     else:
         logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\ttime/step [s]')
 
@@ -2276,11 +2307,15 @@ def perform_md(
         k_grid_disp=k_grid_disp
     )
     if ensemble == 'npt':
+        p_str = ''
+        if is_flex_npt:
+            _, p_str = format_pressure_tensor(state, npt_coupling, pressure_unit)
+            p_str = f'\t{p_str}'
         box_disp = box_to_diag(box)
         if len(box_disp) == 1:
-            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box_disp[0]:.3f}\t{0.0:.2e}')
+            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t{box_disp[0]:.3f}\t{0.0:.2e}')
         else:
-            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t'+
+            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t'+
                         f'({box_disp[0]:.3f},{box_disp[1]:.3f},{box_disp[2]:.3f})\t{0.0:.2e}')
     else:
         logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
@@ -2304,6 +2339,11 @@ def perform_md(
             pysages_result = restart_data_pysages
         else:
             pysages_result = None
+
+    # For npt_flex, the step function returns a [3,3] box matrix via npt_box_flex.
+    # Ensure the initial box matches this shape so fori_loop carry types are consistent.
+    if npt_coupling in ('semi-isotropic', 'anisotropic') and box.ndim == 1:
+        box = jnp.diag(box)
 
     while cycle_md < md_cycles:
         old_time = time.time()
@@ -2411,11 +2451,15 @@ def perform_md(
             )
 
             if ensemble == 'npt':
+                p_str = ''
+                if is_flex_npt:
+                    _, p_val = format_pressure_tensor(state, npt_coupling, pressure_unit)
+                    p_str = f'\t{p_val}'
                 box_disp = box_to_diag(box)
                 if len(box_disp) == 1:
-                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box_disp[0]:.3f}\t{time_per_step:.2e}')
+                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t{box_disp[0]:.3f}\t{time_per_step:.2e}')
                 else:
-                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t'+
+                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t'+
                                 f'({box_disp[0]:.3f},{box_disp[1]:.3f},{box_disp[2]:.3f})\t{time_per_step:.2e}')
             else:
                 logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{time_per_step:.2e}')
@@ -2634,9 +2678,6 @@ def perform_min(
         raise ValueError(f"Input geometry file {input_file_path} contains no atoms.")
     if initial_geometry.get_atomic_numbers() is None or len(initial_geometry.get_atomic_numbers()) == 0:
         raise ValueError(f"Input geometry file {input_file_path} has no atomic numbers.")
-    pbc_str = "PBC" if np.any(initial_geometry.get_pbc()) else "no PBC"
-    logger.info(f"Read {len(initial_geometry)} atoms ({initial_geometry.get_chemical_formula()}) from {input_file_path} [{pbc_str}]")
-
     cell = initial_geometry.get_cell()
     cell = check_cell(cell, lr_cutoff, kspace_electrostatics, kspace_smearing)
 
@@ -3061,11 +3102,10 @@ def run(
 
     relax_before_run = settings.get('relax_before_run', True)
 
-    # Set the precision
-    if settings.get('precision', "float32").lower() == 'float64':
-        jax.config.update("jax_enable_x64", True)
-    else:
-        jax.config.update("jax_enable_x64", False)
+    # Always enable x64 so that high_precision_sum and mixed-precision
+    # integrator ops work correctly. The 'precision' setting controls
+    # which dtype arrays are created in, not whether x64 is available.
+    jax.config.update("jax_enable_x64", True)
 
     # Check for allowed atom types
     input_file_path = settings.get('input_file')
