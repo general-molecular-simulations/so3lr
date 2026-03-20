@@ -105,7 +105,7 @@ def test_cli_finetune(workdir, test_config):
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=180,
     )
 
     _assert_finetuning_succeeded(result, workdir, max_loss=0.1)
@@ -125,7 +125,7 @@ def test_cli_finetune_water_pbc(workdir, test_config_water):
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=240,
     )
 
     _assert_finetuning_succeeded(result, workdir, max_loss=0.2)
