@@ -715,7 +715,7 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     """Log all simulation settings from the internal settings dict."""
     ensemble = s.get('ensemble', 'nvt')
     _label = {'nvt': 'NVT', 'nvt-langevin': 'NVT (Langevin)', 'npt': 'NPT', 'nve': 'NVE'}
-    dt_fs = s.get('md_dt', DEFAULT_TIMESTEP / 1000) * 1000  # ps → fs for display
+    dt_fs = s.get('md_dt', DEFAULT_TIMESTEP)  # fs for display
     total_steps = s.get('md_cycles', DEFAULT_MD_CYCLES) * s.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)
     simulation_time = total_steps * s.get('md_dt', DEFAULT_TIMESTEP / 1000)  # ps
 
