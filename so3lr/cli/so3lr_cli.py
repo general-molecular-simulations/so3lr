@@ -547,11 +547,13 @@ def barostat_options(f: Callable) -> Callable:
 
 
 def langevin_options(f: Callable) -> Callable:
-    """Langevin thermostat options for NVT-Langevin ensemble."""
+    """Langevin thermostat options for NVT-Langevin ensemble.
+    Note: The friction coefficient gamma is computed as gamma = 1.0 / (md_dt * langevin_thermo).
+    langevin_thermo is a dimensionless timescale parameter, not gamma itself."""
     f = click.option('--langevin-removecmmotion', default=DEFAULT_LANGEVIN_REMOVECMMOTION, type=bool,
                      help=f'Remove center of mass motion. [default: {DEFAULT_LANGEVIN_REMOVECMMOTION}]')(f)
     f = click.option('--langevin-thermo', default=DEFAULT_LANGEVIN_THERMO, type=float,
-                     help=f'Friction (Gamma) coefficient for the Langevin thermostat. [default: {DEFAULT_LANGEVIN_THERMO}]')(f)
+                     help=f'Langevin timescale parameter (gamma = 1.0 / (md_dt * langevin_thermo)). [default: {DEFAULT_LANGEVIN_THERMO}]')(f)
     return f
 
 

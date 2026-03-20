@@ -21,7 +21,7 @@ relax_before_run: false
 
 # Thermostat settings
 ensemble: nvt-langevin
-langevin_gamma: 0.1
+langevin_thermo: 100
 
 # Output settings
 save_buffer: 1

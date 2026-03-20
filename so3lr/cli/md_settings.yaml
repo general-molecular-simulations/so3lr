@@ -71,7 +71,7 @@ init_T: 300.0                              # Initial temperature for velocity in
 
 ## NVT-Langevin Settings
 langevin_removecmmotion: true              # Remove center-of-mass motion at each step [Default: true]  (CLI: --langevin-removecmmotion)
-langevin_thermo: 1.0                       # Friction (Gamma) coefficient for the Langevin thermostat [Default: 1.0]  (CLI: --langevin-thermo)
+langevin_thermo: 1.0                       # Langevin timescale parameter (gamma = 1.0 / (md_dt * langevin_thermo)) [Default: 1.0]  (CLI: --langevin-thermo)
 
 ## Evaluation Settings (for so3lr eval)
 datafile: "path/to/dataset.extxyz"         # Path to dataset file for evaluation [Required]

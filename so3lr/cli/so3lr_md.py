@@ -1795,10 +1795,6 @@ def perform_md(
         'tau': nhc_tau
     }
 
-    langevin_kwargs = {
-        'gamma': langevin_thermo,
-        'center_velocity': langevin_removecmmotion
-    }
 
     if ensemble == 'npt':
         nhc_barostat_kwargs = nhc_kwargs.copy()
@@ -1806,7 +1802,7 @@ def perform_md(
 
     if ensemble == 'nvt-langevin':
         langevin_kwargs = {
-            'gamma': langevin_thermo,
+            'gamma': 1.0 / (md_dt * langevin_thermo),
             'center_velocity': langevin_removecmmotion
         }
 

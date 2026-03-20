@@ -314,11 +314,19 @@ class Validator:
             'ensemble',           # logged as NVT/NPT/etc, not as-is
             'nhc_thermo',         # logged as nhc_thermo * dt_fs (fs)
             'nhc_baro',           # logged as nhc_baro * dt_fs (fs)
-            'langevin_gamma',
+            'langevin_thermo',      # logged as langevin_thermo * dt_fs (fs)
             'kspace_electrostatics',
             'kspace_smearing',
             'kspace_spacing',
             'kspace_interp_nodes',
+        }
+        transformed_keys = {
+            'md_dt': lambda v: str(int(v * 1000)),  # Convert ps to fs
+            'relax_before_run': lambda v: 'Enabled' if v else 'Disabled',
+            'ensemble': lambda v: v.upper() if isinstance(v, str) else str(v),
+            'nhc_thermo': lambda v: str(int(v * 1000)) if isinstance(v, (int, float)) else str(v),
+            'nhc_baro': lambda v: str(int(v * 1000)) if isinstance(v, (int, float)) else str(v),
+            'langevin_thermo': lambda v: str(int(v * 1000)) if isinstance(v, (int, float)) else str(v),
         }
         skip_keys = default_skip | set(skip_keys or [])
 
@@ -344,6 +352,8 @@ class Validator:
             if key in skip_keys or value is None:
                 continue
             value_str = str(value)
+            if key in transformed_keys:
+                value_str = transformed_keys[key](value)
             for lf, content in log_contents.items():
                 if value_str not in content:
                     self.errors.append(
