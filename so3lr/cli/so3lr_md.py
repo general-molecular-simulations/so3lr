@@ -218,7 +218,8 @@ def handle_units(
 def handle_box(
     shift_displacement: str,
     positions: jnp.ndarray,
-    cell: Optional[jnp.ndarray] = None
+    cell: Optional[jnp.ndarray] = None,
+    precision: jnp.dtype = jnp.float32
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Callable, Callable, bool]:
     """
     Set up box and displacement functions for simulation.
@@ -248,7 +249,7 @@ def handle_box(
         if cell is None:
             raise ValueError('Cell must be defined for periodic boundary conditions.')
 
-        box = jnp.array(np.diag(np.array(cell)))
+        box = jnp.array(np.diag(np.array(cell)), dtype=precision)
         if box.shape == (3,3):
             box = jnp.diag(box)
         fractional_coordinates = True
@@ -282,7 +283,7 @@ def handle_box(
     elif shift_displacement == 'free':
         # Create displacement and shift functions for free boundary conditions
         displacement, shift = jax_md.space.free()
-        box = jnp.array([0.0])
+        box = jnp.array([0.0], dtype=precision)
         fractional_coordinates = False
 
     else:
@@ -638,8 +639,8 @@ def check_cell(
     if np.any(cell[~mask] != 0):
         raise ValueError(f'JAX-MD currently supports only orthogonal cells. Provided cell: {cell}') 
 
-    if np.any(np.diag(cell) < lr_cutoff * 2):
-        raise ValueError(f'Each dimension of the cell {np.diag(cell)} must be at least twice the long-range cutoff distance [{lr_cutoff} Å].')
+    # if np.any(np.diag(cell) < lr_cutoff * 2):
+    #     raise ValueError(f'Each dimension of the cell {np.diag(cell)} must be at least twice the long-range cutoff distance [{lr_cutoff} Å].')
         
     if lr_cutoff < 10 and (kspace_electrostatics == None or kspace_smearing == None):
         raise ValueError(f'Long-range cutoff below 10 Å is not supported yet. Provided cutoff: {lr_cutoff} Å.')
@@ -805,7 +806,7 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
             others=idx_j,
             mask=None,
             total_charge=jnp.array([total_charge], dtype=precision),
-            num_unpaired_electrons=jnp.array([0.]),
+            num_unpaired_electrons=jnp.array([0.], dtype=precision),
             edges_lr=dR_lr,
             idx_i_lr=idx_i_lr,
             idx_j_lr=idx_j_lr,
@@ -814,7 +815,7 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
             k_smearing=k_smearing,
             k_grid_disp=k_grid_disp,
             k_smearing_disp=k_smearing_disp,
-            theory_mask=jnp.eye(16)[5].reshape(1, -1)
+            theory_mask=jnp.eye(16, dtype=precision)[5].reshape(1, -1)
         )
 
         return graph
@@ -828,11 +829,9 @@ def to_jax_md_custom(
         displacement_or_metric: DisplacementOrMetricFn,
         box,  # box if it exists, check jax_md documentation for conventions
         dr_threshold: float = 0.,  # currently dr_threshold > 0 is experimental
-        capacity_multiplier: float = 1.25,
         buffer_size_multiplier_sr: float = 1.25,
         buffer_size_multiplier_lr: float = 1.25,
-        minimum_cell_size_multiplier_sr: float = 1.0,
-        minimum_cell_size_multiplier_lr: float = 1.0,
+        minimum_cell_size_multiplier: float = 1.0,
         disable_cell_list: bool = False,
         fractional_coordinates: bool = True,
         total_charge: float = 0.,
@@ -848,11 +847,10 @@ def to_jax_md_custom(
         displacement_or_metric: Function to compute displacements.
         box: Box definition for periodic systems.
         dr_threshold: Threshold for neighborhood cutoff.
-        capacity_multiplier: Capacity multiplier for neighbor lists.
-        buffer_size_multiplier_sr: Buffer size multiplier for short-range interactions.
-        buffer_size_multiplier_lr: Buffer size multiplier for long-range interactions.
-        minimum_cell_size_multiplier_sr: Minimum cell size multiplier for short-range.
-        minimum_cell_size_multiplier_lr: Minimum cell size multiplier for long-range.
+        buffer_size_multiplier_sr: Capacity multiplier for short-range neighbor list.
+        buffer_size_multiplier_lr: Capacity multiplier for long-range neighbor list.
+        minimum_cell_size_multiplier: Multiplier for cell size. Increase above 1.0
+            to use larger cells, reducing overhead when cutoff is short.
         disable_cell_list: Whether to disable cell lists.
         fractional_coordinates: Whether to use fractional coordinates.
         total_charge: Total charge of the system.
@@ -868,9 +866,8 @@ def to_jax_md_custom(
         box,
         r_cutoff=potential.cutoff,
         dr_threshold=dr_threshold,
-        capacity_multiplier=capacity_multiplier,
-        buffer_size_multiplier=buffer_size_multiplier_sr,
-        minimum_cell_size_multiplier=minimum_cell_size_multiplier_sr,
+        capacity_multiplier=buffer_size_multiplier_sr,
+        minimum_cell_size_multiplier=minimum_cell_size_multiplier,
         fractional_coordinates=fractional_coordinates,
         # only sparse is supported in mlff
         format=partition.NeighborListFormat(1),
@@ -883,9 +880,8 @@ def to_jax_md_custom(
         box,
         r_cutoff=potential.long_range_cutoff,
         dr_threshold=dr_threshold,
-        capacity_multiplier=capacity_multiplier,
-        buffer_size_multiplier=buffer_size_multiplier_lr,
-        minimum_cell_size_multiplier=minimum_cell_size_multiplier_lr,
+        capacity_multiplier=buffer_size_multiplier_lr,
+        minimum_cell_size_multiplier=minimum_cell_size_multiplier,
         fractional_coordinates=fractional_coordinates,
         # long-range modules can handle OrderedSparse.
         format=partition.NeighborListFormat(2),
@@ -925,6 +921,7 @@ def process_model(
     total_charge: float = 0.,
     buffer_size_multiplier_lr: float = 1.25,
     buffer_size_multiplier_sr: float = 1.25,
+    minimum_cell_size_multiplier: float = 1.0,
     precision: jnp.dtype = jnp.float32,
     fractional_coordinates: bool = False,
     has_aux: bool = False,
@@ -938,14 +935,16 @@ def process_model(
         displacement (DisplacementOrMetricFn): Displacement function.
         box (jnp.ndarray): Box of the system.
         total_charge (float, optional): Total charge of the system. Defaults to 0..
-        buffer_size_multiplier_lr (float, optional): Buffer for short range
+        buffer_size_multiplier_lr (float, optional): Buffer for long range
                                             neighborlist. Defaults to 1.25.
-        buffer_size_multiplier_sr (float, optional): Buffer for long range
+        buffer_size_multiplier_sr (float, optional): Buffer for short range
                                             neighborlist. Defaults to 1.25.
+        minimum_cell_size_multiplier (float, optional): Multiplier for cell size.
+                                            Defaults to 1.0.
         precision (jnp.dtype, optional): Floating point precision.
                                             Defaults to jnp.float32.
-        fractional_coordinates (bool, optional): Whether to use fractional 
-                    coordinates or not (needs to be True for periodic systems). 
+        fractional_coordinates (bool, optional): Whether to use fractional
+                    coordinates or not (needs to be True for periodic systems).
                                             Defaults to False.
 
     Returns:
@@ -963,6 +962,7 @@ def process_model(
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
+        minimum_cell_size_multiplier=minimum_cell_size_multiplier,
     )
 
     return neighbor_fn, neighbor_fn_lr, energy_or_obs_fn
@@ -1003,6 +1003,29 @@ def format_pressure_tensor(state, npt_coupling, pressure_unit):
         return header, val_str
 
 
+def log_nbrs_info(nbrs, label: str = 'SR', box=None):
+    """Log neighbor list allocation diagnostics."""
+    N = nbrs.reference_position.shape[0]
+    fmt = nbrs.format.name if hasattr(nbrs.format, 'name') else str(nbrs.format)
+    max_occ = nbrs.max_occupancy
+    if nbrs.format in (partition.NeighborListFormat.Sparse,
+                        partition.NeighborListFormat.OrderedSparse):
+        actual_occ = int(jnp.sum(nbrs.idx[0] < N))
+    else:
+        actual_occ = int(jnp.sum(nbrs.idx < N))
+    util = actual_occ / max_occ * 100 if max_occ > 0 else 0
+    mem_mb = nbrs.idx[:, :max_occ].size * nbrs.idx.dtype.itemsize / (1024**2)
+    logger.info(f'  {label} ({fmt}): occupancy={actual_occ}, allocated={max_occ} '
+                f'(util: {util:.1f}%, memory: {mem_mb:.0f} MB)')
+    if nbrs.cell_list_capacity is not None:
+        cell_size_ang = nbrs.cell_size
+        if box is not None and cell_size_ang is not None:
+            box_diag = jnp.diag(box) if box.ndim == 2 else box
+            cell_size_ang = float(nbrs.cell_size * jnp.min(box_diag))
+        logger.info(f'  {label} cell list: capacity={nbrs.cell_list_capacity}, '
+                    f'cell_size={cell_size_ang:.2f} A')
+
+
 def check_overflow(
     neighbor_fn: callable,
     neighbor_fn_lr: callable,
@@ -1033,18 +1056,14 @@ def check_overflow(
     if nbrs.did_buffer_overflow:
         overflown = True
         logger.info('Neighbor list overflowed, reallocating.')
-        nbrs = neighbor_fn.allocate(
-            state.position,
-            box=box_diag
-        )
+        nbrs = neighbor_fn.allocate(state.position, box=box_diag)
+        log_nbrs_info(nbrs, 'SR', box=box)
     if nbrs_lr is not None:
         if nbrs_lr.did_buffer_overflow:
             overflown = True
             logger.info('Long-range neighbor list overflowed, reallocating.')
-            nbrs_lr = neighbor_fn_lr.allocate(
-                state.position,
-                box=box_diag
-            )
+            nbrs_lr = neighbor_fn_lr.allocate(state.position, box=box_diag)
+            log_nbrs_info(nbrs_lr, 'LR', box=box)
     return nbrs, nbrs_lr, overflown
 
 
@@ -1342,6 +1361,9 @@ def create_npt_nhc_fn(
         apply_fn = jax.jit(apply_fn)
         step_md_fn = create_md_fn("npt", lr, apply_fn, T, P)
     else:
+        # Use full float32 matmul precision to avoid TF32 drift on GPUs
+        # jax.config.update("jax_default_matmul_precision", "highest")
+        # logger.info("Flex NPT: matmul precision set to 'highest' (recommended)")
         init_fn, apply_fn = jax_md.simulate.npt_nose_hoover_flex(
             energy_fn,
             shift,
@@ -1764,8 +1786,8 @@ def check_kspace_grid(
     if kspace_electrostatics is None:
         return None
     else:
-        k_spacing = jnp.array([kspace_spacing])
-        k_smearing = jnp.array([kspace_smearing])
+        k_spacing = jnp.array([kspace_spacing], dtype=jnp.float32)
+        k_smearing = jnp.array([kspace_smearing], dtype=jnp.float32)
         if kspace_electrostatics == 'ewald':
             if k_grid.shape != jaxpme.kspace.get_kgrid_ewald_shape(box,lr_wavelength=k_spacing):
                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
@@ -1813,6 +1835,7 @@ def perform_md(
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
+    minimum_cell_size_multiplier = all_settings.get('minimum_cell_size_multiplier', 1.0)
     total_charge = all_settings.get('total_charge')
 
     # Ewald electrostatics settings
@@ -1951,8 +1974,9 @@ def perform_md(
 
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
 
+    dtype = jnp.float64 if precision == 'float64' else jnp.float32
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
-        shift_displacement, initial_geometry_dict['positions'], cell)
+        shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
 
     save_buffer = min(md_cycles, save_buffer)
     # Initialize HDF5 storage
@@ -1981,7 +2005,8 @@ def perform_md(
                 path_to_load=restart_load_path,
                 ensemble=ensemble,
                 restart_reset=all_settings.get('restart_reset', False),
-                fractional_coordinates=fractional_coordinates
+                fractional_coordinates=fractional_coordinates,
+                precision=dtype
             )
             position = state.position
         except RestartInNewEnsembleError as e:
@@ -1991,11 +2016,7 @@ def perform_md(
             initial_geometry_dict['momenta'] = e.loaded_state['momentum']
             box = e.loaded_state['box']
             if np.all(box == 0) or box is None:
-                box = jnp.array([0.0])
-            # Convert positions if needed. In jax_md, momenta (and thus
-            # velocities) are coordinate-system-independent, so only positions
-            # need conversion here. Velocities are passed to init_fn which
-            # sets momentum = mass * velocity directly.
+                box = jnp.array([0.0], dtype=jnp.float64 if precision == 'float64' else jnp.float32)
             saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
             if saved_fractional and not fractional_coordinates:
                 logger.info('Converting restart positions from fractional to cartesian coordinates.')
@@ -2056,6 +2077,7 @@ def perform_md(
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
+        minimum_cell_size_multiplier=minimum_cell_size_multiplier,
         has_aux=len(observables)>0,
     )
 
@@ -2075,7 +2097,7 @@ def perform_md(
     )
 
     energy_or_obs_fn = partial(energy_or_obs_fn, k_smearing=k_smearing, k_smearing_disp=k_smearing_disp)
-    energy_fn = jax.jit(partial(energy_or_obs_fn,has_aux=False))
+    energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False))
 
     # Allocating the neighbor lists
     if neighbor_fn_lr is not None:
@@ -2085,6 +2107,11 @@ def perform_md(
 
     nbrs = neighbor_fn.allocate(position, box=box)
     nbrs_lr = neighbor_fn_lr.allocate(position, box=box) if lr else None
+
+    logger.info('Neighbor list allocated:')
+    log_nbrs_info(nbrs, 'SR', box=box)
+    if nbrs_lr is not None:
+        log_nbrs_info(nbrs_lr, 'LR', box=box)
 
     # --- Dispersion tail correction for NPT ---
     if dispersion_tail_correction and ensemble == 'npt':
@@ -2163,9 +2190,9 @@ def perform_md(
         md_P,
     )
 
-    md_dt = unit_dict['dt']
-    md_T = unit_dict['T']
-    md_P = unit_dict['P']
+    md_dt = dtype(unit_dict['dt'])
+    md_T = dtype(unit_dict['T']) if unit_dict['T'] is not None else None
+    md_P = dtype(unit_dict['P']) if unit_dict['P'] is not None else None
 
     # set nhc_tau to 0 for NVE ensemble only
     if ensemble == 'nve':
@@ -2649,6 +2676,7 @@ def perform_min(
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
+    minimum_cell_size_multiplier = all_settings.get('minimum_cell_size_multiplier', 1.0)
     total_charge = all_settings.get('total_charge')
 
     # Ewald electrostatics settings
@@ -2656,7 +2684,7 @@ def perform_min(
     kspace_smearing = all_settings.get('kspace_smearing', 4.0)
     kspace_spacing = all_settings.get('kspace_spacing', 2.0)
     kspace_interp_nodes = all_settings.get('kspace_interp_nodes', 4)
-    
+
     # Settings for the minimization
     min_cycles = all_settings.get('min_cycles')
     min_steps = all_settings.get('min_steps')
@@ -2689,8 +2717,9 @@ def perform_min(
 
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
 
+    dtype = jnp.float64 if precision == 'float64' else jnp.float32
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
-        shift_displacement, initial_geometry_dict['positions'], cell)
+        shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
 
     # Loading the model
     if model_path is None:
@@ -2725,7 +2754,8 @@ def perform_min(
         precision=precision,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
-        buffer_size_multiplier_sr=buffer_size_multiplier_sr
+        buffer_size_multiplier_sr=buffer_size_multiplier_sr,
+        minimum_cell_size_multiplier=minimum_cell_size_multiplier,
     )
 
     k_grid, k_smearing = setup_kspace_grid(
@@ -2735,7 +2765,7 @@ def perform_min(
         box=box
     )
 
-    energy_fn = jax.jit(partial(energy_or_obs_fn,has_aux=False, k_grid=k_grid, k_smearing=k_smearing))
+    energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False, k_grid=k_grid, k_smearing=k_smearing))
     force_fn = jax.jit(jax_md.quantity.force(energy_fn))
 
     # Allocating the neighbor lists
@@ -2941,6 +2971,8 @@ def save_state(
         )
         if is_flex:
             state_dict['stress_tensor'] = state.stress_tensor
+        else:
+            state_dict['stress'] = state.stress
     state_dict.update(ensemble=ensemble)
     np.savez(path_to_save, **state_dict)
 
@@ -2949,7 +2981,8 @@ def load_state(
     path_to_load: str,
     ensemble: str = 'nvt',
     restart_reset: bool = False,
-    fractional_coordinates: bool = True
+    fractional_coordinates: bool = True,
+    precision: jnp.dtype = jnp.float32,
 ) -> Tuple:
     """
 
@@ -3049,13 +3082,14 @@ def load_state(
                 box_mass=loaded_state['box_mass'],
                 barostat=nhc_barostat,
                 thermostat=nhc_thermostat,
+                stress=loaded_state.get('stress', np.float32(0.0)),
             )
     else:
         raise NotImplementedError('Only NVE, NVT and NPT ensembles are supported')
 
     box = loaded_state['box']
     if np.all(box == 0) or box is None:
-        box = jnp.array([0.0])
+        box = jnp.array([0.0], dtype=precision)
     cycle = loaded_state['step']
 
     # Detect coordinate system mismatch and convert if needed.
@@ -3107,6 +3141,11 @@ def run(
     # which dtype arrays are created in, not whether x64 is available.
     jax.config.update("jax_enable_x64", True)
 
+    # Reduces drift for x32 precision simulations
+    matmul_precision = settings.get('matmul_precision', 'highest')
+    jax.config.update("jax_default_matmul_precision", matmul_precision)
+    logger.info(f"Matmul precision: {matmul_precision} (recommended)")
+
     # Check for allowed atom types
     input_file_path = settings.get('input_file')
     if input_file_path is not None:
@@ -3122,13 +3161,13 @@ def run(
         pbc_str = "PBC" if np.any(initial_geometry.get_pbc()) else "no PBC"
         logger.info(f"Read {len(initial_geometry)} atoms ({initial_geometry.get_chemical_formula()}) from {input_file_path} [{pbc_str}]")
 
-        allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
-        current_atomic_numbers = {int(x) for x in initial_geometry.get_atomic_numbers()}
-        if not current_atomic_numbers.issubset(allowed_atomic_numbers):
-            unsupported = current_atomic_numbers - allowed_atomic_numbers
-            logger.error(f"Input geometry contains unsupported element(s): {unsupported}. "
-                         f"Supported elements are: H(1), C(6), N(7), O(8), F(9), P(15), S(16), Cl(17).")
-            raise ValueError(f"Input geometry contains unsupported element(s): {unsupported}")
+        # allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
+        # current_atomic_numbers = {int(x) for x in initial_geometry.get_atomic_numbers()}
+        # if not current_atomic_numbers.issubset(allowed_atomic_numbers):
+        #     unsupported = current_atomic_numbers - allowed_atomic_numbers
+        #     logger.error(f"Input geometry contains unsupported element(s): {unsupported}. "
+        #                  f"Supported elements are: H(1), C(6), N(7), O(8), F(9), P(15), S(16), Cl(17).")
+        #     raise ValueError(f"Input geometry contains unsupported element(s): {unsupported}")
 
     # Load restart file if needed
     restart_load_path = settings.get('restart_load_path')
