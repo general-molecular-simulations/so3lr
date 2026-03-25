@@ -27,6 +27,10 @@ jraph = { git = "https://github.com/google-deepmind/jraph.git", branch = "master
 jax-md = { git = "https://github.com/jax-md/jax-md.git", branch = "main" , optional = false }
 glp = { git = "https://github.com/fbruenig/glp.git", branch = "electrostatics_neighbourlist", optional = false }
 jax-pme = { git = "https://github.com/lab-cosmo/jax-pme", branch = "main" , optional = false }
+pysages = { git = "https://github.com/em819/PySAGES.git", branch = "add_coordination_number_cv", optional = true }
+
+[tool.poetry.extras]
+pysages = ["pysages"]
 
 
 [tool.poetry.group.dev.dependencies]

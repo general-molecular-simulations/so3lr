@@ -38,6 +38,18 @@ from so3lr import So3lrPotential
 
 import jaxpme
 
+# Optional PySAGES integration
+try:
+    import pysages
+    from .so3lr_pysages_interface import (
+        create_pysages_interface_fns, update_so3lr_after_pysages,
+        save_pysages_state, parse_pysages_input, get_pysages_method,
+        load_pysages_state
+    )
+    HAS_PYSAGES = True
+except ImportError:
+    HAS_PYSAGES = False
+
 import h5py
 from collections import namedtuple
 
@@ -246,6 +258,22 @@ def handle_box(
         inv_box = 1/box
         positions = raw_transform(inv_box, positions)
 
+    elif shift_displacement == 'periodic_cart':
+        if cell is None:
+            raise ValueError('Cell must be defined for periodic boundary conditions.')
+
+        box = jnp.array(np.diag(np.array(cell)))
+        if box.shape == (3,3):
+            box = jnp.diag(box)
+        fractional_coordinates = False
+
+        # Create displacement and shift functions for periodic boundary conditions
+        # using cartesian coordinates (required for PySAGES)
+        displacement, shift = jax_md.space.periodic_general(
+            box=box,
+            fractional_coordinates=fractional_coordinates
+        )
+
     elif shift_displacement == 'free':
         # Create displacement and shift functions for free boundary conditions
         displacement, shift = jax_md.space.free()
@@ -255,7 +283,7 @@ def handle_box(
     else:
         raise ValueError(
             f"Unsupported boundary condition: '{shift_displacement}'. "
-            "Only 'free' or 'periodic' boundary conditions are supported."
+            "Only 'free', 'periodic', or 'periodic_cart' boundary conditions are supported."
         )
     logger.info(f"Box for SO3LR: {box}")
     return positions, box, displacement, shift, fractional_coordinates
@@ -1616,6 +1644,24 @@ def perform_md(
     observables = all_settings.get('observables', [])
     output_atom_indices = all_settings.get('output_atom_indices', None)
 
+    # Enhanced sampling (PySAGES)
+    do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
+    pysages_input_path = all_settings.get('pysages_input', './pysages_input.yaml')
+    restart_pysages_save_path = all_settings.get('restart_pysages_save_path')
+    restart_pysages_load_path = all_settings.get('restart_pysages_load_path')
+    enforce_cartesian_coordinates = all_settings.get('enforce_cartesian_coordinates', False)
+
+    if do_enhanced_sampling and not HAS_PYSAGES:
+        raise ImportError(
+            "PySAGES is required for enhanced sampling but is not installed. "
+            "Install it with: pip install so3lr[pysages]"
+        )
+
+    if do_enhanced_sampling and restart_pysages_load_path is not None:
+        restart_pysages = True
+    else:
+        restart_pysages = False
+
     # Handling of restart
     if restart_save_path is not None:
         create_restart = True
@@ -1651,7 +1697,18 @@ def perform_md(
             'Cell must be defined for NPT simulations. The input geometry does not contain cell information.')
 
     if cell is not None:
-        shift_displacement = 'periodic'
+        # PySAGES requires cartesian coordinates for periodic systems
+        if do_enhanced_sampling and not enforce_cartesian_coordinates:
+            logger.warning(
+                "PySAGES requires cartesian coordinates for periodic systems. "
+                "Setting enforce_cartesian_coordinates=True."
+            )
+            enforce_cartesian_coordinates = True
+
+        if enforce_cartesian_coordinates:
+            shift_displacement = 'periodic_cart'
+        else:
+            shift_displacement = 'periodic'
         initial_geometry.wrap()
     else:
         shift_displacement = 'free'
@@ -1701,7 +1758,10 @@ def perform_md(
             restart = False
         except Exception as e:
             raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
-        
+
+        if restart_pysages:
+            restart_data_pysages = load_pysages_state(restart_pysages_load_path)
+
     patched_potential_kwargs={}
     if "partial_charges" in observables:
             patched_potential_kwargs.update(output_intermediate_quantities=observables)
@@ -1921,9 +1981,47 @@ def perform_md(
     total_time_for_steps = 0
     first_loop = True
 
+    # PySAGES setup
+    if do_enhanced_sampling:
+        set_dict = parse_pysages_input(pysages_input_path)
+        method = get_pysages_method(
+            set_dict,
+            nbrs=nbrs,
+            species=initial_geometry_dict['species'],
+            box=box
+        )
+        if restart_pysages:
+            logger.info('Restarting from previous PySAGES run.')
+            pysages_result = restart_data_pysages
+        else:
+            pysages_result = None
+
     while cycle_md < md_cycles:
         old_time = time.time()
-        if lr:
+        if do_enhanced_sampling:
+            generate_context = create_pysages_interface_fns(
+                lr, state, box, step_md_fn, md_dt, nbrs,
+                nbrs_lr=nbrs_lr, k_grid=k_grid
+            )
+
+            if pysages_result:
+                pysages_result = jax.block_until_ready(
+                    pysages.run(pysages_result, generate_context, md_steps,
+                                context_args={})
+                )
+            else:
+                pysages_result = jax.block_until_ready(
+                    pysages.run(method, generate_context, md_steps)
+                )
+
+            new_state, nbrs, nbrs_lr, new_box, k_grid = jax.block_until_ready(
+                update_so3lr_after_pysages(
+                    pysages_result, lr, init_fn, rng_key, md_T,
+                    nbrs, nbrs_lr, k_grid
+                )
+            )
+
+        elif lr:
             new_state, nbrs, nbrs_lr, new_box, k_grid = jax.block_until_ready(
                 jax.lax.fori_loop(
                     0,
@@ -2040,6 +2138,9 @@ def perform_md(
                         restart_save_path,
                         ensemble=ensemble
                     )
+                # Saving PySAGES state for restart
+                if do_enhanced_sampling and restart_pysages_save_path is not None:
+                    save_pysages_state(pysages_result, restart_pysages_save_path)
 
     logger.info('Results saved to: ' + output_file)
     average_time_per_step = total_time_for_steps / (cycle_md - 1)
@@ -2493,18 +2594,18 @@ def load_state(
 
     if ensemble.lower() == 'nve':
         state = jax_md.simulate.NVEState(
-            position=loaded_state['position'],
-            momentum=loaded_state['momentum'],
-            force=loaded_state['force'],
-            mass=loaded_state['mass']
+            position=jnp.array(loaded_state['position']),
+            momentum=jnp.array(loaded_state['momentum']),
+            force=jnp.array(loaded_state['force']),
+            mass=jnp.array(loaded_state['mass'])
         )
 
     elif ensemble.lower() == 'nvt':
         state = jax_md.simulate.NVTNoseHooverState(
-            position=loaded_state['position'],
-            momentum=loaded_state['momentum'],
-            force=loaded_state['force'],
-            mass=loaded_state['mass'],
+            position=jnp.array(loaded_state['position']),
+            momentum=jnp.array(loaded_state['momentum']),
+            force=jnp.array(loaded_state['force']),
+            mass=jnp.array(loaded_state['mass']),
             chain=jax_md.simulate.NoseHooverChain(
                 position=loaded_state['thermostat_position'],
                 momentum=loaded_state['thermostat_momentum'],
@@ -2517,10 +2618,10 @@ def load_state(
 
     elif ensemble.lower() == 'npt':
         state = jax_md.simulate.NPTNoseHooverState(
-            position=loaded_state['position'],
-            momentum=loaded_state['momentum'],
-            force=loaded_state['force'],
-            mass=loaded_state['mass'],
+            position=jnp.array(loaded_state['position']),
+            momentum=jnp.array(loaded_state['momentum']),
+            force=jnp.array(loaded_state['force']),
+            mass=jnp.array(loaded_state['mass']),
             reference_box=loaded_state['reference_box'],
             box_position=loaded_state['box_position'],
             box_momentum=loaded_state['box_momentum'],
