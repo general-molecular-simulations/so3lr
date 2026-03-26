@@ -9,6 +9,8 @@ import shutil
 import pathlib
 import pytest
 
+from subprocess_env import so3lr_subprocess_env
+
 # ============================================================================
 # Test case discovery
 # ============================================================================
@@ -85,7 +87,7 @@ def test_integration_case(integration_workdir):
             cwd=workdir,
             capture_output=True,
             text=True,
-            env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
+            env=so3lr_subprocess_env(),
         )
         (workdir / 'setup_stdout.log').write_text(setup_result.stdout)
         (workdir / 'setup_stderr.log').write_text(setup_result.stderr)
@@ -99,7 +101,7 @@ def test_integration_case(integration_workdir):
         cwd=workdir,
         capture_output=True,
         text=True,
-        env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
+        env=so3lr_subprocess_env(),
     )
     (workdir / 'stdout.log').write_text(result.stdout)
     (workdir / 'stderr.log').write_text(result.stderr)
@@ -146,7 +148,7 @@ class TestSO3LRCLISubcommands:
             cwd=workdir,
             capture_output=True,
             text=True,
-            env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
+            env=so3lr_subprocess_env(),
         )
         assert result.returncode == 0, f"opt failed: {result.stderr}"
         assert (workdir / 'optimized.xyz').exists()
@@ -166,7 +168,7 @@ class TestSO3LRCLISubcommands:
             cwd=workdir,
             capture_output=True,
             text=True,
-            env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
+            env=so3lr_subprocess_env(),
         )
         assert result.returncode == 0, f"nvt failed: {result.stderr}"
     def test_nve_subcommand(self, sample_molecule):
@@ -184,7 +186,7 @@ class TestSO3LRCLISubcommands:
             cwd=workdir,
             capture_output=True,
             text=True,
-            env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
+            env=so3lr_subprocess_env(),
         )
         assert result.returncode == 0, f"nve failed: {result.stderr}"
     def test_eval_subcommand(self, sample_molecule):
@@ -198,7 +200,7 @@ class TestSO3LRCLISubcommands:
             cwd=workdir,
             capture_output=True,
             text=True,
-            env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
+            env=so3lr_subprocess_env(),
         )
         assert result.returncode == 0, f"eval failed: {result.stderr}"
         assert (workdir / 'evaluated.extxyz').exists(), "Output file not created"
@@ -228,7 +230,7 @@ class TestSO3LRCLIOptions:
             cwd=workdir,
             capture_output=True,
             text=True,
-            env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
+            env=so3lr_subprocess_env(),
         )
         assert result.returncode == 0, f"nvt with relax failed: {result.stderr}"
     def test_eval_with_targets(self, sample_molecule):
@@ -243,7 +245,7 @@ class TestSO3LRCLIOptions:
             cwd=workdir,
             capture_output=True,
             text=True,
-            env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
+            env=so3lr_subprocess_env(),
         )
         assert result.returncode == 0, f"eval with targets failed: {result.stderr}"
     def test_nvt_xyz_output(self, sample_molecule):
@@ -262,7 +264,7 @@ class TestSO3LRCLIOptions:
             cwd=workdir,
             capture_output=True,
             text=True,
-            env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
+            env=so3lr_subprocess_env(),
         )
         assert result.returncode == 0, f"nvt xyz output failed: {result.stderr}"
         assert (workdir / 'trajectory.xyz').exists()

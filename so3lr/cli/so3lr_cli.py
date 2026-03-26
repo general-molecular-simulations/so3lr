@@ -47,8 +47,16 @@ def get_hardware_info():
 
     Checks if JAX is using GPU or CPU and prints relevant device properties.
     """
-    devices = jax.devices()
-    backend = jax.default_backend()
+    try:
+        backend = jax.default_backend()
+        devices = jax.local_devices(backend=backend)
+    except RuntimeError as exc:
+        logger.warning(f"Unable to query JAX hardware details: {exc}")
+        logger.info("JAX default backend:       unavailable")
+        logger.info("Number of devices:         unavailable")
+        logger.info("Proceeding without device diagnostics.")
+        logger.info("=" * 60)
+        return
 
     # logger.info("Hardware information")
     logger.info(f"JAX default backend:       {backend}")
@@ -69,7 +77,7 @@ def get_hardware_info():
         for i, device in enumerate(devices):
             # Get device memory
             try:
-                mem_info = jax.devices()[i].memory_stats()
+                mem_info = device.memory_stats()
                 mem_available = mem_info.get('bytes_available', 'unknown')
                 mem_total = mem_info.get('bytes_total', 'unknown')
 

@@ -6,6 +6,8 @@ import pathlib
 import yaml
 import pytest
 
+from subprocess_env import so3lr_subprocess_env
+
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATAFILE = PROJECT_ROOT / 'tests' / 'test_data' / 'ac.xyz'
@@ -106,6 +108,7 @@ def test_cli_finetune(workdir, test_config):
         capture_output=True,
         text=True,
         timeout=180,
+        env=so3lr_subprocess_env(),
     )
 
     _assert_finetuning_succeeded(result, workdir, max_loss=0.1)
@@ -126,6 +129,7 @@ def test_cli_finetune_water_pbc(workdir, test_config_water):
         capture_output=True,
         text=True,
         timeout=240,
+        env=so3lr_subprocess_env(),
     )
 
     _assert_finetuning_succeeded(result, workdir, max_loss=0.2)

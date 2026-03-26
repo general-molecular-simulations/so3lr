@@ -2,9 +2,12 @@ import json
 import re
 import subprocess
 import pathlib
+import os
 
 import yaml
 import pytest
+
+from subprocess_env import so3lr_subprocess_env
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -52,6 +55,7 @@ def _run_train(config_path):
         text=True,
         timeout=300,
         cwd=config_path.parent,
+        env=so3lr_subprocess_env(),
     )
 
 
