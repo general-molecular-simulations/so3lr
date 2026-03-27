@@ -1743,8 +1743,9 @@ def perform_md(
         try:
             state, box, current_cycle = load_state(
                 path_to_load=restart_load_path,
-                ensemble= ensemble,
-                restart_reset = all_settings.get('restart_reset', False)
+                ensemble=ensemble,
+                restart_reset=all_settings.get('restart_reset', False),
+                fractional_coordinates=fractional_coordinates
             )
             position = state.position
         except RestartInNewEnsembleError as e:
@@ -1755,6 +1756,17 @@ def perform_md(
             box = e.loaded_state['box']
             if np.all(box == 0) or box is None:
                 box = jnp.array([0.0])
+            # Convert positions if needed. In jax_md, momenta (and thus
+            # velocities) are coordinate-system-independent, so only positions
+            # need conversion here. Velocities are passed to init_fn which
+            # sets momentum = mass * velocity directly.
+            saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
+            if saved_fractional and not fractional_coordinates:
+                logger.info('Converting restart positions from fractional to cartesian coordinates.')
+                position = transform(jnp.array(box), position)
+            elif not saved_fractional and fractional_coordinates:
+                logger.info('Converting restart positions from cartesian to fractional coordinates.')
+                position = transform(1.0 / jnp.array(box), position)
             restart = False
         except Exception as e:
             raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
@@ -2136,7 +2148,8 @@ def perform_md(
                         box,
                         current_cycle,
                         restart_save_path,
-                        ensemble=ensemble
+                        ensemble=ensemble,
+                        fractional_coordinates=fractional_coordinates
                     )
                 # Saving PySAGES state for restart
                 if do_enhanced_sampling and restart_pysages_save_path is not None:
@@ -2509,18 +2522,21 @@ def save_state(
     box: jnp.array,
     cycle: int,
     path_to_save: str,
-    ensemble: str = 'nvt'
+    ensemble: str = 'nvt',
+    fractional_coordinates: bool = True
 ) -> None:
     """
     Save the state of the simulation to a .npz file.
 
     Args:
-        state: Current state of the simulation. 
+        state: Current state of the simulation.
         box (jnp.array): Cell vectors of the simulation.
         cycle (int): Current MD cycle number.
         path_to_save (str): Path to save the .npz file.
         ensemble (str, optional): Specifies which statistical ensemble
                                     is being run. Defaults to 'nvt'.
+        fractional_coordinates (bool, optional): Whether positions are stored
+            in fractional coordinates. Defaults to True.
     """
 
     state_dict = dict(
@@ -2530,7 +2546,8 @@ def save_state(
         mass=state.mass,
         # Additional necessary information
         box=box,
-        step=cycle
+        step=cycle,
+        fractional_coordinates=fractional_coordinates
     )
 
     if ensemble.lower() == 'nvt':
@@ -2569,18 +2586,25 @@ def save_state(
 def load_state(
     path_to_load: str,
     ensemble: str = 'nvt',
-    restart_reset: bool = False
+    restart_reset: bool = False,
+    fractional_coordinates: bool = True
 ) -> Tuple:
     """
 
     Loads the state of the simulation from a .npz file and returns the state,
-    the box and the cycle number.
+    the box and the cycle number. If the coordinate system of the restart file
+    differs from the current run, positions and momenta are converted.
 
     Args:
         path_to_load (str): Path to the .npz file containing the state of the
                             simulation.
-        ensemble (str, optional): Specifies which ensemble is loaded. 
+        ensemble (str, optional): Specifies which ensemble is loaded.
                                     Defaults to 'nvt'.
+        restart_reset (bool, optional): Whether to reset the restart.
+                                    Defaults to False.
+        fractional_coordinates (bool, optional): Whether the current run uses
+            fractional coordinates. Used to detect and convert coordinate
+            mismatches with the restart file. Defaults to True.
 
     Returns:
         Tuple: Tuple containing the state, the box and the cycle number.
@@ -2650,6 +2674,26 @@ def load_state(
     if np.all(box == 0) or box is None:
         box = jnp.array([0.0])
     cycle = loaded_state['step']
+
+    # Detect coordinate system mismatch and convert if needed.
+    # Old restart files without the flag are assumed to use fractional
+    # coordinates (the historical default for periodic systems).
+    saved_fractional = bool(loaded_state.get('fractional_coordinates', True))
+
+    if saved_fractional and not fractional_coordinates:
+        # Restart was saved in fractional coords, current run uses cartesian.
+        # In jax_md with periodic_general, momenta and forces are stored
+        # identically regardless of coordinate system — only positions differ.
+        logger.info('Converting restart positions from fractional to cartesian coordinates.')
+        state = state.set(
+            position=transform(jnp.array(box), state.position)
+        )
+    elif not saved_fractional and fractional_coordinates:
+        # Restart was saved in cartesian coords, current run uses fractional.
+        logger.info('Converting restart positions from cartesian to fractional coordinates.')
+        state = state.set(
+            position=transform(1.0 / jnp.array(box), state.position)
+        )
 
     return state, box, cycle
 

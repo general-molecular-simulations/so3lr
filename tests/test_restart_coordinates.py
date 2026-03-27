@@ -1,0 +1,499 @@
+"""Tests for restart coordinate conversion between fractional and cartesian.
+
+When a restart file is saved with one coordinate system (e.g., fractional)
+and loaded into a simulation using a different coordinate system (e.g.,
+cartesian), positions and momenta must be converted. These tests verify
+that save_state/load_state handle this correctly, and that full MD
+simulations produce correct results across coordinate system switches.
+"""
+
+import os
+import shutil
+import pathlib
+import subprocess
+
+import pytest
+import numpy as np
+import jax.numpy as jnp
+import jax_md
+
+import yaml
+
+from so3lr.cli.so3lr_md import save_state, load_state
+
+
+# Path to basic_test directory (relative to the repo root)
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+BASIC_TEST_DIR = PROJECT_ROOT.parent / "basic_test"
+
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+def _make_nvt_state(position, momentum, force, mass):
+    """Create a minimal NVTNoseHooverState for testing."""
+    chain = jax_md.simulate.NoseHooverChain(
+        position=jnp.array([0.0, 0.0, 0.0]),
+        momentum=jnp.array([0.1, 0.1, 0.1]),
+        mass=jnp.array([1.0, 1.0, 1.0]),
+        tau=jnp.array(1.0),
+        kinetic_energy=jnp.array(0.5),
+        degrees_of_freedom=jnp.array(3 * position.shape[0]),
+    )
+    return jax_md.simulate.NVTNoseHooverState(
+        position=position,
+        momentum=momentum,
+        force=force,
+        mass=mass,
+        chain=chain,
+    )
+
+
+def _run_so3lr_simulation(workdir, settings_file='md_settings.yaml'):
+    """Run an SO3LR simulation in the given directory."""
+    result = subprocess.run(
+        ['so3lr', '--settings', settings_file],
+        cwd=workdir,
+        capture_output=True,
+        text=True,
+        env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
+    )
+    assert result.returncode == 0, (
+        f"SO3LR simulation failed in {workdir} with return code {result.returncode}\n"
+        f"STDERR:\n{result.stderr}"
+    )
+    return result
+
+
+def _parse_md_observables(log_path):
+    """Parse MD observables from an out.log file.
+
+    Returns a list of dicts with keys: step, E, KE, PE, H, T
+    """
+    results = []
+    with open(log_path) as f:
+        for line in f:
+            if "INFO - " in line:
+                content = line.split("INFO - ", 1)[1]
+            else:
+                content = line
+            parts = content.strip().split('\t')
+            if len(parts) == 7:
+                try:
+                    results.append({
+                        'step': int(parts[0]),
+                        'E': float(parts[1]),
+                        'KE': float(parts[2]),
+                        'PE': float(parts[3]),
+                        'H': float(parts[4]),
+                        'T': float(parts[5]),
+                    })
+                except (ValueError, IndexError):
+                    continue
+    return results
+
+
+def _setup_simulation_dir(tmp_path, source_dir, name):
+    """Copy a basic_test simulation directory to a temp location.
+
+    Only copies input files (*.yaml, *.xyz), not previous output files.
+    """
+    dest = tmp_path / name
+    dest.mkdir(parents=True, exist_ok=True)
+    input_extensions = {'.yaml', '.xyz'}
+    for item in source_dir.iterdir():
+        if item.is_file() and item.suffix in input_extensions:
+            shutil.copy2(item, dest)
+    return dest
+
+
+# ===========================================================================
+# Unit tests: save_state / load_state coordinate flag and conversion
+# ===========================================================================
+
+class TestSaveLoadCoordinateFlag:
+    """Verify the fractional_coordinates flag is saved and read correctly."""
+
+    def test_save_state_stores_fractional_flag_true(self, tmp_path):
+        """When saving with fractional_coordinates=True, the flag is stored."""
+        pos = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+        mass = jnp.array([[1.0], [16.0]])
+        state = _make_nvt_state(pos, mom, force, mass)
+        box = jnp.array([10.0, 10.0, 10.0])
+        path = str(tmp_path / "restart_frac.npz")
+
+        save_state(state, box, 0, path, ensemble='nvt', fractional_coordinates=True)
+
+        data = np.load(path, allow_pickle=True)
+        assert bool(data['fractional_coordinates']) is True
+
+    def test_save_state_stores_fractional_flag_false(self, tmp_path):
+        """When saving with fractional_coordinates=False, the flag is stored."""
+        pos = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+        mass = jnp.array([[1.0], [16.0]])
+        state = _make_nvt_state(pos, mom, force, mass)
+        box = jnp.array([10.0, 10.0, 10.0])
+        path = str(tmp_path / "restart_cart.npz")
+
+        save_state(state, box, 0, path, ensemble='nvt', fractional_coordinates=False)
+
+        data = np.load(path, allow_pickle=True)
+        assert bool(data['fractional_coordinates']) is False
+
+    def test_load_state_no_conversion_same_coords(self, tmp_path):
+        """Loading with same coordinate system should not modify positions."""
+        pos = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+        mass = jnp.array([[1.0], [16.0]])
+        state = _make_nvt_state(pos, mom, force, mass)
+        box = jnp.array([10.0, 10.0, 10.0])
+        path = str(tmp_path / "restart.npz")
+
+        save_state(state, box, 5, path, ensemble='nvt', fractional_coordinates=True)
+        loaded_state, loaded_box, cycle = load_state(
+            path, ensemble='nvt', fractional_coordinates=True
+        )
+
+        np.testing.assert_allclose(loaded_state.position, pos, atol=1e-10)
+        np.testing.assert_allclose(loaded_state.momentum, mom, atol=1e-10)
+        np.testing.assert_allclose(loaded_state.force, force, atol=1e-10)
+        assert cycle == 5
+
+
+class TestCoordinateConversion:
+    """Verify positions and momenta are converted when coordinate systems differ."""
+
+    def test_fractional_to_cartesian(self, tmp_path):
+        """Loading fractional restart into cartesian run should convert
+        positions (multiply by box), but leave momenta and forces unchanged
+        (jax_md stores these identically in both coordinate systems)."""
+        box = jnp.array([25.0, 25.0, 25.0])
+        frac_pos = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+        mass = jnp.array([[1.0], [16.0]])
+        state = _make_nvt_state(frac_pos, mom, force, mass)
+        path = str(tmp_path / "restart_frac.npz")
+
+        save_state(state, box, 0, path, ensemble='nvt', fractional_coordinates=True)
+        loaded_state, _, _ = load_state(
+            path, ensemble='nvt', fractional_coordinates=False
+        )
+
+        np.testing.assert_allclose(loaded_state.position, frac_pos * box, atol=1e-10)
+        np.testing.assert_allclose(loaded_state.momentum, mom, atol=1e-10)
+        np.testing.assert_allclose(loaded_state.force, force, atol=1e-10)
+
+    def test_cartesian_to_fractional(self, tmp_path):
+        """Loading cartesian restart into fractional run should convert
+        positions (divide by box), but leave momenta and forces unchanged."""
+        box = jnp.array([25.0, 25.0, 25.0])
+        cart_pos = jnp.array([[2.5, 5.0, 7.5], [10.0, 12.5, 15.0]])
+        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+        mass = jnp.array([[1.0], [16.0]])
+        state = _make_nvt_state(cart_pos, mom, force, mass)
+        path = str(tmp_path / "restart_cart.npz")
+
+        save_state(state, box, 0, path, ensemble='nvt', fractional_coordinates=False)
+        loaded_state, _, _ = load_state(
+            path, ensemble='nvt', fractional_coordinates=True
+        )
+
+        np.testing.assert_allclose(loaded_state.position, cart_pos / box, atol=1e-10)
+        np.testing.assert_allclose(loaded_state.momentum, mom, atol=1e-10)
+        np.testing.assert_allclose(loaded_state.force, force, atol=1e-10)
+
+    def test_roundtrip_frac_cart_frac(self, tmp_path):
+        """Fractional -> save -> load as cartesian -> save -> load as fractional
+        should recover original state."""
+        box = jnp.array([25.0, 25.0, 25.0])
+        orig_pos = jnp.array([[0.12, 0.34, 0.56], [0.78, 0.91, 0.23]])
+        orig_mom = jnp.array([[1.1, 2.2, 3.3], [4.4, 5.5, 6.6]])
+        orig_force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+        mass = jnp.array([[1.0], [16.0]])
+        state = _make_nvt_state(orig_pos, orig_mom, orig_force, mass)
+
+        # Save as fractional, load as cartesian
+        path1 = str(tmp_path / "restart1.npz")
+        save_state(state, box, 0, path1, ensemble='nvt', fractional_coordinates=True)
+        cart_state, _, _ = load_state(
+            path1, ensemble='nvt', fractional_coordinates=False
+        )
+
+        # Save as cartesian, load as fractional
+        path2 = str(tmp_path / "restart2.npz")
+        save_state(cart_state, box, 0, path2, ensemble='nvt', fractional_coordinates=False)
+        final_state, _, _ = load_state(
+            path2, ensemble='nvt', fractional_coordinates=True
+        )
+
+        np.testing.assert_allclose(final_state.position, orig_pos, atol=1e-10)
+        np.testing.assert_allclose(final_state.momentum, orig_mom, atol=1e-10)
+        np.testing.assert_allclose(final_state.force, orig_force, atol=1e-10)
+
+    def test_old_restart_without_flag_assumes_fractional(self, tmp_path):
+        """Old restart files without fractional_coordinates flag should be
+        treated as fractional (the historical default)."""
+        box = jnp.array([25.0, 25.0, 25.0])
+        frac_pos = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        frac_mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        frac_force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+        mass = jnp.array([[1.0], [16.0]])
+
+        # Manually create an old-format restart file without the flag
+        chain = jax_md.simulate.NoseHooverChain(
+            position=jnp.array([0.0, 0.0, 0.0]),
+            momentum=jnp.array([0.1, 0.1, 0.1]),
+            mass=jnp.array([1.0, 1.0, 1.0]),
+            tau=jnp.array(1.0),
+            kinetic_energy=jnp.array(0.5),
+            degrees_of_freedom=jnp.array(6),
+        )
+        path = str(tmp_path / "old_restart.npz")
+        np.savez(
+            path,
+            position=np.array(frac_pos),
+            momentum=np.array(frac_mom),
+            force=np.array(frac_force),
+            mass=np.array(mass),
+            box=np.array(box),
+            step=0,
+            ensemble='nvt',
+            thermostat_position=np.array(chain.position),
+            thermostat_momentum=np.array(chain.momentum),
+            thermostat_mass=np.array(chain.mass),
+            thermostat_tau=np.array(chain.tau),
+            thermostat_kinetic_energy=np.array(chain.kinetic_energy),
+            thermostat_degrees_of_freedom=np.array(chain.degrees_of_freedom),
+            # NOTE: no fractional_coordinates key
+        )
+
+        # Load as cartesian — should convert since default assumption is fractional
+        loaded_state, _, _ = load_state(
+            path, ensemble='nvt', fractional_coordinates=False
+        )
+
+        expected_pos = frac_pos * box
+        np.testing.assert_allclose(loaded_state.position, expected_pos, atol=1e-10)
+
+
+# ===========================================================================
+# Integration tests: cross-coordinate restart with full MD simulations
+# ===========================================================================
+
+class TestCrossCoordinateRestart:
+    """Integration tests: verify that restarting across coordinate systems
+    produces physically correct results.
+
+    Test 1 (fractional -> cartesian): Run vanilla NVT (fractional coords)
+    for 2 cycles, save restart, then restart with PySAGES unbiased
+    (cartesian coords) for 2 more cycles. Compare the last 2 cycles
+    against a continuous 4-cycle PySAGES unbiased run.
+
+    Test 2 (cartesian -> fractional): Run PySAGES unbiased (cartesian coords)
+    for 2 cycles, save restart, then restart as vanilla NVT (fractional
+    coords) for 2 more cycles. Compare the last 2 cycles against a
+    continuous 4-cycle vanilla NVT run.
+    """
+
+    @pytest.fixture(scope="class")
+    def frac_to_cart_results(self, tmp_path_factory):
+        """Fractional->cartesian restart: vanilla NVT then PySAGES unbiased."""
+        tmp_path = tmp_path_factory.mktemp("frac_to_cart")
+
+        vanilla_src = BASIC_TEST_DIR / "so3lr_vanilla"
+        unbiased_src = BASIC_TEST_DIR / "so3lr_pysages_unbiased"
+        if not vanilla_src.exists() or not unbiased_src.exists():
+            pytest.skip("basic_test input directories not found")
+
+        # --- Continuous 4-cycle PySAGES unbiased run (reference) ---
+        continuous_dir = _setup_simulation_dir(tmp_path, unbiased_src, "continuous")
+        settings_path = continuous_dir / "md_settings.yaml"
+        with open(settings_path) as f:
+            settings = yaml.safe_load(f)
+        settings['md_cycles'] = 4
+        settings['log_file'] = 'out.log'
+        settings['output_file'] = 'traj.xyz'
+        settings.pop('restart_save_path', None)
+        settings.pop('restart_load_path', None)
+        with open(settings_path, 'w') as f:
+            yaml.dump(settings, f)
+        _run_so3lr_simulation(continuous_dir)
+
+        # --- First 2 cycles: vanilla NVT (fractional coords) ---
+        first_dir = _setup_simulation_dir(tmp_path, vanilla_src, "first_vanilla")
+        settings_path = first_dir / "md_settings.yaml"
+        with open(settings_path) as f:
+            settings = yaml.safe_load(f)
+        settings['md_cycles'] = 2
+        settings['log_file'] = 'out.log'
+        settings['output_file'] = 'traj.xyz'
+        settings['restart_save_path'] = './restart.npz'
+        settings.pop('restart_load_path', None)
+        settings.pop('do_enhanced_sampling', None)
+        settings.pop('enforce_cartesian_coordinates', None)
+        with open(settings_path, 'w') as f:
+            yaml.dump(settings, f)
+        _run_so3lr_simulation(first_dir)
+
+        # --- Restart: PySAGES unbiased (cartesian coords) for 2 more cycles ---
+        restart_dir = _setup_simulation_dir(tmp_path, unbiased_src, "restart_pysages")
+        shutil.copy2(first_dir / "restart.npz", restart_dir)
+        settings_path = restart_dir / "md_settings.yaml"
+        with open(settings_path) as f:
+            settings = yaml.safe_load(f)
+        settings['md_cycles'] = 2
+        settings['log_file'] = 'out.log'
+        settings['output_file'] = 'traj.xyz'
+        settings['restart_load_path'] = './restart.npz'
+        settings['restart_save_path'] = './restart2.npz'
+        settings.pop('restart_pysages_load_path', None)
+        with open(settings_path, 'w') as f:
+            yaml.dump(settings, f)
+        _run_so3lr_simulation(restart_dir)
+
+        return {
+            'continuous_log': continuous_dir / "out.log",
+            'restart_log': restart_dir / "out.log",
+        }
+
+    @pytest.fixture(scope="class")
+    def cart_to_frac_results(self, tmp_path_factory):
+        """Cartesian->fractional restart: PySAGES unbiased then vanilla NVT."""
+        tmp_path = tmp_path_factory.mktemp("cart_to_frac")
+
+        vanilla_src = BASIC_TEST_DIR / "so3lr_vanilla"
+        unbiased_src = BASIC_TEST_DIR / "so3lr_pysages_unbiased"
+        if not vanilla_src.exists() or not unbiased_src.exists():
+            pytest.skip("basic_test input directories not found")
+
+        # --- Continuous 4-cycle vanilla NVT run (reference) ---
+        continuous_dir = _setup_simulation_dir(tmp_path, vanilla_src, "continuous")
+        settings_path = continuous_dir / "md_settings.yaml"
+        with open(settings_path) as f:
+            settings = yaml.safe_load(f)
+        settings['md_cycles'] = 4
+        settings['log_file'] = 'out.log'
+        settings['output_file'] = 'traj.xyz'
+        settings.pop('restart_save_path', None)
+        settings.pop('restart_load_path', None)
+        with open(settings_path, 'w') as f:
+            yaml.dump(settings, f)
+        _run_so3lr_simulation(continuous_dir)
+
+        # --- First 2 cycles: PySAGES unbiased (cartesian coords) ---
+        first_dir = _setup_simulation_dir(tmp_path, unbiased_src, "first_pysages")
+        settings_path = first_dir / "md_settings.yaml"
+        with open(settings_path) as f:
+            settings = yaml.safe_load(f)
+        settings['md_cycles'] = 2
+        settings['log_file'] = 'out.log'
+        settings['output_file'] = 'traj.xyz'
+        settings['restart_save_path'] = './restart.npz'
+        settings.pop('restart_load_path', None)
+        with open(settings_path, 'w') as f:
+            yaml.dump(settings, f)
+        _run_so3lr_simulation(first_dir)
+
+        # --- Restart: vanilla NVT (fractional coords) for 2 more cycles ---
+        restart_dir = _setup_simulation_dir(tmp_path, vanilla_src, "restart_vanilla")
+        shutil.copy2(first_dir / "restart.npz", restart_dir)
+        settings_path = restart_dir / "md_settings.yaml"
+        with open(settings_path) as f:
+            settings = yaml.safe_load(f)
+        settings['md_cycles'] = 2
+        settings['log_file'] = 'out.log'
+        settings['output_file'] = 'traj.xyz'
+        settings['restart_load_path'] = './restart.npz'
+        settings['restart_save_path'] = './restart2.npz'
+        settings.pop('do_enhanced_sampling', None)
+        settings.pop('enforce_cartesian_coordinates', None)
+        with open(settings_path, 'w') as f:
+            yaml.dump(settings, f)
+        _run_so3lr_simulation(restart_dir)
+
+        return {
+            'continuous_log': continuous_dir / "out.log",
+            'restart_log': restart_dir / "out.log",
+        }
+
+    def test_frac_to_cart_restart_has_reasonable_energy(self, frac_to_cart_results):
+        """After fractional->cartesian restart, energies should be physically
+        reasonable (not the ~45 million eV seen with the coordinate mismatch bug)."""
+        restarted = _parse_md_observables(frac_to_cart_results['restart_log'])
+        assert len(restarted) > 0, "No MD data found in restart log"
+
+        for obs in restarted:
+            assert abs(obs['PE']) < 1e5, (
+                f"PE={obs['PE']} at step {obs['step']} is unreasonably large — "
+                "likely a coordinate conversion failure"
+            )
+            assert 100 < obs['T'] < 600, (
+                f"T={obs['T']} at step {obs['step']} is outside reasonable range"
+            )
+
+    def test_frac_to_cart_restart_matches_continuous(self, frac_to_cart_results):
+        """Last 2 cycles of frac->cart restart should match cycles 3-4 of
+        continuous PySAGES unbiased run."""
+        continuous = _parse_md_observables(frac_to_cart_results['continuous_log'])
+        restarted = _parse_md_observables(frac_to_cart_results['restart_log'])
+
+        assert len(continuous) >= 4, f"Expected >= 4 data points, got {len(continuous)}"
+        assert len(restarted) >= 2, f"Expected >= 2 data points, got {len(restarted)}"
+
+        cont_last2 = continuous[-2:]
+        rest_last2 = restarted[-2:]
+
+        for c, r in zip(cont_last2, rest_last2):
+            np.testing.assert_allclose(c['E'], r['E'], atol=1e-6,
+                err_msg=f"Total energy mismatch at step {c['step']}")
+            np.testing.assert_allclose(c['KE'], r['KE'], atol=1e-6,
+                err_msg=f"Kinetic energy mismatch at step {c['step']}")
+            np.testing.assert_allclose(c['PE'], r['PE'], atol=1e-6,
+                err_msg=f"Potential energy mismatch at step {c['step']}")
+            np.testing.assert_allclose(c['T'], r['T'], atol=0.1,
+                err_msg=f"Temperature mismatch at step {c['step']}")
+
+    def test_cart_to_frac_restart_has_reasonable_energy(self, cart_to_frac_results):
+        """After cartesian->fractional restart, energies should be physically
+        reasonable."""
+        restarted = _parse_md_observables(cart_to_frac_results['restart_log'])
+        assert len(restarted) > 0, "No MD data found in restart log"
+
+        for obs in restarted:
+            assert abs(obs['PE']) < 1e5, (
+                f"PE={obs['PE']} at step {obs['step']} is unreasonably large — "
+                "likely a coordinate conversion failure"
+            )
+            assert 100 < obs['T'] < 600, (
+                f"T={obs['T']} at step {obs['step']} is outside reasonable range"
+            )
+
+    def test_cart_to_frac_restart_matches_continuous(self, cart_to_frac_results):
+        """Last 2 cycles of cart->frac restart should match cycles 3-4 of
+        continuous vanilla NVT run."""
+        continuous = _parse_md_observables(cart_to_frac_results['continuous_log'])
+        restarted = _parse_md_observables(cart_to_frac_results['restart_log'])
+
+        assert len(continuous) >= 4, f"Expected >= 4 data points, got {len(continuous)}"
+        assert len(restarted) >= 2, f"Expected >= 2 data points, got {len(restarted)}"
+
+        cont_last2 = continuous[-2:]
+        rest_last2 = restarted[-2:]
+
+        for c, r in zip(cont_last2, rest_last2):
+            np.testing.assert_allclose(c['E'], r['E'], atol=1e-6,
+                err_msg=f"Total energy mismatch at step {c['step']}")
+            np.testing.assert_allclose(c['KE'], r['KE'], atol=1e-6,
+                err_msg=f"Kinetic energy mismatch at step {c['step']}")
+            np.testing.assert_allclose(c['PE'], r['PE'], atol=1e-6,
+                err_msg=f"Potential energy mismatch at step {c['step']}")
+            np.testing.assert_allclose(c['T'], r['T'], atol=0.1,
+                err_msg=f"Temperature mismatch at step {c['step']}")
