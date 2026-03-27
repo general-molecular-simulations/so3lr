@@ -225,8 +225,9 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
             nbrs=nbrs,
             species=species,
             box=box,
-            species_nn=arguments['species'],
-            cn_exponents=arguments.get('cn_exps')
+            species_nn=arguments.get('species'),
+            cn_exponents=arguments.get('cn_exps'),
+            indices_nn=arguments.get('indices_nn'),
         )
     else:
         raise ValueError(f"Unknown collective variable type: '{name}'")
