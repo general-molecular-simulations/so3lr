@@ -664,20 +664,46 @@ def load_model(
     if not model_dir.exists():
         raise FileNotFoundError(f"Model path not found: {model_path}")
 
-    # Load from workdir path
-    potential = PotentialSparse.create_from_workdir(
-        workdir=model_dir,
-        from_file=False,
-        long_range_kwargs=dict(
-            cutoff_lr=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            neighborlist_format_lr='ordered_sparse',
-            coulomb_kspace_method=kspace_electrostatics,
-            coulomb_kspace_interp_nodes=kspace_interp_nodes,
-        ),
-        dtype=precision,
-        **kwargs
+    long_range_kw = dict(
+        cutoff_lr=lr_cutoff,
+        dispersion_energy_cutoff_lr_damping=dispersion_damping,
+        neighborlist_format_lr='ordered_sparse',
+        coulomb_kspace_method=kspace_electrostatics,
+        coulomb_kspace_interp_nodes=kspace_interp_nodes,
     )
+
+    checkpoints_dir = model_dir / 'checkpoints'
+    params_pkl = model_dir / 'params.pkl'
+
+    # Prefer Orbax checkpoints, but support legacy params.pkl-only model folders.
+    from_file = False
+    if not checkpoints_dir.exists() and params_pkl.exists():
+        logger.info(
+            'No checkpoints directory found in %s; loading parameters from params.pkl instead.',
+            model_dir,
+        )
+        from_file = True
+
+    def _create_potential(from_file_flag: bool) -> PotentialSparse:
+        return PotentialSparse.create_from_workdir(
+            workdir=model_dir,
+            from_file=from_file_flag,
+            long_range_kwargs=long_range_kw,
+            dtype=precision,
+            **kwargs
+        )
+
+    try:
+        potential = _create_potential(from_file)
+    except FileNotFoundError:
+        if (not from_file) and params_pkl.exists():
+            logger.warning(
+                'Checkpoint loading failed for %s; falling back to params.pkl.',
+                model_dir,
+            )
+            potential = _create_potential(True)
+        else:
+            raise
 
     return potential
 
