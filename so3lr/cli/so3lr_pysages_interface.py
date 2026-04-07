@@ -175,6 +175,14 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
         get_masses(final_snapshot)
     )
 
+    # Restore bias forces to avoid a discontinuity at the cycle boundary.
+    # The snapshot stores unbiased forces (captured before PySAGES adds bias),
+    # so the last bias must be re-applied to keep forces consistent with what
+    # the integrator saw at the end of the PySAGES run.
+    last_bias = raw_result.states[0].bias
+    if last_bias is not None:
+        new_state = new_state.set(force=new_state.force + last_bias)
+
     return new_state, nbrs, nbrs_lr, new_box, k_grid
 
 
