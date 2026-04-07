@@ -2031,18 +2031,18 @@ def perform_md(
             )
 
             if pysages_result:
-                pysages_result = jax.block_until_ready(
+                candidate_result = jax.block_until_ready(
                     pysages.run(pysages_result, generate_context, md_steps,
                                 context_args={})
                 )
             else:
-                pysages_result = jax.block_until_ready(
+                candidate_result = jax.block_until_ready(
                     pysages.run(method, generate_context, md_steps)
                 )
 
             new_state, nbrs, nbrs_lr, new_box, k_grid = jax.block_until_ready(
                 update_so3lr_after_pysages(
-                    pysages_result, lr, init_fn, rng_key, md_T,
+                    candidate_result, lr, init_fn, rng_key, md_T,
                     nbrs, nbrs_lr, k_grid
                 )
             )
@@ -2085,6 +2085,9 @@ def perform_md(
         )
 
         if not overflow:
+            if do_enhanced_sampling:
+                pysages_result = candidate_result
+
             cycle_md += 1
             current_cycle += 1
 
