@@ -441,6 +441,7 @@ def write_to_extxyz(
     positions: List,
     obs_dict: MutableMapping[str, list] = {},
     indices: Optional[List[int]] = None,
+    fractional_coordinates: bool = True,
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
     """
     Write trajectory data to an extended XYZ file.
@@ -457,6 +458,10 @@ def write_to_extxyz(
         momenta: List of momenta arrays for each frame.
         positions: List of position arrays for each frame.
         obs_dict: Dictionary of observables. Defaults to {}.
+        indices: Optional list of atom indices to write.
+        fractional_coordinates: If True, positions are in fractional coordinates
+            and will be scaled by box vectors. If False, positions are already
+            in Cartesian Angstroms and are written directly.
 
     Returns:
         Tuple of empty lists (momenta, positions, boxes) to clear memory on success.
@@ -490,19 +495,28 @@ def write_to_extxyz(
                     atoms_copy.set_positions(positions[i])
                 else:
                     atoms_copy.set_cell(boxes)
-                    atoms_copy.set_positions(positions[i] * boxes)
+                    if fractional_coordinates:
+                        atoms_copy.set_positions(positions[i] * boxes)
+                    else:
+                        atoms_copy.set_positions(positions[i])
             elif isinstance(boxes, (jnp.ndarray, np.ndarray)):
                 if np.any(boxes == 0):
                     atoms_copy.set_positions(positions[i])
                 else:
                     atoms_copy.set_cell(boxes)
-                    atoms_copy.set_positions(positions[i] * boxes)
+                    if fractional_coordinates:
+                        atoms_copy.set_positions(positions[i] * boxes)
+                    else:
+                        atoms_copy.set_positions(positions[i])
             elif isinstance(boxes, list):
                 if np.any(boxes[0] == 0):
                     atoms_copy.set_positions(positions[i])
                 else:
                     atoms_copy.set_cell(boxes[i])
-                    atoms_copy.set_positions(positions[i] * boxes[i])
+                    if fractional_coordinates:
+                        atoms_copy.set_positions(positions[i] * boxes[i])
+                    else:
+                        atoms_copy.set_positions(positions[i])
             else:
                 atoms_copy.set_positions(positions[i])
 
@@ -2139,7 +2153,8 @@ def perform_md(
                         momenta,
                         positions,
                         obs_dict,
-                        output_atom_indices
+                        output_atom_indices,
+                        fractional_coordinates=fractional_coordinates
                     )
                 # Saving the state for restart
                 if create_restart:
