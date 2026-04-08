@@ -296,10 +296,17 @@ def get_pysages_method(settings_dict, nbrs=None, species=None, box=None):
         )
     elif method_name == 'unbiased':
         return pysages.methods.Unbiased(cvs)
+    elif method_name == 'harmonic':
+        args = settings_dict['method_args']
+        return pysages.methods.HarmonicBias(
+            cvs,
+            kspring=args['kspring'],
+            center=args['center']
+        )
     else:
         raise ValueError(
             f"Unknown PySAGES method: '{settings_dict['method']}'. "
-            "Supported methods: abf, spectralabf, metad, unbiased."
+            "Supported methods: abf, spectralabf, metad, harmonic, unbiased."
         )
 
 
