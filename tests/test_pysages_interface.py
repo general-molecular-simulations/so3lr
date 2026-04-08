@@ -158,6 +158,26 @@ class TestImportGuard:
         settings = {}
         assert settings.get('do_enhanced_sampling', False) is False
 
+    @pytest.mark.parametrize("ensemble", ["npt", "nve", "nvt-langevin"])
+    def test_unsupported_ensemble_raises(self, ensemble):
+        """Enhanced sampling with non-NVT ensembles should raise ValueError."""
+        import so3lr.cli.so3lr_md as md_module
+        settings = {
+            'do_enhanced_sampling': True,
+            'input_file': 'dummy.xyz',
+            'output_file': 'dummy.xyz',
+            'md_dt': 0.5,
+            'md_T': 300,
+            'md_cycles': 1,
+            'md_steps': 10,
+            'ensemble': ensemble,
+            'precision': 'float32',
+            'seed': 42,
+            'save_buffer': 10,
+        }
+        with pytest.raises(ValueError, match="only supports the NVT ensemble"):
+            md_module.perform_md(settings)
+
 
 # ===========================================================================
 # 2. handle_box with periodic_cart
