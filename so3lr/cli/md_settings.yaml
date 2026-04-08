@@ -27,6 +27,13 @@ restart_save_path: null                    # Path to save simulation state for r
 restart_load_path: null                    # Path to load simulation state from a previous run [Default: null]
 restart_reset: false                       # Reset accumulated thermostat/barostat state on restart [Default: false]
 
+## Enhanced Sampling (PySAGES) — optional, requires pip install so3lr[pysages]
+do_enhanced_sampling: false                # Enable enhanced sampling via PySAGES [Default: false]
+pysages_input: "./pysages_input.yaml"      # Path to PySAGES settings file (CVs, method, grid) [Default: "./pysages_input.yaml"]
+enforce_cartesian_coordinates: false       # Use Cartesian (not fractional) coordinates for periodic systems. Auto-enabled when do_enhanced_sampling is true. [Default: false]
+restart_pysages_save_path: null            # Path to save PySAGES state for restarting [Default: null]
+restart_pysages_load_path: null            # Path to load PySAGES state from a previous run [Default: null]
+
 ## Model Settings
 model_path: null                           # Path to a custom MLFF model directory. If null, uses built-in SO3LR. [Default: null]
 lr_cutoff: 12.0                            # Long-range cutoff distance in Å [Default: 12.0]  (CLI: --lr-cutoff)
