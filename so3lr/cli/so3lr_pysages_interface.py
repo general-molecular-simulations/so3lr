@@ -114,14 +114,15 @@ def re_init_so3lr_state(chain_pos, chain_mom, chain_mass, chain_tau,
     new_state = jax_md.simulate.canonicalize_mass(new_state)
     new_state = new_state.set(momentum=new_state.mass * velocities)
 
-    dof = jax_md.quantity.count_dof(pos)
+    # dof = jax_md.quantity.count_dof(pos)
     new_thermostat = jax_md.simulate.NoseHooverChain(
         position=chain_pos,
         momentum=chain_mom,
         mass=chain_mass,
         tau=chain_tau,
         kinetic_energy=chain_ekin,
-        degrees_of_freedom=dof
+        # degrees_of_freedom=dof
+        degrees_of_freedom=chain_dof
     )
 
     new_state = new_state.set(chain=new_thermostat)
