@@ -1671,6 +1671,13 @@ def perform_md(
             "Install it with: pip install so3lr[pysages]"
         )
 
+    if do_enhanced_sampling and ensemble not in ('nvt',):
+        raise ValueError(
+            f"Enhanced sampling with PySAGES currently only supports the NVT ensemble "
+            f"(Nose-Hoover thermostat), but '{ensemble}' was selected. "
+            f"NPT, NVE, and NVT-Langevin are not yet supported."
+        )
+
     if do_enhanced_sampling and restart_pysages_load_path is not None:
         restart_pysages = True
     else:
