@@ -622,7 +622,8 @@ SO3LR integrates with [PySAGES](https://github.com/SSAGESLabs/PySAGES), a JAX-ba
 PySAGES is an optional dependency. To install SO3LR with PySAGES support:
 
 ```shell script
-pip install so3lr[pysages]
+cd so3lr
+pip install .[pysages]
 ```
 
 SO3LR runs normally without PySAGES installed. The enhanced sampling features are only activated when `do_enhanced_sampling: true` is set in the settings file.
