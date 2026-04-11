@@ -26,9 +26,91 @@ import yaml
 
 from so3lr.cli.so3lr_md import handle_box, HAS_PYSAGES
 
-# Path to basic_test directory (relative to the repo root)
+# ---------------------------------------------------------------------------
+# Paths and shared settings
+# ---------------------------------------------------------------------------
+
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-BASIC_TEST_DIR = PROJECT_ROOT.parent / "basic_test"
+TEST_DATA_DIR = pathlib.Path(__file__).resolve().parent / "test_data"
+GEOMETRY_FILE = TEST_DATA_DIR / "benzoic_acid_aq_1.xyz"
+
+# Base MD settings shared by all integration runs.  The geometry path is
+# filled in at fixture time so it points to the temp-directory copy.
+_BASE_MD_SETTINGS = {
+    'use_so3lr': True,
+    'precision': 'float64',
+    'total_charge': 0.0,
+    'lr_cutoff': 12.0,
+    'relax_before_run': True,
+    'min_cycles': 10,
+    'min_steps': 20,
+    'min_start_dt': 0.05,
+    'min_max_dt': 0.1,
+    'min_n_min': 2,
+    'min_print': True,
+    'md_dt': 0.5,
+    'md_T': 300,
+    'md_cycles': 2,
+    'md_steps': 500,
+    'hdf5_buffer_size': 50,
+}
+
+_PYSAGES_INPUT_UNBIASED = {
+    'method': 'unbiased',
+    'cv': [{
+        'type': 'coordinationnumber',
+        'indices': [4, 7],
+        'cn_exps': [6, 30],
+        'species': 1,
+        'grid_min': 0.0,
+        'grid_max': 1.5,
+        'grid_stride': 64,
+        'periodic': False,
+    }],
+}
+
+_PYSAGES_INPUT_ABF = {
+    'method': 'abf',
+    'cv': [{
+        'type': 'coordinationnumber',
+        'indices': [4, 7],
+        'cn_exps': [6, 30],
+        'species': 1,
+        'grid_min': 0.0,
+        'grid_max': 1.5,
+        'grid_stride': 64,
+        'periodic': False,
+    }],
+}
+
+
+def _write_yaml(path, data):
+    with open(path, 'w') as f:
+        yaml.dump(data, f)
+
+
+def _prepare_run_dir(tmp_path, name, md_overrides=None, pysages_input=None):
+    """Create a simulation directory with geometry, settings, and optionally pysages input."""
+    run_dir = tmp_path / name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy geometry
+    shutil.copy2(GEOMETRY_FILE, run_dir / "benzoic_acid_aq_1.xyz")
+
+    # Build settings
+    settings = dict(_BASE_MD_SETTINGS)
+    settings['input_file'] = 'benzoic_acid_aq_1.xyz'
+    settings['output_file'] = 'traj.xyz'
+    settings['log_file'] = 'out.log'
+    if md_overrides:
+        settings.update(md_overrides)
+    _write_yaml(run_dir / "md_settings.yaml", settings)
+
+    # PySAGES input (if needed)
+    if pysages_input is not None:
+        _write_yaml(run_dir / "pysages_input.yaml", pysages_input)
+
+    return run_dir
 
 
 # ===========================================================================
@@ -75,6 +157,26 @@ class TestImportGuard:
         """do_enhanced_sampling should default to False."""
         settings = {}
         assert settings.get('do_enhanced_sampling', False) is False
+
+    @pytest.mark.parametrize("ensemble", ["npt", "nve", "nvt-langevin"])
+    def test_unsupported_ensemble_raises(self, ensemble):
+        """Enhanced sampling with non-NVT ensembles should raise ValueError."""
+        import so3lr.cli.so3lr_md as md_module
+        settings = {
+            'do_enhanced_sampling': True,
+            'input_file': 'dummy.xyz',
+            'output_file': 'dummy.xyz',
+            'md_dt': 0.5,
+            'md_T': 300,
+            'md_cycles': 1,
+            'md_steps': 10,
+            'ensemble': ensemble,
+            'precision': 'float32',
+            'seed': 42,
+            'save_buffer': 10,
+        }
+        with pytest.raises(ValueError, match="only supports the NVT ensemble"):
+            md_module.perform_md(settings)
 
 
 # ===========================================================================
@@ -251,23 +353,21 @@ class TestCreatePysagesInterfaceFns:
 class TestParsePysagesInput:
     """Tests for parse_pysages_input."""
 
-    def test_parse_unbiased_input(self):
+    def test_parse_unbiased_input(self, tmp_path):
         from so3lr.cli.so3lr_pysages_interface import parse_pysages_input
-        input_path = BASIC_TEST_DIR / "so3lr_pysages_unbiased" / "pysages_input.yaml"
-        if not input_path.exists():
-            pytest.skip("basic_test/so3lr_pysages_unbiased/pysages_input.yaml not found")
-        settings = parse_pysages_input(str(input_path))
+        path = tmp_path / "pysages_input.yaml"
+        _write_yaml(path, _PYSAGES_INPUT_UNBIASED)
+        settings = parse_pysages_input(str(path))
         assert settings['method'] == 'unbiased'
         assert 'cv' in settings
         assert len(settings['cv']) >= 1
         assert settings['cv'][0]['type'] == 'coordinationnumber'
 
-    def test_parse_abf_input(self):
+    def test_parse_abf_input(self, tmp_path):
         from so3lr.cli.so3lr_pysages_interface import parse_pysages_input
-        input_path = BASIC_TEST_DIR / "so3lr_pysages_abf" / "pysages_input.yaml"
-        if not input_path.exists():
-            pytest.skip("basic_test/so3lr_pysages_abf/pysages_input.yaml not found")
-        settings = parse_pysages_input(str(input_path))
+        path = tmp_path / "pysages_input.yaml"
+        _write_yaml(path, _PYSAGES_INPUT_ABF)
+        settings = parse_pysages_input(str(path))
         assert settings['method'] == 'abf'
 
     def test_parse_nonexistent_file_raises(self):
@@ -275,13 +375,11 @@ class TestParsePysagesInput:
         with pytest.raises(FileNotFoundError):
             parse_pysages_input('/nonexistent/path.yaml')
 
-    def test_parse_returns_dict(self):
+    def test_parse_returns_dict(self, tmp_path):
         from so3lr.cli.so3lr_pysages_interface import parse_pysages_input
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            yaml.dump({'method': 'unbiased', 'cv': []}, f)
-            f.flush()
-            result = parse_pysages_input(f.name)
-        os.unlink(f.name)
+        path = tmp_path / "pysages_input.yaml"
+        _write_yaml(path, {'method': 'unbiased', 'cv': []})
+        result = parse_pysages_input(str(path))
         assert isinstance(result, dict)
         assert result['method'] == 'unbiased'
 
@@ -540,58 +638,46 @@ def _run_so3lr_simulation(workdir, settings_file='md_settings.yaml'):
     return result
 
 
-def _setup_simulation_dir(tmp_path, source_dir, name):
-    """Copy a basic_test simulation directory to a temp location.
-
-    Only copies input files (*.yaml, *.xyz), not previous output files.
-    """
-    dest = tmp_path / name
-    dest.mkdir(parents=True, exist_ok=True)
-    input_extensions = {'.yaml', '.xyz'}
-    for item in source_dir.iterdir():
-        if item.is_file() and item.suffix in input_extensions:
-            shutil.copy2(item, dest)
-    return dest
-
-
+@pytest.mark.slow
 class TestTrajectoryComparison:
     """Integration tests: run simulations and compare MD observables."""
 
     @pytest.fixture(scope="class")
     def simulation_results(self, tmp_path_factory):
-        """Run all three simulations (vanilla, unbiased, ABF) in temp directories.
-
-        This fixture runs once per test class and shares results across tests.
-        """
+        """Run vanilla and unbiased simulations in temp directories."""
         tmp_path = tmp_path_factory.mktemp("pysages_integration")
 
-        vanilla_src = BASIC_TEST_DIR / "so3lr_vanilla"
-        unbiased_src = BASIC_TEST_DIR / "so3lr_pysages_unbiased"
-        abf_src = BASIC_TEST_DIR / "so3lr_pysages_abf"
+        if not GEOMETRY_FILE.exists():
+            pytest.skip(f"Test geometry not found: {GEOMETRY_FILE}")
 
-        if not vanilla_src.exists() or not unbiased_src.exists():
-            pytest.skip("basic_test input directories not found")
+        # Vanilla NVT (no PySAGES)
+        vanilla_dir = _prepare_run_dir(tmp_path, "vanilla", md_overrides={
+            'restart_save_path': './restart2.npz',
+        })
 
-        # Copy to temp directories
-        vanilla_dir = _setup_simulation_dir(tmp_path, vanilla_src, "vanilla")
-        unbiased_dir = _setup_simulation_dir(tmp_path, unbiased_src, "unbiased")
+        # Unbiased PySAGES
+        unbiased_dir = _prepare_run_dir(tmp_path, "unbiased", md_overrides={
+            'do_enhanced_sampling': True,
+            'enforce_cartesian_coordinates': True,
+            'restart_save_path': './restart2.npz',
+        }, pysages_input=_PYSAGES_INPUT_UNBIASED)
 
-        # Run vanilla and unbiased
+        # ABF PySAGES
+        abf_dir = _prepare_run_dir(tmp_path, "abf", md_overrides={
+            'do_enhanced_sampling': True,
+            'enforce_cartesian_coordinates': True,
+            'restart_save_path': './restart2.npz',
+        }, pysages_input=_PYSAGES_INPUT_ABF)
+
         _run_so3lr_simulation(vanilla_dir)
         _run_so3lr_simulation(unbiased_dir)
+        _run_so3lr_simulation(abf_dir)
 
-        result = {
+        return {
             'vanilla_log': vanilla_dir / "out.log",
             'unbiased_log': unbiased_dir / "out.log",
+            'abf_log': abf_dir / "out.log",
         }
-
-        # Run ABF if input exists
-        if abf_src.exists():
-            abf_dir = _setup_simulation_dir(tmp_path, abf_src, "abf")
-            _run_so3lr_simulation(abf_dir)
-            result['abf_log'] = abf_dir / "out.log"
-
-        return result
 
     def test_vanilla_and_unbiased_match(self, simulation_results):
         """All MD observables should be identical between vanilla and unbiased."""
@@ -619,9 +705,6 @@ class TestTrajectoryComparison:
 
     def test_abf_diverges_from_vanilla(self, simulation_results):
         """ABF should produce different observables than vanilla (bias is applied)."""
-        if 'abf_log' not in simulation_results:
-            pytest.skip("ABF test input not available.")
-
         vanilla = _parse_md_observables(simulation_results['vanilla_log'])
         abf = _parse_md_observables(simulation_results['abf_log'])
 
@@ -643,6 +726,7 @@ class TestTrajectoryComparison:
         )
 
 
+@pytest.mark.slow
 class TestRestart:
     """Integration test: verify restart produces identical results to continuous run."""
 
@@ -651,63 +735,46 @@ class TestRestart:
         """Run continuous 4-cycle and 2+2 restart simulations, return parsed logs."""
         tmp_path = tmp_path_factory.mktemp("pysages_restart")
 
-        unbiased_src = BASIC_TEST_DIR / "so3lr_pysages_unbiased"
-        if not unbiased_src.exists():
-            pytest.skip("basic_test/so3lr_pysages_unbiased not found")
+        if not GEOMETRY_FILE.exists():
+            pytest.skip(f"Test geometry not found: {GEOMETRY_FILE}")
 
         # --- Continuous 4-cycle run ---
-        continuous_dir = tmp_path / "continuous"
-        shutil.copytree(unbiased_src, continuous_dir)
-        # Modify settings for 4 cycles
-        settings_path = continuous_dir / "md_settings.yaml"
-        with open(settings_path) as f:
-            settings = yaml.safe_load(f)
-        settings['md_cycles'] = 4
-        settings['log_file'] = 'out.log'
-        settings['output_file'] = 'traj.xyz'
-        settings.pop('restart_save_path', None)
-        settings.pop('restart_load_path', None)
-        settings.pop('restart_pysages_save_path', None)
-        settings.pop('restart_pysages_load_path', None)
-        with open(settings_path, 'w') as f:
-            yaml.dump(settings, f)
-        _run_so3lr_simulation(continuous_dir)
+        continuous_dir = _prepare_run_dir(tmp_path, "continuous", md_overrides={
+            'md_cycles': 4,
+            'do_enhanced_sampling': True,
+            'enforce_cartesian_coordinates': True,
+        })
 
         # --- First 2 cycles with restart save ---
-        first_dir = tmp_path / "first"
-        shutil.copytree(unbiased_src, first_dir)
-        settings_path = first_dir / "md_settings.yaml"
-        with open(settings_path) as f:
-            settings = yaml.safe_load(f)
-        settings['md_cycles'] = 2
-        settings['log_file'] = 'out.log'
-        settings['output_file'] = 'traj.xyz'
-        settings['restart_save_path'] = './restart_so3lr.npz'
-        settings['restart_pysages_save_path'] = './restart_pysages.pkl'
-        settings.pop('restart_load_path', None)
-        settings.pop('restart_pysages_load_path', None)
-        with open(settings_path, 'w') as f:
-            yaml.dump(settings, f)
+        first_dir = _prepare_run_dir(tmp_path, "first", md_overrides={
+            'md_cycles': 2,
+            'do_enhanced_sampling': True,
+            'enforce_cartesian_coordinates': True,
+            'restart_save_path': './restart_so3lr.npz',
+            'restart_pysages_save_path': './restart_pysages.pkl',
+        }, pysages_input=_PYSAGES_INPUT_UNBIASED)
+
+        # Write pysages_input.yaml for continuous run too
+        _write_yaml(continuous_dir / "pysages_input.yaml", _PYSAGES_INPUT_UNBIASED)
+
+        _run_so3lr_simulation(continuous_dir)
         _run_so3lr_simulation(first_dir)
 
         # --- Restart for 2 more cycles ---
-        restart_dir = tmp_path / "restart"
-        shutil.copytree(unbiased_src, restart_dir)
+        restart_dir = _prepare_run_dir(tmp_path, "restart", md_overrides={
+            'md_cycles': 2,
+            'do_enhanced_sampling': True,
+            'enforce_cartesian_coordinates': True,
+            'restart_load_path': './restart_so3lr.npz',
+            'restart_save_path': './restart_so3lr_2.npz',
+            'restart_pysages_load_path': './restart_pysages.pkl',
+            'restart_pysages_save_path': './restart_pysages_2.pkl',
+        }, pysages_input=_PYSAGES_INPUT_UNBIASED)
+
         # Copy restart files from first run
         shutil.copy2(first_dir / "restart_so3lr.npz", restart_dir)
         shutil.copy2(first_dir / "restart_pysages.pkl", restart_dir)
-        settings_path = restart_dir / "md_settings.yaml"
-        with open(settings_path) as f:
-            settings = yaml.safe_load(f)
-        settings['md_cycles'] = 2
-        settings['log_file'] = 'out.log'
-        settings['output_file'] = 'traj.xyz'
-        settings['restart_load_path'] = './restart_so3lr.npz'
-        settings['restart_pysages_load_path'] = './restart_pysages.pkl'
-        settings['restart_save_path'] = './restart_so3lr_2.npz'
-        settings['restart_pysages_save_path'] = './restart_pysages_2.pkl'
-        with open(settings_path, 'w') as f:
-            yaml.dump(settings, f)
+
         _run_so3lr_simulation(restart_dir)
 
         return {

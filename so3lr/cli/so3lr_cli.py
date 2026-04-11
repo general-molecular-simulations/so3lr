@@ -741,7 +741,7 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
     logger.info(f"MD cycles:                 {s.get('md_cycles', DEFAULT_MD_CYCLES)}")
     logger.info(f"Steps per cycle:           {s.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)}")
-    logger.info(f"Timestep:                  {dt_fs} fs")
+    logger.info(f"Timestep:                  {dt_fs} ps")
     logger.info(f"Saving buffer size:        {s.get('save_buffer', DEFAULT_SAVE_BUFFER)}")
     if ensemble in ('nvt', 'npt'):
         logger.info(f"NHC chain length:          {s.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)}")

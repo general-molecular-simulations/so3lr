@@ -441,6 +441,7 @@ def write_to_extxyz(
     positions: List,
     obs_dict: MutableMapping[str, list] = {},
     indices: Optional[List[int]] = None,
+    fractional_coordinates: bool = True,
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
     """
     Write trajectory data to an extended XYZ file.
@@ -457,6 +458,10 @@ def write_to_extxyz(
         momenta: List of momenta arrays for each frame.
         positions: List of position arrays for each frame.
         obs_dict: Dictionary of observables. Defaults to {}.
+        indices: Optional list of atom indices to write.
+        fractional_coordinates: If True, positions are in fractional coordinates
+            and will be scaled by box vectors. If False, positions are already
+            in Cartesian Angstroms and are written directly.
 
     Returns:
         Tuple of empty lists (momenta, positions, boxes) to clear memory on success.
@@ -490,19 +495,28 @@ def write_to_extxyz(
                     atoms_copy.set_positions(positions[i])
                 else:
                     atoms_copy.set_cell(boxes)
-                    atoms_copy.set_positions(positions[i] * boxes)
+                    if fractional_coordinates:
+                        atoms_copy.set_positions(positions[i] * boxes)
+                    else:
+                        atoms_copy.set_positions(positions[i])
             elif isinstance(boxes, (jnp.ndarray, np.ndarray)):
                 if np.any(boxes == 0):
                     atoms_copy.set_positions(positions[i])
                 else:
                     atoms_copy.set_cell(boxes)
-                    atoms_copy.set_positions(positions[i] * boxes)
+                    if fractional_coordinates:
+                        atoms_copy.set_positions(positions[i] * boxes)
+                    else:
+                        atoms_copy.set_positions(positions[i])
             elif isinstance(boxes, list):
                 if np.any(boxes[0] == 0):
                     atoms_copy.set_positions(positions[i])
                 else:
                     atoms_copy.set_cell(boxes[i])
-                    atoms_copy.set_positions(positions[i] * boxes[i])
+                    if fractional_coordinates:
+                        atoms_copy.set_positions(positions[i] * boxes[i])
+                    else:
+                        atoms_copy.set_positions(positions[i])
             else:
                 atoms_copy.set_positions(positions[i])
 
@@ -1657,6 +1671,13 @@ def perform_md(
             "Install it with: pip install so3lr[pysages]"
         )
 
+    if do_enhanced_sampling and ensemble not in ('nvt',):
+        raise ValueError(
+            f"Enhanced sampling with PySAGES currently only supports the NVT ensemble "
+            f"(Nose-Hoover thermostat), but '{ensemble}' was selected. "
+            f"NPT, NVE, and NVT-Langevin are not yet supported."
+        )
+
     if do_enhanced_sampling and restart_pysages_load_path is not None:
         restart_pysages = True
     else:
@@ -2017,18 +2038,18 @@ def perform_md(
             )
 
             if pysages_result:
-                pysages_result = jax.block_until_ready(
+                candidate_result = jax.block_until_ready(
                     pysages.run(pysages_result, generate_context, md_steps,
                                 context_args={})
                 )
             else:
-                pysages_result = jax.block_until_ready(
+                candidate_result = jax.block_until_ready(
                     pysages.run(method, generate_context, md_steps)
                 )
 
             new_state, nbrs, nbrs_lr, new_box, k_grid = jax.block_until_ready(
                 update_so3lr_after_pysages(
-                    pysages_result, lr, init_fn, rng_key, md_T,
+                    candidate_result, lr, init_fn, rng_key, md_T,
                     nbrs, nbrs_lr, k_grid
                 )
             )
@@ -2071,6 +2092,9 @@ def perform_md(
         )
 
         if not overflow:
+            if do_enhanced_sampling:
+                pysages_result = candidate_result
+
             cycle_md += 1
             current_cycle += 1
 
@@ -2139,7 +2163,8 @@ def perform_md(
                         momenta,
                         positions,
                         obs_dict,
-                        output_atom_indices
+                        output_atom_indices,
+                        fractional_coordinates=fractional_coordinates
                     )
                 # Saving the state for restart
                 if create_restart:

@@ -613,6 +613,138 @@ The `k_spacing` controls the k-space grid density:
 - For PME/P3M: `k_spacing ≈ smearing / 8` is a good starting point
 - For Ewald: `k_spacing ≈ smearing / 2` is typical
 
+## Enhanced Sampling with PySAGES
+
+SO3LR integrates with [PySAGES](https://github.com/SSAGESLabs/PySAGES), a JAX-based enhanced sampling library, to enable biased molecular dynamics simulations with collective variables (CVs). This allows free energy calculations and enhanced exploration of configuration space directly within SO3LR's JAX-MD engine.
+
+### Installation
+
+PySAGES is an optional dependency. To install SO3LR with PySAGES support:
+
+```shell script
+cd so3lr
+pip install .[pysages]
+```
+
+SO3LR runs normally without PySAGES installed. The enhanced sampling features are only activated when `do_enhanced_sampling: true` is set in the settings file.
+
+### Supported Ensembles
+
+Enhanced sampling currently supports **NVT (Nose-Hoover thermostat)** only. NPT, NVE, and NVT-Langevin are not yet supported.
+
+### Supported Methods
+
+| Method | Description |
+|--------|-------------|
+| `unbiased` | Unbiased MD with CV tracking (useful for baseline comparisons) |
+| `abf` | Adaptive Biasing Force |
+| `spectralabf` | Spectral ABF (with spectral decomposition) |
+| `metad` | Well-tempered Metadynamics |
+| `harmonic` | Harmonic bias potential (for umbrella sampling, string method, etc.) |
+
+### Supported Collective Variables
+
+| CV Type | Description |
+|---------|-------------|
+| `distance` | Distance between two atom groups |
+| `differenceofdistances` | Difference of two pairwise distances |
+| `angle` | Bond angle (3 atoms) |
+| `dihedral` | Dihedral angle (4 atoms) |
+| `gyrrad` | Radius of gyration |
+| `princmom` | Principal moment of inertia |
+| `asphericity` | Asphericity |
+| `acylindricity` | Acylindricity |
+| `shapeanisotropy` | Shape anisotropy |
+| `coordinationnumber` | Coordination number with element-specific filtering |
+
+### Usage
+
+Enhanced sampling is configured via two files: the main MD settings file and a separate PySAGES input file that defines the CVs and sampling method.
+
+**MD settings file** (`md_settings.yaml`):
+
+```yaml
+ensemble: "nvt"
+input_file: "geometry.xyz"
+output_file: "trajectory.xyz"
+md_dt: 0.5
+md_T: 300
+md_cycles: 100
+md_steps: 100
+
+# Enhanced sampling
+do_enhanced_sampling: true
+pysages_input: "./pysages_input.yaml"
+restart_pysages_save_path: "./restart_pysages.pkl"
+```
+
+**PySAGES input file** (`pysages_input.yaml`) — example with ABF:
+
+```yaml
+method: "abf"
+
+cv:
+  - type: "distance"
+    grp1: [0]
+    grp2: [1]
+    grid_min: 1.0
+    grid_max: 5.0
+    grid_stride: 50
+    periodic: false
+
+# Optional: restraints to keep CVs within bounds
+restraints:
+  lower: [1.5]
+  upper: [4.5]
+  kl: [50.0]
+  ku: [50.0]
+```
+
+**PySAGES input file** — example with harmonic bias:
+
+```yaml
+method: "harmonic"
+
+cv:
+  - type: "distance"
+    grp1: [0]
+    grp2: [1]
+    grid_min: 1.0
+    grid_max: 5.0
+    grid_stride: 50
+    periodic: false
+
+method_args:
+  kspring: [100.0]
+  center: [3.0]
+```
+
+Then run:
+
+```shell script
+so3lr --settings md_settings.yaml
+```
+
+### Restarting Enhanced Sampling Runs
+
+PySAGES state (bias potential, histograms, etc.) can be saved and restored independently of the SO3LR MD state:
+
+```yaml
+# First run — save both states
+restart_save_path: "./restart_so3lr.npz"
+restart_pysages_save_path: "./restart_pysages.pkl"
+
+# Restart — load both states and continue
+restart_load_path: "./restart_so3lr.npz"
+restart_pysages_load_path: "./restart_pysages.pkl"
+restart_pysages_save_path: "./restart_pysages_2.pkl"
+```
+
+### Notes
+
+- For periodic systems, Cartesian coordinates are automatically enforced when enhanced sampling is enabled (PySAGES requires Cartesian, not fractional, coordinates).
+- When using multiple CVs with mixed periodicity (e.g., a dihedral and a distance), the grid is treated as non-periodic. This is a limitation of the PySAGES grid implementation.
+
 ## Coming soon!
 
 - Fast TFDS dataloader
