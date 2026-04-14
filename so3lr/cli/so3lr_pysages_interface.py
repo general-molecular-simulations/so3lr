@@ -143,7 +143,7 @@ def re_init_so3lr_state_nve(pos, velocities, forces, mass):
     return new_state
 
 
-@jit
+#@jit
 def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
                               chain_ekin, chain_dof,
                               baro_pos, baro_mom, baro_mass, baro_tau,
