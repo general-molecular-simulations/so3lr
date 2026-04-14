@@ -30,7 +30,7 @@ logger = logging.getLogger("SO3LR")
 
 
 def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
-                                  nbrs_lr=None, k_grid=None):
+                                  ensemble='nvt', nbrs_lr=None, k_grid=None):
     """
     Create the PySAGES context generator function that wraps SO3LR's MD step.
 
@@ -41,6 +41,7 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
         step_md_fn: The MD step function.
         md_dt: MD timestep.
         nbrs: Short-range neighbor list.
+        ensemble: Ensemble type ('nvt', 'nve', or 'npt').
         nbrs_lr: Long-range neighbor list (optional).
         k_grid: K-space grid for Ewald/PME electrostatics (optional).
 
@@ -128,8 +129,66 @@ def re_init_so3lr_state(chain_pos, chain_mom, chain_mass, chain_tau,
     return new_state
 
 
+@jit
+def re_init_so3lr_state_nve(pos, velocities, forces, mass):
+    """Reconstruct an SO3LR NVE state from PySAGES snapshot data."""
+    new_state = jax_md.simulate.NVEState(
+        position=pos,
+        momentum=None,
+        force=forces,
+        mass=mass,
+    )
+    new_state = jax_md.simulate.canonicalize_mass(new_state)
+    new_state = new_state.set(momentum=new_state.mass * velocities)
+    return new_state
+
+
+@jit
+def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
+                              chain_ekin, chain_dof,
+                              baro_pos, baro_mom, baro_mass, baro_tau,
+                              baro_ekin, baro_dof,
+                              ref_box, box_pos, box_mom, box_mass_val,
+                              pos, velocities, forces, mass):
+    """Reconstruct an SO3LR NPT Nose-Hoover state from PySAGES snapshot data."""
+    dof = jax_md.quantity.count_dof(pos)
+
+    thermostat = jax_md.simulate.NoseHooverChain(
+        position=chain_pos,
+        momentum=chain_mom,
+        mass=chain_mass,
+        tau=chain_tau,
+        kinetic_energy=chain_ekin,
+        degrees_of_freedom=dof,
+    )
+    barostat = jax_md.simulate.NoseHooverChain(
+        position=baro_pos,
+        momentum=baro_mom,
+        mass=baro_mass,
+        tau=baro_tau,
+        kinetic_energy=baro_ekin,
+        degrees_of_freedom=baro_dof,
+    )
+
+    new_state = jax_md.simulate.NPTNoseHooverState(
+        position=pos,
+        momentum=None,
+        force=forces,
+        mass=mass,
+        reference_box=ref_box,
+        box_position=box_pos,
+        box_momentum=box_mom,
+        box_mass=box_mass_val,
+        barostat=barostat,
+        thermostat=thermostat,
+    )
+    new_state = jax_md.simulate.canonicalize_mass(new_state)
+    new_state = new_state.set(momentum=new_state.mass * velocities)
+    return new_state
+
+
 def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
-                                nbrs, nbrs_lr=None, k_grid=None):
+                                nbrs, ensemble='nvt', nbrs_lr=None, k_grid=None):
     """
     Extract the final state from PySAGES results and rebuild SO3LR state.
 
@@ -140,6 +199,7 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
         rng_key: JAX random key.
         md_T: Target temperature.
         nbrs: Short-range neighbor list.
+        ensemble: Ensemble type ('nvt', 'nve', or 'npt').
         nbrs_lr: Long-range neighbor list (optional).
         k_grid: K-space grid (passed through unchanged).
 
@@ -157,23 +217,63 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
     final_snapshot = raw_result.snapshots[-1]
     new_box = final_snapshot.box.H
 
+    velocities = get_velocities(final_snapshot)
+    masses = get_masses(final_snapshot)
+
+    if ensemble == 'nvt':
+        new_state = re_init_so3lr_state(
+            final_snapshot.chain_data["position"],
+            final_snapshot.chain_data["momentum"],
+            final_snapshot.chain_data["mass"],
+            final_snapshot.chain_data["tau"],
+            final_snapshot.chain_data["kinetic_energy"],
+            final_snapshot.chain_data["degrees_of_freedom"],
+            final_snapshot.positions,
+            velocities,
+            final_snapshot.forces,
+            masses,
+        )
+    elif ensemble == 'nve':
+        new_state = re_init_so3lr_state_nve(
+            final_snapshot.positions,
+            velocities,
+            final_snapshot.forces,
+            masses,
+        )
+    elif ensemble == 'npt':
+        new_state = re_init_so3lr_state_npt(
+            final_snapshot.chain_data["position"],
+            final_snapshot.chain_data["momentum"],
+            final_snapshot.chain_data["mass"],
+            final_snapshot.chain_data["tau"],
+            final_snapshot.chain_data["kinetic_energy"],
+            final_snapshot.chain_data["degrees_of_freedom"],
+            final_snapshot.barostat_data["position"],
+            final_snapshot.barostat_data["momentum"],
+            final_snapshot.barostat_data["mass"],
+            final_snapshot.barostat_data["tau"],
+            final_snapshot.barostat_data["kinetic_energy"],
+            final_snapshot.barostat_data["degrees_of_freedom"],
+            final_snapshot.npt_box_data["reference_box"],
+            final_snapshot.npt_box_data["box_position"],
+            final_snapshot.npt_box_data["box_momentum"],
+            final_snapshot.npt_box_data["box_mass"],
+            final_snapshot.positions,
+            velocities,
+            final_snapshot.forces,
+            masses,
+        )
+        # For NPT, derive the box from the reconstructed state (authoritative)
+        # rather than relying on snapshot.box which may lag behind.
+        new_box = jax_md.simulate.npt_box(new_state)
+    else:
+        raise ValueError(f"Unsupported ensemble for PySAGES: '{ensemble}'")
+
+    # Update neighbor lists with the correct box
     nbrs = nbrs.update(final_snapshot.positions, neighbor=nbrs.idx, box=new_box)
     nbrs_lr = nbrs_lr.update(
         final_snapshot.positions, neighbor=nbrs_lr.idx, box=new_box
     ) if lr else None
-
-    new_state = re_init_so3lr_state(
-        final_snapshot.chain_data["position"],
-        final_snapshot.chain_data["momentum"],
-        final_snapshot.chain_data["mass"],
-        final_snapshot.chain_data["tau"],
-        final_snapshot.chain_data["kinetic_energy"],
-        final_snapshot.chain_data["degrees_of_freedom"],
-        final_snapshot.positions,
-        get_velocities(final_snapshot),
-        final_snapshot.forces,
-        get_masses(final_snapshot)
-    )
 
     # Restore bias forces to avoid a discontinuity at the cycle boundary.
     # The snapshot stores unbiased forces (captured before PySAGES adds bias),
