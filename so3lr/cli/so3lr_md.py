@@ -1727,18 +1727,26 @@ def perform_md(
             'Cell must be defined for NPT simulations. The input geometry does not contain cell information.')
 
     if cell is not None:
-        # PySAGES requires cartesian coordinates for periodic systems
-        if do_enhanced_sampling and not enforce_cartesian_coordinates:
-            logger.warning(
-                "PySAGES requires cartesian coordinates for periodic systems. "
-                "Setting enforce_cartesian_coordinates=True."
-            )
-            enforce_cartesian_coordinates = True
-
-        if enforce_cartesian_coordinates:
-            shift_displacement = 'periodic_cart'
+        # PySAGES requires Cartesian positions, BUT for NPT we must keep JAX-MD internal
+        # coordinates fractional (unit cube). The PySAGES interface performs the
+        # Cartesian<->fractional conversion each step.
+        if do_enhanced_sampling and ensemble == 'npt':
+            if enforce_cartesian_coordinates:
+                logger.info(
+                    "NPT+PySAGES: overriding enforce_cartesian_coordinates=False "
+                    "(JAX-MD NPT requires fractional coordinates internally)."
+                )
+            enforce_cartesian_coordinates = False
         else:
-            shift_displacement = 'periodic'
+            # For non-NPT ensembles, PySAGES truly requires internal Cartesian coords.
+            if do_enhanced_sampling and not enforce_cartesian_coordinates:
+                logger.warning(
+                    "PySAGES requires cartesian coordinates for periodic systems. "
+                    "Setting enforce_cartesian_coordinates=True."
+                )
+                enforce_cartesian_coordinates = True
+    
+        shift_displacement = 'periodic_cart' if enforce_cartesian_coordinates else 'periodic'
         initial_geometry.wrap()
     else:
         shift_displacement = 'free'

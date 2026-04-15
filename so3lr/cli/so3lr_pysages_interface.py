@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import jax_md.simulate
 import jax_md.quantity
 import jax_md.units
+from jax_md.space import transform
 import yaml
 from jax import jit
 
@@ -53,28 +54,49 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
 
     if lr:
         def init_fn_pysages():
+            state0 = state
+            if ensemble == 'npt':
+                state0 = state0.set(position=transform(jnp.array(box), state0.position))
             return pb.JaxMDContextState(
-                state,
+                state0,
                 dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box, k_grid=k_grid)
             )
     else:
         def init_fn_pysages():
+            state0 = state
+            if ensemble == 'npt':
+                state0 = state0.set(position=transform(jnp.array(box), state0.position))
             return pb.JaxMDContextState(
-                state,
+                state0,
                 dict(nbrs=nbrs, box=box, k_grid=k_grid)
             )
 
     if lr:
         def step_fn_pysages(context_state):
             state = context_state.state
+
             nbrs = context_state.extras["nbrs"]
             nbrs_lr = context_state.extras["nbrs_lr"]
             box = context_state.extras["box"]
             k_grid = context_state.extras["k_grid"]
             i = 0
+
+            if ensemble == 'npt':
+                inv_box_vec = 1.0 / jnp.array(box)  # orthorhombic inverse
+                frac_positions = transform(inv_box_vec, state.position)  # Cartesian -> fractional
+                state = state.set(position=frac_positions)
+
+
             state, nbrs, nbrs_lr, box, k_grid = step_md_fn(
                 i, (state, nbrs, nbrs_lr, box, k_grid)
             )
+
+            if ensemble == 'npt':
+                box_vec_out = jnp.array(box)
+                cart_positions_out = transform(box_vec_out, state.position)
+                state = state.set(position=cart_positions_out)
+
+
             return pb.JaxMDContextState(
                 state,
                 dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box, k_grid=k_grid)
@@ -82,13 +104,26 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
     else:
         def step_fn_pysages(context_state):
             state = context_state.state
+
             nbrs = context_state.extras["nbrs"]
             box = context_state.extras["box"]
             k_grid = context_state.extras["k_grid"]
             i = 0
+
+            if ensemble == 'npt':
+                inv_box_vec = 1.0 / jnp.array(box)  # orthorhombic inverse
+                frac_positions = transform(inv_box_vec, state.position)  # Cartesian -> fractional
+                state = state.set(position=frac_positions)
+
             state, nbrs, box, k_grid = step_md_fn(
                 i, (state, nbrs, box, k_grid)
             )
+
+            if ensemble == 'npt':
+                box_vec_out = jnp.array(box)
+                cart_positions_out = transform(box_vec_out, state.position)
+                state = state.set(position=cart_positions_out)
+
             return pb.JaxMDContextState(
                 state,
                 dict(nbrs=nbrs, box=box, k_grid=k_grid)
@@ -241,6 +276,10 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
             masses,
         )
     elif ensemble == 'npt':
+        
+        # Convert Cartesian positions from PySAGES → fractional for JAX-MD
+        frac_positions = transform(1.0/jnp.array(new_box), final_snapshot.positions)
+
         new_state = re_init_so3lr_state_npt(
             final_snapshot.chain_data["position"],
             final_snapshot.chain_data["momentum"],
@@ -258,7 +297,8 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
             final_snapshot.npt_box_data["box_position"],
             final_snapshot.npt_box_data["box_momentum"],
             final_snapshot.npt_box_data["box_mass"],
-            final_snapshot.positions,
+            #final_snapshot.positions,
+            frac_positions,
             velocities,
             final_snapshot.forces,
             masses,
@@ -266,14 +306,25 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
         # For NPT, derive the box from the reconstructed state (authoritative)
         # rather than relying on snapshot.box which may lag behind.
         new_box = jax_md.simulate.npt_box(new_state)
+
+        frac_positions = transform(1.0 / jnp.array(new_box), final_snapshot.positions)
+        new_state = new_state.set(position=frac_positions)
+
     else:
         raise ValueError(f"Unsupported ensemble for PySAGES: '{ensemble}'")
 
     # Update neighbor lists with the correct box
-    nbrs = nbrs.update(final_snapshot.positions, neighbor=nbrs.idx, box=new_box)
-    nbrs_lr = nbrs_lr.update(
-        final_snapshot.positions, neighbor=nbrs_lr.idx, box=new_box
-    ) if lr else None
+    if ensemble == 'npt':
+        nbrs = nbrs.update(frac_positions, neighbor=nbrs.idx, box=new_box)
+        nbrs_lr = nbrs_lr.update(
+            frac_positions, neighbor=nbrs_lr.idx, box=new_box
+        ) if lr else None
+
+    else:
+        nbrs = nbrs.update(final_snapshot.positions, neighbor=nbrs.idx, box=new_box)
+        nbrs_lr = nbrs_lr.update(
+            final_snapshot.positions, neighbor=nbrs_lr.idx, box=new_box
+        ) if lr else None
 
     # Restore bias forces to avoid a discontinuity at the cycle boundary.
     # The snapshot stores unbiased forces (captured before PySAGES adds bias),
