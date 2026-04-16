@@ -649,7 +649,10 @@ class AseCalculatorSparse(Calculator):
             output = self.calculate_fn(system, neighbors, hessian_slice_index=hessian_slice_index)
         else:
             output = self.calculate_fn(system, neighbors)
-        self.results = jax.tree_util.tree_map(lambda x: np.array(x, self.dtype), output)
+        def _to_numpy(x):
+            arr = np.array(x, self.dtype)
+            return arr.item() if arr.ndim == 0 else arr
+        self.results = jax.tree_util.tree_map(_to_numpy, output)
 
 
 def to_displacement(cell):
