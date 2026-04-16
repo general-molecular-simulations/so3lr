@@ -47,7 +47,8 @@ def neighbor_list_featurizer(displacement_fn, species, fractional_coordinates=Tr
 
         if 'perturbation' in kwargs:
             pert = kwargs.get('perturbation')
-            positions = transform(pert, positions)
+            if positions is not None:
+                positions = transform(pert, positions)
             box = transform(pert, box)
 
         d = jax.vmap(partial(displacement_fn, **kwargs))
