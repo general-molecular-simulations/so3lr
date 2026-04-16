@@ -93,6 +93,9 @@ class AseCalculatorSparse(Calculator):
             observables: Optional[Sequence[str]] = None,
             output_atom_indices: Optional[Sequence[int]] = None,
             hessian_slice: bool = False,
+            kspace_electrostatics: Optional[str] = None,
+            kspace_smearing: Optional[float] = None,
+            kspace_spacing: Optional[float] = None,
             **kwargs
     ):
         if observables is not None and len(observables) > 0:
@@ -127,7 +130,10 @@ class AseCalculatorSparse(Calculator):
                    has_aux=has_aux,
                    observables=observables,
                    output_atom_indices=output_atom_indices,
-                   hessian_slice=hessian_slice
+                   hessian_slice=hessian_slice,
+                   kspace_electrostatics=kspace_electrostatics,
+                   kspace_smearing=kspace_smearing,
+                   kspace_spacing=kspace_spacing,
                    )
 
     def __init__(
@@ -143,6 +149,9 @@ class AseCalculatorSparse(Calculator):
             observables: Optional[Sequence[str]] = None,
             output_atom_indices: Optional[Sequence[int]] = None,
             hessian_slice: bool = False,
+            kspace_electrostatics: Optional[str] = None,
+            kspace_smearing: Optional[float] = None,
+            kspace_spacing: Optional[float] = None,
             *args,
             **kwargs
     ):
@@ -592,11 +601,25 @@ class AseCalculatorSparse(Calculator):
                 self.lr_cutoff = potential.long_range_cutoff
 
         self.dtype = dtype
+        self.kspace_electrostatics = kspace_electrostatics
+        self.kspace_smearing = kspace_smearing
+        self.kspace_spacing = kspace_spacing
 
     def calculate(self, atoms=None, hessian_slice_index=None, *args, **kwargs):
         super(AseCalculatorSparse, self).calculate(atoms, *args, **kwargs)
 
         system = atoms_to_system(atoms, dtype=self.dtype)
+
+        if self.kspace_electrostatics is not None and 'k_grid' not in atoms.info:
+            import jaxpme
+            k_smearing = jnp.array([self.kspace_smearing], dtype=self.dtype)
+            k_spacing = jnp.array([self.kspace_spacing])
+            cell = jnp.array(np.array(atoms.get_cell()), dtype=self.dtype).T
+            if self.kspace_electrostatics == 'ewald':
+                k_grid = jaxpme.kspace.get_kgrid_ewald(cell, lr_wavelength=k_spacing)
+            else:
+                k_grid = jaxpme.kspace.get_kgrid_mesh(cell, mesh_spacing=k_spacing)
+            system = system._replace(k_grid=k_grid, k_smearing=k_smearing)
 
         if atoms.get_pbc().any():
             cell = jnp.array(np.array(atoms.get_cell()), dtype=self.dtype).T  # (3, 3)
