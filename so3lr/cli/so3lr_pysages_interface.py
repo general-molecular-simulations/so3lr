@@ -356,8 +356,22 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
         return pysages.colvars.Distance(
             indices=[tuple(arguments['grp1']), tuple(arguments['grp2'])]
         )
+    elif name_lower == 'distance_pbc':
+        if box is None:
+            raise ValueError("distance_pbc requires the simulation box.")
+        return pysages.colvars.DistancePBC(
+            indices=[tuple(arguments['grp1']), tuple(arguments['grp2'])],
+            box=box,
+        )
     elif name_lower == 'differenceofdistances':
         return pysages.colvars.DifferenceOfDistances(indices=arguments['indices'])
+    elif name_lower == 'differenceofdistances_pbc':
+        if box is None:
+            raise ValueError("differenceofdistances_pbc requires the simulation box.")
+        return pysages.colvars.DifferenceOfDistancesPBC(
+            indices=arguments['indices'],
+            box=box,
+        )
     elif name_lower == 'angle':
         return pysages.colvars.Angle(indices=arguments['indices'])
     elif name_lower == 'dihedral':
