@@ -12,10 +12,15 @@ import numpy as np
 import numpy.testing as npt
 import pathlib
 import pytest
+import logging
+import sys
+import types
 from functools import partial
+from collections import namedtuple
 
 from ase import Atoms
 from ase.io import read
+from ase.calculators.calculator import Calculator
 
 from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 from so3lr import So3lrCalculator, So3lrPotential, to_jax_md
@@ -27,6 +32,31 @@ DTYPE = jnp.float64
 
 # Constants
 KE = 14.399645351950548  # Coulomb constant in eV*Angstrom
+
+DummySystem = namedtuple('DummySystem', ['R', 'k_grid', 'k_smearing'])
+
+
+def make_stub_ase_calculator():
+    calc = object.__new__(AseCalculatorSparse)
+    Calculator.__init__(calc)
+    calc.calculate_fn = lambda system, neighbors: {
+        'energy': np.array(0.0),
+        'forces': np.zeros((len(system.R), 3)),
+    }
+    calc.neighbors = None
+    calc.spatial_partitioning = None
+    calc.capacity_multiplier = 1.25
+    calc.buffer_size_multiplier = 1.25
+    calc.skin = 0.0
+    calc.cutoff = 5.0
+    calc.hessian_slice = False
+    calc.lr_cutoff = -1.0
+    calc.dtype = np.float64
+    calc.kspace_electrostatics = 'pme'
+    calc.kspace_smearing = 4.0
+    calc.kspace_spacing = 0.5
+    calc._kspace_reported_source = None
+    return calc
 
 
 def get_package_dir():
@@ -214,6 +244,78 @@ class TestPMEDirectComparison:
             atol=1e-5,
             err_msg=f"Total charge should be ~0 for neutral water with {kspace_method}"
         )
+
+
+class TestASECalculatorKSpaceReporting:
+    def test_logs_atoms_info_override_for_kspace_kwargs(self, monkeypatch, caplog):
+        calc = make_stub_ase_calculator()
+        atoms = Atoms('H2', positions=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.74)])
+        atoms.cell = np.eye(3) * 10.0
+        atoms.pbc = True
+        atoms.info['k_grid'] = np.ones((2, 2, 2))
+        atoms.info['k_smearing'] = np.array([4.0])
+
+        dummy_system = DummySystem(
+            R=np.asarray(atoms.get_positions()),
+            k_grid=atoms.info['k_grid'],
+            k_smearing=atoms.info['k_smearing'],
+        )
+        monkeypatch.setattr(
+            'so3lr.mlff.calculators.ase_calculator.atoms_to_system',
+            lambda atoms, dtype: dummy_system,
+        )
+
+        dummy_neighbors = types.SimpleNamespace(overflow=False, cell_list=None)
+        dummy_partitioning = types.SimpleNamespace(
+            update_fn=lambda positions, neighbors, new_cell=None: dummy_neighbors,
+        )
+        monkeypatch.setattr(
+            'so3lr.mlff.calculators.ase_calculator.neighbor_list',
+            lambda **kwargs: (dummy_neighbors, dummy_partitioning),
+        )
+
+        with caplog.at_level(logging.MLFF):
+            calc.calculate(atoms)
+
+        assert 'Using k-space grid from atoms.info; it overrides ASE calculator k-space kwargs.' in caplog.text
+
+    def test_logs_generated_kspace_grid_from_kwargs(self, monkeypatch, caplog):
+        calc = make_stub_ase_calculator()
+        atoms = Atoms('H2', positions=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.74)])
+        atoms.cell = np.eye(3) * 10.0
+        atoms.pbc = True
+
+        dummy_system = DummySystem(
+            R=np.asarray(atoms.get_positions()),
+            k_grid=None,
+            k_smearing=None,
+        )
+        monkeypatch.setattr(
+            'so3lr.mlff.calculators.ase_calculator.atoms_to_system',
+            lambda atoms, dtype: dummy_system,
+        )
+
+        dummy_neighbors = types.SimpleNamespace(overflow=False, cell_list=None)
+        dummy_partitioning = types.SimpleNamespace(
+            update_fn=lambda positions, neighbors, new_cell=None: dummy_neighbors,
+        )
+        monkeypatch.setattr(
+            'so3lr.mlff.calculators.ase_calculator.neighbor_list',
+            lambda **kwargs: (dummy_neighbors, dummy_partitioning),
+        )
+
+        fake_jaxpme = types.SimpleNamespace(
+            kspace=types.SimpleNamespace(
+                get_kgrid_ewald=lambda cell, lr_wavelength: np.ones((2, 2, 2)),
+                get_kgrid_mesh=lambda cell, mesh_spacing: np.ones((2, 2, 2)),
+            )
+        )
+        monkeypatch.setitem(sys.modules, 'jaxpme', fake_jaxpme)
+
+        with caplog.at_level(logging.MLFF):
+            calc.calculate(atoms)
+
+        assert 'Generating PME k-space grid from ASE calculator kwargs.' in caplog.text
 
 
 class TestPMEEnergyDecomposition:
