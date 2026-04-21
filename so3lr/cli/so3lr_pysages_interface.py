@@ -188,13 +188,16 @@ def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
     """Reconstruct an SO3LR NPT Nose-Hoover state from PySAGES snapshot data."""
     dof = jax_md.quantity.count_dof(pos)
 
+    # NoseHooverChain.degrees_of_freedom is a static (metadata) dataclass field
+    # and must be a hashable Python int, not a JAX array. PySAGES snapshots round-trip
+    # these as jnp arrays, which breaks pytree-equality checks on recompile.
     thermostat = jax_md.simulate.NoseHooverChain(
         position=chain_pos,
         momentum=chain_mom,
         mass=chain_mass,
         tau=chain_tau,
         kinetic_energy=chain_ekin,
-        degrees_of_freedom=dof,
+        degrees_of_freedom=int(dof),
     )
     barostat = jax_md.simulate.NoseHooverChain(
         position=baro_pos,
@@ -202,7 +205,7 @@ def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
         mass=baro_mass,
         tau=baro_tau,
         kinetic_energy=baro_ekin,
-        degrees_of_freedom=baro_dof,
+        degrees_of_freedom=int(baro_dof),
     )
 
     new_state = jax_md.simulate.NPTNoseHooverState(
