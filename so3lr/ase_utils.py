@@ -19,7 +19,7 @@ def make_ase_calculator(
         workdir=kwargs.pop('workdir', default_workdir),
         lr_cutoff=lr_cutoff,
         dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
-        from_file=True,
+        from_file=kwargs.pop('from_file', True),
         calculate_stress=calculate_stress,
         dtype=dtype,
         **kwargs
