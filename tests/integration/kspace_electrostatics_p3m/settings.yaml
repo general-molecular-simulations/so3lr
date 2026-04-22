@@ -20,7 +20,7 @@ kspace_interp_nodes: 4
 
 # Key feature: NPT ensemble with pressure
 md_T: 300.0
-md_P: 1.0  # Pressure in atm - enables NPT
+md_P: 1.0  # Pressure in bar - enables NPT
 md_dt: 0.0005
 md_cycles: 2
 md_steps: 2

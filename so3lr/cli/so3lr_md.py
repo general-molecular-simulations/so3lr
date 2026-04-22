@@ -186,7 +186,7 @@ def handle_units(
         unit_system: Function that returns a dictionary of units.
         dt: Timestep in picoseconds.
         T: Target temperature in Kelvin. Defaults to None.
-        P: Target pressure in atmospheres. Defaults to None.
+        P: Target pressure in bar. Defaults to None.
 
     Returns:
         Dictionary containing the timestep, temperature and pressure
