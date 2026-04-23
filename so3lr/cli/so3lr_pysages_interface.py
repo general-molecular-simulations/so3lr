@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import jax_md.simulate
 import jax_md.quantity
 import jax_md.units
+from jax_md.space import transform
 import yaml
 from jax import jit
 
@@ -30,7 +31,7 @@ logger = logging.getLogger("SO3LR")
 
 
 def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
-                                  nbrs_lr=None, k_grid=None):
+                                  ensemble='nvt', nbrs_lr=None, k_grid=None):
     """
     Create the PySAGES context generator function that wraps SO3LR's MD step.
 
@@ -41,6 +42,7 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
         step_md_fn: The MD step function.
         md_dt: MD timestep.
         nbrs: Short-range neighbor list.
+        ensemble: Ensemble type ('nvt', 'nve', or 'npt').
         nbrs_lr: Long-range neighbor list (optional).
         k_grid: K-space grid for Ewald/PME electrostatics (optional).
 
@@ -52,28 +54,49 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
 
     if lr:
         def init_fn_pysages():
+            state0 = state
+            if ensemble == 'npt':
+                state0 = state0.set(position=transform(jnp.array(box), state0.position))
             return pb.JaxMDContextState(
-                state,
+                state0,
                 dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box, k_grid=k_grid)
             )
     else:
         def init_fn_pysages():
+            state0 = state
+            if ensemble == 'npt':
+                state0 = state0.set(position=transform(jnp.array(box), state0.position))
             return pb.JaxMDContextState(
-                state,
+                state0,
                 dict(nbrs=nbrs, box=box, k_grid=k_grid)
             )
 
     if lr:
         def step_fn_pysages(context_state):
             state = context_state.state
+
             nbrs = context_state.extras["nbrs"]
             nbrs_lr = context_state.extras["nbrs_lr"]
             box = context_state.extras["box"]
             k_grid = context_state.extras["k_grid"]
             i = 0
+
+            if ensemble == 'npt':
+                inv_box_vec = 1.0 / jnp.array(box)  # orthorhombic inverse
+                frac_positions = transform(inv_box_vec, state.position)  # Cartesian -> fractional
+                state = state.set(position=frac_positions)
+
+
             state, nbrs, nbrs_lr, box, k_grid = step_md_fn(
                 i, (state, nbrs, nbrs_lr, box, k_grid)
             )
+
+            if ensemble == 'npt':
+                box_vec_out = jnp.array(box)
+                cart_positions_out = transform(box_vec_out, state.position)
+                state = state.set(position=cart_positions_out)
+
+
             return pb.JaxMDContextState(
                 state,
                 dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box, k_grid=k_grid)
@@ -81,13 +104,26 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
     else:
         def step_fn_pysages(context_state):
             state = context_state.state
+
             nbrs = context_state.extras["nbrs"]
             box = context_state.extras["box"]
             k_grid = context_state.extras["k_grid"]
             i = 0
+
+            if ensemble == 'npt':
+                inv_box_vec = 1.0 / jnp.array(box)  # orthorhombic inverse
+                frac_positions = transform(inv_box_vec, state.position)  # Cartesian -> fractional
+                state = state.set(position=frac_positions)
+
             state, nbrs, box, k_grid = step_md_fn(
                 i, (state, nbrs, box, k_grid)
             )
+
+            if ensemble == 'npt':
+                box_vec_out = jnp.array(box)
+                cart_positions_out = transform(box_vec_out, state.position)
+                state = state.set(position=cart_positions_out)
+
             return pb.JaxMDContextState(
                 state,
                 dict(nbrs=nbrs, box=box, k_grid=k_grid)
@@ -128,8 +164,69 @@ def re_init_so3lr_state(chain_pos, chain_mom, chain_mass, chain_tau,
     return new_state
 
 
+@jit
+def re_init_so3lr_state_nve(pos, velocities, forces, mass):
+    """Reconstruct an SO3LR NVE state from PySAGES snapshot data."""
+    new_state = jax_md.simulate.NVEState(
+        position=pos,
+        momentum=None,
+        force=forces,
+        mass=mass,
+    )
+    new_state = jax_md.simulate.canonicalize_mass(new_state)
+    new_state = new_state.set(momentum=new_state.mass * velocities)
+    return new_state
+
+
+#@jit
+def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
+                              chain_ekin, chain_dof,
+                              baro_pos, baro_mom, baro_mass, baro_tau,
+                              baro_ekin, baro_dof,
+                              ref_box, box_pos, box_mom, box_mass_val,
+                              pos, velocities, forces, mass):
+    """Reconstruct an SO3LR NPT Nose-Hoover state from PySAGES snapshot data."""
+    dof = jax_md.quantity.count_dof(pos)
+
+    # NoseHooverChain.degrees_of_freedom is a static (metadata) dataclass field
+    # and must be a hashable Python int, not a JAX array. PySAGES snapshots round-trip
+    # these as jnp arrays, which breaks pytree-equality checks on recompile.
+    thermostat = jax_md.simulate.NoseHooverChain(
+        position=chain_pos,
+        momentum=chain_mom,
+        mass=chain_mass,
+        tau=chain_tau,
+        kinetic_energy=chain_ekin,
+        degrees_of_freedom=int(dof),
+    )
+    barostat = jax_md.simulate.NoseHooverChain(
+        position=baro_pos,
+        momentum=baro_mom,
+        mass=baro_mass,
+        tau=baro_tau,
+        kinetic_energy=baro_ekin,
+        degrees_of_freedom=int(baro_dof),
+    )
+
+    new_state = jax_md.simulate.NPTNoseHooverState(
+        position=pos,
+        momentum=None,
+        force=forces,
+        mass=mass,
+        reference_box=ref_box,
+        box_position=box_pos,
+        box_momentum=box_mom,
+        box_mass=box_mass_val,
+        barostat=barostat,
+        thermostat=thermostat,
+    )
+    new_state = jax_md.simulate.canonicalize_mass(new_state)
+    new_state = new_state.set(momentum=new_state.mass * velocities)
+    return new_state
+
+
 def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
-                                nbrs, nbrs_lr=None, k_grid=None):
+                                nbrs, ensemble='nvt', nbrs_lr=None, k_grid=None):
     """
     Extract the final state from PySAGES results and rebuild SO3LR state.
 
@@ -140,6 +237,7 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
         rng_key: JAX random key.
         md_T: Target temperature.
         nbrs: Short-range neighbor list.
+        ensemble: Ensemble type ('nvt', 'nve', or 'npt').
         nbrs_lr: Long-range neighbor list (optional).
         k_grid: K-space grid (passed through unchanged).
 
@@ -157,23 +255,79 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
     final_snapshot = raw_result.snapshots[-1]
     new_box = final_snapshot.box.H
 
-    nbrs = nbrs.update(final_snapshot.positions, neighbor=nbrs.idx, box=new_box)
-    nbrs_lr = nbrs_lr.update(
-        final_snapshot.positions, neighbor=nbrs_lr.idx, box=new_box
-    ) if lr else None
+    velocities = get_velocities(final_snapshot)
+    masses = get_masses(final_snapshot)
 
-    new_state = re_init_so3lr_state(
-        final_snapshot.chain_data["position"],
-        final_snapshot.chain_data["momentum"],
-        final_snapshot.chain_data["mass"],
-        final_snapshot.chain_data["tau"],
-        final_snapshot.chain_data["kinetic_energy"],
-        final_snapshot.chain_data["degrees_of_freedom"],
-        final_snapshot.positions,
-        get_velocities(final_snapshot),
-        final_snapshot.forces,
-        get_masses(final_snapshot)
-    )
+    if ensemble == 'nvt':
+        new_state = re_init_so3lr_state(
+            final_snapshot.chain_data["position"],
+            final_snapshot.chain_data["momentum"],
+            final_snapshot.chain_data["mass"],
+            final_snapshot.chain_data["tau"],
+            final_snapshot.chain_data["kinetic_energy"],
+            final_snapshot.chain_data["degrees_of_freedom"],
+            final_snapshot.positions,
+            velocities,
+            final_snapshot.forces,
+            masses,
+        )
+    elif ensemble == 'nve':
+        new_state = re_init_so3lr_state_nve(
+            final_snapshot.positions,
+            velocities,
+            final_snapshot.forces,
+            masses,
+        )
+    elif ensemble == 'npt':
+        
+        # Convert Cartesian positions from PySAGES → fractional for JAX-MD
+        frac_positions = transform(1.0/jnp.array(new_box), final_snapshot.positions)
+
+        new_state = re_init_so3lr_state_npt(
+            final_snapshot.chain_data["position"],
+            final_snapshot.chain_data["momentum"],
+            final_snapshot.chain_data["mass"],
+            final_snapshot.chain_data["tau"],
+            final_snapshot.chain_data["kinetic_energy"],
+            final_snapshot.chain_data["degrees_of_freedom"],
+            final_snapshot.barostat_data["position"],
+            final_snapshot.barostat_data["momentum"],
+            final_snapshot.barostat_data["mass"],
+            final_snapshot.barostat_data["tau"],
+            final_snapshot.barostat_data["kinetic_energy"],
+            final_snapshot.barostat_data["degrees_of_freedom"],
+            final_snapshot.npt_box_data["reference_box"],
+            final_snapshot.npt_box_data["box_position"],
+            final_snapshot.npt_box_data["box_momentum"],
+            final_snapshot.npt_box_data["box_mass"],
+            #final_snapshot.positions,
+            frac_positions,
+            velocities,
+            final_snapshot.forces,
+            masses,
+        )
+        # For NPT, derive the box from the reconstructed state (authoritative)
+        # rather than relying on snapshot.box which may lag behind.
+        new_box = jax_md.simulate.npt_box(new_state)
+
+        frac_positions = transform(1.0 / jnp.array(new_box), final_snapshot.positions)
+        new_state = new_state.set(position=frac_positions)
+
+    else:
+        raise ValueError(f"Unsupported ensemble for PySAGES: '{ensemble}'")
+
+    # Update neighbor lists with the correct box
+    if ensemble == 'npt':
+        nbrs = nbrs.update(frac_positions, neighbor=nbrs.idx, box=new_box)
+        nbrs_lr = nbrs_lr.update(
+            frac_positions, neighbor=nbrs_lr.idx, box=new_box
+        ) if lr else None
+
+    else:
+        nbrs = nbrs.update(final_snapshot.positions, neighbor=nbrs.idx, box=new_box)
+        nbrs_lr = nbrs_lr.update(
+            final_snapshot.positions, neighbor=nbrs_lr.idx, box=new_box
+        ) if lr else None
 
     # Restore bias forces to avoid a discontinuity at the cycle boundary.
     # The snapshot stores unbiased forces (captured before PySAGES adds bias),
@@ -205,8 +359,22 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
         return pysages.colvars.Distance(
             indices=[tuple(arguments['grp1']), tuple(arguments['grp2'])]
         )
+    elif name_lower == 'distance_pbc':
+        if box is None:
+            raise ValueError("distance_pbc requires the simulation box.")
+        return pysages.colvars.DistancePBC(
+            indices=[tuple(arguments['grp1']), tuple(arguments['grp2'])],
+            box=box,
+        )
     elif name_lower == 'differenceofdistances':
         return pysages.colvars.DifferenceOfDistances(indices=arguments['indices'])
+    elif name_lower == 'differenceofdistances_pbc':
+        if box is None:
+            raise ValueError("differenceofdistances_pbc requires the simulation box.")
+        return pysages.colvars.DifferenceOfDistancesPBC(
+            indices=arguments['indices'],
+            box=box,
+        )
     elif name_lower == 'angle':
         return pysages.colvars.Angle(indices=arguments['indices'])
     elif name_lower == 'dihedral':

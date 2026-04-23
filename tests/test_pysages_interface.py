@@ -159,11 +159,14 @@ class TestImportGuard:
         assert settings.get('do_enhanced_sampling', False) is False
 
     @pytest.mark.parametrize("ensemble", ["npt", "nve", "nvt-langevin"])
-    def test_unsupported_ensemble_raises(self, ensemble):
-        """Enhanced sampling with non-NVT ensembles should raise ValueError."""
+    def test_nvt_restricted_method_rejects_non_nvt(self, ensemble, tmp_path):
+        """Free-energy methods (ABF, metad, etc.) should reject non-NVT ensembles."""
         import so3lr.cli.so3lr_md as md_module
+        pysages_path = tmp_path / "pysages_input.yaml"
+        _write_yaml(pysages_path, _PYSAGES_INPUT_ABF)
         settings = {
             'do_enhanced_sampling': True,
+            'pysages_input': str(pysages_path),
             'input_file': 'dummy.xyz',
             'output_file': 'dummy.xyz',
             'md_dt': 0.5,
@@ -176,6 +179,45 @@ class TestImportGuard:
             'save_buffer': 10,
         }
         with pytest.raises(ValueError, match="only supports the NVT ensemble"):
+            md_module.perform_md(settings)
+
+    @pytest.mark.parametrize("method_input,ensemble", [
+        (_PYSAGES_INPUT_UNBIASED, "nve"),
+        (_PYSAGES_INPUT_UNBIASED, "npt"),
+        ({"method": "harmonic", "method_args": {"kspring": 10.0, "center": [1.0]},
+          "cv": [{"type": "distance", "grp1": [0], "grp2": [1],
+                  "grid_min": 0.0, "grid_max": 10.0,
+                  "grid_stride": 32, "periodic": False}]}, "nve"),
+        ({"method": "harmonic", "method_args": {"kspring": 10.0, "center": [1.0]},
+          "cv": [{"type": "distance", "grp1": [0], "grp2": [1],
+                  "grid_min": 0.0, "grid_max": 10.0,
+                  "grid_stride": 32, "periodic": False}]}, "npt"),
+    ])
+    def test_unrestricted_method_accepts_any_ensemble(self, method_input, ensemble, tmp_path):
+        """Harmonic and unbiased methods should not reject NVE or NPT ensembles.
+
+        The run will fail later (missing geometry), but the ensemble check must pass.
+        """
+        import so3lr.cli.so3lr_md as md_module
+        pysages_path = tmp_path / "pysages_input.yaml"
+        _write_yaml(pysages_path, method_input)
+        settings = {
+            'do_enhanced_sampling': True,
+            'pysages_input': str(pysages_path),
+            'input_file': 'dummy.xyz',
+            'output_file': 'dummy.xyz',
+            'md_dt': 0.5,
+            'md_T': 300,
+            'md_cycles': 1,
+            'md_steps': 10,
+            'ensemble': ensemble,
+            'precision': 'float32',
+            'seed': 42,
+            'save_buffer': 10,
+        }
+        # Should NOT raise ValueError about ensemble; it should fail later
+        # when trying to read the geometry file
+        with pytest.raises((FileNotFoundError, RuntimeError)):
             md_module.perform_md(settings)
 
 
@@ -467,6 +509,14 @@ class TestGetPysagesMethod:
         method = get_pysages_method(self._make_settings('spectralabf'))
         assert isinstance(method, pysages.methods.SpectralABF)
 
+    def test_harmonic_method(self):
+        from so3lr.cli.so3lr_pysages_interface import get_pysages_method
+        import pysages.methods
+        settings = self._make_settings('harmonic')
+        settings['method_args'] = {'kspring': 10.0, 'center': [1.0]}
+        method = get_pysages_method(settings)
+        assert isinstance(method, pysages.methods.HarmonicBias)
+
     def test_unknown_method_raises(self):
         from so3lr.cli.so3lr_pysages_interface import get_pysages_method
         with pytest.raises(ValueError, match="Unknown PySAGES method"):
@@ -527,6 +577,147 @@ class TestUpdateAfterPysages:
         sig = inspect.signature(update_so3lr_after_pysages)
         # nbrs_lr should have a default of None
         assert sig.parameters['nbrs_lr'].default is None
+
+    def test_ensemble_parameter_exists(self):
+        """update_so3lr_after_pysages should accept an ensemble parameter."""
+        from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
+        import inspect
+        sig = inspect.signature(update_so3lr_after_pysages)
+        assert 'ensemble' in sig.parameters
+        assert sig.parameters['ensemble'].default == 'nvt'
+
+    def test_create_pysages_interface_fns_has_ensemble(self):
+        """create_pysages_interface_fns should accept an ensemble parameter."""
+        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
+        import inspect
+        sig = inspect.signature(create_pysages_interface_fns)
+        assert 'ensemble' in sig.parameters
+        assert sig.parameters['ensemble'].default == 'nvt'
+
+
+# ===========================================================================
+# 4b. NVE / NPT state reconstruction
+# ===========================================================================
+
+class TestStateReconstruction:
+    """Tests for NVE and NPT state reconstruction from PySAGES snapshot data."""
+
+    def test_nve_state_reconstruction(self):
+        """re_init_so3lr_state_nve should produce a valid NVEState."""
+        from so3lr.cli.so3lr_pysages_interface import re_init_so3lr_state_nve
+
+        n_atoms = 4
+        pos = jnp.ones((n_atoms, 3))
+        vel = jnp.ones((n_atoms, 3)) * 0.5
+        forces = jnp.zeros((n_atoms, 3))
+        mass = jnp.ones(n_atoms) * 12.0
+
+        state = re_init_so3lr_state_nve(pos, vel, forces, mass)
+
+        assert isinstance(state, jax_md.simulate.NVEState)
+        np.testing.assert_allclose(state.position, pos)
+        np.testing.assert_allclose(state.force, forces)
+        # momentum = mass * velocity
+        expected_mom = state.mass * vel
+        np.testing.assert_allclose(state.momentum, expected_mom, atol=1e-10)
+
+    def test_nve_state_has_no_chain(self):
+        """NVEState should not have a chain attribute."""
+        from so3lr.cli.so3lr_pysages_interface import re_init_so3lr_state_nve
+
+        pos = jnp.ones((2, 3))
+        vel = jnp.ones((2, 3))
+        forces = jnp.zeros((2, 3))
+        mass = jnp.ones(2) * 12.0
+
+        state = re_init_so3lr_state_nve(pos, vel, forces, mass)
+        assert not hasattr(state, 'chain')
+
+    def test_npt_state_reconstruction(self):
+        """re_init_so3lr_state_npt should produce a valid NPTNoseHooverState."""
+        from so3lr.cli.so3lr_pysages_interface import re_init_so3lr_state_npt
+
+        n_atoms = 4
+        chain_len = 3
+        pos = jnp.ones((n_atoms, 3))
+        vel = jnp.ones((n_atoms, 3)) * 0.5
+        forces = jnp.zeros((n_atoms, 3))
+        mass = jnp.ones(n_atoms) * 12.0
+
+        # Thermostat chain
+        chain_pos = jnp.zeros(chain_len)
+        chain_mom = jnp.zeros(chain_len)
+        chain_mass = jnp.ones(chain_len)
+        chain_tau = jnp.array(100.0)
+        chain_ekin = jnp.array(0.0)
+        chain_dof = jnp.array(float(3 * n_atoms))
+
+        # Barostat chain
+        baro_pos = jnp.zeros(chain_len)
+        baro_mom = jnp.zeros(chain_len)
+        baro_mass = jnp.ones(chain_len)
+        baro_tau = jnp.array(1000.0)
+        baro_ekin = jnp.array(0.0)
+        baro_dof = jnp.array(3.0)
+
+        # NPT box variables
+        ref_box = jnp.eye(3) * 10.0
+        box_pos = jnp.zeros(3)
+        box_mom = jnp.zeros(3)
+        box_mass_val = jnp.ones(3)
+
+        state = re_init_so3lr_state_npt(
+            chain_pos, chain_mom, chain_mass, chain_tau, chain_ekin, chain_dof,
+            baro_pos, baro_mom, baro_mass, baro_tau, baro_ekin, baro_dof,
+            ref_box, box_pos, box_mom, box_mass_val,
+            pos, vel, forces, mass,
+        )
+
+        assert isinstance(state, jax_md.simulate.NPTNoseHooverState)
+        np.testing.assert_allclose(state.position, pos)
+        np.testing.assert_allclose(state.force, forces)
+        np.testing.assert_allclose(state.reference_box, ref_box)
+        np.testing.assert_allclose(state.box_position, box_pos)
+        np.testing.assert_allclose(state.box_momentum, box_mom)
+        np.testing.assert_allclose(state.box_mass, box_mass_val)
+
+        # Check thermostat chain
+        np.testing.assert_allclose(state.thermostat.position, chain_pos)
+        np.testing.assert_allclose(state.thermostat.tau, chain_tau)
+
+        # Check barostat chain
+        np.testing.assert_allclose(state.barostat.position, baro_pos)
+        np.testing.assert_allclose(state.barostat.tau, baro_tau)
+
+        # Check momentum = mass * velocity
+        expected_mom = state.mass * vel
+        np.testing.assert_allclose(state.momentum, expected_mom, atol=1e-10)
+
+    def test_nvt_state_reconstruction_unchanged(self):
+        """re_init_so3lr_state (NVT) should still work as before."""
+        from so3lr.cli.so3lr_pysages_interface import re_init_so3lr_state
+
+        n_atoms = 4
+        chain_len = 3
+        pos = jnp.ones((n_atoms, 3))
+        vel = jnp.ones((n_atoms, 3)) * 0.5
+        forces = jnp.zeros((n_atoms, 3))
+        mass = jnp.ones(n_atoms) * 12.0
+        chain_pos = jnp.zeros(chain_len)
+        chain_mom = jnp.zeros(chain_len)
+        chain_mass = jnp.ones(chain_len)
+        chain_tau = jnp.array(100.0)
+        chain_ekin = jnp.array(0.0)
+        chain_dof = jnp.array(float(3 * n_atoms))
+
+        state = re_init_so3lr_state(
+            chain_pos, chain_mom, chain_mass, chain_tau, chain_ekin, chain_dof,
+            pos, vel, forces, mass,
+        )
+
+        assert isinstance(state, jax_md.simulate.NVTNoseHooverState)
+        np.testing.assert_allclose(state.position, pos)
+        np.testing.assert_allclose(state.chain.position, chain_pos)
 
 
 # ===========================================================================

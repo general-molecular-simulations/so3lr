@@ -1671,12 +1671,21 @@ def perform_md(
             "Install it with: pip install so3lr[pysages]"
         )
 
-    if do_enhanced_sampling and ensemble not in ('nvt',):
-        raise ValueError(
-            f"Enhanced sampling with PySAGES currently only supports the NVT ensemble "
-            f"(Nose-Hoover thermostat), but '{ensemble}' was selected. "
-            f"NPT, NVE, and NVT-Langevin are not yet supported."
-        )
+    # Methods that only add a fixed bias potential (no histogram accumulation
+    # or adaptive forces) work correctly with any ensemble.
+    PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS = {'harmonic', 'unbiased'}
+
+    if do_enhanced_sampling:
+        pysages_set_dict = parse_pysages_input(pysages_input_path)
+        pysages_method_name = pysages_set_dict['method'].lower()
+        if (pysages_method_name not in PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS
+                and ensemble not in ('nvt',)):
+            raise ValueError(
+                f"Enhanced sampling method '{pysages_method_name}' currently only "
+                f"supports the NVT ensemble (Nose-Hoover thermostat), but "
+                f"'{ensemble}' was selected. Methods that support all ensembles: "
+                f"{', '.join(sorted(PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS))}."
+            )
 
     if do_enhanced_sampling and restart_pysages_load_path is not None:
         restart_pysages = True
@@ -1718,18 +1727,26 @@ def perform_md(
             'Cell must be defined for NPT simulations. The input geometry does not contain cell information.')
 
     if cell is not None:
-        # PySAGES requires cartesian coordinates for periodic systems
-        if do_enhanced_sampling and not enforce_cartesian_coordinates:
-            logger.warning(
-                "PySAGES requires cartesian coordinates for periodic systems. "
-                "Setting enforce_cartesian_coordinates=True."
-            )
-            enforce_cartesian_coordinates = True
-
-        if enforce_cartesian_coordinates:
-            shift_displacement = 'periodic_cart'
+        # PySAGES requires Cartesian positions, BUT for NPT we must keep JAX-MD internal
+        # coordinates fractional (unit cube). The PySAGES interface performs the
+        # Cartesian<->fractional conversion each step.
+        if do_enhanced_sampling and ensemble == 'npt':
+            if enforce_cartesian_coordinates:
+                logger.info(
+                    "NPT+PySAGES: overriding enforce_cartesian_coordinates=False "
+                    "(JAX-MD NPT requires fractional coordinates internally)."
+                )
+            enforce_cartesian_coordinates = False
         else:
-            shift_displacement = 'periodic'
+            # For non-NPT ensembles, PySAGES truly requires internal Cartesian coords.
+            if do_enhanced_sampling and not enforce_cartesian_coordinates:
+                logger.warning(
+                    "PySAGES requires cartesian coordinates for periodic systems. "
+                    "Setting enforce_cartesian_coordinates=True."
+                )
+                enforce_cartesian_coordinates = True
+    
+        shift_displacement = 'periodic_cart' if enforce_cartesian_coordinates else 'periodic'
         initial_geometry.wrap()
     else:
         shift_displacement = 'free'
@@ -2014,11 +2031,10 @@ def perform_md(
     total_time_for_steps = 0
     first_loop = True
 
-    # PySAGES setup
+    # PySAGES setup (pysages_set_dict was already parsed during validation)
     if do_enhanced_sampling:
-        set_dict = parse_pysages_input(pysages_input_path)
         method = get_pysages_method(
-            set_dict,
+            pysages_set_dict,
             nbrs=nbrs,
             species=initial_geometry_dict['species'],
             box=box
@@ -2034,7 +2050,7 @@ def perform_md(
         if do_enhanced_sampling:
             generate_context = create_pysages_interface_fns(
                 lr, state, box, step_md_fn, md_dt, nbrs,
-                nbrs_lr=nbrs_lr, k_grid=k_grid
+                ensemble=ensemble, nbrs_lr=nbrs_lr, k_grid=k_grid
             )
 
             if pysages_result:
@@ -2050,7 +2066,7 @@ def perform_md(
             new_state, nbrs, nbrs_lr, new_box, k_grid = jax.block_until_ready(
                 update_so3lr_after_pysages(
                     candidate_result, lr, init_fn, rng_key, md_T,
-                    nbrs, nbrs_lr, k_grid
+                    nbrs, ensemble=ensemble, nbrs_lr=nbrs_lr, k_grid=k_grid
                 )
             )
 
