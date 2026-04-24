@@ -583,21 +583,24 @@ def atoms_to_jnp(
     positions = jnp.array(atoms.get_positions(), dtype=precision)
     species = jnp.array(atoms.get_atomic_numbers(), dtype=jnp.int32)
     masses = jnp.array(atoms.get_masses(), dtype=precision)
-    if not np.all(atoms.get_velocities()==0):
-        velocities = jnp.array(atoms.get_velocities(), dtype=precision)
-    elif not np.all(atoms.get_momenta()==0):
-        velocities = jnp.array(atoms.get_momenta() / masses, dtype=precision)
+    if not np.all(atoms.get_velocities() == 0):
+        momenta = jnp.array(
+            atoms.get_velocities() * atoms.get_masses()[:, None],
+            dtype=precision,
+        )
+    elif not np.all(atoms.get_momenta() == 0):
+        momenta = jnp.array(atoms.get_momenta(), dtype=precision)
     else:
-        velocities = None
+        momenta = None
 
-    if velocities is not None:
+    if momenta is not None:
         logger.info('Loading initial velocities from input file.')
      
     return {
         'positions': positions,
         'species': species,
         'masses': masses,
-        'velocities': velocities
+        'momenta': momenta
     }
 
 
@@ -1816,7 +1819,7 @@ def perform_md(
             logger.warning(e)
             position = e.loaded_state['position']
             initial_geometry_dict['masses'] = e.loaded_state['mass']
-            initial_geometry_dict['velocities'] = e.loaded_state['momentum'] / e.loaded_state['mass']
+            initial_geometry_dict['momenta'] = e.loaded_state['momentum']
             box = e.loaded_state['box']
             if np.all(box == 0) or box is None:
                 box = jnp.array([0.0])
@@ -1997,7 +2000,7 @@ def perform_md(
                 neighbor_lr=nbrs_lr.idx,
                 kT=md_T,
                 mass=initial_geometry_dict['masses'],
-                velocities = initial_geometry_dict.get('velocities'),
+                momenta=initial_geometry_dict.get('momenta'),
                 k_grid=k_grid
             )
         else:
@@ -2008,7 +2011,7 @@ def perform_md(
                 neighbor=nbrs.idx,
                 kT=md_T,
                 mass=initial_geometry_dict['masses'],
-                velocities = initial_geometry_dict.get('velocities'),
+                momenta=initial_geometry_dict.get('momenta'),
                 k_grid=k_grid
             )
 
