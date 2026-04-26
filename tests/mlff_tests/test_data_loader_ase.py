@@ -108,6 +108,7 @@ def test_data_load_no_pbc(calculate_neighbors_lr: bool):
 def test_data_load_with_pbc(calculate_neighbors_lr: bool):
     filename = 'test_data/data_set_pbc.xyz'
     f = pkg_resources.resource_filename(__name__, filename)
+    sample_indices = np.arange(0, 50, 10)
 
     loader = AseDataLoaderSparse(input_file=f)
     if calculate_neighbors_lr:
@@ -115,10 +116,11 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
         all_data, data_stats = loader.load(
             cutoff=4.,
             calculate_neighbors_lr=calculate_neighbors_lr,
-            cutoff_lr=15.
+            cutoff_lr=15.,
+            pick_idx=sample_indices,
         )
 
-        npt.assert_equal(len(all_data), 50)
+        npt.assert_equal(len(all_data), len(sample_indices))
         npt.assert_equal(data_stats['max_num_of_nodes'], 192)
 
         graph0, lr0 = all_data[0]
@@ -130,17 +132,17 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
         all_data, data_stats = loader.load(
             cutoff=4.,
             calculate_neighbors_lr=calculate_neighbors_lr,
-            cutoff_lr=15.
+            cutoff_lr=15.,
+            pick_idx=sample_indices,
         )
 
-        npt.assert_equal(len(all_data), 50)
+        npt.assert_equal(len(all_data), len(sample_indices))
         npt.assert_equal(data_stats['max_num_of_nodes'], 192)
 
         graph0, lr0 = all_data[0]
         npt.assert_(isinstance(graph0, jraph.GraphsTuple))
 
-        for i in range(0, 50)[::5]:
-            graph, lr = all_data[i]
+        for graph, lr in all_data:
             positions = graph.nodes.get('positions')
             atomic_numbers = graph.nodes.get('atomic_numbers')
             senders = graph.senders

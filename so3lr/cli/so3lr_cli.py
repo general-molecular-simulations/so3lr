@@ -47,8 +47,16 @@ def get_hardware_info():
 
     Checks if JAX is using GPU or CPU and prints relevant device properties.
     """
-    devices = jax.devices()
-    backend = jax.default_backend()
+    try:
+        backend = jax.default_backend()
+        devices = jax.local_devices(backend=backend)
+    except RuntimeError as exc:
+        logger.warning(f"Unable to query JAX hardware details: {exc}")
+        logger.info("JAX default backend:       unavailable")
+        logger.info("Number of devices:         unavailable")
+        logger.info("Proceeding without device diagnostics.")
+        logger.info("=" * 60)
+        return
 
     # logger.info("Hardware information")
     logger.info(f"JAX default backend:       {backend}")
@@ -69,7 +77,7 @@ def get_hardware_info():
         for i, device in enumerate(devices):
             # Get device memory
             try:
-                mem_info = jax.devices()[i].memory_stats()
+                mem_info = device.memory_stats()
                 mem_available = mem_info.get('bytes_available', 'unknown')
                 mem_total = mem_info.get('bytes_total', 'unknown')
 
@@ -107,7 +115,7 @@ DEFAULT_SAVE_BUFFER = 50
 DEFAULT_OUTPUT_FORMAT = 'extxyz'
 DEFAULT_TIMESTEP = 0.5  # femtoseconds
 DEFAULT_TEMPERATURE = 300  # Kelvin
-DEFAULT_PRESSURE = 1.0  # atmospheres
+DEFAULT_PRESSURE = 1.0  # bar
 
 # Nose-Hoover chain parameters
 DEFAULT_MD_CYCLES = 100
@@ -312,7 +320,7 @@ Evaluate SO3LR on a dataset with all options:
 # # MD settings
 # md_dt: 0.5                                   # MD timestep in femtoseconds
 # md_T: 300.0                                  # Simulation temperature in Kelvin
-# md_P: 1.0                                    # Pressure in atmospheres (enables NPT simulation)
+# md_P: 1.0                                    # Pressure in bar (enables NPT simulation)
 # md_cycles: 100                               # Number of MD cycles to run
 # md_steps: 100                                # Number of steps per MD cycle
 # relax_before_run: true                       # Whether to perform geometry relaxation before MD
@@ -540,7 +548,7 @@ def thermostat_options(f: Callable) -> Callable:
 def barostat_options(f: Callable) -> Callable:
     """Nose-Hoover barostat options for NPT ensemble."""
     f = click.option('--pressure', default=DEFAULT_PRESSURE, type=float,
-                     help=f'Simulation pressure in atmospheres. [default: {DEFAULT_PRESSURE}]')(f)
+                     help=f'Simulation pressure in bar. [default: {DEFAULT_PRESSURE}]')(f)
     f = click.option('--nhc-baro', default=DEFAULT_NHC_BARO, type=float,
                      help=f'Barostat damping factor (tau = dt * nhc_baro). [default: {DEFAULT_NHC_BARO}]')(f)
     return f
@@ -736,7 +744,7 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     logger.info(f"Total charge:              {s.get('total_charge', DEFAULT_TOTAL_CHARGE)}")
     logger.info(f"Temperature:               {s.get('md_T', s.get('init_T', DEFAULT_TEMPERATURE))} K")
     if ensemble == 'npt':
-        logger.info(f"Pressure:                  {s.get('md_P')} atm")
+        logger.info(f"Pressure:                  {s.get('md_P')} bar")
     logger.info(f"Ensemble:                  {_label.get(ensemble, ensemble)}")
     logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
     logger.info(f"MD cycles:                 {s.get('md_cycles', DEFAULT_MD_CYCLES)}")

@@ -8,11 +8,10 @@ from so3lr.mlff.data import NpzDataLoaderSparse
 from so3lr.mlff.data import transformations
 import numpy as np
 import optax
-from pathlib import Path
 import pkg_resources
 
 
-def test_fit(disable_jit: bool = False):
+def test_fit(tmp_path, disable_jit: bool = False):
     if disable_jit:
         from jax.config import config
         config.update('jax_disable_jit', True)
@@ -75,8 +74,8 @@ def test_fit(disable_jit: bool = False):
         weights={'energy': 0.001, 'forces': 0.999}
     )
 
-    workdir = Path('_test_run_training_sparse').expanduser().absolute().resolve()
-    workdir.mkdir(exist_ok=True)
+    workdir = tmp_path / 'run_training_sparse'
+    workdir.mkdir()
 
     training_utils.fit(
         model=so3k,
@@ -95,13 +94,4 @@ def test_fit(disable_jit: bool = False):
         allow_restart=False,
         use_wandb=False  # Otherwise the GitHub CI fails.
     )
-
-
-def test_remove_dirs():
-    try:
-        import shutil
-        shutil.rmtree('_test_run_training_sparse')
-        shutil.rmtree('wandb')
-    except FileNotFoundError:
-        pass
 

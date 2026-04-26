@@ -93,6 +93,9 @@ class AseCalculatorSparse(Calculator):
             observables: Optional[Sequence[str]] = None,
             output_atom_indices: Optional[Sequence[int]] = None,
             hessian_slice: bool = False,
+            kspace_electrostatics: Optional[str] = None,
+            kspace_smearing: Optional[float] = None,
+            kspace_spacing: Optional[float] = None,
             **kwargs
     ):
         if observables is not None and len(observables) > 0:
@@ -127,7 +130,10 @@ class AseCalculatorSparse(Calculator):
                    has_aux=has_aux,
                    observables=observables,
                    output_atom_indices=output_atom_indices,
-                   hessian_slice=hessian_slice
+                   hessian_slice=hessian_slice,
+                   kspace_electrostatics=kspace_electrostatics,
+                   kspace_smearing=kspace_smearing,
+                   kspace_spacing=kspace_spacing,
                    )
 
     def __init__(
@@ -143,6 +149,9 @@ class AseCalculatorSparse(Calculator):
             observables: Optional[Sequence[str]] = None,
             output_atom_indices: Optional[Sequence[int]] = None,
             hessian_slice: bool = False,
+            kspace_electrostatics: Optional[str] = None,
+            kspace_smearing: Optional[float] = None,
+            kspace_spacing: Optional[float] = None,
             *args,
             **kwargs
     ):
@@ -592,13 +601,65 @@ class AseCalculatorSparse(Calculator):
                 self.lr_cutoff = potential.long_range_cutoff
 
         self.dtype = dtype
+        self.kspace_electrostatics = kspace_electrostatics
+        self.kspace_smearing = kspace_smearing
+        self.kspace_spacing = kspace_spacing
+        self._kspace_reported_source = None
+
+        if self.kspace_electrostatics is not None:
+            if self.kspace_smearing is None or self.kspace_spacing is None:
+                raise ValueError('kspace_electrostatics requires both kspace_smearing and '
+                                 'kspace_spacing when passed to the ASE calculator.')
 
     def calculate(self, atoms=None, hessian_slice_index=None, *args, **kwargs):
         super(AseCalculatorSparse, self).calculate(atoms, *args, **kwargs)
 
         system = atoms_to_system(atoms, dtype=self.dtype)
 
-        if atoms.get_pbc().any():
+        pbc_any = atoms.get_pbc().any()
+        has_atoms_k_grid = 'k_grid' in atoms.info
+        has_atoms_k_smearing = 'k_smearing' in atoms.info
+        if has_atoms_k_grid != has_atoms_k_smearing:
+            raise ValueError(
+                'atoms.info must define both k_grid and k_smearing together '
+                'for ASE k-space electrostatics.'
+            )
+
+        kspace_source = None
+        kspace_message = None
+        if has_atoms_k_grid:
+            if self.kspace_electrostatics is not None:
+                kspace_source = 'atoms.info.override'
+                kspace_message = ('Using k-space grid from atoms.info; it overrides ASE '
+                                  'calculator k-space kwargs.')
+            else:
+                kspace_source = 'atoms.info'
+                kspace_message = 'Using k-space grid from atoms.info.'
+
+        if self.kspace_electrostatics is not None and not has_atoms_k_grid:
+            if not pbc_any:
+                kspace_source = 'kwargs.ignored'
+                kspace_message = ('Ignoring ASE calculator k-space kwargs because the system '
+                                  'is non-periodic.')
+            else:
+                kspace_source = 'kwargs.generated'
+                kspace_message = (f'Generating {self.kspace_electrostatics.upper()} k-space '
+                                  'grid from ASE calculator kwargs.')
+                import jaxpme
+                k_smearing = jnp.array([self.kspace_smearing], dtype=self.dtype)
+                k_spacing = jnp.array([self.kspace_spacing])
+                cell = jnp.array(np.array(atoms.get_cell()), dtype=self.dtype).T
+                if self.kspace_electrostatics == 'ewald':
+                    k_grid = jaxpme.kspace.get_kgrid_ewald(cell, lr_wavelength=k_spacing)
+                else:
+                    k_grid = jaxpme.kspace.get_kgrid_mesh(cell, mesh_spacing=k_spacing)
+                system = system._replace(k_grid=k_grid, k_smearing=k_smearing)
+
+        if kspace_source is not None and self._kspace_reported_source != kspace_source:
+            logging.mlff(kspace_message)
+            self._kspace_reported_source = kspace_source
+
+        if pbc_any:
             cell = jnp.array(np.array(atoms.get_cell()), dtype=self.dtype).T  # (3, 3)
         else:
             cell = None
@@ -649,7 +710,10 @@ class AseCalculatorSparse(Calculator):
             output = self.calculate_fn(system, neighbors, hessian_slice_index=hessian_slice_index)
         else:
             output = self.calculate_fn(system, neighbors)
-        self.results = jax.tree_util.tree_map(lambda x: np.array(x, self.dtype), output)
+        def _to_numpy(x):
+            arr = np.array(x, self.dtype)
+            return arr.item() if arr.ndim == 0 else arr
+        self.results = jax.tree_util.tree_map(_to_numpy, output)
 
 
 def to_displacement(cell):

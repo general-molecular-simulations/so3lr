@@ -13,12 +13,13 @@ def make_ase_calculator(
         **kwargs
 ):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
+    default_workdir = package_dir / 'so3lr' / 'params'
 
     calc = AseCalculatorSparse.create_from_workdir(
-        workdir=package_dir / 'so3lr' / 'params',
+        workdir=kwargs.pop('workdir', default_workdir),
         lr_cutoff=lr_cutoff,
         dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
-        from_file=True,
+        from_file=kwargs.pop('from_file', True),
         calculate_stress=calculate_stress,
         dtype=dtype,
         **kwargs

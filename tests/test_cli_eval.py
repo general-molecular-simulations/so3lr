@@ -4,6 +4,8 @@ import pathlib
 import pytest
 from ase.io import read
 
+from subprocess_env import so3lr_subprocess_env
+
 
 EXPECTED_RMSE = {
     'dipole_vec_rmse': '5.079e-02',
@@ -37,6 +39,7 @@ def test_cli_eval(eval_dir):
         text=True,
         timeout=600,
         cwd=eval_dir,
+        env=so3lr_subprocess_env(),
     )
 
     assert result.returncode == 0, (
@@ -79,6 +82,7 @@ def test_cli_eval_with_intermediates(eval_dir):
         text=True,
         timeout=600,
         cwd=eval_dir,
+        env=so3lr_subprocess_env(),
     )
 
     assert result.returncode == 0, (
@@ -135,6 +139,7 @@ def test_cli_eval_with_embeddings(eval_dir):
         text=True,
         timeout=600,
         cwd=eval_dir,
+        env=so3lr_subprocess_env(),
     )
 
     assert result.returncode == 0, (

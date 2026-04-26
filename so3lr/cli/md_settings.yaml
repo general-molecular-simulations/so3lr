@@ -69,7 +69,7 @@ nhc_steps: 2                               # Number of Nose-Hoover integration s
 nhc_thermo: 100.0                          # Thermostat damping timescale factor (tau = md_dt * nhc_thermo) [Default: 100.0]
 
 ## NPT-specific Settings
-md_P: null                                 # Target pressure in atm. Setting this enables NPT. [Default: null]  (CLI: --pressure)
+md_P: null                                 # Target pressure in bar. Setting this enables NPT. [Default: null]  (CLI: --pressure)
 nhc_baro: 1000.0                           # Barostat damping timescale factor (tau = md_dt * nhc_baro) [Default: 1000.0]
 nhc_sy_steps: 3                            # Number of Suzuki-Yoshida integration steps [Default: 3]
 

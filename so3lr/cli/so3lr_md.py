@@ -186,7 +186,7 @@ def handle_units(
         unit_system: Function that returns a dictionary of units.
         dt: Timestep in picoseconds.
         T: Target temperature in Kelvin. Defaults to None.
-        P: Target pressure in atmospheres. Defaults to None.
+        P: Target pressure in bar. Defaults to None.
 
     Returns:
         Dictionary containing the timestep, temperature and pressure
@@ -583,21 +583,24 @@ def atoms_to_jnp(
     positions = jnp.array(atoms.get_positions(), dtype=precision)
     species = jnp.array(atoms.get_atomic_numbers(), dtype=jnp.int32)
     masses = jnp.array(atoms.get_masses(), dtype=precision)
-    if not np.all(atoms.get_velocities()==0):
-        velocities = jnp.array(atoms.get_velocities(), dtype=precision)
-    elif not np.all(atoms.get_momenta()==0):
-        velocities = jnp.array(atoms.get_momenta() / masses, dtype=precision)
+    if not np.all(atoms.get_velocities() == 0):
+        momenta = jnp.array(
+            atoms.get_velocities() * atoms.get_masses()[:, None],
+            dtype=precision,
+        )
+    elif not np.all(atoms.get_momenta() == 0):
+        momenta = jnp.array(atoms.get_momenta(), dtype=precision)
     else:
-        velocities = None
+        momenta = None
 
-    if velocities is not None:
+    if momenta is not None:
         logger.info('Loading initial velocities from input file.')
      
     return {
         'positions': positions,
         'species': species,
         'masses': masses,
-        'velocities': velocities
+        'momenta': momenta
     }
 
 
@@ -664,20 +667,46 @@ def load_model(
     if not model_dir.exists():
         raise FileNotFoundError(f"Model path not found: {model_path}")
 
-    # Load from workdir path
-    potential = PotentialSparse.create_from_workdir(
-        workdir=model_dir,
-        from_file=False,
-        long_range_kwargs=dict(
-            cutoff_lr=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            neighborlist_format_lr='ordered_sparse',
-            coulomb_kspace_method=kspace_electrostatics,
-            coulomb_kspace_interp_nodes=kspace_interp_nodes,
-        ),
-        dtype=precision,
-        **kwargs
+    long_range_kw = dict(
+        cutoff_lr=lr_cutoff,
+        dispersion_energy_cutoff_lr_damping=dispersion_damping,
+        neighborlist_format_lr='ordered_sparse',
+        coulomb_kspace_method=kspace_electrostatics,
+        coulomb_kspace_interp_nodes=kspace_interp_nodes,
     )
+
+    checkpoints_dir = model_dir / 'checkpoints'
+    params_pkl = model_dir / 'params.pkl'
+
+    # Prefer Orbax checkpoints, but support legacy params.pkl-only model folders.
+    from_file = False
+    if not checkpoints_dir.exists() and params_pkl.exists():
+        logger.info(
+            'No checkpoints directory found in %s; loading parameters from params.pkl instead.',
+            model_dir,
+        )
+        from_file = True
+
+    def _create_potential(from_file_flag: bool) -> PotentialSparse:
+        return PotentialSparse.create_from_workdir(
+            workdir=model_dir,
+            from_file=from_file_flag,
+            long_range_kwargs=long_range_kw,
+            dtype=precision,
+            **kwargs
+        )
+
+    try:
+        potential = _create_potential(from_file)
+    except FileNotFoundError:
+        if (not from_file) and params_pkl.exists():
+            logger.warning(
+                'Checkpoint loading failed for %s; falling back to params.pkl.',
+                model_dir,
+            )
+            potential = _create_potential(True)
+        else:
+            raise
 
     return potential
 
@@ -1790,7 +1819,7 @@ def perform_md(
             logger.warning(e)
             position = e.loaded_state['position']
             initial_geometry_dict['masses'] = e.loaded_state['mass']
-            initial_geometry_dict['velocities'] = e.loaded_state['momentum'] / e.loaded_state['mass']
+            initial_geometry_dict['momenta'] = e.loaded_state['momentum']
             box = e.loaded_state['box']
             if np.all(box == 0) or box is None:
                 box = jnp.array([0.0])
@@ -1971,7 +2000,7 @@ def perform_md(
                 neighbor_lr=nbrs_lr.idx,
                 kT=md_T,
                 mass=initial_geometry_dict['masses'],
-                velocities = initial_geometry_dict.get('velocities'),
+                momenta=initial_geometry_dict.get('momenta'),
                 k_grid=k_grid
             )
         else:
@@ -1982,7 +2011,7 @@ def perform_md(
                 neighbor=nbrs.idx,
                 kT=md_T,
                 mass=initial_geometry_dict['masses'],
-                velocities = initial_geometry_dict.get('velocities'),
+                momenta=initial_geometry_dict.get('momenta'),
                 k_grid=k_grid
             )
 
@@ -2203,7 +2232,12 @@ def perform_md(
     if output_format == 'extxyz':
         logger.info('Consider saving the trajectory in HDF5 format, which has no overhead for long runs (--output traj_name.hdf5).')
 
-    if jax.default_backend() in ["gpu", "cuda", "rocm"]:
+    try:
+        backend = jax.default_backend()
+    except RuntimeError:
+        backend = "cpu"
+
+    if backend in ["gpu", "cuda", "rocm"]:
         if average_time_per_step > 1.2 * 3.25e-6 * len(initial_geometry):
             logger.warn('Ideally, the average time per step should be close to {:.2e} seconds (measured on an A100 GPU)'.format(
                 3.25e-6 * len(initial_geometry)))
