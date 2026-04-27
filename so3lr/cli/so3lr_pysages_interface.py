@@ -445,7 +445,9 @@ def get_pysages_method(settings_dict, nbrs=None, species=None, box=None):
 
     method_name = settings_dict['method'].lower()
     if method_name == 'abf':
-        return pysages.methods.ABF(cvs, grid, restraints=restraints)
+        N=settings_dict['method_args'].get('N', 500) if 'method_args' in settings_dict else 500
+        logger.info(f'N(ABF): {N}')
+        return pysages.methods.ABF(cvs, grid, restraints=restraints, N=N)
     elif method_name == 'spectralabf':
         return pysages.methods.SpectralABF(cvs, grid, restraints=restraints)
     elif method_name == 'metad':
