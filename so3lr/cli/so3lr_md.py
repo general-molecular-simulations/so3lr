@@ -2377,7 +2377,8 @@ def perform_md(
         if do_enhanced_sampling:
             generate_context = create_pysages_interface_fns(
                 lr, state, box, step_md_fn, md_dt, nbrs,
-                ensemble=ensemble, nbrs_lr=nbrs_lr, k_grid=k_grid
+                ensemble=ensemble, nbrs_lr=nbrs_lr,
+                k_grid=k_grid, k_grid_disp=k_grid_disp
             )
 
             if pysages_result:
@@ -2390,10 +2391,11 @@ def perform_md(
                     pysages.run(method, generate_context, md_steps)
                 )
 
-            new_state, nbrs, nbrs_lr, new_box, k_grid = jax.block_until_ready(
+            new_state, nbrs, nbrs_lr, new_box, k_grid, k_grid_disp = jax.block_until_ready(
                 update_so3lr_after_pysages(
                     candidate_result, lr, init_fn, rng_key, md_T,
-                    nbrs, ensemble=ensemble, nbrs_lr=nbrs_lr, k_grid=k_grid
+                    nbrs, ensemble=ensemble, nbrs_lr=nbrs_lr,
+                    k_grid=k_grid, k_grid_disp=k_grid_disp
                 )
             )
 
