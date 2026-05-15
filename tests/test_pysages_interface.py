@@ -18,6 +18,9 @@ import pathlib
 import subprocess
 
 import pytest
+
+pytest.importorskip("pysages", reason="PySAGES is an optional dependency")
+
 import numpy as np
 import jax
 import jax.numpy as jnp

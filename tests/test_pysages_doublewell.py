@@ -14,6 +14,9 @@ Marked ``slow``; run with ``pytest --full``.
 import os
 import pytest
 
+pytest.importorskip("pysages", reason="PySAGES is an optional dependency")
+pytest.importorskip("jax_md", reason="jax-md is required for this test")
+
 import numpy as np
 
 # ---- physical setup (metal-style units: A, eV, amu) ----
@@ -84,9 +87,6 @@ def test_pysages_jaxmd_backend_recovers_double_well_fe(tmp_path, monkeypatch):
     caught immediately: it drives the median ratio to ~2.0, which fails the
     upper tolerance of 1.4.
     """
-    pytest.importorskip("pysages")
-    pytest.importorskip("jax_md")
-
     # PySAGES' jax-md backend writes a `cv_vs_timestep.txt` log; isolate it.
     monkeypatch.chdir(tmp_path)
 
