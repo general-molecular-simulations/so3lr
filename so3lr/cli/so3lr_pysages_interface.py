@@ -225,7 +225,7 @@ def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
     return new_state
 
 
-def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
+def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T, dt,
                                 nbrs, ensemble='nvt', nbrs_lr=None, k_grid=None):
     """
     Extract the final state from PySAGES results and rebuild SO3LR state.
@@ -279,7 +279,7 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
             masses,
         )
     elif ensemble == 'npt':
-        
+
         # Convert Cartesian positions from PySAGES → fractional for JAX-MD
         frac_positions = transform(1.0/jnp.array(new_box), final_snapshot.positions)
 
@@ -336,6 +336,30 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T,
     last_bias = raw_result.states[0].bias
     if last_bias is not None:
         new_state = new_state.set(force=new_state.force + last_bias)
+
+        # The pysages jax-md backend patch unconditionally adds 0.5*dt*bias to
+        # state.momentum after taking the snapshot (regardless of ensemble), so
+        # the snapshot velocity is missing that kick for any non-trivial bias.
+        p = new_state.momentum + 0.5 * dt * last_bias
+        new_state = new_state.set(momentum=p)
+
+        # The post-step bias kick breaks the invariant chain.kinetic_energy ==
+        # KE(state.momentum) that jax-md's apply_fn establishes at line 640
+        # (NVT) / 962-966 (NPT) and that thermostat.half_step's substep_fn
+        # relies on (it scales both KE and momentum consistently rather than
+        # recomputing KE). Restore it here. The barostat is untouched because
+        # the bias does not modify box_momentum.
+        from jax_md.quantity import kinetic_energy
+        KE = kinetic_energy(momentum=p, mass=new_state.mass)
+        if ensemble == "nvt":
+            new_state = new_state.set(
+                chain=new_state.chain.set(kinetic_energy=KE)
+            )
+        elif ensemble == "npt":
+            new_state = new_state.set(
+                thermostat=new_state.thermostat.set(kinetic_energy=KE)
+            )
+
 
     return new_state, nbrs, nbrs_lr, new_box, k_grid
 
