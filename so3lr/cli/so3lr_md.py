@@ -1774,7 +1774,7 @@ def perform_md(
                     "Setting enforce_cartesian_coordinates=True."
                 )
                 enforce_cartesian_coordinates = True
-    
+
         shift_displacement = 'periodic_cart' if enforce_cartesian_coordinates else 'periodic'
         initial_geometry.wrap()
     else:
