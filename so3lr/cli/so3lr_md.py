@@ -2431,7 +2431,7 @@ def perform_md(
             state = new_state
             box = new_box
 
-            if (ensemble == 'npt') and (current_cycle % kspace_npt_cycles == 0):
+            if (ensemble == 'npt') and (kspace_npt_cycles is not None) and (current_cycle % kspace_npt_cycles == 0):
                 box_for_kgrid = box_to_diag(box)
                 k_grid,_ = setup_kspace_grid(
                     kspace_electrostatics,
@@ -3101,6 +3101,38 @@ def load_state(
         state = state.set(
             position=transform(1.0 / jnp.array(box), state.position)
         )
+
+    # Normalize the reconstructed state/box to match the dtypes (and weak typing)
+    # of a fresh init_fn carry, so the restart fori_loop type-checks under x64.
+    # `load_state` otherwise returns raw numpy arrays straight from the npz:
+    #   * `position` stays numpy -> numpy gather raises IndexError on the sentinel
+    #     neighbor index in the pre-loop forward passes.
+    #   * `stress`/`stress_tensor` come back *strongly* typed float64, whereas a
+    #     fresh run carries `stress` as a *weakly* typed float64 scalar. A strong
+    #     float64 stress promotes the float32 box -> float64 inside the integrator,
+    #     so the loop carry input (float32) != output (float64) and jax.lax.scan
+    #     rejects it. Rebuilding stress weak (a Python float for the scalar case)
+    #     restores the fresh-run behaviour; everything else -> run precision jnp.
+    import dataclasses
+    _weak_fields = {'stress', 'stress_tensor'}
+
+    def _to_precision(x):
+        a = jnp.asarray(x)
+        return a.astype(precision) if jnp.issubdtype(a.dtype, jnp.floating) else a
+
+    _new_vals = {}
+    for _f in dataclasses.fields(state):
+        _v = getattr(state, _f.name)
+        if _v is None:
+            _new_vals[_f.name] = None
+        elif _f.name in _weak_fields:
+            _a = jnp.asarray(_v)
+            _new_vals[_f.name] = float(_a) if _a.ndim == 0 else _a.astype(precision)
+        else:
+            _new_vals[_f.name] = jax.tree_util.tree_map(_to_precision, _v)
+    state = dataclasses.replace(state, **_new_vals)
+
+    box = jnp.asarray(box, precision)
 
     return state, box, cycle
 
