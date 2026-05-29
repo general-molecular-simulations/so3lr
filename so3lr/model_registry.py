@@ -26,9 +26,9 @@ _REGISTRY = {
     "so3lr-s": _MODELS / "so3lr-s",
     "so3lr-m": _MODELS / "so3lr-m",
     "so3lr-l": _MODELS / "so3lr-l",
-    # Legacy vanilla SO3LR, kept reachable by name for reproducibility.
+    # Original vanilla SO3LR, kept reachable by name for reproducibility.
     "so3lr": _PKG / "params",
-    "so3lr-legacy": _PKG / "params",
+    "so3lr-og": _PKG / "params",
 }
 
 

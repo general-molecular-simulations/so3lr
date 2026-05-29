@@ -1,7 +1,7 @@
-![workflow-test-ci](https://github.com/general-molecular-simulation/so3lr/actions/workflows/CI.yml/badge.svg)
+![workflow-test-ci](https://github.com/general-molecular-simulations/so3lr/actions/workflows/CI.yml/badge.svg)
 [![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb)
-[![cite-link](https://img.shields.io/badge/how_to-cite-000000)](https://github.com/general-molecular-simulation/so3lr?tab=readme-ov-file#Citation)
+[![cite-link](https://img.shields.io/badge/how_to-cite-000000)](https://github.com/general-molecular-simulations/so3lr?tab=readme-ov-file#Citation)
 [![preprint-link](https://img.shields.io/badge/paper-JACS-FFCE34)](https://doi.org/10.1021/jacs.5c09558)
 [![data](https://zenodo.org/badge/DOI/10.5281/zenodo.14779793.svg)](https://doi.org/10.5281/zenodo.14779793)
 ![Logo](./logo.png)
@@ -34,6 +34,47 @@ git clone https://github.com/general-molecular-simulations/so3lr.git
 cd so3lr
 pip install .
 ```
+
+## Models
+
+SO3LR ships in three sizes. All are bundled inside the package, so you select one **by short name** — no download or path needed. They trade off speed against accuracy:
+
+| Model | Layers | Features | Heads | Cutoff (Å) | Best for |
+|-------|--------|----------|-------|-----------|----------|
+| `so3lr-s` | 2 | 128 | 4 | 4.5 | Fastest — quick tests and very large systems |
+| `so3lr-m` *(default)* | 3 | 128 | 4 | 4.5 | Balanced — general-purpose use |
+| `so3lr-l` | 3 | 256 | 8 | 5.0 | Most accurate — highest fidelity, largest model |
+| `so3lr-og` | 3 | 128 | 4 | 4.5 | Original SO3LR v1 — for reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558) |
+
+If you do not specify a model, **`so3lr-m`** is used. `so3lr-og` (also reachable as `so3lr`) is the original v1 model kept for backward compatibility.
+
+### Selecting a model
+
+The same names work across every interface:
+
+```python
+# Python / ASE
+from so3lr import So3lrCalculator
+calc = So3lrCalculator(model="so3lr-l")          # also "so3lr-s" / "so3lr-m"
+```
+
+```shell script
+# CLI (works with opt / nvt / npt / nve / eval)
+so3lr nvt --input geometry.xyz --model so3lr-l
+```
+
+```yaml
+# In an MD settings YAML (model: is an alias of model_path:)
+model: so3lr-l
+```
+
+Custom and fine-tuned models still work — just pass a path instead of a name:
+
+```python
+So3lrCalculator(model="/path/to/finetuned")      # or  --model /path/to/finetuned  on the CLI
+```
+
+> **Backward compatibility:** The no-arg default is now `so3lr-m`. To reproduce the **original SO3LR v1** model from the [JACS paper](https://doi.org/10.1021/jacs.5c09558), pass `model="so3lr"` (alias `"so3lr-og"`).
 
 ## Command Line Interface (CLI)
 
@@ -106,6 +147,8 @@ Evaluate the SO3LR model on a dataset:
 ```shell script
 so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 100 --save-to predictions.extxyz
 ```
+
+Add `--model so3lr-s` (or `so3lr-l`) to evaluate a different bundled model; without it, `so3lr-m` is used.
 
 The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread).
 
@@ -218,6 +261,7 @@ atoms = Atoms('H2', positions=[(0, 0, 0), (0, 0, 0.74)])
 atoms.info['charge'] = 0.0
 
 calc = So3lrCalculator(
+    model="so3lr-m",         # bundled model; also "so3lr-s" / "so3lr-l" or a path. Default: so3lr-m
     calculate_stress=False,
     lr_cutoff=100, # for gas-phase systems
     dtype=np.float64
@@ -301,6 +345,8 @@ print(f"Partial charges: {partial_charges}")
 | `electrostatic_energy_undamped` | Undamped electrostatic energy | `(n_atoms,)` |
 | `dispersion_energy_undamped` | Undamped dispersion energy | `(n_atoms,)` |
 | `x` | Final-layer per-atom embeddings | `(n_atoms, features)` |
+
+> **Note:** The `zbl_repulsion` key returns the model's short-range repulsion energy. For `so3lr-s/m/l` this is a parameter-free NHL repulsion; for the legacy `so3lr` model it is the original ZBL repulsion. The observable name is kept as `zbl_repulsion` for backward compatibility.
 
 ### Observable Gradients
 
