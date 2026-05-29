@@ -1,26 +1,23 @@
 import jax
 import jax.numpy as jnp
-import pathlib
 
 from so3lr.mlff.calculators.potential import load_model_from_workdir
+from so3lr.model_registry import resolve_model
 
 
 def make_so3lr(
     lr_cutoff=12.,
     dispersion_energy_cutoff_lr_damping=2.,
     calculate_forces=True,
+    model=None,
     workdir=None,
     output_intermediate_quantities=None
 ):
-    if workdir is None:
-        # Use default SO3LR params directory
-        package_dir = pathlib.Path(__file__).parent.parent.resolve()
-        workdir_path = package_dir / 'so3lr' / 'params'
-        from_file = True
-    else:
-        # Use provided workdir
-        workdir_path = pathlib.Path(workdir).expanduser().resolve()
-        from_file = False
+    # ``workdir`` (legacy arg) takes precedence over ``model``; either may be a
+    # bundled model name or a filesystem path. None -> DEFAULT_MODEL.
+    workdir_path, from_file, _ = resolve_model(
+        workdir if workdir is not None else model
+    )
 
     model, params = load_model_from_workdir(
         workdir_path,

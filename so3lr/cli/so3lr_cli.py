@@ -487,8 +487,10 @@ def common_io_options(f: Callable) -> Callable:
 
 def common_model_options(f: Callable) -> Callable:
     """Common model options for all commands."""
-    f = click.option('--model', '--model_path', 'model_path', type=click.Path(exists=False),
-                     help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')(f)
+    f = click.option('--model', '--model_path', 'model_path', type=str, default=None,
+                     help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
+                          'or a path to a custom MLFF model directory. '
+                          'If not provided, so3lr-m is used. [default: so3lr-m]')(f)
     f = click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
                      help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')(f)
     f = click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
@@ -689,6 +691,10 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
         logger.error(f"Error loading settings file: {str(e)}")
         sys.exit(1)
 
+    # Accept 'model' as an alias for 'model_path' in the YAML.
+    if settings_dict.get('model_path') is None and settings_dict.get('model') is not None:
+        settings_dict['model_path'] = settings_dict.pop('model')
+
     # md_dt is written in fs in the YAML but run() expects ps
     if 'md_dt' in settings_dict:
         settings_dict['md_dt'] = settings_dict['md_dt'] / 1000
@@ -734,9 +740,10 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     logger.info(f"Initial geometry:          {s.get('input_file')}")
     logger.info(f"Output file:               {s.get('output_file')}")
     logger.info(f"Log file:                  {s.get('log_file')}")
-    logger.info(f"Force field:               {'Custom MLFF' if s.get('model_path') else 'SO3LR'}")
-    if s.get('model_path'):
-        logger.info(f"Model path:                {s['model_path']}")
+    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    _model = s.get('model_path') or DEFAULT_MODEL
+    _kind = 'bundled' if _model in available_models() else 'custom path'
+    logger.info(f"Force field:               {_model} ({_kind})")
     logger.info(f"Precision:                 {s.get('precision', DEFAULT_PRECISION)}")
     logger.info(f"Long-range cutoff:         {s.get('lr_cutoff', DEFAULT_LR_CUTOFF)} Å")
     logger.info(f"Dispersion damping:        {s.get('dispersion_damping', DEFAULT_DISPERSION_DAMPING)} Å")
@@ -1141,8 +1148,10 @@ def nve_md(**kwargs) -> None:
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Model settings group
-@click.option('--model', '--model_path', 'model_path', type=click.Path(exists=False),
-              help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
+@click.option('--model', '--model_path', 'model_path', type=str, default=None,
+              help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
+                   'or a path to a custom MLFF model directory. '
+                   'If not provided, so3lr-m is used. [default: so3lr-m]')
 @click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,

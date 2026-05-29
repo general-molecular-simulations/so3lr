@@ -1171,10 +1171,8 @@ def tune(
                 'partial_charges', 'hirshfeld_ratios', 'c6_ratios'],
         )
     else:
-        # Verify model path exists
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(
-                f"Custom model path not found: {model_path}")
+        # model_path may be a bundled name (so3lr-s/m/l/so3lr) or a path;
+        # load_model resolves both and raises if neither is valid.
         # logger.info(f"Using custom MLFF potential from: {model_path}")
         potential = load_model(
             model_path,

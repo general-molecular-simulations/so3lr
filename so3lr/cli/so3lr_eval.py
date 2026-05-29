@@ -260,32 +260,29 @@ def evaluate_so3lr_on(
         # Create parent directory if it doesn't exist
         save_to.parent.mkdir(parents=True, exist_ok=True)
 
-    # Initialize the model
-    if model_path is None:
-        logger.info("Using default SO3LR potential")
-        #TODO: add precision handling
-        so3lr_calc = make_so3lr(
-            lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            calculate_forces=True,
-            output_intermediate_quantities=output_intermediate_quantities
-        )
-        cutoff = 4.5 # Default cutoff for SO3LR
+    # Initialize the model. A bundled name (so3lr-s/m/l/so3lr) or a custom path;
+    # None falls back to the default model.
+    from so3lr.model_registry import resolve_model, available_models
+    workdir_path, _, _ = resolve_model(model_path)
+    if model_path is None or model_path in available_models():
+        logger.info(f"Using bundled SO3LR model: {workdir_path.name}")
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
-        so3lr_calc = make_so3lr(
-            workdir=model_path,
-            lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            calculate_forces=True,
-            output_intermediate_quantities=output_intermediate_quantities
-        )
 
-        with open(Path(model_path) / "hyperparameters.json", "r") as fp:
-            cfg = json.load(fp)
-        
-        cutoff = cfg['model']['cutoff']
-    
+    #TODO: add precision handling
+    so3lr_calc = make_so3lr(
+        workdir=workdir_path,
+        lr_cutoff=lr_cutoff,
+        dispersion_energy_cutoff_lr_damping=dispersion_damping,
+        calculate_forces=True,
+        output_intermediate_quantities=output_intermediate_quantities
+    )
+
+    # Read the short-range cutoff from the resolved model's hyperparameters.
+    with open(workdir_path / "hyperparameters.json", "r") as fp:
+        cfg = json.load(fp)
+    cutoff = cfg['model']['cutoff']
+
     logger.info(f"Using cutoff: {cutoff} Å")
 
     # Load the data

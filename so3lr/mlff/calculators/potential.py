@@ -130,6 +130,13 @@ def load_model_from_workdir(
             new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
             params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
 
+            # Tile the optional final bias (legacy models with use_final_bias_bool).
+            old_bias = params['params']['observables_0']['energy_dense_final'].get('bias')
+            if old_bias is not None and old_bias.shape[-1] == 1:
+                params['params']['observables_0']['energy_dense_final']['bias'] = jnp.tile(
+                    old_bias, (num_theory_levels,)
+                )
+
     # # Initialize missing C6RatiosSparse params (observables_3) if not in checkpoint.
     # # C6RatiosSparse was added after the model was trained. With embedding=1.0 and
     # # final Dense=0, c6_ratios defaults to 1.0 (free-atom C6 values).

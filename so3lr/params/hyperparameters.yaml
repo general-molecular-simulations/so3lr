@@ -164,6 +164,8 @@ model:
   use_charge_embed: true
   use_spin_embed: true
   zbl_repulsion_bool: true
+  legacy_so3lr_bool: true
+  use_final_bias_bool: true
 neighborlist_format_lr: sparse
 optimizer:
   gradient_clipping: clip_by_global_norm

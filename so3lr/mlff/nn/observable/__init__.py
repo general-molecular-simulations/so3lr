@@ -10,3 +10,4 @@ from .observable_sparse import ElectrostaticEnergyKspace
 from .observable_sparse import DispersionEnergyKspace
 from .observable_sparse import DispersionEnergySparse
 from .observable_sparse import ZBLRepulsionSparse
+from .observable_sparse import NHLRepulsionSparse

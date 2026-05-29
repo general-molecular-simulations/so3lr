@@ -85,6 +85,7 @@ class AseCalculatorSparse(Calculator):
             add_energy_shift: bool = False,
             dtype: np.dtype = np.float64,
             model: str = 'so3krates',
+            head_index: int = 5,
             has_aux: bool = False,
             from_file: bool = False,
             observables: Optional[Sequence[str]] = None,
@@ -116,6 +117,7 @@ class AseCalculatorSparse(Calculator):
         )
 
         return cls(potential=mlff_potential,
+                   head_index=head_index,
                    calculate_stress=calculate_stress,
                    calculate_hessian=calculate_hessian,
                    capacity_multiplier=capacity_multiplier,
@@ -143,6 +145,7 @@ class AseCalculatorSparse(Calculator):
             calculate_hessian: bool,
             dtype: np.dtype,
             has_aux: bool,
+            head_index: int = 5,
             observables: Optional[Sequence[str]] = None,
             output_atom_indices: Optional[Sequence[int]] = None,
             hessian_slice: bool = False,
@@ -598,6 +601,7 @@ class AseCalculatorSparse(Calculator):
                 self.lr_cutoff = potential.long_range_cutoff
 
         self.dtype = dtype
+        self.head_index = head_index
         self.kspace_electrostatics = kspace_electrostatics
         self.kspace_smearing = kspace_smearing
         self.kspace_spacing = kspace_spacing
@@ -612,6 +616,15 @@ class AseCalculatorSparse(Calculator):
         super(AseCalculatorSparse, self).calculate(atoms, *args, **kwargs)
 
         system = atoms_to_system(atoms, dtype=self.dtype)
+
+        # Select the inference level-of-theory head. glp's atoms_to_system seeds
+        # theory_mask with a default head that is not necessarily the production
+        # head; pin it explicitly so multi-head models predict the right level.
+        if getattr(system, 'theory_mask', None) is not None:
+            num_theory_levels = system.theory_mask.shape[-1]
+            system = system._replace(
+                theory_mask=jnp.eye(num_theory_levels, dtype=self.dtype)[self.head_index].reshape(1, -1)
+            )
 
         pbc_any = atoms.get_pbc().any()
         has_atoms_k_grid = 'k_grid' in atoms.info

@@ -162,6 +162,7 @@ def make_so3krates_sparse_from_config(
         dispersion_energy_scale=model_config.dispersion_energy_scale,
         return_representations_bool=return_representations_bool,
         zbl_repulsion_bool=model_config.zbl_repulsion_bool,
+        legacy_so3lr_bool=model_config.get('legacy_so3lr_bool', False),
         use_final_bias_bool=model_config.get('use_final_bias_bool', False),
         neighborlist_format_lr=config.neighborlist_format_lr,
         output_intermediate_quantities=output_intermediate_quantities,

@@ -4,6 +4,12 @@ version = "0.1.0"
 description = "SO3krates Universal Pairwise Force Field with Long Range Interactions (SO3LR) for Molecular Simulation"
 authors = ["Adil Kabylda, Thorben Frank"]
 license = "MIT"
+# Ship bundled model checkpoints (orbax dirs + params.pkl + hyperparameters) as
+# package data so they are present in built wheels/sdists, not just editable installs.
+include = [
+    { path = "so3lr/models/**/*", format = ["sdist", "wheel"] },
+    { path = "so3lr/params/**/*", format = ["sdist", "wheel"] },
+]
 
 
 [tool.poetry.dependencies]

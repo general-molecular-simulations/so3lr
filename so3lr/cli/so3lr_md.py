@@ -682,10 +682,11 @@ def load_model(
     """
     logger.info(f'Loading model from {model_path}')
 
-    # Verify model path exists
-    model_dir = Path(model_path).expanduser().resolve()
-    if not model_dir.exists():
-        raise FileNotFoundError(f"Model path not found: {model_path}")
+    # Resolve a bundled model name (so3lr-s/m/l/so3lr) or a filesystem path.
+    # Raises FileNotFoundError if it is neither a known name nor an existing path.
+    from so3lr.model_registry import resolve_model
+    model_dir, from_file, _ = resolve_model(model_path)
+    params_pkl = model_dir / 'params.pkl'
 
     long_range_kw = dict(
         cutoff_lr=lr_cutoff,
@@ -699,18 +700,6 @@ def load_model(
         do_ewald = (kspace_dispersion == 'ewald')
         long_range_kw['dispersion_kspace_do_ewald'] = do_ewald
         long_range_kw['dispersion_kspace_interp_nodes'] = kspace_dispersion_interp_nodes
-
-    checkpoints_dir = model_dir / 'checkpoints'
-    params_pkl = model_dir / 'params.pkl'
-
-    # Prefer Orbax checkpoints, but support legacy params.pkl-only model folders.
-    from_file = False
-    if not checkpoints_dir.exists() and params_pkl.exists():
-        logger.info(
-            'No checkpoints directory found in %s; loading parameters from params.pkl instead.',
-            model_dir,
-        )
-        from_file = True
 
     def _create_potential(from_file_flag: bool) -> PotentialSparse:
         return PotentialSparse.create_from_workdir(
@@ -2042,36 +2031,25 @@ def perform_md(
     if "partial_charges" in observables:
             patched_potential_kwargs.update(output_intermediate_quantities=observables)
 
-    # Loading the model
-    if model_path is None:
-        # Load default SO3LR
-        logger.info("Using default SO3LR potential.")
-        potential = So3lrPotential(
-            dtype=jnp.float64 if precision == 'float64' else jnp.float32,
-            lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            coulomb_kspace_method=kspace_electrostatics,
-            coulomb_kspace_interp_nodes=kspace_interp_nodes,
-            dispersion_kspace_method=kspace_dispersion,
-            dispersion_kspace_interp_nodes=kspace_dispersion_interp_nodes,
-            **patched_potential_kwargs
-        )
+    # Loading the model. A bundled name (so3lr-s/m/l/so3lr) or a custom path; None
+    # falls back to the default model. load_model resolves names and paths alike.
+    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    selected_model = model_path if model_path is not None else DEFAULT_MODEL
+    if selected_model in available_models():
+        logger.info(f"Using bundled SO3LR model: {selected_model}")
     else:
-        # Verify model path exists
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Custom model path not found: {model_path}")
-        logger.info(f"Using custom MLFF potential from: {model_path}")
-        potential = load_model(
-            model_path,
-            precision=jnp.float64 if precision == 'float64' else jnp.float32,
-            lr_cutoff=lr_cutoff,
-            dispersion_damping=dispersion_damping,
-            kspace_electrostatics=kspace_electrostatics,
-            kspace_interp_nodes=kspace_interp_nodes,
-            kspace_dispersion=kspace_dispersion,
-            kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
-            **patched_potential_kwargs
-        )
+        logger.info(f"Using custom MLFF potential from: {selected_model}")
+    potential = load_model(
+        selected_model,
+        precision=jnp.float64 if precision == 'float64' else jnp.float32,
+        lr_cutoff=lr_cutoff,
+        dispersion_damping=dispersion_damping,
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
+        **patched_potential_kwargs
+    )
 
     # Setting up the model
     neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = process_model(
@@ -2548,9 +2526,17 @@ def perform_md(
                     save_pysages_state(pysages_result, restart_pysages_save_path)
 
     logger.info('Results saved to: ' + output_file)
-    average_time_per_step = total_time_for_steps / (cycle_md - 1)
-    logger.info(f'Average time per step: {average_time_per_step:.2e} seconds', )
-    logger.info(f'Average time per atom per step: {average_time_per_step / len(initial_geometry):.2e} seconds')
+    # The first cycle is excluded from timing (it includes JIT compilation /
+    # neighbor-list allocation), so at least two cycles are needed for an average.
+    timed_cycles = cycle_md - 1
+    if timed_cycles > 0:
+        average_time_per_step = total_time_for_steps / timed_cycles
+        logger.info(f'Average time per step: {average_time_per_step:.2e} seconds', )
+        logger.info(f'Average time per atom per step: {average_time_per_step / len(initial_geometry):.2e} seconds')
+    else:
+        average_time_per_step = None
+        logger.info('Average time per step: not available (needs at least 2 MD cycles; '
+                    'the first cycle is excluded as warm-up).')
 
     if output_format == 'extxyz':
         logger.info('Consider saving the trajectory in HDF5 format, which has no overhead for long runs (--output traj_name.hdf5).')
@@ -2560,7 +2546,7 @@ def perform_md(
     except RuntimeError:
         backend = "cpu"
 
-    if backend in ["gpu", "cuda", "rocm"]:
+    if average_time_per_step is not None and backend in ["gpu", "cuda", "rocm"]:
         if average_time_per_step > 1.2 * 3.25e-6 * len(initial_geometry):
             logger.warn('Ideally, the average time per step should be close to {:.2e} seconds (measured on an A100 GPU)'.format(
                 3.25e-6 * len(initial_geometry)))
@@ -2731,28 +2717,22 @@ def perform_min(
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
 
-    # Loading the model
-    if model_path is None:
-        # Load default SO3LR
-        logger.info("Using default SO3LR potential.")
-        potential = So3lrPotential(
-            dtype=jnp.float64 if precision == 'float64' else jnp.float32,
-            lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            coulomb_kspace_method=kspace_electrostatics,
-            coulomb_kspace_interp_nodes=kspace_interp_nodes,
-        )
+    # Loading the model. A bundled name (so3lr-s/m/l/so3lr) or a custom path; None
+    # falls back to the default model. load_model resolves names and paths alike.
+    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    selected_model = model_path if model_path is not None else DEFAULT_MODEL
+    if selected_model in available_models():
+        logger.info(f"Using bundled SO3LR model: {selected_model}")
     else:
-        # Load custom MLFF
-        logger.info(f"Using custom MLFF potential from: {model_path}")
-        potential = load_model(
-            model_path,
-            precision=jnp.float64 if precision == 'float64' else jnp.float32,
-            lr_cutoff=lr_cutoff,
-            dispersion_damping=dispersion_damping,
-            kspace_electrostatics=kspace_electrostatics,
-            kspace_interp_nodes=kspace_interp_nodes,
-        )
+        logger.info(f"Using custom MLFF potential from: {selected_model}")
+    potential = load_model(
+        selected_model,
+        precision=jnp.float64 if precision == 'float64' else jnp.float32,
+        lr_cutoff=lr_cutoff,
+        dispersion_damping=dispersion_damping,
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_interp_nodes=kspace_interp_nodes,
+    )
 
     # Setting up the model
     neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = process_model(
