@@ -603,8 +603,15 @@ def atoms_to_jnp(
         momenta = None
 
     if momenta is not None:
-        logger.info('Loading initial velocities from input file.')
-     
+        if momenta.shape[0] > 1:
+            momenta = momenta - jnp.mean(momenta, axis=0, keepdims=True)
+            logger.info(
+                'Loading initial velocities from input file; '
+                'subtracted center-of-mass momentum.'
+            )
+        else:
+            logger.info('Loading initial velocities from input file.')
+
     return {
         'positions': positions,
         'species': species,
@@ -2542,7 +2549,8 @@ def perform_md(
 
     logger.info('Results saved to: ' + output_file)
     average_time_per_step = total_time_for_steps / (cycle_md - 1)
-    logger.info(f'Average time per step: {average_time_per_step:.2e} seconds')
+    logger.info(f'Average time per step: {average_time_per_step:.2e} seconds', )
+    logger.info(f'Average time per atom per step: {average_time_per_step / len(initial_geometry):.2e} seconds')
 
     if output_format == 'extxyz':
         logger.info('Consider saving the trajectory in HDF5 format, which has no overhead for long runs (--output traj_name.hdf5).')

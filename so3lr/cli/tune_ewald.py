@@ -1206,8 +1206,8 @@ def tune(
         total_charge=total_charge,
         precision=precision,
         fractional_coordinates=fractional_coordinates,
-        buffer_size_multiplier_lr=buffer_size_multiplier_sr,
-        buffer_size_multiplier_sr=buffer_size_multiplier_lr,
+        buffer_size_multiplier_sr=buffer_size_multiplier_sr,
+        buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         has_aux=True,
     )
 
