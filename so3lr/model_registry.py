@@ -65,10 +65,11 @@ def resolve_model(name_or_path=None):
                 f"and not an existing path."
             )
 
-    # Prefer orbax checkpoints; fall back to a legacy params.pkl only when there
-    # is no checkpoints directory.
-    from_file = (
-        not (workdir / "checkpoints").exists()
-    ) and (workdir / "params.pkl").exists()
+    # Prefer a canonical params.pkl when present: the legacy (v1) model ships
+    # such a pickle export, and its bundled orbax checkpoint is incomplete (no
+    # _CHECKPOINT_METADATA), so loading from the pickle is both faithful to v1
+    # and robust. The new so3lr-s/m/l models have no params.pkl and therefore
+    # load from their orbax checkpoints/ directory.
+    from_file = (workdir / "params.pkl").exists()
 
     return workdir, from_file, DEFAULT_HEAD_INDEX

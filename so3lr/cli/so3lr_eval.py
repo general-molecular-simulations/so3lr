@@ -69,7 +69,10 @@ def process_predictions(
     main_graph.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
     main_graph.globals['energy_so3lr'] = output_prediction['energy']
     main_graph.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
-    main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
+    # c6_ratios is only emitted by the so3lr-s/m/l models; the legacy 'so3lr'
+    # model has no c6 head, so guard against its absence.
+    if 'c6_ratios' in output_prediction:
+        main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
 
     # Remove non-standard global fields that don't have one row per graph
     # (residue_charge has shape (2,) per graph, residue_segments has shape

@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, Tuple, Optional, Sequence
 
 from so3lr.mlff.nn.sub_module import BaseSubModule
 from so3lr.mlff.masking.mask import safe_mask
-from so3lr.mlff.nn.observable.dispersion_ref_data import alphas, C6_coef, NHL_AA, NHL_BB
+from so3lr.mlff.nn.observable.dispersion_ref_data import alphas, C6_coef, alphas_legacy, C6_coef_legacy, NHL_AA, NHL_BB
 from so3lr.mlff.masking.mask import safe_scale
 from so3lr.mlff.nn.activation_function import softplus_inverse, softplus
 
@@ -1031,13 +1031,14 @@ def _gauss_legendre_nodes_weights(n: int, dtype=jnp.float64):
     return jnp.asarray(nodes, dtype=dtype), jnp.asarray(weights, dtype=dtype)
 
 
-@jax.jit
+@partial(jax.jit, static_argnames=('legacy',))
 def mixing_rules(
         atomic_numbers: jnp.ndarray,
         idx_i: jnp.ndarray,
         idx_j: jnp.ndarray,
         hirshfeld_ratios: jnp.ndarray,
         c6_ratios: jnp.ndarray,
+        legacy: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Apply Casimir-Polder mixing rules to obtain pairwise dispersion parameters.
 
@@ -1050,6 +1051,10 @@ def mixing_rules(
         idx_i: Sender indices for long-range edges.
         idx_j: Receiver indices for long-range edges.
         hirshfeld_ratios: Per-atom Hirshfeld volume ratios, shape: (num_nodes).
+        c6_ratios: Per-atom C6 volume ratios, shape: (num_nodes).
+        legacy: If True, use the legacy SO3LR (v1) free-atom reference
+            coefficients (``alphas_legacy``/``C6_coef_legacy``) instead of the
+            refitted ones used by the so3lr-s/m/l models.
 
     Returns:
         Tuple of (alpha_ij, C6_ij): mean polarizabilities and combined C6
@@ -1057,24 +1062,22 @@ def mixing_rules(
     """
     dtype = hirshfeld_ratios.dtype
 
+    # Free-atom reference coefficients: legacy v1 vs refitted (so3lr-s/m/l).
+    alphas_ref = alphas_legacy if legacy else alphas
+    C6_ref = C6_coef_legacy if legacy else C6_coef
+
     atomic_number_i = atomic_numbers[idx_i] - 1
     atomic_number_j = atomic_numbers[idx_j] - 1
     hirshfeld_ratio_i = hirshfeld_ratios[idx_i]
     hirshfeld_ratio_j = hirshfeld_ratios[idx_j]
 
-    # TODO: old HirshfeldSparse below, maybe make backward compatible at some point
-    # alpha_i = jnp.asarray(jnp.take(alphas, atomic_number_i, axis=0), dtype=dtype) * hirshfeld_ratio_i
-    # C6_i = jnp.asarray(jnp.take(C6_coef, atomic_number_i, axis=0), dtype=dtype) * jnp.square(hirshfeld_ratio_i)
-    # alpha_j = jnp.asarray(jnp.take(alphas, atomic_number_j, axis=0), dtype=dtype) * hirshfeld_ratio_j
-    # C6_j = jnp.asarray(jnp.take(C6_coef, atomic_number_j, axis=0), dtype=dtype) * jnp.square(hirshfeld_ratio_j)
-
     C6_ratio_i = c6_ratios[idx_i]
     C6_ratio_j = c6_ratios[idx_j]
 
-    alpha_i = jnp.asarray(jnp.take(alphas, atomic_number_i, axis=0), dtype=dtype) * hirshfeld_ratio_i
-    C6_i = jnp.asarray(jnp.take(C6_coef, atomic_number_i, axis=0), dtype=dtype) * C6_ratio_i
-    alpha_j = jnp.asarray(jnp.take(alphas, atomic_number_j, axis=0), dtype=dtype) * hirshfeld_ratio_j
-    C6_j = jnp.asarray(jnp.take(C6_coef, atomic_number_j, axis=0), dtype=dtype) * C6_ratio_j
+    alpha_i = jnp.asarray(jnp.take(alphas_ref, atomic_number_i, axis=0), dtype=dtype) * hirshfeld_ratio_i
+    C6_i = jnp.asarray(jnp.take(C6_ref, atomic_number_i, axis=0), dtype=dtype) * C6_ratio_i
+    alpha_j = jnp.asarray(jnp.take(alphas_ref, atomic_number_j, axis=0), dtype=dtype) * hirshfeld_ratio_j
+    C6_j = jnp.asarray(jnp.take(C6_ref, atomic_number_j, axis=0), dtype=dtype) * C6_ratio_j
     
     alpha_ij = (alpha_i + alpha_j) / 2
     C6_ij = 2 * C6_i * C6_j * alpha_j * alpha_i / (alpha_i ** 2 * C6_j + alpha_j ** 2 * C6_i)
@@ -1991,7 +1994,8 @@ class DispersionEnergySparse(nn.Module):
             idx_i_lr,
             idx_j_lr,
             hirshfeld_ratios,
-            c6_ratios
+            c6_ratios,
+            legacy=self.legacy
         )
 
         # Use cubic fit for gamma
