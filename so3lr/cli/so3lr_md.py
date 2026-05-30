@@ -1959,7 +1959,7 @@ def perform_md(
     relax_before_run = all_settings.get('relax_before_run')
     observables = all_settings.get('observables', [])
     output_atom_indices = all_settings.get('output_atom_indices', None)
-    dispersion_tail_correction = all_settings.get('dispersion_tail_correction', ensemble == 'npt')
+    dispersion_tail_correction = all_settings.get('dispersion_tail_correction', False)
 
     # Enhanced sampling (PySAGES)
     do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
@@ -2198,7 +2198,16 @@ def perform_md(
                 box=box, k_grid=k_grid, k_grid_disp=k_grid_disp, has_aux=True
             )
 
-        _hirshfeld_ratios = _aux['hirshfeld_ratios']
+        # New models expose the ratio as 'a0_ratios'; the legacy model uses
+        # 'hirshfeld_ratios'. Accept either so an explicit opt-in works for both.
+        _hirshfeld_ratios = _aux.get('a0_ratios', _aux.get('hirshfeld_ratios'))
+        if _hirshfeld_ratios is None or 'c6_ratios' not in _aux:
+            raise KeyError(
+                "dispersion_tail_correction requires per-atom 'a0_ratios'/"
+                "'hirshfeld_ratios' and 'c6_ratios' in the model output; the "
+                "selected model does not provide them (the legacy model has no "
+                "C6 head). Disable dispersion_tail_correction for this model."
+            )
         _c6_ratios = _aux['c6_ratios']
         _species = initial_geometry_dict['species']
 
