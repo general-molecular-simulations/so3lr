@@ -1474,9 +1474,12 @@ def make_optimizer(
     )
 
 
-def freeze_parameters(optimizer, trainable_subset_keys):
-    """Freeze parameters by giving keys for trainable subsets. Thus, all parameters that are NOT in
-    `trainable_subset_keys` are frozen.
+def freeze_parameters(optimizer, trainable_subset_keys=None, frozen_subset_keys=None):
+    """Freeze parameters by giving keys for trainable or frozen subsets.
+
+    Exactly one of ``trainable_subset_keys`` (whitelist: only these are trained,
+    everything else frozen) or ``frozen_subset_keys`` (blacklist: only these are
+    frozen, everything else trained) should be provided.
 
     Args:
         optimizer (): optax.GradientTransformation.
@@ -1484,20 +1487,34 @@ def freeze_parameters(optimizer, trainable_subset_keys):
         for a pyTree like {'a': {'b': *, 'c': *}, 'd': *} and trainable_subset_keys = ['a'] one gets the following
         {'a': {'b': 'trainable', 'c': 'trainable'}, 'd': 'frozen'}. If 'c' and 'd' should be trainable one has to
         pass trainable_subset_keys = ['c', 'd'].
+        frozen_subset_keys (Sequence): Keys whose entries are frozen; all other
+        parameters remain trainable (the inverse of ``trainable_subset_keys``).
 
     Returns:
 
     """
+    if frozen_subset_keys is not None:
+        label_fn = make_freeze_annotation_fn(frozen_subset_keys)
+    else:
+        label_fn = make_annotation_fn(trainable_subset_keys)
 
     return optax.multi_transform(
         {'trainable': optimizer, 'frozen': zero_grads()},
-        param_labels=make_annotation_fn(trainable_subset_keys)
+        param_labels=label_fn
     )
 
 
 def make_annotation_fn(keys):
     return lambda params: traverse_util.path_aware_map(
         lambda path, v: 'trainable' if len(set(keys) & set(path)) > 0 else 'frozen', params
+    )
+
+
+def make_freeze_annotation_fn(keys):
+    """Inverse of make_annotation_fn: parameters whose path contains any of
+    ``keys`` are 'frozen', everything else is 'trainable'."""
+    return lambda params: traverse_util.path_aware_map(
+        lambda path, v: 'frozen' if len(set(keys) & set(path)) > 0 else 'trainable', params
     )
 
 

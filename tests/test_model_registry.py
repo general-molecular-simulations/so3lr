@@ -30,8 +30,9 @@ def test_resolve_bundled_models(name):
     workdir, from_file, head_index = mr.resolve_model(name)
     assert workdir == PKG / "models" / name
     assert workdir.exists()
-    assert (workdir / "checkpoints").exists()
-    assert from_file is False
+    # Bundled v2 models ship as a single params.pkl (no orbax checkpoints/).
+    assert (workdir / "params.pkl").exists()
+    assert from_file is True
     assert head_index == 5
 
 

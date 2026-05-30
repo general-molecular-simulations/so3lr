@@ -14,6 +14,7 @@ It includes functionality for:
 import os
 import sys
 import time
+import json
 import logging
 import pathlib
 from pathlib import Path
@@ -654,6 +655,16 @@ def check_cell(
 
     return cell
 
+def _is_legacy_model(model_dir) -> bool:
+    """Return True if the resolved model is the legacy v1 SO3LR (legacy_so3lr_bool)."""
+    try:
+        with open(pathlib.Path(model_dir) / 'hyperparameters.json', 'r') as fp:
+            cfg = json.load(fp)
+        return bool(cfg.get('model', {}).get('legacy_so3lr_bool', False))
+    except Exception:
+        return False
+
+
 def load_model(
     model_path: str,
     precision: jnp.dtype,
@@ -687,6 +698,14 @@ def load_model(
     from so3lr.model_registry import resolve_model
     model_dir, from_file, _ = resolve_model(model_path)
     params_pkl = model_dir / 'params.pkl'
+
+    # The legacy v1 model used real-space cutoff electrostatics; k-space
+    # (pme/ewald/p3m) is untested for it. Warn but allow.
+    if kspace_electrostatics is not None and _is_legacy_model(model_dir):
+        logger.warning(
+            f"k-space electrostatics ('{kspace_electrostatics}') is untested for the legacy "
+            f"v1 SO3LR model, which was trained with real-space cutoff electrostatics. "
+            f"Results may be unreliable; consider a real-space long-range cutoff instead.")
 
     long_range_kw = dict(
         cutoff_lr=lr_cutoff,
@@ -725,7 +744,7 @@ def load_model(
     return potential
 
 
-def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., precision=jnp.float32, fractional_coordinates=True):
+def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., precision=jnp.float32, fractional_coordinates=True, num_unpaired_electrons=0.):
     """
     Create a function that builds a graph from positions and neighbors.
 
@@ -802,7 +821,7 @@ def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., p
             others=idx_j,
             mask=None,
             total_charge=jnp.array([total_charge], dtype=precision),
-            num_unpaired_electrons=jnp.array([0.], dtype=precision),
+            num_unpaired_electrons=jnp.array([num_unpaired_electrons], dtype=precision),
             edges_lr=dR_lr,
             idx_i_lr=idx_i_lr,
             idx_j_lr=idx_j_lr,
@@ -832,6 +851,7 @@ def to_jax_md_custom(
         fractional_coordinates: bool = True,
         total_charge: float = 0.,
         precision: jnp.dtype = jnp.float32,
+        num_unpaired_electrons: float = 0.,
         **neighbor_kwargs
 ):
     """
@@ -889,7 +909,8 @@ def to_jax_md_custom(
         species,
         total_charge,
         precision,
-        fractional_coordinates=fractional_coordinates
+        fractional_coordinates=fractional_coordinates,
+        num_unpaired_electrons=num_unpaired_electrons
     )
 
     # Create an energy_fn that is compatible with jax_md
@@ -915,6 +936,7 @@ def process_model(
     displacement: DisplacementOrMetricFn,
     box: jnp.ndarray,
     total_charge: float = 0.,
+    num_unpaired_electrons: float = 0.,
     buffer_size_multiplier_lr: float = 1.25,
     buffer_size_multiplier_sr: float = 1.25,
     minimum_cell_size_multiplier: float = 1.0,
@@ -954,6 +976,7 @@ def process_model(
         box=box,
         disable_cell_list=False if fractional_coordinates else True,
         total_charge=total_charge,
+        num_unpaired_electrons=num_unpaired_electrons,
         precision=precision,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
@@ -1801,10 +1824,69 @@ def check_kspace_grid(
             )
 
 
+def validate_and_log_input(initial_geometry, input_file_path,
+                           total_charge=None, num_unpaired_electrons=None,
+                           verbose=True):
+    """Validate a parsed structure and (optionally) log a human-readable summary.
+
+    Raises a clear error if positions or atomic numbers are missing. When
+    ``verbose`` is True, logs what was read (counts, elements, periodicity,
+    charge/spin) plus a short example of the first atoms, and warns about large
+    net charge/spin in periodic cells. Pass ``verbose=False`` to validate only
+    (avoids duplicate logging when a later stage logs the full summary).
+    """
+    n_atoms = len(initial_geometry)
+    if n_atoms == 0:
+        raise ValueError(f"Input geometry file {input_file_path} contains no atoms.")
+
+    atomic_numbers = initial_geometry.get_atomic_numbers()
+    if atomic_numbers is None or len(atomic_numbers) == 0:
+        raise ValueError(f"Input geometry file {input_file_path} has no atomic numbers (atom types).")
+
+    positions = initial_geometry.get_positions()
+    if positions is None or len(positions) == 0:
+        raise ValueError(f"Input geometry file {input_file_path} has no atomic positions.")
+
+    if not verbose:
+        return
+
+    symbols = initial_geometry.get_chemical_symbols()
+    elements = sorted(set(symbols))
+    is_periodic = bool(np.any(initial_geometry.get_pbc()))
+
+    logger.info(f"Read {n_atoms} atoms ({initial_geometry.get_chemical_formula()}) from {input_file_path}")
+    logger.info(f"  Elements:     {', '.join(elements)}")
+    if is_periodic:
+        diag = np.diag(np.array(initial_geometry.get_cell()))
+        logger.info(f"  Periodic:     yes  (cell lengths along x,y,z = {diag[0]:.3f}, {diag[1]:.3f}, {diag[2]:.3f} Å)")
+    else:
+        logger.info(f"  Periodic:     no")
+    if total_charge is not None:
+        logger.info(f"  Total charge: {total_charge}    Spin (unpaired e-): {num_unpaired_electrons}")
+
+    # Short example of what was parsed, so users can confirm the input.
+    logger.info("  Example (first atoms read: symbol  x  y  z [Å]):")
+    for i in range(min(3, n_atoms)):
+        x, y, z = positions[i]
+        logger.info(f"    {symbols[i]:>2}  {x:11.5f} {y:11.5f} {z:11.5f}")
+
+    # Warn about poorly-behaved electrostatics/spin in periodic cells.
+    if is_periodic and total_charge is not None and abs(total_charge) > 2:
+        logger.warning(
+            f"Net charge {total_charge:+} e in a periodic cell — long-range electrostatics "
+            f"assume a neutral cell; consider neutralizing the system (counter-ions or a "
+            f"uniform background charge).")
+    if is_periodic and num_unpaired_electrons is not None and abs(num_unpaired_electrons) > 2:
+        logger.warning(
+            f"Large spin ({num_unpaired_electrons} unpaired electrons) in a periodic cell — "
+            f"verify this is intended.")
+
+
 def perform_md(
     all_settings: Dict,
     opt_structure: Optional[jnp.ndarray] = None,
     restart: Optional[bool] = False,
+    log_input: bool = True,
 ) -> None:
     """
     Perform molecular dynamics simulation with the given settings.
@@ -1833,6 +1915,7 @@ def perform_md(
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
     minimum_cell_size_multiplier = all_settings.get('minimum_cell_size_multiplier', 1.0)
     total_charge = all_settings.get('total_charge')
+    num_unpaired_electrons = all_settings.get('num_unpaired_electrons', 0)
 
     # Ewald electrostatics settings
     kspace_electrostatics = all_settings.get('kspace_electrostatics',None)
@@ -1929,10 +2012,10 @@ def perform_md(
     except Exception as e:
         raise RuntimeError(f"Failed to read geometry file {input_file_path}: {e}")
 
-    if len(initial_geometry) == 0:
-        raise ValueError(f"Input geometry file {input_file_path} contains no atoms.")
-    if initial_geometry.get_atomic_numbers() is None or len(initial_geometry.get_atomic_numbers()) == 0:
-        raise ValueError(f"Input geometry file {input_file_path} has no atomic numbers.")
+    validate_and_log_input(initial_geometry, input_file_path,
+                           total_charge=total_charge,
+                           num_unpaired_electrons=num_unpaired_electrons,
+                           verbose=log_input)
     if opt_structure is not None:
         initial_geometry.set_positions(opt_structure)
 
@@ -2058,6 +2141,7 @@ def perform_md(
         displacement=displacement,
         box=box,
         total_charge=total_charge,
+        num_unpaired_electrons=num_unpaired_electrons,
         precision=precision,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
@@ -2464,6 +2548,16 @@ def perform_md(
                 k_grid_disp=k_grid_disp
             )
 
+            # Abort if the dynamics diverged (NaN/Inf). Cheap host-side check on
+            # the per-cycle scalars that were already synced for logging.
+            if not np.all(np.isfinite([float(KE), float(PE), float(current_T)])):
+                logger.error(
+                    f"Non-finite value encountered at step {current_cycle*md_steps} "
+                    f"(KE={KE}, PE={PE}, T={current_T}). The simulation has diverged; "
+                    f"aborting. Check the timestep, temperature, and input structure.")
+                raise RuntimeError(
+                    "MD simulation diverged: NaN/Inf detected in energy or temperature.")
+
             if ensemble == 'npt':
                 p_str = ''
                 if is_flex_npt:
@@ -2650,6 +2744,7 @@ def create_fire_fn(
 
 def perform_min(
     all_settings: Dict,
+    log_input: bool = True,
 ) -> Union[jnp.ndarray, List[jnp.ndarray]]:
     """
     Perform energy minimization (geometry optimization) with the given settings.
@@ -2674,6 +2769,7 @@ def perform_min(
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
     minimum_cell_size_multiplier = all_settings.get('minimum_cell_size_multiplier', 1.0)
     total_charge = all_settings.get('total_charge')
+    num_unpaired_electrons = all_settings.get('num_unpaired_electrons', 0)
 
     # Ewald electrostatics settings
     kspace_electrostatics = all_settings.get('kspace_electrostatics',None)
@@ -2698,10 +2794,10 @@ def perform_min(
     except FileNotFoundError:
         raise FileNotFoundError(f"Cannot find initial geometry file: {input_file_path}")
 
-    if len(initial_geometry) == 0:
-        raise ValueError(f"Input geometry file {input_file_path} contains no atoms.")
-    if initial_geometry.get_atomic_numbers() is None or len(initial_geometry.get_atomic_numbers()) == 0:
-        raise ValueError(f"Input geometry file {input_file_path} has no atomic numbers.")
+    validate_and_log_input(initial_geometry, input_file_path,
+                           total_charge=total_charge,
+                           num_unpaired_electrons=num_unpaired_electrons,
+                           verbose=log_input)
     cell = initial_geometry.get_cell()
     cell = check_cell(cell, lr_cutoff, kspace_electrostatics, kspace_smearing)
 
@@ -2741,6 +2837,7 @@ def perform_min(
         displacement=displacement,
         box=box,
         total_charge=total_charge,
+        num_unpaired_electrons=num_unpaired_electrons,
         precision=precision,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
@@ -3176,12 +3273,11 @@ def run(
         except FileNotFoundError:
             raise FileNotFoundError(f"Cannot find initial geometry file: {input_file_path}")
 
-        if len(initial_geometry) == 0:
-            raise ValueError(f"Input geometry file {input_file_path} contains no atoms.")
-        if initial_geometry.get_atomic_numbers() is None or len(initial_geometry.get_atomic_numbers()) == 0:
-            raise ValueError(f"Input geometry file {input_file_path} has no atomic numbers.")
-        pbc_str = "PBC" if np.any(initial_geometry.get_pbc()) else "no PBC"
-        logger.info(f"Read {len(initial_geometry)} atoms ({initial_geometry.get_chemical_formula()}) from {input_file_path} [{pbc_str}]")
+        # Log the full input summary once here; the delegated perform_min /
+        # perform_md calls below validate only (log_input=False).
+        validate_and_log_input(initial_geometry, input_file_path,
+                               total_charge=settings.get('total_charge'),
+                               num_unpaired_electrons=settings.get('num_unpaired_electrons'))
 
         # allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
         # current_atomic_numbers = {int(x) for x in initial_geometry.get_atomic_numbers()}
@@ -3208,10 +3304,10 @@ def run(
             logger.info('Restarting MD, skipping relaxation.')
             opt_structure = None
         else:
-            opt_structure = perform_min(settings)
+            opt_structure = perform_min(settings, log_input=False)
             logger.info("=" * 60)
     else:
         opt_structure = None
 
     # Perform MD with relaxed structure
-    perform_md(settings, opt_structure, restart)
+    perform_md(settings, opt_structure, restart, log_input=False)

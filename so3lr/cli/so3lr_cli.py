@@ -1,8 +1,6 @@
 """Command line interfaces for SO3LR."""
 import os
 import sys
-import jax
-import ase
 import time
 import yaml
 import click
@@ -12,15 +10,48 @@ import platform
 import numpy as np
 
 from pathlib import Path
-from ase.io import read, write
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 
 from .. import __version__
-from .so3lr_eval import evaluate_so3lr_on
-from .so3lr_finetune import finetune_so3lr
-from .so3lr_train import train_so3lr
-from .so3lr_md import perform_min, run, setup_logger
-from .tune_ewald import tune
+
+# NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
+# submodules, which pull in jax/flax/jax-md/glp/orbax) are deferred so that
+# `so3lr --help` / `so3lr <cmd> --help` stay fast and do not trigger JAX
+# initialization. The thin wrappers below import the real implementation lazily
+# on first call, keeping every call site unchanged.
+def setup_logger(*args, **kwargs):
+    from .so3lr_md import setup_logger as _f
+    return _f(*args, **kwargs)
+
+
+def run(*args, **kwargs):
+    from .so3lr_md import run as _f
+    return _f(*args, **kwargs)
+
+
+def perform_min(*args, **kwargs):
+    from .so3lr_md import perform_min as _f
+    return _f(*args, **kwargs)
+
+
+def evaluate_so3lr_on(*args, **kwargs):
+    from .so3lr_eval import evaluate_so3lr_on as _f
+    return _f(*args, **kwargs)
+
+
+def finetune_so3lr(*args, **kwargs):
+    from .so3lr_finetune import finetune_so3lr as _f
+    return _f(*args, **kwargs)
+
+
+def train_so3lr(*args, **kwargs):
+    from .so3lr_train import train_so3lr as _f
+    return _f(*args, **kwargs)
+
+
+def tune(*args, **kwargs):
+    from .tune_ewald import tune as _f
+    return _f(*args, **kwargs)
 
 # Get logger
 logger = logging.getLogger("SO3LR")
@@ -47,6 +78,7 @@ def get_hardware_info():
 
     Checks if JAX is using GPU or CPU and prints relevant device properties.
     """
+    import jax
     try:
         backend = jax.default_backend()
         devices = jax.local_devices(backend=backend)
@@ -109,6 +141,7 @@ DEFAULT_PRECISION = 'float32'
 DEFAULT_LR_CUTOFF = 12.0  # Angstrom
 DEFAULT_SEED = 52
 DEFAULT_TOTAL_CHARGE = 0
+DEFAULT_SPIN = 0  # number of unpaired electrons (multiplicity - 1)
 DEFAULT_DISPERSION_DAMPING = 2.0  # Angstrom
 DEFAULT_BUFFER_MULTIPLIER = 1.25
 DEFAULT_SAVE_BUFFER = 50
@@ -503,6 +536,8 @@ def common_model_options(f: Callable) -> Callable:
                      help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')(f)
     f = click.option('--total-charge', default=DEFAULT_TOTAL_CHARGE, type=int,
                      help=f'Total charge of the system. [default: {DEFAULT_TOTAL_CHARGE}]')(f)
+    f = click.option('--spin', 'num_unpaired_electrons', default=DEFAULT_SPIN, type=int,
+                     help=f'Spin: number of unpaired electrons (multiplicity - 1). [default: {DEFAULT_SPIN}]')(f)
     return f
 
 
@@ -607,6 +642,7 @@ YAML_DEFAULTS: Dict[str, Any] = {
     'buffer_size_multiplier_sr':  DEFAULT_BUFFER_MULTIPLIER,
     'buffer_size_multiplier_lr':  DEFAULT_BUFFER_MULTIPLIER,
     'total_charge':               DEFAULT_TOTAL_CHARGE,
+    'num_unpaired_electrons':     DEFAULT_SPIN,
     'seed':                       DEFAULT_SEED,
     'save_buffer':                DEFAULT_SAVE_BUFFER,
     'md_dt':                      DEFAULT_TIMESTEP / 1000,  # stored in ps
@@ -750,6 +786,7 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     logger.info(f"Short-range buffer:        {s.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)}")
     logger.info(f"Long-range buffer:         {s.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)}")
     logger.info(f"Total charge:              {s.get('total_charge', DEFAULT_TOTAL_CHARGE)}")
+    logger.info(f"Spin (unpaired e-):        {s.get('num_unpaired_electrons', DEFAULT_SPIN)}")
     logger.info(f"Temperature:               {s.get('md_T', s.get('init_T', DEFAULT_TEMPERATURE))} K")
     if ensemble == 'npt':
         logger.info(f"Pressure:                  {s.get('md_P')} bar")
@@ -812,6 +849,7 @@ def run_md_simulation(
     buffer_sr: float,
     buffer_lr: float,
     total_charge: int,
+    num_unpaired_electrons: int,
     save_buffer: int,
     temperature: float,
     dt: float,
@@ -875,6 +913,7 @@ def run_md_simulation(
         'buffer_size_multiplier_lr': buffer_lr,
         'save_buffer': save_buffer,
         'total_charge': total_charge,
+        'num_unpaired_electrons': num_unpaired_electrons,
         'seed': seed,
         'restart_load_path': restart_load,
         'restart_save_path': restart_save,
@@ -956,6 +995,7 @@ def fire_optimization(
     buffer_sr: float,
     buffer_lr: float,
     total_charge: int,
+    num_unpaired_electrons: int,
     min_cycles: int,
     min_steps: int,
     min_start_dt: float,
@@ -1007,6 +1047,7 @@ def fire_optimization(
     logger.info(f"Output geometry:           {output_file}")
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Total charge:              {total_charge}")
+    logger.info(f"Spin (unpaired e-):        {num_unpaired_electrons}")
     logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
         
@@ -1048,6 +1089,7 @@ def fire_optimization(
         'buffer_size_multiplier_sr': buffer_sr,
         'buffer_size_multiplier_lr': buffer_lr,
         'total_charge': total_charge,
+        'num_unpaired_electrons': num_unpaired_electrons,
         'kspace_electrostatics': kspace_electrostatics,
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
@@ -1456,6 +1498,7 @@ def tune_ewald(
     buffer_sr: float,
     buffer_lr: float,
     total_charge: int,
+    num_unpaired_electrons: int,
     jit_compile: bool,
     kspace_electrostatics: str,
     kspace_smearing: float,
@@ -1543,6 +1586,7 @@ def tune_ewald(
     logger.info(f"Precision:                 {settings_dict.get('precision')}")
     logger.info(f"Long-range cutoff:         {settings_dict.get('lr_cutoff')} Å")
     logger.info(f"Total charge:              {settings_dict.get('total_charge')}")
+    logger.info(f"Spin (unpaired e-):        {settings_dict.get('num_unpaired_electrons')}")
     logger.info(f"JIT compilation:           {'Enabled' if settings_dict.get('jit_compile') else 'Disabled'}")
 
 
@@ -1567,6 +1611,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
-
-

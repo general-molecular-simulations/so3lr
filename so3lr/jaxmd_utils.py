@@ -8,7 +8,13 @@ from jax_md.space import DisplacementOrMetricFn, Box, transform
 from so3lr.graph import Graph
 
 
-def neighbor_list_featurizer(displacement_fn, species, fractional_coordinates=True):
+def neighbor_list_featurizer(
+        displacement_fn,
+        species,
+        fractional_coordinates=True,
+        total_charge: float = 0.0,
+        num_unpaired_electrons: float = 0.0,
+):
     def featurize(R, neighbor, neighbor_lr, **kwargs):
         idx_i = neighbor[0]  # shape: P
         idx_j = neighbor[1]  # shape: P
@@ -74,8 +80,8 @@ def neighbor_list_featurizer(displacement_fn, species, fractional_coordinates=Tr
             centers=idx_i,
             others=idx_j,
             mask=None,
-            total_charge=jnp.array([0.]),
-            num_unpaired_electrons=jnp.array([0.]),
+            total_charge=jnp.asarray([total_charge], dtype=R.dtype),
+            num_unpaired_electrons=jnp.asarray([num_unpaired_electrons], dtype=R.dtype),
             edges_lr=dR_lr,
             idx_i_lr=idx_i_lr,
             idx_j_lr=idx_j_lr,
@@ -105,6 +111,8 @@ def to_jax_md(
         minimum_cell_size_multiplier_lr: float = 1.0,
         disable_cell_list: bool = False,
         fractional_coordinates: bool = True,
+        total_charge: float = 0.0,  # net charge of the system (e)
+        num_unpaired_electrons: float = 0.0,  # spin: number of unpaired electrons
         **neighbor_kwargs
 ):
     # Handle vacuum systems (box_size=None) by using a large effective box
@@ -146,6 +154,8 @@ def to_jax_md(
         displacement_or_metric,
         species,
         fractional_coordinates=fractional_coordinates,
+        total_charge=total_charge,
+        num_unpaired_electrons=num_unpaired_electrons,
     )
 
     # create an energy_fn that is compatible with jax_md

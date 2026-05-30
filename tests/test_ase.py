@@ -287,6 +287,31 @@ def test_so3lr_s_ase_calculator(name: str):
         atol=1e-4
     )
 
+    # c6_ratios is a dedicated head of the new models; check it against the
+    # saved reference via the aux observable output.
+    calc_obs = So3lrCalculator(
+        model="so3lr-s",
+        dtype=np.float64,
+        has_aux=True,
+        observables=['c6_ratios']
+    )
+    atoms_obs = atoms.copy()
+    atoms_obs.calc = calc_obs
+    _ = atoms_obs.get_potential_energy()
+    c6_ratios = np.asarray(calc_obs.results['aux']['c6_ratios'])
+
+    npt.assert_allclose(
+        target_predictions['c6_ratios'],
+        c6_ratios,
+        atol=1e-5
+    )
+
+    with npt.assert_raises(AssertionError):
+        npt.assert_allclose(
+            target_predictions['c6_ratios'],
+            np.zeros_like(c6_ratios)
+        )
+
     with npt.assert_raises(AssertionError):
         npt.assert_allclose(
             target_predictions['energy'],

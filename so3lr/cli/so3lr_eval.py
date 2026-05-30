@@ -28,6 +28,7 @@ logger = logging.getLogger("SO3LR")
 OBSERVABLES = {
     'nn_energy', 'partial_charges', 'electrostatic_energy',
     'dispersion_energy', 'zbl_repulsion',
+    'nlh_repulsion',  # clear name for the so3lr-s/m/l repulsion (== zbl_repulsion)
     'electrostatic_energy_undamped', 'dispersion_energy_undamped',
     'x',  # final-layer atom embeddings; saved to _x.npz, not extxyz
 }
@@ -66,9 +67,14 @@ def process_predictions(
 
     # Add predictions to graph nodes and globals
     main_graph.nodes['forces_so3lr'] = output_prediction['forces']
-    main_graph.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
     main_graph.globals['energy_so3lr'] = output_prediction['energy']
     main_graph.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
+    # The polarizability/volume-ratio head is named 'hirshfeld_ratios' for the
+    # legacy 'so3lr' model and 'a0_ratios' for the new so3lr-s/m/l models.
+    if 'hirshfeld_ratios' in output_prediction:
+        main_graph.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
+    if 'a0_ratios' in output_prediction:
+        main_graph.nodes['a0_ratios_so3lr'] = output_prediction['a0_ratios']
     # c6_ratios is only emitted by the so3lr-s/m/l models; the legacy 'so3lr'
     # model has no c6 head, so guard against its absence.
     if 'c6_ratios' in output_prediction:
@@ -118,12 +124,23 @@ def calculate_metrics(
     metrics = {}
 
     for target in targets:
+        # The polarizability/volume-ratio prediction is named 'a0_ratios' (new
+        # models) or 'hirshfeld_ratios' (legacy); datasets typically store the
+        # label under 'hirshfeld_ratios'. Accept either label key for the ratio.
+        label_target = target
+        if target in ('a0_ratios', 'hirshfeld_ratios'):
+            other = 'hirshfeld_ratios' if target == 'a0_ratios' else 'a0_ratios'
+            if (target not in inputs or inputs.get(target) is None) and inputs.get(other) is not None:
+                label_target = other
+
         # Skip targets that have no ground truth in the dataset (e.g., observables)
-        if target not in inputs or inputs[target] is None:
+        if label_target not in inputs or inputs[label_target] is None:
+            continue
+        if target not in output_prediction:
             continue
 
-        mask = assign_mask(target, inputs=inputs)
-        y_true = inputs[target]
+        mask = assign_mask(label_target, inputs=inputs)
+        y_true = inputs[label_target]
         y_pred = output_prediction[target]
 
         diff = np.asarray(y_pred) - np.asarray(y_true)
@@ -287,6 +304,13 @@ def evaluate_so3lr_on(
     cutoff = cfg['model']['cutoff']
 
     logger.info(f"Using cutoff: {cutoff} Å")
+
+    # The ratio head is named 'hirshfeld_ratios' for the legacy model and
+    # 'a0_ratios' for the new so3lr-s/m/l models. Normalize the requested target
+    # to the model's output key so metric names (e.g. a0_ratios_rmse) match.
+    legacy_model = bool(cfg['model'].get('legacy_so3lr_bool', False))
+    ratio_key = 'hirshfeld_ratios' if legacy_model else 'a0_ratios'
+    target_list = [ratio_key if t in ('hirshfeld_ratios', 'a0_ratios') else t for t in target_list]
 
     # Load the data
     logger.info(f"Loading data from {datafile}")

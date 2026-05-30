@@ -13,11 +13,12 @@ EXPECTED_RMSE = {
     'hirshfeld_ratios_rmse': '1.168e-02',
 }
 
-# RMSEs produced by the bundled so3lr-s model on ac.xyz.
+# RMSEs produced by the bundled so3lr-s model on ac.xyz. The ratio head is
+# reported as 'a0_ratios' for the new models (legacy uses 'hirshfeld_ratios').
 EXPECTED_RMSE_SO3LR_S = {
     'dipole_vec_rmse': '3.742e-02',
     'forces_rmse': '7.330e-02',
-    'hirshfeld_ratios_rmse': '1.535e-01',
+    'a0_ratios_rmse': '1.535e-01',
 }
 
 
@@ -105,9 +106,10 @@ def test_cli_eval_default_model(eval_dir):
 
     log_content = eval_log.read_text()
 
-    # The default-model metrics differ from the legacy ones; assert each RMSE
-    # key is present and parses to a finite, positive float (version-robust).
-    for key in EXPECTED_RMSE:
+    # The default model is so3lr-m (a new model): metrics differ from the legacy
+    # ones and the ratio head is reported as 'a0_ratios'. Assert each RMSE key is
+    # present and parses to a finite, positive float (version-robust).
+    for key in ('dipole_vec_rmse', 'forces_rmse', 'a0_ratios_rmse'):
         m = re.search(rf"'{key}': '([^']+)'", log_content)
         assert m is not None, (
             f"'{key}' not found in {eval_log}.\nLog content:\n{log_content}"

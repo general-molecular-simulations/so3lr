@@ -8,7 +8,7 @@ from so3lr.mlff.nn.observable import ElectrostaticEnergyKspace
 from so3lr.mlff.nn.observable import DispersionEnergyKspace
 from so3lr.mlff.nn.observable import DispersionEnergySparse
 from so3lr.mlff.nn.observable import ZBLRepulsionSparse
-from so3lr.mlff.nn.observable import NHLRepulsionSparse
+from so3lr.mlff.nn.observable import NLHRepulsionSparse
 from so3lr.mlff.nn.observable import DipoleVecSparse
 from so3lr.mlff.nn.observable import HirshfeldSparse
 from so3lr.mlff.nn.observable import C6RatiosSparse
@@ -176,12 +176,12 @@ def init_so3krates_sparse(
         partial_charges=partial_charges
     )
 
-    # Legacy SO3LR uses the original learnable ZBL repulsion; newer models use NHL.
+    # Legacy SO3LR uses the original learnable ZBL repulsion; newer models use NLH.
     # Both share module_name='zbl_repulsion'.
     if legacy_so3lr_bool:
         zbl_repulsion = ZBLRepulsionSparse(prop_keys=None)
     else:
-        zbl_repulsion = NHLRepulsionSparse(prop_keys=None)
+        zbl_repulsion = NLHRepulsionSparse(prop_keys=None)
 
     energy = EnergySparse(
         prop_keys=None,

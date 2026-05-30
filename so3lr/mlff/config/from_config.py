@@ -648,9 +648,19 @@ def run_fine_tuning(
         config_start_from_workdir = config_dict.ConfigDict(json.load(fp=fp))
 
     # Select a fine-tuning strategy.
+    # trainable_subset_keys: whitelist (train only these). frozen_subset_keys:
+    # blacklist (freeze only these, train the rest). At most one is set.
+    frozen_subset_keys = None
     if strategy == 'full':
         # All parameters are re-fined.
         trainable_subset_keys = None
+    elif strategy in ('freeze_long_range', 'forces_only'):
+        # Forces-only fine-tuning: train the short-range representation + energy
+        # head, but FREEZE the long-range heads (dipole/partial-charges,
+        # a0/hirshfeld, c6) so the (unlabelled) electrostatics and dispersion
+        # keep their physically-meaningful pretrained predictions.
+        trainable_subset_keys = None
+        frozen_subset_keys = ['observables_1', 'observables_2', 'observables_3']
     elif strategy == 'obs_0':
         # Only the final MLP is refined
         trainable_subset_keys = ['observables_0']
@@ -706,6 +716,7 @@ def run_fine_tuning(
         raise ValueError(
             f'--strategy {strategy} is unknown. Select one of '
             f'(`full`, '
+            f'`freeze_long_range` (alias `forces_only`), '
             f'`final_mlp`, '
             f'`last_layer`, '
             f'`last_layer_and_final_mlp`, '
@@ -794,6 +805,9 @@ def run_fine_tuning(
         print(f"Fine-tuning strategy: {strategy}")
         if trainable_subset_keys:
             print(f"Trainable modules: {trainable_subset_keys}")
+    if frozen_subset_keys:
+        print(f"Fine-tuning strategy: {strategy}")
+        print(f"Frozen modules: {frozen_subset_keys}")
 
     # Get data filepath.
     data_filepath = data_path_from_config(config=config)
@@ -840,11 +854,17 @@ def run_fine_tuning(
 
     opt = make_optimizer_from_config(config)
 
-    # Freeze all parameters arrays except the ones that lie under trainable_subset_keys.
+    # Freeze all parameter arrays except those under trainable_subset_keys, or
+    # (for blacklist strategies) freeze only those under frozen_subset_keys.
     if trainable_subset_keys is not None:
         opt = training_utils.freeze_parameters(
             optimizer=opt,
             trainable_subset_keys=trainable_subset_keys
+        )
+    elif frozen_subset_keys is not None:
+        opt = training_utils.freeze_parameters(
+            optimizer=opt,
+            frozen_subset_keys=frozen_subset_keys
         )
 
     if model == 'so3krates':

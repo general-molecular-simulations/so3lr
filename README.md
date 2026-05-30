@@ -216,6 +216,18 @@ so3lr finetune --datafile dataset.xyz --workdir so3lr_finetuned --num-train 1000
 
 You can customize the training process with a config file (`--config custom_finetune.yaml`), choose different fine-tuning strategies (`--strategy full`), or fine-tune from a previously trained model (`--model-path ./previous_finetune_workdir`). Possible strategies include `full`, `final_mlp`, `last_layer`, `last_layer_and_final_mlp`, `first_layer`, and `first_layer_and_last_layer`. We recommend using the `full` or `last_layer_and_final_mlp` strategies. The default configuration in `so3lr/config/finetune.yaml` includes settings for the optimizer, learning rate schedule, batch size, loss weights, and data filtering. To use a fine-tuned model, use the `--model path_to_finetuned_model` flag.
 
+### Fine-tuning on forces only (recommended: `freeze_long_range`)
+
+SO3LR's long-range energy terms are driven by dedicated prediction heads: electrostatics from the partial-charge/dipole head, and dispersion from the polarizability (`a0_ratios`) and `c6_ratios` heads. These heads are trained against their own labels (dipoles/charges, Hirshfeld/polarizability, C6). If your fine-tuning dataset contains **only forces** (no dipole/charge/Hirshfeld/C6 labels) and you train with `--strategy full`, the force gradients will silently drag these heads away from their physically-meaningful values — degrading the electrostatics and dispersion even though the forces look fine.
+
+For forces-only datasets, use the dedicated strategy that **freezes the long-range heads** and trains only the short-range representation and energy head:
+
+```shell script
+so3lr finetune --datafile forces_only.xyz --strategy freeze_long_range --num-train 1000 --num-valid 100
+```
+
+`freeze_long_range` (alias `forces_only`) freezes the dipole/partial-charge, `a0_ratios`, and `c6_ratios` heads (`observables_1/2/3`) while keeping the message-passing layers and the energy head (`observables_0`) trainable, so the pretrained electrostatics and dispersion are preserved. If your dataset *does* include dipole/Hirshfeld/C6 labels, prefer `full` (or add those terms to `loss_weights`) so the long-range heads adapt with supervision.
+
 ## Training from Scratch
 
 You can train a SO3krates model from scratch using a YAML configuration file. The default configuration is in `so3lr/config/config.yaml` and includes settings for the model architecture, optimizer, learning rate schedule, batch size, loss weights, and data filtering.
@@ -339,14 +351,15 @@ print(f"Partial charges: {partial_charges}")
 | `nn_energy` | Neural network energy contribution | `(n_atoms,)` |
 | `electrostatic_energy` | Damped electrostatic energy | `(n_atoms,)` |
 | `dispersion_energy` | Damped dispersion energy | `(n_atoms,)` |
-| `zbl_repulsion` | ZBL short-range repulsion | `(n_atoms,)` |
+| `zbl_repulsion` | Short-range repulsion (NLH for so3lr-s/m/l, ZBL for legacy `so3lr`) | `(n_atoms,)` |
+| `nlh_repulsion` | NLH short-range repulsion (so3lr-s/m/l; alias of `zbl_repulsion`) | `(n_atoms,)` |
 | `partial_charges` | Atomic partial charges | `(n_atoms,)` |
 | `hirshfeld_ratios` | Hirshfeld volume ratios | `(n_atoms,)` |
 | `electrostatic_energy_undamped` | Undamped electrostatic energy | `(n_atoms,)` |
 | `dispersion_energy_undamped` | Undamped dispersion energy | `(n_atoms,)` |
 | `x` | Final-layer per-atom embeddings | `(n_atoms, features)` |
 
-> **Note:** The `zbl_repulsion` key returns the model's short-range repulsion energy. For `so3lr-s/m/l` this is a parameter-free NHL repulsion; for the legacy `so3lr` model it is the original ZBL repulsion. The observable name is kept as `zbl_repulsion` for backward compatibility.
+> **Note:** The `zbl_repulsion` key returns the model's short-range repulsion energy. For `so3lr-s/m/l` this is a parameter-free NLH repulsion (also available under the clearer alias `nlh_repulsion`); for the legacy `so3lr` model it is the original ZBL repulsion. The `zbl_repulsion` key is kept for backward compatibility.
 
 ### Observable Gradients
 

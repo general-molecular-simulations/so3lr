@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, Tuple, Optional, Sequence
 
 from so3lr.mlff.nn.sub_module import BaseSubModule
 from so3lr.mlff.masking.mask import safe_mask
-from so3lr.mlff.nn.observable.dispersion_ref_data import alphas, C6_coef, alphas_legacy, C6_coef_legacy, NHL_AA, NHL_BB
+from so3lr.mlff.nn.observable.dispersion_ref_data import alphas, C6_coef, alphas_legacy, C6_coef_legacy, NLH_AA, NLH_BB
 from so3lr.mlff.masking.mask import safe_scale
 from so3lr.mlff.nn.activation_function import softplus_inverse, softplus
 
@@ -352,7 +352,7 @@ class EnergySparse(BaseSubModule):
 
         for imq_key in self.output_intermediate_quantities:
             # Skip the intermediate quantities that are already defined as observables
-            if imq_key in ['dipole_vec', 'energy', 'hirshfeld_ratios', 'c6_ratios']:
+            if imq_key in ['dipole_vec', 'energy', 'hirshfeld_ratios', 'a0_ratios', 'c6_ratios']:
                 continue
             imq = inputs.get(imq_key)
             if imq is None:
@@ -468,9 +468,11 @@ class HirshfeldSparse(BaseSubModule):
                 name='hirshfeld_ratios_dense_final'
             )(x).squeeze(axis=-1)  # (num_nodes)
 
-        hirshfeld_ratios = safe_scale(jnp.abs(x_ + q), node_mask)
+        a0_ratios = safe_scale(jnp.abs(x_ + q), node_mask)
 
-        return dict(hirshfeld_ratios=hirshfeld_ratios)
+        # New models predict static-polarizability (alpha_0) ratios; surface them
+        # under 'a0_ratios'. The legacy branch (above) keeps 'hirshfeld_ratios'.
+        return dict(a0_ratios=a0_ratios)
 
     def reset_output_convention(self, output_convention):
         self.output_convention = output_convention
@@ -1465,7 +1467,7 @@ class ZBLRepulsionSparse(BaseSubModule):
     """
     Ziegler-Biersack-Littmark repulsion (original vanilla-SO3LR, learnable).
 
-    Used by the legacy model. The newer models use NHLRepulsionSparse instead;
+    Used by the legacy model. The newer models use NLHRepulsionSparse instead;
     both share module_name='zbl_repulsion' so the checkpoint key matches whichever
     one the model config selects.
     """
@@ -1532,9 +1534,9 @@ class ZBLRepulsionSparse(BaseSubModule):
         pass
 
 
-class NHLRepulsionSparse(BaseSubModule):
+class NLHRepulsionSparse(BaseSubModule):
     """
-    NHL repulsion (used by the newer so3lr-s/m/l models).
+    NLH repulsion (used by the newer so3lr-s/m/l models).
     """
     prop_keys: Dict
     module_name: str = 'zbl_repulsion'
@@ -1561,13 +1563,13 @@ class NHLRepulsionSparse(BaseSubModule):
         zi = jnp.minimum(z_i, z_j)                       # (E,)
         zj = jnp.maximum(z_i, z_j)                       # (E,)
 
-        # Get NHL coefficients 
+        # Get NLH coefficients
         # First gather along Z_i (axis 0), then along Z_j (axis 1)
-        a = jnp.asarray(jnp.take(NHL_AA, zi, axis=0), dtype=dtype)   # (E, 93, 3)
+        a = jnp.asarray(jnp.take(NLH_AA, zi, axis=0), dtype=dtype)   # (E, 93, 3)
         a = jnp.take_along_axis(a, zj[:, None, None], axis=1)     # (E, 1, 3)
         a = a.squeeze(1)                                           # (E, 3)
 
-        b = jnp.asarray(jnp.take(NHL_BB, zi, axis=0), dtype=dtype)   # (E, 93, 3)
+        b = jnp.asarray(jnp.take(NLH_BB, zi, axis=0), dtype=dtype)   # (E, 93, 3)
         b = jnp.take_along_axis(b, zj[:, None, None], axis=1)     # (E, 1, 3)
         b = b.squeeze(1)                                           # (E, 3)
 
@@ -1581,16 +1583,19 @@ class NHLRepulsionSparse(BaseSubModule):
         x = self.ke * phi_r_cut_ij * z_over_r
 
         # NLH screening phi(r)
-        y = jnp.sum(a * jnp.exp(-b * d_ij[:, None]), axis=-1) 
+        y = jnp.sum(a * jnp.exp(-b * d_ij[:, None]), axis=-1)
 
-        # Switching, edge energy, and reduction 
+        # Switching, edge energy, and reduction
         w = switching_fn(d_ij, x_on=0.0, x_off=1.5)
 
         e_rep_edge = w * x * y / jnp.asarray(2, dtype=d_ij.dtype)
         e_rep_edge = segment_sum(e_rep_edge, segment_ids=idx_i, num_segments=num_nodes)
         e_rep_edge = safe_scale(e_rep_edge, node_mask)
 
-        return dict(zbl_repulsion=e_rep_edge)
+        # Expose under both keys: 'zbl_repulsion' keeps the energy-summation /
+        # checkpoint path working (shared module_name), 'nlh_repulsion' is the
+        # clear name for this model's repulsion, requestable as an observable.
+        return dict(zbl_repulsion=e_rep_edge, nlh_repulsion=e_rep_edge)
 
     def reset_output_convention(self, output_convention):
         pass
@@ -1970,10 +1975,12 @@ class DispersionEnergySparse(nn.Module):
         # Determine input dtype
         input_dtype = d_ij_lr.dtype
 
-        # Calculate Hirshfeld ratios
-        hirshfeld_ratios = inputs.get('hirshfeld_ratios')
+        # Polarizability/volume ratios used for alpha scaling. The head emits
+        # 'hirshfeld_ratios' for the legacy model and 'a0_ratios' for the new ones.
+        ratio_key = 'hirshfeld_ratios' if self.legacy else 'a0_ratios'
+        hirshfeld_ratios = inputs.get(ratio_key)
         if hirshfeld_ratios is None:
-            hirshfeld_ratios =  self.hirshfeld_ratios(inputs)['hirshfeld_ratios']
+            hirshfeld_ratios = self.hirshfeld_ratios(inputs)[ratio_key]
 
         if self.legacy:
             # Legacy SO3LR has no dedicated C6 head: C6 is derived from Hirshfeld
