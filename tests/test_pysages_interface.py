@@ -18,6 +18,9 @@ import pathlib
 import subprocess
 
 import pytest
+
+pytest.importorskip("pysages", reason="PySAGES is an optional dependency")
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -153,10 +156,71 @@ class TestImportGuard:
         finally:
             md_module.HAS_PYSAGES = original
 
-    def test_default_no_enhanced_sampling(self):
-        """do_enhanced_sampling should default to False."""
-        settings = {}
-        assert settings.get('do_enhanced_sampling', False) is False
+    def test_default_no_enhanced_sampling(self, tmp_path, capfd):
+        """When ``do_enhanced_sampling`` is absent from settings, perform_md
+        must take no PySAGES code path:
+
+          * ``parse_pysages_input`` must not run (no "Parsed settings for
+            PySAGES" log line), *even when a valid pysages_input.yaml
+            exists in cwd or is passed via settings*;
+          * the periodic-system Cartesian-override warning at perform_md
+            lines 1771-1776 must not fire, even with
+            ``enforce_cartesian_coordinates=False`` on a periodic geometry
+            (those are exactly the inputs that *would* trigger the override
+            if PySAGES were silently enabled).
+
+        Catches a regression where the default for ``do_enhanced_sampling``
+        flips from False to True. The pysages_input is provided as a valid
+        file so the test does not depend on the default-path lookup
+        crashing — the assertion is "PySAGES was not entered", full stop.
+        """
+        import so3lr.cli.so3lr_md as md_module
+        pysages_path = tmp_path / "pysages_input.yaml"
+        _write_yaml(pysages_path, _PYSAGES_INPUT_UNBIASED)
+
+        settings = {
+            # Note: 'do_enhanced_sampling' deliberately omitted.
+            'pysages_input': str(pysages_path),  # valid, but should not be read
+            'input_file': str(GEOMETRY_FILE),
+            'output_file': 'dummy.xyz',
+            'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
+            'ensemble': 'nvt', 'precision': 'float32',
+            'seed': 42, 'save_buffer': 10,
+            'use_so3lr': True,
+            'lr_cutoff': 12.0, 'total_charge': 0.0,
+            # On a periodic system, if PySAGES were silently enabled the
+            # gating would auto-flip this to True and emit a warning.
+            'enforce_cartesian_coordinates': False,
+        }
+        try:
+            md_module.perform_md(settings)
+        except Exception:
+            pass
+        captured = capfd.readouterr()
+        output = captured.out + captured.err
+
+        assert "Parsed settings for PySAGES" not in output, (
+            "parse_pysages_input ran even though do_enhanced_sampling "
+            "was not set in settings; the default may have flipped to "
+            f"True.\n--- output ---\n{output}"
+        )
+        assert "cartesian coordinates for periodic systems" not in output, (
+            "The PySAGES periodic-cartesian override warning fired even "
+            "though do_enhanced_sampling was not set; the PySAGES code "
+            f"path was entered.\n--- output ---\n{output}"
+        )
+
+        # Sanity: perform_md ran far enough that the assertions above
+        # are meaningful. Both log lines we checked for fire (when they
+        # do fire) *before* the geometry-read message, so if "Read
+        # ... atoms" appears we know we passed the gating block too.
+        assert "Read" in output and "atoms" in output, (
+            f"perform_md aborted before reading geometry. The two "
+            f"PySAGES-path checks above are still informative (their "
+            f"log lines fire before geometry-read), but this likely "
+            f"means the test environment is missing a setting.\n"
+            f"--- output ---\n{output}"
+        )
 
     @pytest.mark.parametrize("ensemble", ["npt", "nve", "nvt-langevin"])
     def test_nvt_restricted_method_rejects_non_nvt(self, ensemble, tmp_path):
@@ -218,6 +282,41 @@ class TestImportGuard:
         # Should NOT raise ValueError about ensemble; it should fail later
         # when trying to read the geometry file
         with pytest.raises((FileNotFoundError, RuntimeError)):
+            md_module.perform_md(settings)
+
+    @pytest.mark.parametrize("method_name", ["spectralabf", "metad"])
+    def test_nvt_restricted_extra_methods_reject_non_nvt(self, method_name, tmp_path):
+        """The original parametrized rejection test only covers ABF. The same
+        perform_md gate at lines 1710-1717 must also reject spectralabf and
+        metad for non-NVT ensembles. A regression that adds a method to
+        PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS by mistake (or forgets to
+        include a new method in the gate) would not be caught by the ABF-only
+        parametrization.
+        """
+        import so3lr.cli.so3lr_md as md_module
+        pysages_path = tmp_path / "pysages_input.yaml"
+        cv_block = [{
+            'type': 'distance', 'grp1': [0], 'grp2': [1],
+            'grid_min': 0.0, 'grid_max': 10.0,
+            'grid_stride': 32, 'periodic': False,
+        }]
+        method_block = {'method': method_name, 'cv': cv_block}
+        if method_name == 'metad':
+            method_block['method_args'] = {
+                'height': 0.1, 'sigma': [0.2], 'stride': 100,
+                'ngauss': 500, 'deltaT': 1500.0,
+            }
+        _write_yaml(pysages_path, method_block)
+        settings = {
+            'do_enhanced_sampling': True,
+            'pysages_input': str(pysages_path),
+            'input_file': 'dummy.xyz',
+            'output_file': 'dummy.xyz',
+            'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 10,
+            'ensemble': 'npt',
+            'precision': 'float32', 'seed': 42, 'save_buffer': 10,
+        }
+        with pytest.raises(ValueError, match="only supports the NVT ensemble"):
             md_module.perform_md(settings)
 
 
@@ -391,6 +490,197 @@ class TestCreatePysagesInterfaceFns:
         ctx = gen()
         np.testing.assert_allclose(ctx.box, jnp.array([0.0, 0.0, 0.0]))
 
+    # ------------------------------------------------------------------
+    # Additional coverage for the NPT and lr=True branches of
+    # create_pysages_interface_fns. The existing tests above only exercise
+    # the lr=False / non-NPT path. The new tests below cover:
+    #   * Cartesian<->fractional position conversions in init_fn (NPT)
+    #     and step_fn (NPT, both lr branches)
+    #   * threading of nbrs_lr through the lr=True step_fn
+    # ------------------------------------------------------------------
+
+    class _SettableState:
+        """Minimal stand-in for a jax_md state. Supports `.set(position=...)`
+        and exposes the result via `.position`. Used to exercise the position-
+        transformation code paths without constructing a real jax_md state."""
+        def __init__(self, position):
+            self.position = position
+
+        def set(self, *, position):
+            return TestCreatePysagesInterfaceFns._SettableState(position)
+
+    def test_init_fn_npt_transforms_position_to_cartesian(self):
+        """For ensemble='npt', init_fn_pysages must convert the incoming
+        fractional-coords state (jax-md NPT internal representation) into
+        Cartesian (what PySAGES sees). The conversion is
+        ``transform(box, frac)`` which is element-wise multiplication for
+        orthorhombic boxes. If the NPT branch at lines 58-59/67-68 is
+        skipped, the PySAGES backend would see fractional coords as if they
+        were Cartesian and every CV evaluation would be broken.
+        """
+        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
+
+        box = jnp.array([10.0, 10.0, 10.0])
+        frac = jnp.array([[0.1, 0.2, 0.3]])
+        state = self._SettableState(frac)
+
+        def dummy_step(i, args):
+            return args
+
+        gen = create_pysages_interface_fns(
+            lr=False, state=state, box=box, step_md_fn=dummy_step,
+            md_dt=0.5, nbrs="mock", ensemble='npt',
+        )
+        ctx = gen()
+        ctx_state = ctx.init_fn()
+        # Expected: box * frac element-wise = [[1.0, 2.0, 3.0]]
+        np.testing.assert_allclose(
+            ctx_state.state.position, jnp.array([[1.0, 2.0, 3.0]]), atol=1e-10
+        )
+
+    def test_init_fn_nvt_does_not_transform_position(self):
+        """The mirror-image test of the above: for non-NPT ensembles, init_fn
+        must NOT touch the state's position. Catches a regression where the
+        NPT branch is run for every ensemble, which would silently scale
+        positions in NVT by the box on every cycle boundary.
+        """
+        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
+
+        box = jnp.array([10.0, 10.0, 10.0])
+        positions = jnp.array([[1.0, 2.0, 3.0]])
+        state = self._SettableState(positions)
+
+        def dummy_step(i, args):
+            return args
+
+        gen = create_pysages_interface_fns(
+            lr=False, state=state, box=box, step_md_fn=dummy_step,
+            md_dt=0.5, nbrs="mock", ensemble='nvt',
+        )
+        ctx = gen()
+        ctx_state = ctx.init_fn()
+        np.testing.assert_allclose(
+            ctx_state.state.position, positions, atol=1e-10
+        )
+
+    def test_step_fn_npt_no_lr_roundtrips_position(self):
+        """For ensemble='npt' and lr=False, step_fn_pysages must:
+          1. convert state.position from Cartesian to fractional
+             (state.position / box) *before* calling step_md_fn;
+          2. convert state.position back from fractional to Cartesian
+             (state.position * box) *after* step_md_fn returns.
+        With an identity step_md_fn the round-trip composes to the identity.
+        We assert both halves: step_md_fn observes fractional coords inside,
+        and the outgoing context_state holds Cartesian coords.
+
+        Catches mutations that drop either the pre- or post-conversion
+        (lines 84-87 / 94-97 for lr=True, 113-116 / 122-125 for lr=False).
+        """
+        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
+
+        box = jnp.array([10.0, 10.0, 10.0])
+        cart_initial = jnp.array([[1.0, 2.0, 3.0]])
+        state = self._SettableState(cart_initial / 10.0)  # fractional input
+
+        seen_inside_step = []
+
+        def capture_step(i, args):
+            inner_state, _nbrs, _box, _k = args
+            seen_inside_step.append(np.array(inner_state.position))
+            return args
+
+        gen = create_pysages_interface_fns(
+            lr=False, state=state, box=box, step_md_fn=capture_step,
+            md_dt=0.5, nbrs="mock", ensemble='npt',
+        )
+        ctx = gen()
+        # init_fn transforms fractional -> Cartesian
+        ctx_state_after_init = ctx.init_fn()
+        np.testing.assert_allclose(
+            ctx_state_after_init.state.position, cart_initial, atol=1e-10
+        )
+        # step_fn should: cart -> frac (inside step_md_fn) -> cart (output)
+        ctx_state_after_step = ctx.step_fn(ctx_state_after_init)
+
+        assert seen_inside_step, "step_md_fn was never invoked"
+        np.testing.assert_allclose(
+            seen_inside_step[0], np.array([[0.1, 0.2, 0.3]]), atol=1e-10
+        )
+        np.testing.assert_allclose(
+            ctx_state_after_step.state.position, cart_initial, atol=1e-10
+        )
+
+    def test_step_fn_npt_lr_true_roundtrips_position(self):
+        """Same NPT pre/post-conversion check as the no-lr test, but on the
+        lr=True branch (lines 75-103). Verifies that the conversion logic is
+        replicated correctly in both branches; a copy-paste regression in one
+        branch is exactly the kind of bug a single-branch test misses.
+        """
+        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
+
+        box = jnp.array([10.0, 10.0, 10.0])
+        cart_initial = jnp.array([[1.0, 2.0, 3.0]])
+        state = self._SettableState(cart_initial / 10.0)
+
+        seen_inside_step = []
+
+        def capture_step(i, args):
+            inner_state, _nbrs, _nbrs_lr, _box, _k = args
+            seen_inside_step.append(np.array(inner_state.position))
+            return args
+
+        gen = create_pysages_interface_fns(
+            lr=True, state=state, box=box, step_md_fn=capture_step,
+            md_dt=0.5, nbrs="mock", nbrs_lr="mock_lr", ensemble='npt',
+        )
+        ctx = gen()
+        ctx_state_after_init = ctx.init_fn()
+        ctx_state_after_step = ctx.step_fn(ctx_state_after_init)
+
+        assert seen_inside_step
+        np.testing.assert_allclose(
+            seen_inside_step[0], np.array([[0.1, 0.2, 0.3]]), atol=1e-10
+        )
+        np.testing.assert_allclose(
+            ctx_state_after_step.state.position, cart_initial, atol=1e-10
+        )
+
+    def test_step_fn_lr_true_threads_nbrs_lr(self):
+        """The lr=True step_fn must pack/unpack a 5-tuple
+        ``(state, nbrs, nbrs_lr, box, k_grid)`` through step_md_fn and
+        propagate ``nbrs_lr`` in the returned extras dict.
+        If lr=True silently dispatched to the lr=False branch (a 4-tuple),
+        step_md_fn would receive the wrong arity and nbrs_lr would not
+        appear in the output extras. Catches that swap.
+        """
+        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
+
+        box = jnp.array([10.0, 10.0, 10.0])
+        nbrs = "mock_nbrs"
+        nbrs_lr_token = "mock_nbrs_lr"
+        k_grid = jnp.ones((2, 2))
+
+        observed_arity = []
+
+        def capture_step(i, args):
+            observed_arity.append(len(args))
+            return args
+
+        gen = create_pysages_interface_fns(
+            lr=True, state="mock", box=box, step_md_fn=capture_step,
+            md_dt=0.5, nbrs=nbrs, nbrs_lr=nbrs_lr_token, k_grid=k_grid,
+        )
+        ctx = gen()
+        ctx_state_after_init = ctx.init_fn()
+        ctx_state_after_step = ctx.step_fn(ctx_state_after_init)
+
+        assert observed_arity == [5], (
+            f"lr=True step_md_fn should receive a 5-tuple "
+            f"(state, nbrs, nbrs_lr, box, k_grid); got arity {observed_arity}."
+        )
+        assert ctx_state_after_step.extras["nbrs_lr"] == nbrs_lr_token
+        assert ctx_state_after_step.extras["nbrs"] == nbrs
+
 
 class TestParsePysagesInput:
     """Tests for parse_pysages_input."""
@@ -413,9 +703,28 @@ class TestParsePysagesInput:
         assert settings['method'] == 'abf'
 
     def test_parse_nonexistent_file_raises(self):
-        from so3lr.cli.so3lr_pysages_interface import parse_pysages_input
+        """When do_enhanced_sampling=True but pysages_input points to a
+        nonexistent file, perform_md must propagate FileNotFoundError to
+        the caller rather than catching it or substituting a less
+        informative error. Drives perform_md (rather than calling
+        parse_pysages_input directly) so the test verifies the error
+        surfaces through perform_md's setup path — a typo in the YAML
+        path should fail loudly at the CLI boundary, not get swallowed.
+        """
+        import so3lr.cli.so3lr_md as md_module
+        settings = {
+            'do_enhanced_sampling': True,
+            'pysages_input': '/nonexistent/path/that/cannot/exist.yaml',
+            'input_file': str(GEOMETRY_FILE),
+            'output_file': 'dummy.xyz',
+            'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
+            'ensemble': 'nvt', 'precision': 'float32',
+            'seed': 42, 'save_buffer': 10,
+            'use_so3lr': True,
+            'lr_cutoff': 12.0, 'total_charge': 0.0,
+        }
         with pytest.raises(FileNotFoundError):
-            parse_pysages_input('/nonexistent/path.yaml')
+            md_module.perform_md(settings)
 
     def test_parse_returns_dict(self, tmp_path):
         from so3lr.cli.so3lr_pysages_interface import parse_pysages_input
@@ -476,6 +785,117 @@ class TestProcessCV:
         with pytest.raises(ValueError, match="Unknown collective variable type"):
             process_cv({'type': 'nonexistent_cv'})
 
+    # ------------------------------------------------------------------
+    # Coverage for the five process_cv dispatchers that were untested:
+    # distance_pbc, differenceofdistances, differenceofdistances_pbc,
+    # princmom, coordinationnumber. For two of these (distance_pbc,
+    # differenceofdistances_pbc) we also exercise the box-required raise.
+    # Argument plumbing is asserted where the resulting CV exposes the
+    # plumbed values (PrincipalMoment.axis, CoordinationNumber.{num_exp,
+    # denom_exp, species_nn}, Distance.groups).
+    # ------------------------------------------------------------------
+
+    def test_distance_pbc_cv(self):
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        import pysages.colvars
+        box = jnp.array([10.0, 10.0, 10.0])
+        cv = process_cv(
+            {'type': 'distance_pbc', 'grp1': [0, 1], 'grp2': [2, 3]},
+            box=box,
+        )
+        assert isinstance(cv, pysages.colvars.DistancePBC)
+
+    def test_distance_pbc_without_box_raises(self):
+        """The distance_pbc branch at line 388 raises if `box` is not given.
+        Without this guard the underlying DistancePBC would fail with an
+        opaque error far from the user-facing settings file."""
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        with pytest.raises(ValueError, match="distance_pbc requires"):
+            process_cv({'type': 'distance_pbc', 'grp1': [0, 1], 'grp2': [2, 3]})
+
+    def test_differenceofdistances_cv(self):
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        import pysages.colvars
+        cv = process_cv({'type': 'differenceofdistances', 'indices': [0, 1, 2, 3]})
+        assert isinstance(cv, pysages.colvars.DifferenceOfDistances)
+
+    def test_differenceofdistances_pbc_cv(self):
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        import pysages.colvars
+        box = jnp.array([10.0, 10.0, 10.0])
+        cv = process_cv(
+            {'type': 'differenceofdistances_pbc', 'indices': [0, 1, 2, 3]},
+            box=box,
+        )
+        assert isinstance(cv, pysages.colvars.DifferenceOfDistancesPBC)
+
+    def test_differenceofdistances_pbc_without_box_raises(self):
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        with pytest.raises(ValueError, match="differenceofdistances_pbc requires"):
+            process_cv({'type': 'differenceofdistances_pbc',
+                        'indices': [0, 1, 2, 3]})
+
+    def test_princmom_cv_plumbs_axis(self):
+        """PrincipalMoment is the only CV with an `axis` argument; this is the
+        cheapest test that catches the dispatcher silently swapping the axis
+        argument for something else (or dropping it entirely)."""
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        import pysages.colvars
+        cv = process_cv({'type': 'princmom', 'indices': [0, 1, 2, 3], 'axis': 2})
+        assert isinstance(cv, pysages.colvars.PrincipalMoment)
+        assert cv.axis == 2
+
+    def test_coordinationnumber_cv(self):
+        """CoordinationNumber is the most complex dispatcher: it pulls
+        ``n_atoms`` from ``nbrs.reference_position.shape[0]`` to build the
+        neighbor-pool indices, threads ``species``/``box``, and forwards
+        ``species`` (renamed to ``species_nn`` on the colvar) plus
+        ``cn_exps`` (mapped to ``cn_exponents``, exposed as
+        ``num_exp``/``denom_exp``). A regression in any of these
+        translations would not be caught by an isinstance-only check.
+
+        We use a minimal stand-in ``nbrs`` with the two attributes
+        CoordinationNumber.__init__ touches: ``reference_position``
+        (for n_atoms) and ``idx`` (for max-neighbors estimation)."""
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        import pysages.colvars.coordinates
+        import types
+        n_atoms = 5
+        fake_nbrs = types.SimpleNamespace(
+            reference_position=jnp.zeros((n_atoms, 3)),
+            idx=jnp.array([[0, 1], [2, 3]], dtype=jnp.int32),
+        )
+        species = jnp.array([1, 1, 1, 1, 6])
+        box = jnp.array([10.0, 10.0, 10.0])
+        cv = process_cv(
+            {'type': 'coordinationnumber', 'indices': [4],
+             'cn_exps': [6, 12], 'species': 1},
+            nbrs=fake_nbrs,
+            species=species,
+            box=box,
+        )
+        assert isinstance(
+            cv, pysages.colvars.coordinates.CoordinationNumber
+        )
+        # cn_exps (n, m) -> num_exp=n, denom_exp=m on the colvar
+        assert cv.num_exp == 6
+        assert cv.denom_exp == 12
+        # 'species' from the YAML maps to species_nn on the colvar
+        assert int(cv.species_nn) == 1
+
+    def test_distance_cv_indices_plumbed(self):
+        """Beyond isinstance, the existing test_distance_cv does not verify
+        that grp1/grp2 from the settings dict actually reach the resulting
+        Distance colvar. Distance stores its two groups in `cv.groups`,
+        each as a sorted index array. Verify both groups arrive unchanged.
+        """
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        cv = process_cv({'type': 'distance',
+                         'grp1': [0, 1], 'grp2': [2, 3]})
+        # cv.groups is [group_a_indices, group_b_indices]
+        np.testing.assert_array_equal(np.array(cv.groups[0]), [0, 1])
+        np.testing.assert_array_equal(np.array(cv.groups[1]), [2, 3])
+
 
 class TestGetPysagesMethod:
     """Tests for get_pysages_method."""
@@ -522,6 +942,84 @@ class TestGetPysagesMethod:
         with pytest.raises(ValueError, match="Unknown PySAGES method"):
             get_pysages_method(self._make_settings('bogus_method'))
 
+    # ------------------------------------------------------------------
+    # Additional coverage for branches that were untested previously:
+    #   * the metad dispatcher (lines 477-489) — verifies every method_arg
+    #     reaches the constructed Metadynamics object;
+    #   * the ABF N parameter (default 500 vs override from method_args);
+    #   * the restraints branch (lines 458-466) and its absence path.
+    # ------------------------------------------------------------------
+
+    def test_metad_method_plumbs_method_args(self):
+        """The metad branch passes five positional method_args
+        (height, sigma, stride, ngauss [-> ngaussians], deltaT) and uses
+        the metal_unit_system temperature for kB. A regression that swaps
+        any two of these would not be caught by an isinstance-only check.
+        """
+        from so3lr.cli.so3lr_pysages_interface import get_pysages_method
+        import pysages.methods
+        settings = self._make_settings('metad')
+        settings['method_args'] = {
+            'height': 0.05,
+            'sigma': [0.3],
+            'stride': 200,
+            'ngauss': 750,
+            'deltaT': 1500.0,
+        }
+        method = get_pysages_method(settings)
+        assert isinstance(method, pysages.methods.Metadynamics)
+        assert method.height == 0.05
+        assert list(method.sigma) == [0.3]
+        assert method.stride == 200
+        assert method.ngaussians == 750
+        assert method.deltaT == 1500.0
+
+    def test_abf_N_defaults_to_500_when_method_args_absent(self):
+        """With no 'method_args' block, the ABF branch must default N to 500."""
+        from so3lr.cli.so3lr_pysages_interface import get_pysages_method
+        method = get_pysages_method(self._make_settings('abf'))
+        assert method.N == 500
+
+    def test_abf_N_read_from_method_args(self):
+        """With a 'method_args' block, the ABF branch must read N from it
+        rather than the hardcoded default. A regression that always uses
+        500 (e.g. dropping the .get) would not be caught by the default-
+        path test alone."""
+        from so3lr.cli.so3lr_pysages_interface import get_pysages_method
+        settings = self._make_settings('abf')
+        settings['method_args'] = {'N': 1234}
+        method = get_pysages_method(settings)
+        assert method.N == 1234
+
+    def test_restraints_propagate_to_method(self):
+        """When a 'restraints' block is present, it must surface on the
+        method as a CVRestraints with matching lower/upper/kl/ku. Catches a
+        regression that builds CVRestraints but never passes it into the
+        method constructor."""
+        from so3lr.cli.so3lr_pysages_interface import get_pysages_method
+        import pysages
+        settings = self._make_settings('abf')
+        settings['restraints'] = {
+            'lower': (0.5,), 'upper': (9.5,),
+            'kl': (100.0,), 'ku': (200.0,),
+        }
+        method = get_pysages_method(settings)
+        assert method.restraints is not None
+        # CVRestraints stores its fields as jnp arrays — coerce for comparison.
+        np.testing.assert_allclose(np.array(method.restraints.lower), [0.5])
+        np.testing.assert_allclose(np.array(method.restraints.upper), [9.5])
+        np.testing.assert_allclose(np.array(method.restraints.kl), [100.0])
+        np.testing.assert_allclose(np.array(method.restraints.ku), [200.0])
+
+    def test_no_restraints_when_block_absent(self):
+        """Absence of a 'restraints' block must yield method.restraints=None
+        (the `else: restraints = None` branch at line 468). Without this
+        explicit test, dropping the else branch could leave a stale or
+        wrong-default value on the method."""
+        from so3lr.cli.so3lr_pysages_interface import get_pysages_method
+        method = get_pysages_method(self._make_settings('abf'))
+        assert method.restraints is None
+
 
 class TestProcessGrid:
     """Tests for process_grid."""
@@ -542,57 +1040,447 @@ class TestProcessGrid:
         grid = process_grid(cv_settings)
         np.testing.assert_array_equal(np.array(grid.shape), np.array([32, 64]))
 
+    # ------------------------------------------------------------------
+    # process_grid coverage extensions: shape was the only attribute asserted
+    # by the existing two tests. We additionally verify that the three other
+    # fields the function constructs from the settings actually arrive on the
+    # Grid object: lower (from grid_min), upper (from grid_max), and the
+    # periodic flag (computed as `all(periodic)`). A regression that uses
+    # `any(periodic)` instead of `all(periodic)` is invisible to the existing
+    # shape-only checks.
+    # ------------------------------------------------------------------
+
+    def test_grid_lower_and_upper_propagate(self):
+        from so3lr.cli.so3lr_pysages_interface import process_grid
+        cv_settings = [
+            {'grid_min': -2.5, 'grid_max': 7.5, 'grid_stride': 32, 'periodic': False},
+            {'grid_min': 0.25, 'grid_max': 6.28, 'grid_stride': 64, 'periodic': False},
+        ]
+        grid = process_grid(cv_settings)
+        np.testing.assert_allclose(np.array(grid.lower), [-2.5, 0.25], atol=1e-10)
+        np.testing.assert_allclose(np.array(grid.upper), [7.5, 6.28], atol=1e-10)
+
+    def test_grid_periodic_uses_all_not_any(self):
+        """The function builds `periodic=all(periodic)`. With mixed flags the
+        result must be False (any-flag-False -> not-fully-periodic). Catches a
+        mutation from `all` to `any`, which would produce a periodic Grid in
+        a setting where one or more CVs is non-periodic — a silent
+        correctness bug."""
+        from so3lr.cli.so3lr_pysages_interface import process_grid
+        cv_settings_mixed = [
+            {'grid_min': 0.0, 'grid_max': 10.0, 'grid_stride': 32, 'periodic': True},
+            {'grid_min': 0.0, 'grid_max': 10.0, 'grid_stride': 32, 'periodic': False},
+        ]
+        cv_settings_all = [
+            {'grid_min': 0.0, 'grid_max': 10.0, 'grid_stride': 32, 'periodic': True},
+            {'grid_min': 0.0, 'grid_max': 10.0, 'grid_stride': 32, 'periodic': True},
+        ]
+        assert process_grid(cv_settings_mixed).is_periodic is False
+        assert process_grid(cv_settings_all).is_periodic is True
+
 
 # ===========================================================================
 # 4. update_so3lr_after_pysages k_grid passthrough
 # ===========================================================================
 
+class _RecordingNeighbors:
+    """Stand-in for a jax_md NeighborList.
+
+    Records the arguments passed to ``update`` so the test can assert that
+    update_so3lr_after_pysages refreshes the neighbor list with the correct
+    box and positions, and returns self so the resulting object is reusable.
+    """
+
+    def __init__(self, idx=None):
+        self.idx = idx if idx is not None else jnp.zeros((1,), dtype=jnp.int32)
+        self.last_update = None
+
+    def update(self, positions, neighbor=None, box=None):
+        self.last_update = {
+            'positions': positions, 'neighbor': neighbor, 'box': box,
+        }
+        return self
+
+
+def _make_snapshot(positions, velocities, masses, forces, box_H,
+                   chain_data=None, barostat_data=None, npt_box_data=None):
+    """Build a minimal object matching what update_so3lr_after_pysages reads
+    out of ``raw_result.snapshots[-1]``."""
+    import types
+    snap = types.SimpleNamespace()
+    snap.positions = positions
+    snap.vel_mass = (velocities, masses)
+    snap.forces = forces
+    snap.box = types.SimpleNamespace(H=box_H)
+    snap.chain_data = chain_data
+    snap.barostat_data = barostat_data
+    snap.npt_box_data = npt_box_data
+    return snap
+
+
+def _make_result(snapshot, bias):
+    """Build a minimal stand-in for pysages.Result.
+
+    Only the attributes that update_so3lr_after_pysages touches are populated:
+    ``snapshots[-1]`` and ``states[0].bias``.
+    """
+    import types
+    state0 = types.SimpleNamespace(bias=bias)
+    return types.SimpleNamespace(snapshots=[snapshot], states=[state0])
+
+
+def _nvt_chain_data(n_atoms, chain_len=3):
+    return {
+        'position':  jnp.zeros(chain_len),
+        'momentum':  jnp.zeros(chain_len),
+        'mass':      jnp.ones(chain_len),
+        'tau':       jnp.array(100.0),
+        'kinetic_energy': jnp.array(0.0),
+        'degrees_of_freedom': jnp.array(float(3 * n_atoms)),
+    }
+
+
+def _barostat_data(chain_len=3):
+    return {
+        'position':  jnp.zeros(chain_len),
+        'momentum':  jnp.zeros(chain_len),
+        'mass':      jnp.ones(chain_len),
+        'tau':       jnp.array(1000.0),
+        'kinetic_energy': jnp.array(0.0),
+        'degrees_of_freedom': jnp.array(3.0),
+    }
+
+
+def _npt_box_data(ref_box, box_pos=None):
+    return {
+        'reference_box': ref_box,
+        'box_position':  jnp.zeros(3) if box_pos is None else box_pos,
+        'box_momentum':  jnp.zeros(3),
+        'box_mass':      jnp.ones(3),
+    }
+
+
 class TestUpdateAfterPysages:
-    """Tests for update_so3lr_after_pysages k_grid handling."""
+    """Behavioural tests for update_so3lr_after_pysages.
 
-    def test_k_grid_passthrough(self):
-        """k_grid should be returned unchanged."""
+    These tests build a fake PySAGES Result and call the function directly so
+    the assertions check actual behaviour (state reconstruction, bias-force
+    restoration, neighbor-list refresh, NPT box recomputation) rather than
+    inspecting the function signature.
+    """
+
+    DT = 0.5
+    MD_T = 300.0
+
+    def _make_nvt_inputs(self, n_atoms=4, bias=None, box_side=10.0):
+        positions = jnp.ones((n_atoms, 3))
+        velocities = jnp.ones((n_atoms, 3)) * 0.5
+        forces = jnp.zeros((n_atoms, 3))
+        masses = jnp.ones(n_atoms) * 12.0
+        box_H = jnp.eye(3) * box_side
+        snap = _make_snapshot(
+            positions, velocities, masses, forces, box_H,
+            chain_data=_nvt_chain_data(n_atoms),
+        )
+        return _make_result(snap, bias), positions, velocities, forces, masses
+
+    # ---- k_grid passthrough (real, not signature-only) -------------------
+
+    def test_k_grid_returned_unchanged(self):
+        from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
+        result, *_ = self._make_nvt_inputs()
+        k_grid_in = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        nbrs = _RecordingNeighbors()
+
+        _, _, _, _, k_grid_out = update_so3lr_after_pysages(
+            result, lr=False, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=nbrs, ensemble='nvt',
+            k_grid=k_grid_in,
+        )
+        # Same object identity, same values.
+        assert k_grid_out is k_grid_in
+        np.testing.assert_array_equal(k_grid_out, k_grid_in)
+
+    def test_k_grid_none_is_passed_through(self):
+        from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
+        result, *_ = self._make_nvt_inputs()
+        _, _, _, _, k_grid_out = update_so3lr_after_pysages(
+            result, lr=False, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            ensemble='nvt', k_grid=None,
+        )
+        assert k_grid_out is None
+
+    # ---- NVT reconstruction ---------------------------------------------
+
+    def test_nvt_reconstructs_state_without_bias(self):
+        from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
+        result, positions, velocities, forces, masses = self._make_nvt_inputs(bias=None)
+        nbrs = _RecordingNeighbors()
+
+        state, nbrs_out, nbrs_lr_out, new_box, _ = update_so3lr_after_pysages(
+            result, lr=False, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=nbrs, ensemble='nvt', k_grid=None,
+        )
+
+        assert isinstance(state, jax_md.simulate.NVTNoseHooverState)
+        np.testing.assert_allclose(state.position, positions)
+        # No bias => force should be exactly the unbiased force from the snapshot
+        np.testing.assert_allclose(state.force, forces)
+        # momentum = canonicalized_mass * velocity
+        np.testing.assert_allclose(state.momentum, state.mass * velocities, atol=1e-10)
+        # Box came from snapshot.box.H
+        np.testing.assert_allclose(new_box, jnp.eye(3) * 10.0)
+        # No long-range nbrs in lr=False
+        assert nbrs_lr_out is None
+        # Neighbor list was refreshed with the snapshot positions and new box
+        assert nbrs.last_update is not None
+        np.testing.assert_allclose(nbrs.last_update['positions'], positions)
+        np.testing.assert_allclose(nbrs.last_update['box'], new_box)
+
+    def test_nvt_bias_restores_force_momentum_and_chain_ke(self):
+        """When raw_result.states[0].bias != 0, update_so3lr_after_pysages must
+        re-apply the post-step bias kick that the PySAGES jax-md backend
+        already applied to the integrator but did *not* capture in the snapshot:
+
+          force   <- snapshot.forces + bias
+          momentum <- mass*velocity + 0.5 * dt * bias
+          chain.kinetic_energy <- KE(new_momentum)         (NVT invariant)
+
+        These three steps are the block at so3lr_pysages_interface.py lines
+        336-361 and are easy to break (the historical half-bias bug missed
+        the 2nd-half kick).
+        """
+        from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
+        from jax_md.quantity import kinetic_energy
+
+        n_atoms = 4
+        bias = jnp.full((n_atoms, 3), 0.3)  # non-zero, asymmetric vs. force
+        result, _, velocities, forces, _ = self._make_nvt_inputs(n_atoms=n_atoms, bias=bias)
+
+        state, *_ = update_so3lr_after_pysages(
+            result, lr=False, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            ensemble='nvt', k_grid=None,
+        )
+
+        np.testing.assert_allclose(state.force, forces + bias, atol=1e-10)
+        expected_mom = state.mass * velocities + 0.5 * self.DT * bias
+        np.testing.assert_allclose(state.momentum, expected_mom, atol=1e-10)
+        # The chain KE must be consistent with the (post-kick) momentum,
+        # otherwise the next thermostat half-step rescales by the wrong factor.
+        expected_KE = kinetic_energy(momentum=expected_mom, mass=state.mass)
+        np.testing.assert_allclose(state.chain.kinetic_energy, expected_KE, atol=1e-10)
+
+    # ---- NVE reconstruction ---------------------------------------------
+
+    def test_nve_reconstructs_state(self):
         from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
 
-        k_grid_input = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        n_atoms = 3
+        positions = jnp.ones((n_atoms, 3)) * 2.0
+        velocities = jnp.ones((n_atoms, 3)) * 0.25
+        forces = jnp.zeros((n_atoms, 3))
+        masses = jnp.ones(n_atoms) * 16.0
+        snap = _make_snapshot(positions, velocities, masses, forces,
+                              jnp.eye(3) * 20.0)
+        result = _make_result(snap, bias=None)
 
-        # We need to create a mock PySAGES result.
-        # This is complex, so we test via the actual basic_test runs instead.
-        # Here we just verify the function signature accepts k_grid.
-        # The full integration test (category 6) covers the actual behavior.
-        import inspect
-        sig = inspect.signature(update_so3lr_after_pysages)
-        assert 'k_grid' in sig.parameters
+        state, _, nbrs_lr_out, new_box, _ = update_so3lr_after_pysages(
+            result, lr=False, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            ensemble='nve', k_grid=None,
+        )
 
-    def test_return_signature_includes_k_grid(self):
-        """The function signature documents returning k_grid."""
+        assert isinstance(state, jax_md.simulate.NVEState)
+        assert not hasattr(state, 'chain')
+        np.testing.assert_allclose(state.position, positions)
+        np.testing.assert_allclose(state.force, forces)
+        np.testing.assert_allclose(state.momentum, state.mass * velocities, atol=1e-10)
+        assert nbrs_lr_out is None
+        np.testing.assert_allclose(new_box, jnp.eye(3) * 20.0)
+
+    def test_nve_bias_skips_chain_ke_resync(self):
+        """NVE has no thermostat chain — the chain.kinetic_energy resync at
+        lines 354-357 must not fire (NVEState has no ``chain`` field). The
+        force/momentum kick is still applied."""
         from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
-        doc = update_so3lr_after_pysages.__doc__
-        assert 'k_grid' in doc
 
-    def test_nbrs_lr_none_when_no_lr(self):
-        """When lr=False, nbrs_lr should not be required."""
+        n_atoms = 3
+        positions = jnp.ones((n_atoms, 3))
+        velocities = jnp.ones((n_atoms, 3)) * 0.25
+        forces = jnp.zeros((n_atoms, 3))
+        masses = jnp.ones(n_atoms) * 16.0
+        bias = jnp.full((n_atoms, 3), -0.2)
+
+        snap = _make_snapshot(positions, velocities, masses, forces, jnp.eye(3) * 20.0)
+        result = _make_result(snap, bias=bias)
+
+        state, *_ = update_so3lr_after_pysages(
+            result, lr=False, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            ensemble='nve', k_grid=None,
+        )
+
+        np.testing.assert_allclose(state.force, forces + bias, atol=1e-10)
+        expected_mom = state.mass * velocities + 0.5 * self.DT * bias
+        np.testing.assert_allclose(state.momentum, expected_mom, atol=1e-10)
+        assert not hasattr(state, 'chain')
+
+    # ---- NPT reconstruction ---------------------------------------------
+
+    def test_npt_recomputes_box_from_state_not_snapshot(self):
+        """For NPT, the returned new_box must come from
+        ``jax_md.simulate.npt_box(reconstructed_state)`` — NOT from
+        ``snapshot.box.H``. The snapshot lags by one step in NPT because the
+        barostat updates the box after the snapshot is taken; trusting it
+        feeds a stale box back into the neighbor list and the next step's
+        coordinate conversion.
+
+        We seed ``box_position`` to a non-zero value so npt_box(state) and
+        snapshot.box.H differ, then verify the returned box matches the former.
+        """
         from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
-        import inspect
-        sig = inspect.signature(update_so3lr_after_pysages)
-        # nbrs_lr should have a default of None
-        assert sig.parameters['nbrs_lr'].default is None
 
-    def test_ensemble_parameter_exists(self):
-        """update_so3lr_after_pysages should accept an ensemble parameter."""
+        n_atoms = 2
+        ref_box = jnp.array([10.0, 10.0, 10.0])
+        # box_position=ln(1.2) ~ 0.1823 -> npt_box = ref_box * 1.2 = [12,12,12]
+        # snapshot.box.H is intentionally wrong (different value).
+        box_pos = jnp.log(jnp.array([1.2, 1.2, 1.2]))
+        cart_pos = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])  # cartesian
+        velocities = jnp.zeros((n_atoms, 3))
+        forces = jnp.zeros((n_atoms, 3))
+        masses = jnp.ones(n_atoms) * 12.0
+        wrong_box_H = jnp.array([7.0, 7.0, 7.0])  # different from npt_box(state)
+
+        snap = _make_snapshot(
+            cart_pos, velocities, masses, forces, wrong_box_H,
+            chain_data=_nvt_chain_data(n_atoms),
+            barostat_data=_barostat_data(),
+            npt_box_data=_npt_box_data(ref_box, box_pos=box_pos),
+        )
+        result = _make_result(snap, bias=None)
+        nbrs = _RecordingNeighbors()
+        nbrs_lr = _RecordingNeighbors()
+
+        state, _, _, new_box, _ = update_so3lr_after_pysages(
+            result, lr=True, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=nbrs, ensemble='npt',
+            nbrs_lr=nbrs_lr, k_grid=None,
+        )
+
+        # Box was recomputed from the state, so it must equal npt_box(state),
+        # not the (deliberately wrong) snapshot.box.H value.
+        np.testing.assert_allclose(
+            new_box, jax_md.simulate.npt_box(state), atol=1e-10
+        )
+        # And specifically not the stale snapshot value.
+        assert not jnp.allclose(new_box, wrong_box_H)
+        # Neighbor list was refreshed against the recomputed box.
+        np.testing.assert_allclose(nbrs.last_update['box'], new_box)
+        np.testing.assert_allclose(nbrs_lr.last_update['box'], new_box)
+
+    def test_npt_converts_positions_to_fractional(self):
+        """JAX-MD NPT runs in fractional coordinates internally; the function
+        must transform the snapshot's cartesian positions back to fractional
+        using the *recomputed* box before storing them on the state."""
         from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
-        import inspect
-        sig = inspect.signature(update_so3lr_after_pysages)
-        assert 'ensemble' in sig.parameters
-        assert sig.parameters['ensemble'].default == 'nvt'
 
-    def test_create_pysages_interface_fns_has_ensemble(self):
-        """create_pysages_interface_fns should accept an ensemble parameter."""
-        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
-        import inspect
-        sig = inspect.signature(create_pysages_interface_fns)
-        assert 'ensemble' in sig.parameters
-        assert sig.parameters['ensemble'].default == 'nvt'
+        n_atoms = 2
+        # Orthorhombic NPT boxes in jax-md are 1-D vectors (the diagonal),
+        # not 3x3 matrices — npt_box returns the same shape, and the
+        # interface inverts the box element-wise via 1.0/box.
+        ref_box = jnp.array([10.0, 10.0, 10.0])
+        cart_pos = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        velocities = jnp.zeros((n_atoms, 3))
+        forces = jnp.zeros((n_atoms, 3))
+        masses = jnp.ones(n_atoms) * 12.0
+
+        snap = _make_snapshot(
+            cart_pos, velocities, masses, forces, jnp.array([99.0, 99.0, 99.0]),
+            chain_data=_nvt_chain_data(n_atoms),
+            barostat_data=_barostat_data(),
+            npt_box_data=_npt_box_data(ref_box),  # box_position=0 => npt_box == ref_box
+        )
+        result = _make_result(snap, bias=None)
+
+        state, _, _, new_box, _ = update_so3lr_after_pysages(
+            result, lr=False, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            ensemble='npt', k_grid=None,
+        )
+
+        # box_position=0 => new_box == reference_box
+        np.testing.assert_allclose(new_box, ref_box, atol=1e-10)
+        # positions on state must be fractional = cart / box_diag
+        np.testing.assert_allclose(state.position, cart_pos / 10.0, atol=1e-10)
+
+    # ---- Error handling --------------------------------------------------
+
+    def test_unsupported_ensemble_raises(self):
+        from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
+        result, *_ = self._make_nvt_inputs()
+        with pytest.raises(ValueError, match="Unsupported ensemble"):
+            update_so3lr_after_pysages(
+                result, lr=False, init_fn=None, rng_key=None,
+                md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+                ensemble='nonsense', k_grid=None,
+            )
+
+    # ---- NPT bias-kick thermostat KE resync -----------------------------
+
+    def test_npt_bias_restores_thermostat_kinetic_energy(self):
+        """The NVT analogue of this test is
+        ``test_nvt_bias_restores_force_momentum_and_chain_ke``; here is the
+        NPT counterpart for the symmetric code at lines 358-361.
+
+        For NPT with non-zero bias, the post-step bias kick
+        (``momentum += 0.5*dt*bias``) invalidates the snapshot's
+        chain.kinetic_energy field (which was KE of the *pre-kick* momentum).
+        ``update_so3lr_after_pysages`` must recompute KE from the post-kick
+        momentum and write it back as ``state.thermostat.kinetic_energy``
+        (NPT stores its NHC-thermostat under ``thermostat`` rather than
+        ``chain``). If this resync is skipped — e.g. because the NPT branch
+        falls through to the NVT branch and writes to ``state.chain`` (which
+        doesn't exist on NPTNoseHooverState), or just isn't there at all —
+        the next thermostat half-step rescales by an inconsistent factor.
+        """
+        from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
+        from jax_md.quantity import kinetic_energy
+
+        n_atoms = 2
+        ref_box = jnp.array([10.0, 10.0, 10.0])
+        cart_pos = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        velocities = jnp.full((n_atoms, 3), 0.3)
+        forces = jnp.zeros((n_atoms, 3))
+        masses = jnp.ones(n_atoms) * 12.0
+        bias = jnp.full((n_atoms, 3), 0.4)
+
+        snap = _make_snapshot(
+            cart_pos, velocities, masses, forces, jnp.array([99.0, 99.0, 99.0]),
+            chain_data=_nvt_chain_data(n_atoms),
+            barostat_data=_barostat_data(),
+            npt_box_data=_npt_box_data(ref_box),
+        )
+        result = _make_result(snap, bias=bias)
+
+        state, *_ = update_so3lr_after_pysages(
+            result, lr=False, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            ensemble='npt', k_grid=None,
+        )
+
+        # Sanity: the bias kick was applied to momentum (already tested
+        # elsewhere for NVT/NVE; included here as the precondition for the
+        # KE assertion below).
+        expected_mom = state.mass * velocities + 0.5 * self.DT * bias
+        np.testing.assert_allclose(state.momentum, expected_mom, atol=1e-10)
+
+        # The NPT thermostat KE must reflect KE(post-kick momentum).
+        expected_KE = kinetic_energy(momentum=expected_mom, mass=state.mass)
+        np.testing.assert_allclose(
+            state.thermostat.kinetic_energy, expected_KE, atol=1e-10
+        )
 
 
 # ===========================================================================
@@ -724,51 +1612,107 @@ class TestStateReconstruction:
 # 5. Settings parsing defaults and auto-configuration
 # ===========================================================================
 
-class TestSettingsDefaults:
-    """Tests for settings extraction in perform_md."""
+_WARN_SUBSTR = "cartesian coordinates for periodic systems"
+_NPT_INFO_SUBSTR = "NPT+PySAGES: overriding enforce_cartesian_coordinates=False"
 
-    def test_do_enhanced_sampling_defaults_false(self):
-        settings = {}
-        assert settings.get('do_enhanced_sampling', False) is False
 
-    def test_pysages_input_defaults_to_local_path(self):
-        settings = {}
-        assert settings.get('pysages_input', './pysages_input.yaml') == './pysages_input.yaml'
+class TestPerformMdEnforceCartesianGating:
+    """Tests for the enforce_cartesian_coordinates gating in perform_md.
 
-    def test_enforce_cartesian_auto_set_for_periodic_pysages(self):
-        """When do_enhanced_sampling=True and system is periodic,
-        enforce_cartesian_coordinates should be auto-set to True."""
-        # Simulate the logic from perform_md
-        do_enhanced_sampling = True
-        enforce_cartesian_coordinates = False
-        cell_is_not_none = True
+    For periodic systems with do_enhanced_sampling=True, perform_md must:
 
-        if do_enhanced_sampling and cell_is_not_none and not enforce_cartesian_coordinates:
-            enforce_cartesian_coordinates = True
+      * flip ``enforce_cartesian_coordinates`` False -> True for non-NPT
+        ensembles (warning logged), because PySAGES requires Cartesian
+        internal coords;
+      * flip True -> False for NPT (info logged), because JAX-MD NPT
+        requires fractional internal coords (the PySAGES interface
+        converts per step);
+      * leave the flag untouched in every other case, with no log line.
 
-        assert enforce_cartesian_coordinates is True
+    These tests drive perform_md directly with the right settings and
+    inspect stderr for the warning/info lines. perform_md will fail
+    later in the function (model setup is not available in this test
+    environment) — we let it raise and then assert on what was logged
+    before the failure.
+    """
 
-    def test_enforce_cartesian_not_changed_when_no_pysages(self):
-        """Without enhanced sampling, enforce_cartesian_coordinates stays as set."""
-        do_enhanced_sampling = False
-        enforce_cartesian_coordinates = False
-        cell_is_not_none = True
+    @pytest.fixture
+    def base_settings(self, tmp_path):
+        """Minimal settings dict that lets perform_md reach the gating block."""
+        pysages_path = tmp_path / "pysages_input.yaml"
+        _write_yaml(pysages_path, _PYSAGES_INPUT_UNBIASED)
+        return {
+            'pysages_input': str(pysages_path),
+            'input_file': str(GEOMETRY_FILE),
+            'output_file': 'dummy.xyz',
+            'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
+            'precision': 'float32',
+            'seed': 42, 'save_buffer': 10,
+            'use_so3lr': True,
+            'lr_cutoff': 12.0, 'total_charge': 0.0,
+        }
 
-        if do_enhanced_sampling and cell_is_not_none and not enforce_cartesian_coordinates:
-            enforce_cartesian_coordinates = True
+    @staticmethod
+    def _run_and_capture(settings, capfd):
+        """Run perform_md, swallow its (expected) downstream failure, and
+        return the combined stdout+stderr produced before the failure."""
+        import so3lr.cli.so3lr_md as md_module
+        try:
+            md_module.perform_md(settings)
+        except Exception:
+            pass
+        captured = capfd.readouterr()
+        return captured.out + captured.err
 
-        assert enforce_cartesian_coordinates is False
+    # The matrix of inputs that decides the gating outcome.
+    #   do_es, ensemble, init_flag, expect_warn, expect_info
+    # All cases assume a periodic cell (which the test geometry provides).
+    @pytest.mark.parametrize("do_es,ensemble,init_flag,expect_warn,expect_info", [
+        # PySAGES on, non-NPT: must force cartesian True (warning on F->T)
+        (True,  'nvt', False, True,  False),
+        (True,  'nvt', True,  False, False),  # already True, no transition
+        # PySAGES on, NPT: must force cartesian False (info on T->F)
+        (True,  'npt', True,  False, True),
+        (True,  'npt', False, False, False),  # already False, no transition
+        # PySAGES off: flag passes through untouched, no log either way
+        (False, 'nvt', False, False, False),
+        (False, 'nvt', True,  False, False),
+        (False, 'npt', False, False, False),
+    ])
+    def test_enforce_cartesian_logging(self, base_settings, capfd,
+                                       do_es, ensemble, init_flag,
+                                       expect_warn, expect_info):
+        settings = dict(base_settings)
+        settings.update({
+            'do_enhanced_sampling': do_es,
+            'ensemble': ensemble,
+            'enforce_cartesian_coordinates': init_flag,
+        })
 
-    def test_enforce_cartesian_respected_when_already_true(self):
-        """If user already set enforce_cartesian_coordinates=True, don't override."""
-        do_enhanced_sampling = True
-        enforce_cartesian_coordinates = True
-        cell_is_not_none = True
+        output = self._run_and_capture(settings, capfd)
 
-        if do_enhanced_sampling and cell_is_not_none and not enforce_cartesian_coordinates:
-            enforce_cartesian_coordinates = True
+        # Sanity: perform_md ran far enough to read the geometry. If this
+        # fails, the settings dict is incomplete and the gating block was
+        # never reached, so the rest of the assertions are meaningless.
+        assert "Read" in output and "atoms" in output, (
+            f"perform_md aborted before reading the geometry; gating "
+            f"block was never reached. Output:\n{output}"
+        )
 
-        assert enforce_cartesian_coordinates is True
+        warn_seen = _WARN_SUBSTR in output
+        info_seen = _NPT_INFO_SUBSTR in output
+        assert warn_seen == expect_warn, (
+            f"warning expectation mismatch for "
+            f"(do_es={do_es}, ensemble={ensemble!r}, init_flag={init_flag}): "
+            f"expected_warn={expect_warn}, saw warn={warn_seen}.\n"
+            f"--- output ---\n{output}"
+        )
+        assert info_seen == expect_info, (
+            f"info expectation mismatch for "
+            f"(do_es={do_es}, ensemble={ensemble!r}, init_flag={init_flag}): "
+            f"expected_info={expect_info}, saw info={info_seen}.\n"
+            f"--- output ---\n{output}"
+        )
 
 
 # ===========================================================================

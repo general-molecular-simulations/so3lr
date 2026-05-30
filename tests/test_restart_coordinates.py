@@ -11,6 +11,7 @@ import os
 import shutil
 import pathlib
 import subprocess
+import importlib.util
 
 import pytest
 import numpy as np
@@ -24,9 +25,44 @@ from jax_md.space import transform
 from so3lr.cli.so3lr_md import save_state, load_state, RestartInNewEnsembleError
 
 
-# Path to basic_test directory (relative to the repo root)
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-BASIC_TEST_DIR = PROJECT_ROOT.parent / "basic_test"
+TEST_DATA_DIR = pathlib.Path(__file__).resolve().parent / "test_data"
+GEOMETRY_FILE = TEST_DATA_DIR / "benzoic_acid_aq_1.xyz"
+
+# Settings shared by the cross-coordinate restart integration runs.
+# Values mirror the historical basic_test/so3lr_vanilla/md_settings.yaml.
+# input_file/output_file/log_file are filled in at fixture time.
+_BASE_MD_SETTINGS = {
+    'use_so3lr': True,
+    'precision': 'float64',
+    'total_charge': 0.0,
+    'lr_cutoff': 12.0,
+    'relax_before_run': True,
+    'min_cycles': 10,
+    'min_steps': 20,
+    'min_start_dt': 0.05,
+    'min_max_dt': 0.1,
+    'min_n_min': 2,
+    'min_print': True,
+    'md_dt': 0.0005,
+    'md_T': 300,
+    'md_cycles': 2,
+    'md_steps': 500,
+    'hdf5_buffer_size': 50,
+}
+
+_PYSAGES_INPUT_UNBIASED = {
+    'method': 'unbiased',
+    'cv': [{
+        'type': 'coordinationnumber',
+        'indices': [4, 7],
+        'cn_exps': [6, 30],
+        'species': 1,
+        'grid_min': 0.0,
+        'grid_max': 1.5,
+        'grid_stride': 64,
+        'periodic': False,
+    }],
+}
 
 
 # ===========================================================================
@@ -127,18 +163,33 @@ def _parse_md_observables(log_path):
     return results
 
 
-def _setup_simulation_dir(tmp_path, source_dir, name):
-    """Copy a basic_test simulation directory to a temp location.
+def _prepare_run_dir(tmp_path, name, md_overrides=None, pysages_input=None):
+    """Create a self-contained SO3LR run directory.
 
-    Only copies input files (*.yaml, *.xyz), not previous output files.
+    Copies the committed benzoic_acid_aq_1.xyz geometry, writes md_settings.yaml
+    built from _BASE_MD_SETTINGS + any md_overrides, and optionally writes
+    pysages_input.yaml. Replaces the previous _setup_simulation_dir, which
+    relied on an external basic_test/ source tree.
     """
-    dest = tmp_path / name
-    dest.mkdir(parents=True, exist_ok=True)
-    input_extensions = {'.yaml', '.xyz'}
-    for item in source_dir.iterdir():
-        if item.is_file() and item.suffix in input_extensions:
-            shutil.copy2(item, dest)
-    return dest
+    run_dir = tmp_path / name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(GEOMETRY_FILE, run_dir / "benzoic_acid_aq_1.xyz")
+
+    settings = dict(_BASE_MD_SETTINGS)
+    settings['input_file'] = 'benzoic_acid_aq_1.xyz'
+    settings['output_file'] = 'traj.xyz'
+    settings['log_file'] = 'out.log'
+    if md_overrides:
+        settings.update(md_overrides)
+    with open(run_dir / "md_settings.yaml", 'w') as f:
+        yaml.dump(settings, f)
+
+    if pysages_input is not None:
+        with open(run_dir / "pysages_input.yaml", 'w') as f:
+            yaml.dump(pysages_input, f)
+
+    return run_dir
 
 
 # ===========================================================================
@@ -698,6 +749,11 @@ class TestRestartResetWithCoordinateConversion:
 # Integration tests: cross-coordinate restart with full MD simulations
 # ===========================================================================
 
+@pytest.mark.slow
+@pytest.mark.skipif(
+    importlib.util.find_spec("pysages") is None,
+    reason="PySAGES is an optional dependency",
+)
 class TestCrossCoordinateRestart:
     """Integration tests: verify that restarting across coordinate systems
     produces physically correct results.
@@ -718,55 +774,41 @@ class TestCrossCoordinateRestart:
         """Fractional->cartesian restart: vanilla NVT then PySAGES unbiased."""
         tmp_path = tmp_path_factory.mktemp("frac_to_cart")
 
-        vanilla_src = BASIC_TEST_DIR / "so3lr_vanilla"
-        unbiased_src = BASIC_TEST_DIR / "so3lr_pysages_unbiased"
-        if not vanilla_src.exists() or not unbiased_src.exists():
-            pytest.skip("basic_test input directories not found")
-
         # --- Continuous 4-cycle PySAGES unbiased run (reference) ---
-        continuous_dir = _setup_simulation_dir(tmp_path, unbiased_src, "continuous")
-        settings_path = continuous_dir / "md_settings.yaml"
-        with open(settings_path) as f:
-            settings = yaml.safe_load(f)
-        settings['md_cycles'] = 4
-        settings['log_file'] = 'out.log'
-        settings['output_file'] = 'traj.xyz'
-        settings.pop('restart_save_path', None)
-        settings.pop('restart_load_path', None)
-        with open(settings_path, 'w') as f:
-            yaml.dump(settings, f)
+        continuous_dir = _prepare_run_dir(
+            tmp_path, "continuous",
+            md_overrides={
+                'md_cycles': 4,
+                'do_enhanced_sampling': True,
+                'enforce_cartesian_coordinates': True,
+            },
+            pysages_input=_PYSAGES_INPUT_UNBIASED,
+        )
         _run_so3lr_simulation(continuous_dir)
 
         # --- First 2 cycles: vanilla NVT (fractional coords) ---
-        first_dir = _setup_simulation_dir(tmp_path, vanilla_src, "first_vanilla")
-        settings_path = first_dir / "md_settings.yaml"
-        with open(settings_path) as f:
-            settings = yaml.safe_load(f)
-        settings['md_cycles'] = 2
-        settings['log_file'] = 'out.log'
-        settings['output_file'] = 'traj.xyz'
-        settings['restart_save_path'] = './restart.npz'
-        settings.pop('restart_load_path', None)
-        settings.pop('do_enhanced_sampling', None)
-        settings.pop('enforce_cartesian_coordinates', None)
-        with open(settings_path, 'w') as f:
-            yaml.dump(settings, f)
+        first_dir = _prepare_run_dir(
+            tmp_path, "first_vanilla",
+            md_overrides={
+                'md_cycles': 2,
+                'restart_save_path': './restart.npz',
+            },
+        )
         _run_so3lr_simulation(first_dir)
 
         # --- Restart: PySAGES unbiased (cartesian coords) for 2 more cycles ---
-        restart_dir = _setup_simulation_dir(tmp_path, unbiased_src, "restart_pysages")
+        restart_dir = _prepare_run_dir(
+            tmp_path, "restart_pysages",
+            md_overrides={
+                'md_cycles': 2,
+                'do_enhanced_sampling': True,
+                'enforce_cartesian_coordinates': True,
+                'restart_load_path': './restart.npz',
+                'restart_save_path': './restart2.npz',
+            },
+            pysages_input=_PYSAGES_INPUT_UNBIASED,
+        )
         shutil.copy2(first_dir / "restart.npz", restart_dir)
-        settings_path = restart_dir / "md_settings.yaml"
-        with open(settings_path) as f:
-            settings = yaml.safe_load(f)
-        settings['md_cycles'] = 2
-        settings['log_file'] = 'out.log'
-        settings['output_file'] = 'traj.xyz'
-        settings['restart_load_path'] = './restart.npz'
-        settings['restart_save_path'] = './restart2.npz'
-        settings.pop('restart_pysages_load_path', None)
-        with open(settings_path, 'w') as f:
-            yaml.dump(settings, f)
         _run_so3lr_simulation(restart_dir)
 
         return {
@@ -779,54 +821,36 @@ class TestCrossCoordinateRestart:
         """Cartesian->fractional restart: PySAGES unbiased then vanilla NVT."""
         tmp_path = tmp_path_factory.mktemp("cart_to_frac")
 
-        vanilla_src = BASIC_TEST_DIR / "so3lr_vanilla"
-        unbiased_src = BASIC_TEST_DIR / "so3lr_pysages_unbiased"
-        if not vanilla_src.exists() or not unbiased_src.exists():
-            pytest.skip("basic_test input directories not found")
-
         # --- Continuous 4-cycle vanilla NVT run (reference) ---
-        continuous_dir = _setup_simulation_dir(tmp_path, vanilla_src, "continuous")
-        settings_path = continuous_dir / "md_settings.yaml"
-        with open(settings_path) as f:
-            settings = yaml.safe_load(f)
-        settings['md_cycles'] = 4
-        settings['log_file'] = 'out.log'
-        settings['output_file'] = 'traj.xyz'
-        settings.pop('restart_save_path', None)
-        settings.pop('restart_load_path', None)
-        with open(settings_path, 'w') as f:
-            yaml.dump(settings, f)
+        continuous_dir = _prepare_run_dir(
+            tmp_path, "continuous",
+            md_overrides={'md_cycles': 4},
+        )
         _run_so3lr_simulation(continuous_dir)
 
         # --- First 2 cycles: PySAGES unbiased (cartesian coords) ---
-        first_dir = _setup_simulation_dir(tmp_path, unbiased_src, "first_pysages")
-        settings_path = first_dir / "md_settings.yaml"
-        with open(settings_path) as f:
-            settings = yaml.safe_load(f)
-        settings['md_cycles'] = 2
-        settings['log_file'] = 'out.log'
-        settings['output_file'] = 'traj.xyz'
-        settings['restart_save_path'] = './restart.npz'
-        settings.pop('restart_load_path', None)
-        with open(settings_path, 'w') as f:
-            yaml.dump(settings, f)
+        first_dir = _prepare_run_dir(
+            tmp_path, "first_pysages",
+            md_overrides={
+                'md_cycles': 2,
+                'do_enhanced_sampling': True,
+                'enforce_cartesian_coordinates': True,
+                'restart_save_path': './restart.npz',
+            },
+            pysages_input=_PYSAGES_INPUT_UNBIASED,
+        )
         _run_so3lr_simulation(first_dir)
 
         # --- Restart: vanilla NVT (fractional coords) for 2 more cycles ---
-        restart_dir = _setup_simulation_dir(tmp_path, vanilla_src, "restart_vanilla")
+        restart_dir = _prepare_run_dir(
+            tmp_path, "restart_vanilla",
+            md_overrides={
+                'md_cycles': 2,
+                'restart_load_path': './restart.npz',
+                'restart_save_path': './restart2.npz',
+            },
+        )
         shutil.copy2(first_dir / "restart.npz", restart_dir)
-        settings_path = restart_dir / "md_settings.yaml"
-        with open(settings_path) as f:
-            settings = yaml.safe_load(f)
-        settings['md_cycles'] = 2
-        settings['log_file'] = 'out.log'
-        settings['output_file'] = 'traj.xyz'
-        settings['restart_load_path'] = './restart.npz'
-        settings['restart_save_path'] = './restart2.npz'
-        settings.pop('do_enhanced_sampling', None)
-        settings.pop('enforce_cartesian_coordinates', None)
-        with open(settings_path, 'w') as f:
-            yaml.dump(settings, f)
         _run_so3lr_simulation(restart_dir)
 
         return {

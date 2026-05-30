@@ -1774,7 +1774,7 @@ def perform_md(
                     "Setting enforce_cartesian_coordinates=True."
                 )
                 enforce_cartesian_coordinates = True
-    
+
         shift_displacement = 'periodic_cart' if enforce_cartesian_coordinates else 'periodic'
         initial_geometry.wrap()
     else:
@@ -2094,7 +2094,7 @@ def perform_md(
 
             new_state, nbrs, nbrs_lr, new_box, k_grid = jax.block_until_ready(
                 update_so3lr_after_pysages(
-                    candidate_result, lr, init_fn, rng_key, md_T,
+                    candidate_result, lr, init_fn, rng_key, md_T, md_dt,
                     nbrs, ensemble=ensemble, nbrs_lr=nbrs_lr, k_grid=k_grid
                 )
             )
