@@ -1045,6 +1045,12 @@ def log_nbrs_info(nbrs, label: str = 'SR', box=None):
                     f'cell_size={cell_size_ang:.2f} A')
 
 
+# Per-overflow cell-list headroom, added to cell_capacity on each reallocation.
+OVERFLOW_EXTRA_SR = 2
+OVERFLOW_EXTRA_LR = 8
+MAX_OVERFLOW_RETRIES = 4
+
+
 def check_overflow(
     neighbor_fn: callable,
     neighbor_fn_lr: callable,
@@ -1052,7 +1058,9 @@ def check_overflow(
     nbrs_lr: jax_md.partition.NeighborList,
     state,
     box: jnp.ndarray,
-) -> Tuple[jax_md.partition.NeighborList, jax_md.partition.NeighborList, bool]:
+    sr_extra: int = 0,
+    lr_extra: int = 0,
+) -> Tuple[jax_md.partition.NeighborList, jax_md.partition.NeighborList, bool, bool]:
     """
 
     Check if the neighbor lists have overflowed and reallocate them if needed.
@@ -1070,20 +1078,21 @@ def check_overflow(
         Updated neighbor lists and a boolean indicating if the lists overflowed.
     """
 
-    overflown = False
+    sr_overflow = False
+    lr_overflow = False
     box_diag = box_to_diag(box)
     if nbrs.did_buffer_overflow:
-        overflown = True
-        logger.info('Neighbor list overflowed, reallocating.')
-        nbrs = neighbor_fn.allocate(state.position, box=box_diag)
+        sr_overflow = True
+        logger.info(f'Neighbor list overflowed, reallocating (SR extra_capacity={sr_extra}).')
+        nbrs = neighbor_fn.allocate(state.position, box=box_diag, extra_capacity=sr_extra)
         log_nbrs_info(nbrs, 'SR', box=box)
     if nbrs_lr is not None:
         if nbrs_lr.did_buffer_overflow:
-            overflown = True
-            logger.info('Long-range neighbor list overflowed, reallocating.')
-            nbrs_lr = neighbor_fn_lr.allocate(state.position, box=box_diag)
+            lr_overflow = True
+            logger.info(f'Long-range neighbor list overflowed, reallocating (LR extra_capacity={lr_extra}).')
+            nbrs_lr = neighbor_fn_lr.allocate(state.position, box=box_diag, extra_capacity=lr_extra)
             log_nbrs_info(nbrs_lr, 'LR', box=box)
-    return nbrs, nbrs_lr, overflown
+    return nbrs, nbrs_lr, sr_overflow, lr_overflow
 
 
 def compute_quantities(
@@ -2450,6 +2459,10 @@ def perform_md(
     if npt_coupling in ('semi-isotropic', 'anisotropic') and box.ndim == 1:
         box = jnp.diag(box)
 
+    sr_overflow_extra = 0
+    lr_overflow_extra = 0
+    overflow_retries = 0
+
     while cycle_md < md_cycles:
         old_time = time.time()
         if do_enhanced_sampling:
@@ -2505,16 +2518,40 @@ def perform_md(
             first_loop = False
 
         # Checking if the neighbor lists overflowed
-        nbrs, nbrs_lr, overflow = check_overflow(
+        nbrs, nbrs_lr, sr_overflow, lr_overflow = check_overflow(
             neighbor_fn,
             neighbor_fn_lr,
             nbrs,
             nbrs_lr,
             new_state,
-            new_box
+            new_box,
+            sr_extra=sr_overflow_extra,
+            lr_extra=lr_overflow_extra,
         )
+        overflow = sr_overflow or lr_overflow
+
+        if overflow:
+            # Add extra capacity for consecutive overflows
+            if sr_overflow:
+                sr_overflow_extra += OVERFLOW_EXTRA_SR
+            if lr_overflow:
+                lr_overflow_extra += OVERFLOW_EXTRA_LR
+            overflow_retries += 1
+            if overflow_retries > MAX_OVERFLOW_RETRIES:
+                raise RuntimeError(
+                    f"Neighbor-list overflow did not stabilize after "
+                    f"{MAX_OVERFLOW_RETRIES} reallocations "
+                    f"(SR extra_capacity={sr_overflow_extra}, "
+                    f"LR extra_capacity={lr_overflow_extra}). "
+                    f"Increase buffer_size_multiplier_sr and/or _lr."
+                    f"Double-check your starting/final structure."
+                )
 
         if not overflow:
+            # Cycle succeeded: reset escalation state for the next cycle.
+            sr_overflow_extra = 0
+            lr_overflow_extra = 0
+            overflow_retries = 0
             if do_enhanced_sampling:
                 pysages_result = candidate_result
 
