@@ -103,3 +103,55 @@ def test_fit(tmp_path, use_ema, disable_jit: bool = False):
     assert (workdir / 'checkpoints').exists()
     assert any((workdir / 'checkpoints').iterdir())
 
+
+
+def test_fit_early_stopping(tmp_path, caplog):
+    """Early stopping halts training and logs once the validation loss stalls.
+
+    With an enormous min_delta the validation loss can never count as an
+    improvement, so training must stop after ``patience`` evaluations.
+    """
+    import logging
+
+    f = pkg_resources.resource_filename(__name__, 'test_data/ethanol.npz')
+    loader = NpzDataLoaderSparse(input_file=f)
+    all_data, _ = loader.load(cutoff=5.)
+
+    energy_unit = units.kcal / units.mol
+    np.random.RandomState(0).shuffle(all_data)
+    num_train, num_valid = 50, 10
+    energy_mean = transformations.calculate_energy_mean(all_data[:num_train]) * energy_unit
+    num_nodes = transformations.calculate_average_number_of_nodes(all_data[:num_train])
+    shifts = {a: energy_mean / num_nodes for a in range(119)}
+
+    def prep(sl):
+        return transformations.subtract_atomic_energy_shifts(
+            transformations.unit_conversion(
+                sl, energy_unit=energy_unit, length_unit=units.Angstrom,
+                dipole_vec_unit=units.Debye),
+            atomic_energy_shifts=shifts)
+
+    training_data = list(prep(all_data[:num_train]))
+    validation_data = list(prep(all_data[num_train:num_train + num_valid]))
+
+    so3k = SO3kratesSparse(
+        cutoff=5., num_features=32, num_features_head=8, num_heads=2,
+        degrees=[1, 2], message_normalization='avg_num_neighbors', avg_num_neighbors=8.)
+    loss_fn = training_utils.make_loss_fn(
+        get_energy_and_force_fn_sparse(so3k), weights={'energy': 0.001, 'forces': 0.999})
+
+    workdir = tmp_path / 'run'
+    workdir.mkdir()
+    logging.getLogger("SO3LR").propagate = True
+    with caplog.at_level(logging.INFO, logger="SO3LR"):
+        training_utils.fit(
+            model=so3k, optimizer=optax.adam(learning_rate=1e-3), loss_fn=loss_fn,
+            graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
+            num_epochs=20, batch_max_num_edges=72 + 72 + 1, batch_max_num_nodes=9 + 9 + 1,
+            batch_max_num_graphs=3, eval_every_num_steps=10, batch_max_num_pairs=100,
+            training_data=training_data, validation_data=validation_data,
+            ckpt_dir=workdir / 'checkpoints', allow_restart=False, use_wandb=False,
+            early_stopping_patience=2, early_stopping_min_delta=1e9,
+        )
+
+    assert any('Early stopping at step' in r.getMessage() for r in caplog.records)

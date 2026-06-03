@@ -835,7 +835,12 @@ def fit(
         # validation metrics and saved in the checkpoint -- this is the deployed
         # ("averaged") model and is usually more stable/accurate.
         use_ema: bool = False,
-        ema_decay: float = 0.999
+        ema_decay: float = 0.999,
+        # Early stopping: halt training when the validation loss has not improved
+        # by more than ``early_stopping_min_delta`` for ``early_stopping_patience``
+        # consecutive evaluations. ``None`` disables early stopping (default).
+        early_stopping_patience: int = None,
+        early_stopping_min_delta: float = 0.0
 ):
     """
     Fit model.
@@ -929,6 +934,14 @@ def fit(
                 lambda e, x: ema_decay * e + (1.0 - ema_decay) * x, ema_p, p
             )
         logger.info(f"Using EMA of weights for validation/checkpoints (decay={ema_decay}).")
+
+    # Early-stopping bookkeeping (best validation loss seen + stall counter).
+    best_eval_loss = float('inf')
+    evals_without_improvement = 0
+    stop_training = False
+    if early_stopping_patience is not None:
+        logger.info(f"Early stopping enabled (patience={early_stopping_patience} evals, "
+                    f"min_delta={early_stopping_min_delta}).")
 
     for epoch in range(num_epochs):
         # Shuffle the training data.
@@ -1072,7 +1085,29 @@ def fit(
                         eval_metrics,
                         step=step
                     )
+
+                # Early stopping on the validation loss.
+                if early_stopping_patience is not None:
+                    _eval_loss = eval_metrics['eval_loss']
+                    if _eval_loss < best_eval_loss - early_stopping_min_delta:
+                        best_eval_loss = _eval_loss
+                        evals_without_improvement = 0
+                    else:
+                        evals_without_improvement += 1
+                        if evals_without_improvement >= early_stopping_patience:
+                            logger.info(
+                                f"Early stopping at step {step}: validation loss has not "
+                                f"improved by >{early_stopping_min_delta} for "
+                                f"{early_stopping_patience} evaluations "
+                                f"(best={best_eval_loss:.6f}).")
+                            stop_training = True
             # Finished validation process.
+
+            if stop_training:
+                break  # exit the batch loop
+
+        if stop_training:
+            break  # exit the epoch loop
 
     # Wait until checkpoint manager completes all save operations.
     ckpt_mngr.wait_until_finished()
@@ -1110,6 +1145,9 @@ def fit_from_iterator(
         # Exponential moving average of weights; see fit().
         use_ema: bool = False,
         ema_decay: float = 0.999,
+        # Early stopping; see fit().
+        early_stopping_patience: int = None,
+        early_stopping_min_delta: float = 0.0,
 ):
     """
     Fit model.
@@ -1197,6 +1235,14 @@ def fit_from_iterator(
                 lambda e, x: ema_decay * e + (1.0 - ema_decay) * x, ema_p, p
             )
         logger.info(f"Using EMA of weights for validation/checkpoints (decay={ema_decay}).")
+
+    # Early-stopping bookkeeping; see fit().
+    best_eval_loss = float('inf')
+    evals_without_improvement = 0
+    stop_training = False
+    if early_stopping_patience is not None:
+        logger.info(f"Early stopping enabled (patience={early_stopping_patience} evals, "
+                    f"min_delta={early_stopping_min_delta}).")
 
     for epoch in range(num_epochs):
         if use_wandb:
@@ -1327,7 +1373,28 @@ def fit_from_iterator(
                         eval_metrics,
                         step=step
                     )
+
+                # Early stopping on the validation loss.
+                if early_stopping_patience is not None:
+                    if eval_loss < best_eval_loss - early_stopping_min_delta:
+                        best_eval_loss = eval_loss
+                        evals_without_improvement = 0
+                    else:
+                        evals_without_improvement += 1
+                        if evals_without_improvement >= early_stopping_patience:
+                            logger.info(
+                                f"Early stopping at step {step}: validation loss has not "
+                                f"improved by >{early_stopping_min_delta} for "
+                                f"{early_stopping_patience} evaluations "
+                                f"(best={best_eval_loss:.6f}).")
+                            stop_training = True
             # Finished validation process.
+
+            if stop_training:
+                break  # exit the batch loop
+
+        if stop_training:
+            break  # exit the epoch loop
 
     # Wait until checkpoint manager completes all save operations.
     ckpt_mngr.wait_until_finished()
