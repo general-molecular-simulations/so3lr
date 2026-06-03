@@ -105,3 +105,34 @@ def test_node_mse_loss_nan(vectorial: bool):
     expected_loss = 1 / 1 * (1 / 1 * 0.1 ** 2)
 
     npt.assert_allclose(loss_value, expected_loss, atol=1e-6)
+
+
+def test_expand_observables_to_theory_levels():
+    """1D energy-head params are tiled to N theory levels; multi-level and
+    missing entries are left unchanged."""
+    n = 16
+    params = {'params': {'observables_0': {
+        'energy_offset': jnp.arange(3.0),                       # (3,)
+        'atomic_scales': jnp.ones((3,)),                        # (3,)
+        'energy_dense_final': {'kernel': jnp.ones((8, 1))},     # (8, 1)
+    }}}
+    out = training_utils.expand_observables_to_theory_levels(params, num_theory_levels=n)
+    obs0 = out['params']['observables_0']
+    npt.assert_equal(obs0['energy_offset'].shape, (3, n))
+    npt.assert_equal(obs0['atomic_scales'].shape, (3, n))
+    npt.assert_equal(obs0['energy_dense_final']['kernel'].shape, (8, n))
+    # First column preserves the original 1D values.
+    npt.assert_allclose(obs0['energy_offset'][:, 0], jnp.arange(3.0))
+
+    # Already multi-level -> unchanged.
+    already = {'params': {'observables_0': {
+        'energy_offset': jnp.ones((3, n)),
+        'energy_dense_final': {'kernel': jnp.ones((8, n))},
+    }}}
+    out2 = training_utils.expand_observables_to_theory_levels(already, num_theory_levels=n)
+    npt.assert_equal(out2['params']['observables_0']['energy_offset'].shape, (3, n))
+    npt.assert_equal(out2['params']['observables_0']['energy_dense_final']['kernel'].shape, (8, n))
+
+    # Missing observables_0 -> returned unchanged.
+    empty = {'params': {}}
+    assert training_utils.expand_observables_to_theory_levels(empty) is empty

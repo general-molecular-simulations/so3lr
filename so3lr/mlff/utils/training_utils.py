@@ -773,6 +773,34 @@ def make_validation_step_fn(
 
     return validation_step_fn
 
+def expand_observables_to_theory_levels(params, num_theory_levels: int = 16):
+    """Expand a restored single-theory-level checkpoint to ``num_theory_levels``.
+
+    Tiles the per-atom energy-head parameters (``energy_offset``,
+    ``atomic_scales`` and the ``energy_dense_final`` kernel) of ``observables_0``
+    from one level of theory to ``num_theory_levels`` levels. Parameters that
+    are already multi-level are left unchanged. Mutates and returns ``params``.
+    """
+    if 'params' not in params or 'observables_0' not in params['params']:
+        return params
+    obs0 = params['params']['observables_0']
+
+    if 'energy_offset' in obs0 and jnp.ndim(obs0['energy_offset']) == 1:
+        obs0['energy_offset'] = jnp.tile(obs0['energy_offset'][:, None], (1, num_theory_levels))
+        logger.debug('Tiled energy_offset to %d theory levels.', num_theory_levels)
+
+    if 'atomic_scales' in obs0 and jnp.ndim(obs0['atomic_scales']) == 1:
+        obs0['atomic_scales'] = jnp.tile(obs0['atomic_scales'][:, None], (1, num_theory_levels))
+        logger.debug('Tiled atomic_scales to %d theory levels.', num_theory_levels)
+
+    if 'energy_dense_final' in obs0 and obs0['energy_dense_final']['kernel'].shape[1] == 1:
+        kernel = obs0['energy_dense_final']['kernel']
+        obs0['energy_dense_final']['kernel'] = jnp.tile(kernel, (1, num_theory_levels))
+        logger.debug('Tiled energy_dense_final kernel to %d theory levels.', num_theory_levels)
+
+    return params
+
+
 def fit(
         model,
         optimizer,
@@ -935,77 +963,8 @@ def fit(
                         params = checkpoint_utils.load_params_from_checkpoint(
                             ckpt_dir=ckpt_dir
                         )
-                        print(f"Loaded parameters from {ckpt_dir}")
-                        print(f"Params keys: {params.keys()}")
-                        print("\nParameter shapes:")
-                        print("=" * 50)
-                        print_param_shapes(params)
-                        print("=" * 50)
-                        print('This is fit_from_iterator function')
-                        # Modify parameters to handle theory levels
-                        if 'params' in params and 'observables_0' in params['params']:
-                            num_theory_levels = 16
-                            # Modify energy_offset
-                            if 'energy_offset' in params['params']['observables_0']:
-                                print("\nOriginal energy_offset:")
-                                print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-                                print("Values:", params['params']['observables_0']['energy_offset'])
-                                old_energy_offset = params['params']['observables_0']['energy_offset']
-
-                                # Only tile if shape is 1D
-                                if len(old_energy_offset.shape) == 1:
-                                    new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-                                    params['params']['observables_0']['energy_offset'] = new_energy_offset
-                                    print("Applied tiling to energy_offset")
-                                else:
-                                    print("Energy offset already has multiple dimensions, no tiling applied")
-
-                                print("\nNew energy_offset:")
-                                print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-                                print("Values:", params['params']['observables_0']['energy_offset'])
-
-                            # Modify atomic_scales
-                            if 'atomic_scales' in params['params']['observables_0']:
-                                print("\nOriginal atomic_scales:")
-                                print("Shape:", params['params']['observables_0']['atomic_scales'].shape)
-                                print("Values:", params['params']['observables_0']['atomic_scales'])
-                                old_atomic_scales = params['params']['observables_0']['atomic_scales']
-
-                                # Only tile if shape is 1D
-                                if len(old_atomic_scales.shape) == 1:
-                                    new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-                                    params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-                                    print("Applied tiling to atomic_scales")
-                                else:
-                                    print("Atomic scales already has multiple dimensions, no tiling applied")
-
-                                print("\nNew atomic_scales:")
-                                print("Shape:", params['params']['observables_0']['atomic_scales'].shape)
-                                print("Values:", params['params']['observables_0']['atomic_scales'])
-
-                            # Modify energy_dense_final
-                            if 'energy_dense_final' in params['params']['observables_0']:
-                                print("\nOriginal energy_dense_final kernel:")
-                                print("Shape:", params['params']['observables_0']['energy_dense_final']['kernel'].shape)
-                                print("Values:", params['params']['observables_0']['energy_dense_final']['kernel'])
-                                old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-
-                                # Check the shape to determine if tiling is needed
-                                if old_kernel.shape[1] == 1:
-                                    new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-                                    params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-                                    print("Applied tiling to energy_dense_final kernel")
-                                else:
-                                    print("Energy dense final kernel already has correct output dimension, no tiling applied")
-
-                                print("\nNew energy_dense_final kernel:")
-                                print("Shape:", params['params']['observables_0']['energy_dense_final']['kernel'].shape)
-                                print("Values:", params['params']['observables_0']['energy_dense_final']['kernel'])
-
-                            print("\nParameter shapes after modification:")
-                            print("=" * 50)
-                            print_param_shapes(params)
-                            print("=" * 50)
+                        logger.info(f"Loaded parameters from {ckpt_dir} (keys: {list(params.keys())}).")
+                        params = expand_observables_to_theory_levels(params)
                         step += latest_step
 
                         print(f'Re-start training from {latest_step}.')
@@ -1260,83 +1219,8 @@ def fit_from_iterator(
                         params = checkpoint_utils.load_params_from_checkpoint(
                             ckpt_dir=ckpt_dir
                         )
-                        print(f"Loaded parameters from {ckpt_dir}")
-                        print(f"Params keys: {params.keys()}")
-                        print("\nParameter shapes:")
-                        print("=" * 50)
-                        print_param_shapes(params)
-                        print("=" * 50)
-                        print('This is fit_from_iterator function')
-                        # Modify parameters to handle theory levels
-                        if 'params' in params and 'observables_0' in params['params']:
-                            num_theory_levels = 16
-                            old_energy_offset = params['params']['observables_0']['energy_offset']
-                            print('CHECK THE SHAPE ', old_energy_offset.shape, len(old_energy_offset.shape))
-                            if len(old_energy_offset.shape) == 1:
-                                print('len(old_energy_offset.shape) == 1, so tiling the shape')
-                                # Modify energy_offset
-                                if 'energy_offset' in params['params']['observables_0']:
-                                    print("\nOriginal energy_offset:")
-                                    print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-                                    print("Values:", params['params']['observables_0']['energy_offset'])
-
-                                    # Only tile if shape is 1D
-                                    if len(old_energy_offset.shape) == 1:
-                                        new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-                                        params['params']['observables_0']['energy_offset'] = new_energy_offset
-                                        print("Applied tiling to energy_offset")
-                                    else:
-                                        print("Energy offset already has multiple dimensions, no tiling applied")
-
-                                    print("\nNew energy_offset:")
-                                    print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-                                    print("Values:", params['params']['observables_0']['energy_offset'])
-
-                                # Modify atomic_scales
-                                if 'atomic_scales' in params['params']['observables_0']:
-                                    print("\nOriginal atomic_scales:")
-                                    print("Shape:", params['params']['observables_0']['atomic_scales'].shape)
-                                    print("Values:", params['params']['observables_0']['atomic_scales'])
-                                    old_atomic_scales = params['params']['observables_0']['atomic_scales']
-
-                                    # Only tile if shape is 1D
-                                    if len(old_atomic_scales.shape) == 1:
-                                        new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-                                        params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-                                        print("Applied tiling to atomic_scales")
-                                    else:
-                                        print("Atomic scales already has multiple dimensions, no tiling applied")
-
-                                    print("\nNew atomic_scales:")
-                                    print("Shape:", params['params']['observables_0']['atomic_scales'].shape)
-                                    print("Values:", params['params']['observables_0']['atomic_scales'])
-
-                                # Modify energy_dense_final
-                                if 'energy_dense_final' in params['params']['observables_0']:
-                                    print("\nOriginal energy_dense_final kernel:")
-                                    print("Shape:", params['params']['observables_0']['energy_dense_final']['kernel'].shape)
-                                    print("Values:", params['params']['observables_0']['energy_dense_final']['kernel'])
-                                    old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-
-                                    # Check the shape to determine if tiling is needed
-                                    if old_kernel.shape[1] == 1:
-                                        new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-                                        params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-                                        print("Applied tiling to energy_dense_final kernel")
-                                    else:
-                                        print("Energy dense final kernel already has correct output dimension, no tiling applied")
-
-                                    print("\nNew energy_dense_final kernel:")
-                                    print("Shape:", params['params']['observables_0']['energy_dense_final']['kernel'].shape)
-                                    print("Values:", params['params']['observables_0']['energy_dense_final']['kernel'])
-                            else:
-                                print('NO TILING IS NEEDED, len(old_energy_offset.shape) != 1 ', old_energy_offset.shape, len(old_energy_offset.shape))
-
-                            print("\nParameter shapes after modification:")
-                            print("=" * 50)
-                            print_param_shapes(params)
-                            print("=" * 50)
-
+                        logger.info(f"Loaded parameters from {ckpt_dir} (keys: {list(params.keys())}).")
+                        params = expand_observables_to_theory_levels(params)
                         step += latest_step
                         print(f'Re-start training from {latest_step}.')
                     else:
