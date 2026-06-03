@@ -148,6 +148,7 @@ def make_so3krates_sparse_from_config(
         use_charge_embed=model_config.use_charge_embed,
         use_spin_embed=model_config.use_spin_embed,
         energy_regression_dim=model_config.energy_regression_dim,
+        energy_final_mlp_widths=model_config.get('energy_final_mlp_widths', None),
         energy_activation_fn=model_config.energy_activation_fn,
         energy_learn_atomic_type_scales=model_config.energy_learn_atomic_type_scales,
         energy_learn_atomic_type_shifts=model_config.energy_learn_atomic_type_shifts,
@@ -664,21 +665,24 @@ def run_fine_tuning(
     elif strategy == 'obs_0':
         # Only the final MLP is refined
         trainable_subset_keys = ['observables_0']
-    elif strategy == 'final_mlp':
-        # Only specific parameters from observables_0 are refined
+    elif strategy in ('final_mlp', 'freeze_all_but_final_mlp'):
+        # Freeze EVERYTHING (the SO3krates backbone and the partial-charge /
+        # Hirshfeld / C6 heads) and refine ONLY the per-atom energy readout MLP:
+        # the regression layer, any deeper 'energy_dense_hidden_*' layers, and the
+        # final projection, plus the atomic scales/offsets. This keeps the
+        # physically-meaningful charge & ratio predictions untouched.
+        # ('energy_dense*' is a prefix match — see _path_matches_key.)
         trainable_subset_keys = [
             'observables_0/atomic_scales',
-            'observables_0/energy_dense_final',
-            'observables_0/energy_dense_regression', 
+            'observables_0/energy_dense*',
             'observables_0/energy_offset'
         ]
     elif strategy == 'll_fmlp':
-        # Only specific parameters from observables_0 are refined
+        # Last MP layer + the full energy readout MLP (incl. deeper head layers).
         trainable_subset_keys = [
             f'layers_{config.model.num_layers - 1}',
             'observables_0/atomic_scales',
-            'observables_0/energy_dense_final',
-            'observables_0/energy_dense_regression', 
+            'observables_0/energy_dense*',
             'observables_0/energy_offset'
         ]
     elif strategy == 'final_mlp_and_hirshfeld':

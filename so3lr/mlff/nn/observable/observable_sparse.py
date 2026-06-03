@@ -160,6 +160,13 @@ class EnergySparse(BaseSubModule):
     prop_keys: Dict
     zmax: int = 118
     regression_dim: int = None
+    # Optional config-driven deeper readout MLP. When set (e.g. [128, 128]), it
+    # defines the full stack of hidden widths for the per-atom energy head; the
+    # first hidden layer keeps the legacy name 'energy_dense_regression' so
+    # pretrained weights still load, and any extra layers ('energy_dense_hidden_i')
+    # initialise fresh. When None, falls back to the single `regression_dim`
+    # layer (or no hidden layer), preserving the original architecture exactly.
+    final_mlp_widths: Optional[Sequence[int]] = None
     activation_fn: Callable[[Any], Any] = lambda u: u
     learn_atomic_type_scales: bool = False
     learn_atomic_type_shifts: bool = False
@@ -241,13 +248,28 @@ class EnergySparse(BaseSubModule):
         else:
             atomic_scales = jnp.ones((1,), dtype=x.dtype)
 
-        if self.regression_dim is not None:
-            y = nn.Dense(
-                self.regression_dim,
-                kernel_init=nn.initializers.lecun_normal(),
-                name='energy_dense_regression'
-            )(x)  # (num_nodes, regression_dim)
-            y = self.activation_fn(y)  # (num_nodes, regression_dim)
+        # Resolve the hidden-layer widths of the readout MLP. `final_mlp_widths`
+        # (new, flexible) takes precedence over the legacy single `regression_dim`.
+        if self.final_mlp_widths is not None:
+            hidden_widths = list(self.final_mlp_widths)
+        elif self.regression_dim is not None:
+            hidden_widths = [self.regression_dim]
+        else:
+            hidden_widths = []
+
+        if hidden_widths:
+            y = x
+            for i, width in enumerate(hidden_widths):
+                # Keep the legacy name for the first hidden layer so pretrained
+                # 'energy_dense_regression' weights still load; extra layers are
+                # named 'energy_dense_hidden_{i}' and initialise fresh.
+                layer_name = 'energy_dense_regression' if i == 0 else f'energy_dense_hidden_{i}'
+                y = nn.Dense(
+                    width,
+                    kernel_init=nn.initializers.lecun_normal(),
+                    name=layer_name
+                )(y)  # (num_nodes, width)
+                y = self.activation_fn(y)  # (num_nodes, width)
             atomic_energy = nn.Dense(
                 num_theory_levels,
                 kernel_init=self.kernel_init,

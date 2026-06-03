@@ -1504,17 +1504,47 @@ def freeze_parameters(optimizer, trainable_subset_keys=None, frozen_subset_keys=
     )
 
 
+def _path_matches_key(path, key):
+    """Return True if a parameter ``path`` (tuple of nested module/leaf names)
+    matches a selection ``key``.
+
+    Supported key forms:
+      * Plain component, e.g. ``'observables_0'`` — matches if it equals ANY
+        single component of ``path`` (the historical behaviour).
+      * Hierarchical, e.g. ``'observables_0/energy_dense_final'`` — matches if
+        its '/'-separated parts appear as a CONTIGUOUS subsequence of ``path``.
+        (The previous ``set(keys) & set(path)`` test silently matched nothing
+        for slashed keys, so strategies like ``final_mlp`` froze everything.)
+      * Trailing ``*`` on any component for prefix matching, e.g.
+        ``'observables_0/energy_dense*'`` matches ``energy_dense_regression``,
+        ``energy_dense_hidden_0``, ``energy_dense_final``, ...
+    """
+    def _component_matches(component, pattern):
+        if pattern.endswith('*'):
+            return component.startswith(pattern[:-1])
+        return component == pattern
+
+    parts = key.split('/')
+    n = len(parts)
+    if n == 1:
+        return any(_component_matches(c, parts[0]) for c in path)
+    for i in range(len(path) - n + 1):
+        if all(_component_matches(path[i + j], parts[j]) for j in range(n)):
+            return True
+    return False
+
+
 def make_annotation_fn(keys):
     return lambda params: traverse_util.path_aware_map(
-        lambda path, v: 'trainable' if len(set(keys) & set(path)) > 0 else 'frozen', params
+        lambda path, v: 'trainable' if any(_path_matches_key(path, k) for k in keys) else 'frozen', params
     )
 
 
 def make_freeze_annotation_fn(keys):
-    """Inverse of make_annotation_fn: parameters whose path contains any of
+    """Inverse of make_annotation_fn: parameters whose path matches any of
     ``keys`` are 'frozen', everything else is 'trainable'."""
     return lambda params: traverse_util.path_aware_map(
-        lambda path, v: 'frozen' if len(set(keys) & set(path)) > 0 else 'trainable', params
+        lambda path, v: 'frozen' if any(_path_matches_key(path, k) for k in keys) else 'trainable', params
     )
 
 
