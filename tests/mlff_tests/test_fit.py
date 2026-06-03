@@ -1,5 +1,6 @@
 from ase import units
 import jax
+import pytest
 from so3lr.mlff.nn import SO3kratesSparse
 from so3lr.mlff import training_utils
 from so3lr.mlff import jraph_utils
@@ -11,7 +12,8 @@ import optax
 import pkg_resources
 
 
-def test_fit(tmp_path, disable_jit: bool = False):
+@pytest.mark.parametrize("use_ema", [False, True])
+def test_fit(tmp_path, use_ema, disable_jit: bool = False):
     if disable_jit:
         from jax.config import config
         config.update('jax_disable_jit', True)
@@ -92,6 +94,12 @@ def test_fit(tmp_path, disable_jit: bool = False):
         validation_data=list(validation_data),
         ckpt_dir=workdir / 'checkpoints',
         allow_restart=False,
-        use_wandb=False  # Otherwise the GitHub CI fails.
+        use_wandb=False,  # Otherwise the GitHub CI fails.
+        use_ema=use_ema,
+        ema_decay=0.99,
     )
+
+    # A checkpoint should have been written (with EMA weights when use_ema=True).
+    assert (workdir / 'checkpoints').exists()
+    assert any((workdir / 'checkpoints').iterdir())
 

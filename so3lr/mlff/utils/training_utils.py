@@ -801,7 +801,13 @@ def fit(
         use_adaptive_robust_loss: bool = False,
         adaptive_robust_loss_targets: list = None,
         adaptive_robust_loss_init_alpha: float = 1.5,
-        adaptive_robust_loss_init_scale: float = 1.0
+        adaptive_robust_loss_init_scale: float = 1.0,
+        # Exponential moving average of weights. When enabled, the
+        # raw params keep training while a shadow EMA copy is used for the
+        # validation metrics and saved in the checkpoint -- this is the deployed
+        # ("averaged") model and is usually more stable/accurate.
+        use_ema: bool = False,
+        ema_decay: float = 0.999
 ):
     """
     Fit model.
@@ -885,6 +891,17 @@ def fit(
     header_printed = False
 
     opt_state = None
+    # Shadow EMA copy of the parameters. Updated after every
+    # optimizer step; used for validation + checkpoints when ``use_ema`` is set.
+    ema_params = None
+    if use_ema:
+        @jax.jit
+        def _ema_update_fn(ema_p, p):
+            return jax.tree_util.tree_map(
+                lambda e, x: ema_decay * e + (1.0 - ema_decay) * x, ema_p, p
+            )
+        logger.info(f"Using EMA of weights for validation/checkpoints (decay={ema_decay}).")
+
     for epoch in range(num_epochs):
         # Shuffle the training data.
         numpy_rng.shuffle(training_data)
@@ -1018,12 +1035,18 @@ def fit(
             if opt_state is None:
                 opt_state = optimizer.init(params)
 
+            # Initialize the EMA shadow copy from the first available params.
+            if use_ema and ema_params is None:
+                ema_params = params
+
             # Make sure parameters and opt_state are set.
             assert params is not None
             assert opt_state is not None
 
             params, opt_state, train_metrics = training_step_fn(params, opt_state, batch_training)
             step += 1
+            if use_ema:
+                ema_params = _ema_update_fn(ema_params, params)
             train_metrics_np = jax.device_get(train_metrics)
 
             # Log training metrics.
@@ -1043,6 +1066,9 @@ def fit(
                     n_pairs=batch_max_num_pairs,
                 )
 
+                # Use the EMA (deployed) weights for validation when enabled.
+                eval_params = ema_params if use_ema else params
+
                 # Start iteration over validation batches.
                 eval_totals = {}
                 eval_counts = {}
@@ -1051,7 +1077,7 @@ def fit(
                     batch_validation = jax.tree_util.tree_map(jnp.array, batch_validation)
 
                     eval_out = validation_step_fn(
-                        params,
+                        eval_params,
                         batch_validation
                     )
 
@@ -1072,10 +1098,10 @@ def fit(
                     header_printed = True
                 logger.info(print_metrics_row(epoch, step, eval_metrics))
 
-                # Save checkpoint.
+                # Save checkpoint (the EMA / deployed weights when EMA is on).
                 ckpt_mngr.save(
                     step,
-                    args=ocp.args.Composite(params=ocp.args.StandardSave(params)),
+                    args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
                     metrics={
                         'loss': eval_metrics['eval_loss']
                     }
@@ -1122,6 +1148,9 @@ def fit_from_iterator(
         adaptive_robust_loss_init_alpha: float = 1.5,
         adaptive_robust_loss_init_scale: float = 1.0,
         dataset_info: dict = None,
+        # Exponential moving average of weights; see fit().
+        use_ema: bool = False,
+        ema_decay: float = 0.999,
 ):
     """
     Fit model.
@@ -1200,6 +1229,15 @@ def fit_from_iterator(
     header_printed = False
 
     opt_state = None
+    # Shadow EMA copy of the parameters; see fit().
+    ema_params = None
+    if use_ema:
+        @jax.jit
+        def _ema_update_fn(ema_p, p):
+            return jax.tree_util.tree_map(
+                lambda e, x: ema_decay * e + (1.0 - ema_decay) * x, ema_p, p
+            )
+        logger.info(f"Using EMA of weights for validation/checkpoints (decay={ema_decay}).")
 
     for epoch in range(num_epochs):
         if use_wandb:
@@ -1327,12 +1365,17 @@ def fit_from_iterator(
             # If optimizer state is None (in the first step), initialize from the parameter pyTree.
             if opt_state is None:
                 opt_state = optimizer.init(params)
+            # Initialize the EMA shadow copy from the first available params.
+            if use_ema and ema_params is None:
+                ema_params = params
             # Make sure parameters and opt_state are set.
             assert params is not None
             assert opt_state is not None
 
             params, opt_state, train_metrics = training_step_fn(params, opt_state, batch_training)
             step += 1
+            if use_ema:
+                ema_params = _ema_update_fn(ema_params, params)
             train_metrics_np = jax.device_get(train_metrics)
 
             # Log training metrics.
@@ -1352,6 +1395,8 @@ def fit_from_iterator(
 
             # Start validation process.
             if step % eval_every_num_steps == 0:
+                # Use the EMA (deployed) weights for validation when enabled.
+                eval_params = ema_params if use_ema else params
                 # Start iteration over validation batches.
                 eval_totals = {}
                 eval_counts = {}
@@ -1361,7 +1406,7 @@ def fit_from_iterator(
                     batch_validation = jax.tree_util.tree_map(jnp.array, batch_validation)
 
                     eval_out = validation_step_fn(
-                        params,
+                        eval_params,
                         batch_validation
                     )
 
@@ -1382,11 +1427,11 @@ def fit_from_iterator(
                 logger.info(print_metrics_row(epoch, step, eval_metrics))
                 eval_loss = eval_metrics['eval_loss']
 
-                # Only save if loss is finite
+                # Only save if loss is finite (save the EMA weights when EMA is on).
                 if jnp.isfinite(eval_loss):
                     ckpt_mngr.save(
                         step,
-                        args=ocp.args.Composite(params=ocp.args.StandardSave(params)),
+                        args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
                         metrics={'loss': eval_loss}
                     )
                 else:

@@ -366,7 +366,10 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             use_adaptive_robust_loss=use_adaptive_robust_loss,
             adaptive_robust_loss_targets=adaptive_robust_loss_targets,
             adaptive_robust_loss_init_alpha=adaptive_robust_loss_init_alpha,
-            adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale
+            adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale,
+            # Exponential moving average of weights.
+            use_ema=config.training.get('use_ema', False),
+            ema_decay=config.training.get('ema_decay', 0.999)
         )
     else:
         training_utils.fit_from_iterator(
@@ -394,6 +397,9 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             adaptive_robust_loss_targets=adaptive_robust_loss_targets,
             adaptive_robust_loss_init_alpha=adaptive_robust_loss_init_alpha,
             adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale,
+            # Exponential moving average of weights.
+            use_ema=config.training.get('use_ema', False),
+            ema_decay=config.training.get('ema_decay', 0.999),
             # Dataset info for effective epoch tracking
             dataset_info=training_data.dataset_info() if hasattr(training_data, 'dataset_info') else None,
         )
