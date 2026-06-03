@@ -672,6 +672,43 @@ The `k_spacing` controls the k-space grid density:
 - For PME/P3M: `k_spacing ≈ smearing / 8` is a good starting point
 - For Ewald: `k_spacing ≈ smearing / 2` is typical
 
+#### Automatic tuning with `so3lr tune-ewald`
+
+Rather than choosing `smearing`/`spacing` by hand, the `tune-ewald` command grid-searches
+real-space cutoff, smearing, and grid resolution for a given structure and reports the
+parameter set that reaches a target force accuracy at the lowest cost:
+
+```shell script
+# Tune PME parameters for a periodic box (use float64 for the accuracy estimate)
+so3lr tune-ewald --input water_box.xyz \
+    --kspace-electrostatics pme \
+    --lr-cutoff 12.0 \
+    --precision float64
+```
+
+- `--kspace-electrostatics`: method to tune — `ewald`, `pme`, or `p3m`.
+- `--lr-cutoff`: long-range cutoff (Å); used as the upper bound of the cutoff search.
+- `--precision`: run the tuning in `float64` so the error bounds are meaningful.
+- Other model flags (`--model`, `--total-charge`, `--dispersion-damping`, buffer sizes)
+  are shared with the MD commands.
+
+Results (including per-candidate error/timing bounds and the recommended
+`smearing`/`spacing`/`interp-nodes`) are written to the log file, and the command
+prints a ready-to-run MD invocation plus the equivalent settings-YAML keys.
+
+Plug the recommended values into your MD run either on the CLI
+(`--kspace-smearing` / `--kspace-spacing` / `--kspace-interp-nodes`) or, for a
+`so3lr --settings settings.yaml` run, by adding the matching keys to the YAML:
+
+```yaml
+# settings.yaml
+lr_cutoff: 12.0
+kspace_electrostatics: pme      # ewald / pme / p3m
+kspace_smearing: 4.0            # recommended value from tune-ewald
+kspace_spacing: 0.5            # recommended value from tune-ewald
+kspace_interp_nodes: 4         # for pme / p3m
+```
+
 ## Enhanced Sampling with PySAGES
 
 SO3LR integrates with [PySAGES](https://github.com/SSAGESLabs/PySAGES), a JAX-based enhanced sampling library, to enable biased molecular dynamics simulations with collective variables (CVs). This allows free energy calculations and enhanced exploration of configuration space directly within SO3LR's JAX-MD engine.

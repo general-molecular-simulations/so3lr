@@ -1373,9 +1373,11 @@ def tune(
         raise ValueError(
             f"Unknown kspace_electrostatics type: {kspace_electrostatics}. Must be 'ewald', 'pme', 'p3m', or 'cutoff'.")
 
+    recommended_param = None
     if any(err < accuracy for err in errs):
         param, timing, error = params[timings.index(min(timings))], min(
             timings), errs[timings.index(min(timings))]
+        recommended_param = param  # fastest param that still meets the accuracy target
         if kspace_electrostatics == 'cutoff':
             logger.info(
                 f"Optimally timed parameters for cutoff electrostatics with an estimated force error below {accuracy}eV/A:")
@@ -1386,7 +1388,7 @@ def tune(
             logger.info(f"  lr_cutoff: {param['cutoff']}")
             logger.info(f"  kspace_smearing: {param['smearing']}")
             logger.info(f"  kspace_spacing: {param['spacing']}")
-            if 'interpolation_nodes' in params:
+            if 'interpolation_nodes' in param:
                 logger.info(
                     f"  kspace_interp_nodes: {param['interpolation_nodes']}")
         elif kspace_dispersion == 'cutoff':
@@ -1409,7 +1411,7 @@ def tune(
         logger.info(f"  lr_cutoff: {param['cutoff']}")
         logger.info(f"  kspace_smearing: {param['smearing']}")
         logger.info(f"  kspace_spacing: {param['spacing']}")
-        if 'interpolation_nodes' in params:
+        if 'interpolation_nodes' in param:
             logger.info(
                 f"  kspace_interp_nodes: {param['interpolation_nodes']}")
     elif kspace_dispersion == 'cutoff':
@@ -1418,3 +1420,36 @@ def tune(
         logger.info(f"  dispersion_damping: {param['cutoff_lr_damping']}")
     logger.info(f"  timing: {timing}")
     logger.info(f"  force error estimate [eV/A]: {error}")
+
+    # Print a ready-to-run MD command using the tuned parameters so users know
+    # exactly how to launch a simulation next. Prefer the fastest param that met
+    # the accuracy target; otherwise fall back to the smallest-error param.
+    rec = recommended_param if recommended_param is not None else param
+    if kspace_electrostatics in ('ewald', 'pme', 'p3m'):
+        _interp = rec.get('interpolation_nodes')
+        _interp_flag = f" --kspace-interp-nodes {int(_interp)}" if _interp is not None else ""
+        logger.info("=" * 60)
+        logger.info("To run MD with these k-space parameters, e.g. NPT (CLI):")
+        logger.info(
+            f"  so3lr npt --input {input_file_path} --lr-cutoff {rec['cutoff']} "
+            f"--kspace-electrostatics {kspace_electrostatics} "
+            f"--kspace-smearing {rec['smearing']} --kspace-spacing {rec['spacing']}{_interp_flag} "
+            f"--temperature 300 --pressure 1.0"
+        )
+        logger.info("Or add the following to your settings.yaml:")
+        logger.info(f"  lr_cutoff: {rec['cutoff']}")
+        logger.info(f"  kspace_electrostatics: {kspace_electrostatics}")
+        logger.info(f"  kspace_smearing: {rec['smearing']}")
+        logger.info(f"  kspace_spacing: {rec['spacing']}")
+        if _interp is not None:
+            logger.info(f"  kspace_interp_nodes: {int(_interp)}")
+        logger.info("=" * 60)
+    elif kspace_electrostatics == 'cutoff' or kspace_dispersion == 'cutoff':
+        logger.info("=" * 60)
+        logger.info("To run MD with this cutoff, e.g. NVT (CLI):")
+        logger.info(
+            f"  so3lr nvt --input {input_file_path} --lr-cutoff {rec['cutoff']} --temperature 300"
+        )
+        logger.info("Or add the following to your settings.yaml:")
+        logger.info(f"  lr_cutoff: {rec['cutoff']}")
+        logger.info("=" * 60)
