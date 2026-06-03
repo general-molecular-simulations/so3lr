@@ -321,6 +321,29 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
 
         config.training.batch_max_num_pairs = batch_max_num_pairs
 
+    # Echo device and batching info to the (file-backed) SO3LR logger so a
+    # training run is self-documenting from its log file alone -- not only from
+    # captured SLURM stdout. Runs regardless of whether training was started via
+    # `so3lr train`/`so3lr finetune` or by calling the functions directly.
+    try:
+        import jax as _jax
+        _devices = _jax.devices()
+        logger.info("=" * 60)
+        logger.info(f"JAX backend:               {_jax.default_backend()}")
+        logger.info(f"Number of devices:         {len(_devices)}")
+        for _i, _d in enumerate(_devices):
+            logger.info(f"  Device {_i}:                 {_d.device_kind} ({_d.platform})")
+    except Exception as _e:  # pragma: no cover - purely informational
+        logger.info(f"Could not query JAX devices: {_e}")
+    logger.info("-" * 60)
+    logger.info("Training batch settings:")
+    logger.info(f"  batch_max_num_graphs:    {config.training.batch_max_num_graphs}")
+    logger.info(f"  batch_max_num_nodes:     {config.training.batch_max_num_nodes}")
+    logger.info(f"  batch_max_num_edges:     {config.training.batch_max_num_edges}")
+    logger.info(f"  batch_max_num_pairs:     {config.training.batch_max_num_pairs}")
+    logger.info(f"  num_epochs:              {config.training.num_epochs}")
+    logger.info("=" * 60)
+
     with open(workdir / 'hyperparameters.json', 'w') as fp:
         json.dump(config.to_dict(), fp)
 
@@ -942,6 +965,29 @@ def run_fine_tuning(
             batch_max_num_pairs = 0
 
         config.training.batch_max_num_pairs = batch_max_num_pairs
+
+    # Echo device and batching info to the (file-backed) SO3LR logger so a
+    # training run is self-documenting from its log file alone -- not only from
+    # captured SLURM stdout. Runs regardless of whether training was started via
+    # `so3lr train`/`so3lr finetune` or by calling the functions directly.
+    try:
+        import jax as _jax
+        _devices = _jax.devices()
+        logger.info("=" * 60)
+        logger.info(f"JAX backend:               {_jax.default_backend()}")
+        logger.info(f"Number of devices:         {len(_devices)}")
+        for _i, _d in enumerate(_devices):
+            logger.info(f"  Device {_i}:                 {_d.device_kind} ({_d.platform})")
+    except Exception as _e:  # pragma: no cover - purely informational
+        logger.info(f"Could not query JAX devices: {_e}")
+    logger.info("-" * 60)
+    logger.info("Training batch settings:")
+    logger.info(f"  batch_max_num_graphs:    {config.training.batch_max_num_graphs}")
+    logger.info(f"  batch_max_num_nodes:     {config.training.batch_max_num_nodes}")
+    logger.info(f"  batch_max_num_edges:     {config.training.batch_max_num_edges}")
+    logger.info(f"  batch_max_num_pairs:     {config.training.batch_max_num_pairs}")
+    logger.info(f"  num_epochs:              {config.training.num_epochs}")
+    logger.info("=" * 60)
 
     with open(workdir / 'hyperparameters.json', 'w') as fp:
         json.dump(config.to_dict(), fp)
