@@ -742,6 +742,11 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     settings_dict = canonicalize_ensemble(settings_dict)
     settings_dict['output_format'] = infer_output_format(settings_dict.get('output_file', ''))
 
+    # Default the log file to the settings YAML name with a .log extension
+    # (e.g. `npt.yaml` -> `npt.log`), unless the YAML specifies `log_file`.
+    if not settings_dict.get('log_file'):
+        settings_dict['log_file'] = str(settings_path.with_suffix('.log'))
+
     setup_logger(settings_dict.get('log_file'))
     logger.info(SO3LR_ASCII)
     logger.info(f"Loading settings from {settings}")
@@ -766,7 +771,8 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     """Log all simulation settings from the internal settings dict."""
     ensemble = s.get('ensemble', 'nvt')
     _label = {'nvt': 'NVT', 'nvt-langevin': 'NVT (Langevin)', 'npt': 'NPT', 'nve': 'NVE'}
-    dt_fs = s.get('md_dt', DEFAULT_TIMESTEP)  # fs for display
+    dt_ps = s.get('md_dt', DEFAULT_TIMESTEP / 1000)  # md_dt is stored internally in ps
+    dt_fs = dt_ps * 1000  # for display in fs
     total_steps = s.get('md_cycles', DEFAULT_MD_CYCLES) * s.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)
     simulation_time = total_steps * s.get('md_dt', DEFAULT_TIMESTEP / 1000)  # ps
 
@@ -794,17 +800,18 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
     logger.info(f"MD cycles:                 {s.get('md_cycles', DEFAULT_MD_CYCLES)}")
     logger.info(f"Steps per cycle:           {s.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)}")
-    logger.info(f"Timestep:                  {dt_fs} ps")
+    logger.info(f"Timestep:                  {dt_fs:.4g} fs")
     logger.info(f"Saving buffer size:        {s.get('save_buffer', DEFAULT_SAVE_BUFFER)}")
     if ensemble in ('nvt', 'npt'):
         logger.info(f"NHC chain length:          {s.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)}")
         logger.info(f"Nose-Hoover steps:         {s.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)}")
-        logger.info(f"Nose-Hoover Tdamp:         {s.get('nhc_thermo', DEFAULT_NHC_THERMO) * dt_fs} fs")
+        logger.info(f"Nose-Hoover Tdamp:         {s.get('nhc_thermo', DEFAULT_NHC_THERMO) * dt_fs:.4g} fs")
     if ensemble == 'npt':
-        logger.info(f"Nose-Hoover Pdamp:         {s.get('nhc_baro', DEFAULT_NHC_BARO) * dt_fs} fs")
+        logger.info(f"Nose-Hoover Pdamp:         {s.get('nhc_baro', DEFAULT_NHC_BARO) * dt_fs:.4g} fs")
     if ensemble == 'nvt-langevin':
         logger.info(f"Center of Mass Motion Removal: {s.get('langevin_removecmmotion', DEFAULT_LANGEVIN_REMOVECMMOTION)}")
-        logger.info(f"Langevin friction value:   {s.get('langevin_thermo', DEFAULT_LANGEVIN_THERMO) * dt_fs}")
+        _gamma = 1.0 / (dt_ps * s.get('langevin_thermo', DEFAULT_LANGEVIN_THERMO))
+        logger.info(f"Langevin friction (gamma): {_gamma:.4g} 1/ps")
     logger.info(f"Random seed:               {s.get('seed', DEFAULT_SEED)}")
     logger.info(f"Observables:               {s.get('observables', DEFAULT_OBSERVABLES)}")
     if s.get('restart_load_path'):
@@ -831,6 +838,14 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
         logger.info(f"Output atom indices:       {s['output_atom_indices']}")
     if s.get('restart_reset'):
         logger.info(f"Restart reset:             {s['restart_reset']}")
+    logger.info("=" * 60)
+
+    # Dump the full merged settings dict (after YAML_DEFAULTS applied, CLI->settings
+    # converted) so the log file alone is enough to reproduce the run. str() coercion
+    # keeps it robust to Path/array/non-serializable values. (md_dt is in ps.)
+    logger.info("Full merged settings (md_dt in ps):")
+    for _k in sorted(s.keys()):
+        logger.info(f"    {_k}: {s[_k]}")
     logger.info("=" * 60)
 
 # ============================================================================
@@ -1443,9 +1458,10 @@ def train_model(
         logger.error(f"Error: Config file not found: {config_path}")
         sys.exit(1)
 
-    # Setup logging
+    # Setup logging: default the log file to the config name with a .log
+    # extension (e.g. `config.yaml` -> `config.log`).
     if log_file is None:
-        log_file = Path(config_path).stem + "_training.log"
+        log_file = str(Path(config_path).with_suffix('.log'))
 
     setup_logger(log_file)
 
@@ -1565,9 +1581,14 @@ def tune_ewald(
         else:
             settings_dict.setdefault(internal_key, val)
 
-    # Generate default log file name based on output file if not explicitly provided
+    # Default the log file to the settings YAML name with a .log extension when
+    # a settings file is given (e.g. `tune.yaml` -> `tune.log`); otherwise fall
+    # back to the input-geometry name.
     if settings_dict.get('log_file') is None:
-        settings_dict.update({'log_file': f"{Path(input_file).stem}_tune-kspace.log"})
+        if settings is not None:
+            settings_dict['log_file'] = str(Path(settings).with_suffix('.log'))
+        else:
+            settings_dict['log_file'] = f"{Path(input_file).stem}_tune-kspace.log"
 
     # Setup logging with default levels
     setup_logger(settings_dict.get('log_file'))
