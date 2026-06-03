@@ -20,7 +20,7 @@ jax.config.update('jax_enable_x64', True)
 from ase.io import read
 from jax_md import space, simulate, units, partition
 
-from so3lr.cli.so3lr_md import neighbor_list_featurizer_custom
+from so3lr.jaxmd_utils import neighbor_list_featurizer
 from so3lr.mlff.calculators.potential import PotentialSparse
 
 PACKAGE_DIR = pathlib.Path(__file__).parent.parent.resolve()
@@ -66,7 +66,7 @@ def _setup_system(dtype):
         disable_cell_list=True,
     )
 
-    featurizer = neighbor_list_featurizer_custom(
+    featurizer = neighbor_list_featurizer(
         displacement, species, total_charge=0., precision=dtype,
         fractional_coordinates=True,
     )

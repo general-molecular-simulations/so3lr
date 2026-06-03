@@ -40,6 +40,7 @@ from so3lr.mlff.nn.observable.observable_sparse import (
 
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
+from so3lr.jaxmd_utils import to_jax_md as _to_jax_md
 from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
 
 import jaxpme
@@ -744,100 +745,6 @@ def load_model(
     return potential
 
 
-def neighbor_list_featurizer_custom(displacement_fn, species, total_charge=0., precision=jnp.float32, fractional_coordinates=True, num_unpaired_electrons=0.):
-    """
-    Create a function that builds a graph from positions and neighbors.
-
-    Args:
-        displacement_fn: Function to compute displacements.
-        species: Array of atomic species.
-        total_charge: Total charge of the system.
-        precision: Precision to use for calculations.
-
-    Returns:
-        Function that creates a graph from positions and neighbors.
-    """
-    def featurize(R, neighbor, neighbor_lr, **kwargs):
-        idx_i = neighbor[0]  # shape: P
-        idx_j = neighbor[1]  # shape: P
-        idx_i_lr = neighbor_lr[0]  # shape: P
-        idx_j_lr = neighbor_lr[1]  # shape: P
-
-        Ra = R[idx_i]
-        Rb = R[idx_j]
-        Ra_lr = R[idx_i_lr]
-        Rb_lr = R[idx_j_lr]
-
-        positions = None
-        k_smearing = None
-        k_smearing_disp = None
-        box = kwargs.get('box', None)
-        k_grid = kwargs.get('k_grid', None)
-        k_grid_disp = kwargs.get('k_grid_disp', None)
-
-        if box is not None:
-            box = kwargs.get('box')
-            if box is not None:
-                if box.shape == (3, 3):
-                    box = box
-                elif box.shape == (3, ):
-                    box = jnp.diag(box)
-                elif box.shape == (1,):
-                    box = jnp.diag(jnp.repeat(box, 3))
-                else:
-                    raise ValueError(f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
-
-        need_positions = (k_grid is not None) or (k_grid_disp is not None)
-        if need_positions:
-            if k_grid is not None:
-                k_smearing = kwargs.get('k_smearing')
-                assert box is not None, "k_grid requires a box to be defined."
-                assert k_smearing is not None, "k_grid requires k_smearing to be defined."
-            if k_grid_disp is not None:
-                k_smearing_disp = kwargs.get('k_smearing_disp')
-                assert box is not None, "k_grid_disp requires a box to be defined."
-                assert k_smearing_disp is not None, "k_grid_disp requires k_smearing_disp to be defined."
-            if fractional_coordinates:
-                positions = transform(box, R) # transform to non-fractional coordinates
-            else:
-                positions = R
-
-        if 'perturbation' in kwargs:
-            pert = kwargs.get('perturbation')
-            if positions is not None:
-                positions = transform(pert, positions)
-            if box is not None:
-                box = transform(pert, box)
-
-        d = jax.vmap(partial(displacement_fn, **kwargs))
-        dR = d(Ra, Rb)
-        dR_lr = d(Ra_lr, Rb_lr)
-
-        graph = Graph(
-            positions=positions,
-            nodes=species,
-            edges=dR,
-            centers=idx_i,
-            others=idx_j,
-            mask=None,
-            total_charge=jnp.array([total_charge], dtype=precision),
-            num_unpaired_electrons=jnp.array([num_unpaired_electrons], dtype=precision),
-            edges_lr=dR_lr,
-            idx_i_lr=idx_i_lr,
-            idx_j_lr=idx_j_lr,
-            cell=box,  # Will be None for free boundary conditions
-            k_grid=k_grid,
-            k_smearing=k_smearing,
-            k_grid_disp=k_grid_disp,
-            k_smearing_disp=k_smearing_disp,
-            theory_mask=jnp.eye(16, dtype=precision)[5].reshape(1, -1)
-        )
-
-        return graph
-
-    return featurize
-
-
 def to_jax_md_custom(
         potential,  # the mlff potential
         species: jnp.ndarray,
@@ -854,8 +761,14 @@ def to_jax_md_custom(
         num_unpaired_electrons: float = 0.,
         **neighbor_kwargs
 ):
-    """
-    Create neighbor functions and energy function for JAX MD.
+    """Create neighbor functions and a jax-md energy function for the MD engine.
+
+    Thin wrapper around the shared :func:`so3lr.jaxmd_utils.to_jax_md` helper, so
+    the CLI and the public helper stay in sync (previously these were two
+    independent copies). Uses ``capacity_multiplier=None`` so each per-list
+    ``buffer_size_multiplier`` is used directly as the neighbor-list capacity
+    multiplier (the historical CLI behaviour), and applies a single
+    ``minimum_cell_size_multiplier`` to both the short- and long-range lists.
 
     Args:
         potential: The MLFF potential object.
@@ -865,69 +778,35 @@ def to_jax_md_custom(
         dr_threshold: Threshold for neighborhood cutoff.
         buffer_size_multiplier_sr: Capacity multiplier for short-range neighbor list.
         buffer_size_multiplier_lr: Capacity multiplier for long-range neighbor list.
-        minimum_cell_size_multiplier: Multiplier for cell size. Increase above 1.0
-            to use larger cells, reducing overhead when cutoff is short.
+        minimum_cell_size_multiplier: Multiplier for cell size.
         disable_cell_list: Whether to disable cell lists.
         fractional_coordinates: Whether to use fractional coordinates.
         total_charge: Total charge of the system.
-        precision: Precision to use for calculations.
+        precision: Precision to use for the auxiliary graph arrays.
+        num_unpaired_electrons: Number of unpaired electrons (spin).
         **neighbor_kwargs: Additional keyword arguments for neighbor functions.
 
     Returns:
         Tuple of neighbor function, long-range neighbor function, and energy function.
     """
-    # Create the neighbor_fn
-    neighbor_fn = partition.neighbor_list(
-        displacement_or_metric,
-        box,
-        r_cutoff=potential.cutoff,
+    return _to_jax_md(
+        potential=potential,
+        displacement_or_metric=displacement_or_metric,
+        box_size=box,
+        species=species,
         dr_threshold=dr_threshold,
-        capacity_multiplier=buffer_size_multiplier_sr,
-        minimum_cell_size_multiplier=minimum_cell_size_multiplier,
-        fractional_coordinates=fractional_coordinates,
-        # only sparse is supported in mlff
-        format=partition.NeighborListFormat(1),
+        capacity_multiplier=None,
+        buffer_size_multiplier_sr=buffer_size_multiplier_sr,
+        buffer_size_multiplier_lr=buffer_size_multiplier_lr,
+        minimum_cell_size_multiplier_sr=minimum_cell_size_multiplier,
+        minimum_cell_size_multiplier_lr=minimum_cell_size_multiplier,
         disable_cell_list=disable_cell_list,
-        **neighbor_kwargs)
-
-    # Create the neighbor_fn for long-range cutoff
-    neighbor_fn_lr = partition.neighbor_list(
-        displacement_or_metric,
-        box,
-        r_cutoff=potential.long_range_cutoff,
-        dr_threshold=dr_threshold,
-        capacity_multiplier=buffer_size_multiplier_lr,
-        minimum_cell_size_multiplier=minimum_cell_size_multiplier,
         fractional_coordinates=fractional_coordinates,
-        # long-range modules can handle OrderedSparse.
-        format=partition.NeighborListFormat(2),
-        disable_cell_list=disable_cell_list,
-        **neighbor_kwargs)
-
-    featurizer = neighbor_list_featurizer_custom(
-        displacement_or_metric,
-        species,
-        total_charge,
-        precision,
-        fractional_coordinates=fractional_coordinates,
-        num_unpaired_electrons=num_unpaired_electrons
+        total_charge=total_charge,
+        num_unpaired_electrons=num_unpaired_electrons,
+        precision=precision,
+        **neighbor_kwargs,
     )
-
-    # Create an energy_fn that is compatible with jax_md
-    def energy_fn(
-            R,
-            neighbor,
-            neighbor_lr,
-            has_aux=False,
-            **energy_fn_kwargs
-    ):
-        graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
-        if has_aux:
-            return potential(graph, has_aux=True)
-        else:
-            return potential(graph).sum()
-
-    return neighbor_fn, neighbor_fn_lr, energy_fn
 
 
 def process_model(
