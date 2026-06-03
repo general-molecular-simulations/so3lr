@@ -666,7 +666,7 @@ class AseCalculatorSparse(Calculator):
                 system = system._replace(k_grid=k_grid, k_smearing=k_smearing)
 
         if kspace_source is not None and self._kspace_reported_source != kspace_source:
-            logging.mlff(kspace_message)
+            logger.info(kspace_message)
             self._kspace_reported_source = kspace_source
 
         if pbc_any:

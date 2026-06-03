@@ -274,7 +274,7 @@ class TestASECalculatorKSpaceReporting:
             lambda **kwargs: (dummy_neighbors, dummy_partitioning),
         )
 
-        with caplog.at_level(logging.MLFF):
+        with caplog.at_level(logging.INFO, logger="SO3LR"):
             calc.calculate(atoms)
 
         assert 'Using k-space grid from atoms.info; it overrides ASE calculator k-space kwargs.' in caplog.text
@@ -312,7 +312,7 @@ class TestASECalculatorKSpaceReporting:
         )
         monkeypatch.setitem(sys.modules, 'jaxpme', fake_jaxpme)
 
-        with caplog.at_level(logging.MLFF):
+        with caplog.at_level(logging.INFO, logger="SO3LR"):
             calc.calculate(atoms)
 
         assert 'Generating PME k-space grid from ASE calculator kwargs.' in caplog.text
