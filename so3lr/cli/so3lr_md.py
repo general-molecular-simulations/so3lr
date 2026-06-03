@@ -2313,6 +2313,14 @@ def perform_md(
     else:
         logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
 
+    # Reference for the conserved-quantity drift check in the loop below. H is
+    # the Nose-Hoover invariant for NVE/NVT/NPT and should stay ~constant; large
+    # drift signals integration error. NVT-Langevin is stochastic (its KE+PE is
+    # not conserved) and is excluded.
+    H0 = float(H) if (H is not None and np.isfinite(float(H)) and float(H) != 0.0) else None
+    drift_warned = False
+    energy_drift_threshold = float(all_settings.get('energy_drift_threshold', 0.05))
+
     momenta, positions, boxes = [], [], []
     cycle_md = 0
     current_cycle = 0
@@ -2482,6 +2490,20 @@ def perform_md(
                     f"aborting. Check the timestep, temperature, and input structure.")
                 raise RuntimeError(
                     "MD simulation diverged: NaN/Inf detected in energy or temperature.")
+
+            # Warn (once) on large drift of the conserved quantity. Skipped for
+            # the stochastic Langevin thermostat, where KE+PE is not conserved.
+            if (not drift_warned and H0 is not None and H is not None
+                    and ensemble != 'nvt-langevin' and np.isfinite(float(H))):
+                rel_drift = abs(float(H) - H0) / abs(H0)
+                if rel_drift > energy_drift_threshold:
+                    logger.warning(
+                        f"Conserved-quantity drift {rel_drift:.1%} exceeds "
+                        f"{energy_drift_threshold:.0%} at step {current_cycle*md_steps} "
+                        f"(H0={H0:.4f} eV, H={float(H):.4f} eV). This usually means the "
+                        f"integration is unstable; consider a smaller timestep or float64 "
+                        f"precision. (Set energy_drift_threshold to tune/silence this.)")
+                    drift_warned = True
 
             if ensemble == 'npt':
                 p_str = ''
