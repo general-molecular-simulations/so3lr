@@ -3277,6 +3277,19 @@ def load_state(
 
     box = jnp.asarray(box, precision)
 
+    # Report exactly what was restored from the .npz so the log is self-explanatory.
+    _n_atoms = int(np.asarray(state.position).shape[0])
+    _avail = sorted(loaded_state.files) if hasattr(loaded_state, 'files') else sorted(loaded_state.keys())
+    logger.info(f"Restored state from .npz: ensemble={ensemble.lower()}, "
+                f"n_atoms={_n_atoms}, step/cycle={int(np.asarray(cycle))}, "
+                f"saved_fractional={saved_fractional}, precision={np.dtype(precision).name}")
+    logger.info(f"  position shape: {tuple(np.asarray(state.position).shape)}; "
+                f"box: {np.asarray(box).tolist()}")
+    if ensemble.lower() == 'npt':
+        logger.info(f"  npt_flex={bool(loaded_state.get('npt_flex', False))}; "
+                    f"box_position shape: {tuple(np.asarray(state.box_position).shape)}")
+    logger.info(f"  fields present in .npz: {_avail}")
+
     return state, box, cycle
 
 
