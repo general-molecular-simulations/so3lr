@@ -238,6 +238,28 @@ Basic training command:
 so3lr train --config config.yaml
 ```
 
+### Optional training features
+
+The `training:` block of the config supports a few optional features, all
+disabled by default (see the commented entries in `so3lr/config/config.yaml`):
+
+- **EMA of weights** — `use_ema: true` (with `ema_decay`, default `0.999`) keeps an
+  exponential moving average of the parameters. The raw weights keep training
+  while the smoothed EMA copy is used for validation and saved in the checkpoint,
+  which is usually more stable and accurate at deployment.
+- **Early stopping** — `early_stopping_patience: <N>` halts training once the
+  validation loss has not improved (by more than `early_stopping_min_delta`) for
+  `N` consecutive evaluations.
+- **Reduce LR on plateau** — `reduce_lr_on_plateau: true` multiplies the learning
+  rate by `reduce_lr_factor` (default `0.5`) whenever the validation loss stalls
+  for `reduce_lr_patience` evaluations, down to a floor of
+  `learning_rate * reduce_lr_min_scale`. This composes with the configured
+  `learning_rate_schedule`.
+- **Two-stage loss reweighting** — set `stage_two_start_epoch: <epoch>` and
+  `stage_two_loss_weights:` to switch to a second set of loss weights partway
+  through training (e.g. start energy-heavy, then emphasise forces). The
+  best-loss, early-stopping and plateau trackers reset at the switch.
+
 ## Dimer Binding Energy Calculations
 
 You can calculate binding energies with SO3LR as reported in the paper (Fig. 2B). The binding energy is computed as the difference between the energies of the bound dimer and the non-interacting monomers (separated by a distance larger than the long-range cutoff), with charges assigned to each monomer separately to prevent spurious charge transfer.
