@@ -801,6 +801,52 @@ def expand_observables_to_theory_levels(params, num_theory_levels: int = 16):
     return params
 
 
+def _has_plateau_lr_knob(opt_state) -> bool:
+    """True if ``opt_state`` exposes an injectable ``plateau_lr_scale`` knob
+    (i.e. the optimizer was built with ``reduce_lr_on_plateau=True``)."""
+    return optax.tree_utils.tree_get(opt_state, 'plateau_lr_scale') is not None
+
+
+def _reduce_lr_on_plateau_step(
+        opt_state, eval_loss, *, best_loss, wait, cooldown_counter, scale,
+        factor, patience, min_scale, min_delta, cooldown, step):
+    """One Reduce-LR-on-plateau bookkeeping step (Keras-style semantics).
+
+    Tracks the best validation loss seen and the number of consecutive
+    evaluations without improvement; once that reaches ``patience`` the
+    multiplicative ``plateau_lr_scale`` in ``opt_state`` is shrunk by ``factor``
+    (floored at ``min_scale``) out-of-jit via ``optax.tree_utils.tree_set``,
+    then a ``cooldown`` of evaluations is observed before counting again.
+
+    Returns the updated ``(opt_state, best_loss, wait, cooldown_counter, scale)``.
+    """
+    if cooldown_counter > 0:
+        cooldown_counter -= 1
+        wait = 0
+
+    if eval_loss < best_loss - min_delta:
+        best_loss = eval_loss
+        wait = 0
+    elif cooldown_counter == 0:
+        wait += 1
+        if wait >= patience:
+            new_scale = max(scale * factor, min_scale)
+            if new_scale < scale - 1e-12:
+                opt_state = optax.tree_utils.tree_set(opt_state, plateau_lr_scale=new_scale)
+                logger.info(
+                    f"Reduce-LR-on-plateau: validation loss stalled for {patience} "
+                    f"evals at step {step}; scaling LR x{scale:.4g} -> x{new_scale:.4g}.")
+                scale = new_scale
+                cooldown_counter = cooldown
+            else:
+                logger.info(
+                    f"Reduce-LR-on-plateau: LR scale already at floor "
+                    f"(x{min_scale:.4g}); not reducing further at step {step}.")
+            wait = 0
+
+    return opt_state, best_loss, wait, cooldown_counter, scale
+
+
 def fit(
         model,
         optimizer,
@@ -840,7 +886,19 @@ def fit(
         # by more than ``early_stopping_min_delta`` for ``early_stopping_patience``
         # consecutive evaluations. ``None`` disables early stopping (default).
         early_stopping_patience: int = None,
-        early_stopping_min_delta: float = 0.0
+        early_stopping_min_delta: float = 0.0,
+        # Reduce-LR-on-plateau: when the validation loss has not improved by more
+        # than ``reduce_lr_min_delta`` for ``reduce_lr_patience`` consecutive
+        # evaluations, multiply the learning rate by ``reduce_lr_factor`` (down to
+        # a floor of ``reduce_lr_min_scale`` times the base LR). Requires the
+        # optimizer to have been built with ``reduce_lr_on_plateau=True`` so the
+        # injectable ``plateau_lr_scale`` knob exists in ``opt_state``.
+        reduce_lr_on_plateau: bool = False,
+        reduce_lr_factor: float = 0.5,
+        reduce_lr_patience: int = 10,
+        reduce_lr_min_scale: float = 1e-2,
+        reduce_lr_min_delta: float = 0.0,
+        reduce_lr_cooldown: int = 0
 ):
     """
     Fit model.
@@ -943,6 +1001,19 @@ def fit(
         logger.info(f"Early stopping enabled (patience={early_stopping_patience} evals, "
                     f"min_delta={early_stopping_min_delta}).")
 
+    # Reduce-LR-on-plateau bookkeeping (best loss seen + stall/cooldown counters
+    # + current multiplicative scale). ``_plateau_active`` is finalised once the
+    # optimizer state exists and the injectable knob is confirmed present.
+    plateau_best_loss = float('inf')
+    plateau_wait = 0
+    plateau_cooldown_counter = 0
+    plateau_scale = 1.0
+    _plateau_active = False
+    if reduce_lr_on_plateau:
+        logger.info(f"Reduce-LR-on-plateau enabled (factor={reduce_lr_factor}, "
+                    f"patience={reduce_lr_patience} evals, min_scale={reduce_lr_min_scale}, "
+                    f"min_delta={reduce_lr_min_delta}, cooldown={reduce_lr_cooldown}).")
+
     for epoch in range(num_epochs):
         # Shuffle the training data.
         numpy_rng.shuffle(training_data)
@@ -1014,6 +1085,17 @@ def fit(
             # Make sure parameters and opt_state are set.
             assert params is not None
             assert opt_state is not None
+
+            # Confirm (once) that the injectable LR knob exists before relying on it.
+            if reduce_lr_on_plateau and not _plateau_active:
+                if _has_plateau_lr_knob(opt_state):
+                    _plateau_active = True
+                else:
+                    logger.warning(
+                        "reduce_lr_on_plateau=True but the optimizer has no "
+                        "'plateau_lr_scale' knob -- build the optimizer with "
+                        "reduce_lr_on_plateau=True. Disabling plateau LR scaling.")
+                    reduce_lr_on_plateau = False
 
             params, opt_state, train_metrics = training_step_fn(params, opt_state, batch_training)
             step += 1
@@ -1101,6 +1183,17 @@ def fit(
                                 f"{early_stopping_patience} evaluations "
                                 f"(best={best_eval_loss:.6f}).")
                             stop_training = True
+
+                # Reduce the learning rate when the validation loss plateaus.
+                if _plateau_active:
+                    (opt_state, plateau_best_loss, plateau_wait,
+                     plateau_cooldown_counter, plateau_scale) = _reduce_lr_on_plateau_step(
+                        opt_state, eval_metrics['eval_loss'],
+                        best_loss=plateau_best_loss, wait=plateau_wait,
+                        cooldown_counter=plateau_cooldown_counter, scale=plateau_scale,
+                        factor=reduce_lr_factor, patience=reduce_lr_patience,
+                        min_scale=reduce_lr_min_scale, min_delta=reduce_lr_min_delta,
+                        cooldown=reduce_lr_cooldown, step=step)
             # Finished validation process.
 
             if stop_training:
@@ -1148,6 +1241,13 @@ def fit_from_iterator(
         # Early stopping; see fit().
         early_stopping_patience: int = None,
         early_stopping_min_delta: float = 0.0,
+        # Reduce-LR-on-plateau; see fit().
+        reduce_lr_on_plateau: bool = False,
+        reduce_lr_factor: float = 0.5,
+        reduce_lr_patience: int = 10,
+        reduce_lr_min_scale: float = 1e-2,
+        reduce_lr_min_delta: float = 0.0,
+        reduce_lr_cooldown: int = 0,
 ):
     """
     Fit model.
@@ -1244,6 +1344,17 @@ def fit_from_iterator(
         logger.info(f"Early stopping enabled (patience={early_stopping_patience} evals, "
                     f"min_delta={early_stopping_min_delta}).")
 
+    # Reduce-LR-on-plateau bookkeeping; see fit().
+    plateau_best_loss = float('inf')
+    plateau_wait = 0
+    plateau_cooldown_counter = 0
+    plateau_scale = 1.0
+    _plateau_active = False
+    if reduce_lr_on_plateau:
+        logger.info(f"Reduce-LR-on-plateau enabled (factor={reduce_lr_factor}, "
+                    f"patience={reduce_lr_patience} evals, min_scale={reduce_lr_min_scale}, "
+                    f"min_delta={reduce_lr_min_delta}, cooldown={reduce_lr_cooldown}).")
+
     for epoch in range(num_epochs):
         if use_wandb:
             wandb.log({"epoch": epoch})
@@ -1301,6 +1412,17 @@ def fit_from_iterator(
             # Make sure parameters and opt_state are set.
             assert params is not None
             assert opt_state is not None
+
+            # Confirm (once) that the injectable LR knob exists before relying on it.
+            if reduce_lr_on_plateau and not _plateau_active:
+                if _has_plateau_lr_knob(opt_state):
+                    _plateau_active = True
+                else:
+                    logger.warning(
+                        "reduce_lr_on_plateau=True but the optimizer has no "
+                        "'plateau_lr_scale' knob -- build the optimizer with "
+                        "reduce_lr_on_plateau=True. Disabling plateau LR scaling.")
+                    reduce_lr_on_plateau = False
 
             params, opt_state, train_metrics = training_step_fn(params, opt_state, batch_training)
             step += 1
@@ -1388,6 +1510,17 @@ def fit_from_iterator(
                                 f"{early_stopping_patience} evaluations "
                                 f"(best={best_eval_loss:.6f}).")
                             stop_training = True
+
+                # Reduce the learning rate when the validation loss plateaus.
+                if _plateau_active:
+                    (opt_state, plateau_best_loss, plateau_wait,
+                     plateau_cooldown_counter, plateau_scale) = _reduce_lr_on_plateau_step(
+                        opt_state, eval_metrics['eval_loss'],
+                        best_loss=plateau_best_loss, wait=plateau_wait,
+                        cooldown_counter=plateau_cooldown_counter, scale=plateau_scale,
+                        factor=reduce_lr_factor, patience=reduce_lr_patience,
+                        min_scale=reduce_lr_min_scale, min_delta=reduce_lr_min_delta,
+                        cooldown=reduce_lr_cooldown, step=step)
             # Finished validation process.
 
             if stop_training:
@@ -1406,7 +1539,8 @@ def make_optimizer(
         learning_rate_schedule_args: Dict = dict(),
         gradient_clipping: str = 'identity',
         gradient_clipping_args: Dict = dict(),
-        num_of_nans_to_ignore: int = 0
+        num_of_nans_to_ignore: int = 0,
+        reduce_lr_on_plateau: bool = False
 ):
     """Make optax optimizer.
 
@@ -1427,6 +1561,12 @@ def make_optimizer(
         num_of_nans_to_ignore (int): Number of times NaNs are ignored during in the gradient step. Defaults to 0.
         gradient_clipping (str): Gradient clipping to apply.
         gradient_clipping_args (dict): Arguments to the gradient clipping to apply.
+        reduce_lr_on_plateau (bool): If True, append an injectable multiplicative
+            learning-rate scale (hyperparameter ``plateau_lr_scale``, initialised
+            to 1.0) to the optimizer chain. ``fit`` mutates this knob between
+            steps to shrink the effective learning rate when the validation loss
+            plateaus. The training step itself stays jitted; only ``opt_state`` is
+            updated out-of-jit via ``optax.tree_utils.tree_set``. Defaults to False.
     Returns:
         optax.GradientTransformation
 
@@ -1463,11 +1603,24 @@ def make_optimizer(
         **gradient_clipping_args
     )
 
-    return optax.chain(
+    transforms = [
         clip_transform,
         optax.zero_nans(),
         opt
-    )
+    ]
+
+    if reduce_lr_on_plateau:
+        # Injectable multiplicative LR scale, driven out-of-jit by ``fit``.
+        # Named via the factory argument so the hyperparameter key is
+        # ``plateau_lr_scale`` (looked up with optax.tree_utils.tree_get/set).
+        def _plateau_scale_factory(plateau_lr_scale):
+            return optax.scale(plateau_lr_scale)
+
+        transforms.append(
+            optax.inject_hyperparams(_plateau_scale_factory)(plateau_lr_scale=1.0)
+        )
+
+    return optax.chain(*transforms)
 
 
 def freeze_parameters(optimizer, trainable_subset_keys=None, frozen_subset_keys=None):

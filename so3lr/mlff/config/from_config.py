@@ -193,7 +193,9 @@ def make_optimizer_from_config(config: config_dict.ConfigDict = None):
             learning_rate_schedule_args=opt_config.learning_rate_schedule_args if opt_config.learning_rate_schedule_args is not None else dict(),
             num_of_nans_to_ignore=opt_config.num_of_nans_to_ignore,
             gradient_clipping=opt_config.gradient_clipping,
-            gradient_clipping_args=opt_config.gradient_clipping_args if opt_config.gradient_clipping_args is not None else dict()
+            gradient_clipping_args=opt_config.gradient_clipping_args if opt_config.gradient_clipping_args is not None else dict(),
+            # Add the injectable LR knob only when plateau scaling is requested.
+            reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False)
         )
 
 
@@ -395,7 +397,14 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             ema_decay=config.training.get('ema_decay', 0.999),
             # Early stopping.
             early_stopping_patience=config.training.get('early_stopping_patience', None),
-            early_stopping_min_delta=config.training.get('early_stopping_min_delta', 0.0)
+            early_stopping_min_delta=config.training.get('early_stopping_min_delta', 0.0),
+            # Reduce LR on plateau.
+            reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False),
+            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.5),
+            reduce_lr_patience=config.training.get('reduce_lr_patience', 10),
+            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 1e-2),
+            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 0.0),
+            reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0)
         )
     else:
         training_utils.fit_from_iterator(
@@ -429,6 +438,13 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             # Early stopping.
             early_stopping_patience=config.training.get('early_stopping_patience', None),
             early_stopping_min_delta=config.training.get('early_stopping_min_delta', 0.0),
+            # Reduce LR on plateau.
+            reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False),
+            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.5),
+            reduce_lr_patience=config.training.get('reduce_lr_patience', 10),
+            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 1e-2),
+            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 0.0),
+            reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
             # Dataset info for effective epoch tracking
             dataset_info=training_data.dataset_info() if hasattr(training_data, 'dataset_info') else None,
         )
