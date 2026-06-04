@@ -231,3 +231,57 @@ def test_fit_reduce_lr_on_plateau(tmp_path, caplog):
 
     assert any('Reduce-LR-on-plateau' in r.getMessage() and 'scaling LR' in r.getMessage()
                for r in caplog.records)
+
+
+def test_fit_two_stage_loss(tmp_path, caplog):
+    """Two-stage loss reweighting swaps to the stage-two loss at the configured
+    epoch and logs the switch."""
+    import logging
+
+    f = pkg_resources.resource_filename(__name__, 'test_data/ethanol.npz')
+    loader = NpzDataLoaderSparse(input_file=f)
+    all_data, _ = loader.load(cutoff=5.)
+
+    energy_unit = units.kcal / units.mol
+    np.random.RandomState(0).shuffle(all_data)
+    num_train, num_valid = 50, 10
+    energy_mean = transformations.calculate_energy_mean(all_data[:num_train]) * energy_unit
+    num_nodes = transformations.calculate_average_number_of_nodes(all_data[:num_train])
+    shifts = {a: energy_mean / num_nodes for a in range(119)}
+
+    def prep(sl):
+        return transformations.subtract_atomic_energy_shifts(
+            transformations.unit_conversion(
+                sl, energy_unit=energy_unit, length_unit=units.Angstrom,
+                dipole_vec_unit=units.Debye),
+            atomic_energy_shifts=shifts)
+
+    training_data = list(prep(all_data[:num_train]))
+    validation_data = list(prep(all_data[num_train:num_train + num_valid]))
+
+    so3k = SO3kratesSparse(
+        cutoff=5., num_features=32, num_features_head=8, num_heads=2,
+        degrees=[1, 2], message_normalization='avg_num_neighbors', avg_num_neighbors=8.)
+    force_fn = get_energy_and_force_fn_sparse(so3k)
+
+    # Stage one weights energy heavily; stage two flips to forces.
+    loss_fn = training_utils.make_loss_fn(force_fn, weights={'energy': 0.99, 'forces': 0.01})
+    stage_two_loss_fn = training_utils.make_loss_fn(
+        force_fn, weights={'energy': 0.01, 'forces': 0.99})
+
+    workdir = tmp_path / 'run'
+    workdir.mkdir()
+    logging.getLogger("SO3LR").propagate = True
+    with caplog.at_level(logging.INFO, logger="SO3LR"):
+        training_utils.fit(
+            model=so3k, optimizer=optax.adam(learning_rate=1e-3), loss_fn=loss_fn,
+            graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
+            num_epochs=6, batch_max_num_edges=72 + 72 + 1, batch_max_num_nodes=9 + 9 + 1,
+            batch_max_num_graphs=3, eval_every_num_steps=10, batch_max_num_pairs=100,
+            training_data=training_data, validation_data=validation_data,
+            ckpt_dir=workdir / 'checkpoints', allow_restart=False, use_wandb=False,
+            stage_two_start_epoch=3, stage_two_loss_fn=stage_two_loss_fn,
+        )
+
+    assert any('switching to the stage-two loss at epoch 3' in r.getMessage()
+               for r in caplog.records)

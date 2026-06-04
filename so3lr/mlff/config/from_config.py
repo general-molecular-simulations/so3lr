@@ -291,6 +291,28 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
         use_adaptive_robust_loss=use_adaptive_robust_loss,
     )
 
+    # Optional two-stage loss reweighting: after `stage_two_start_epoch` the
+    # training/validation loss is rebuilt with `stage_two_loss_weights`.
+    stage_two_start_epoch = config.training.get('stage_two_start_epoch', None)
+    stage_two_loss_weights = config.training.get('stage_two_loss_weights', None)
+    stage_two_loss_fn = None
+    stage_two_val_fn = None
+    if stage_two_start_epoch is not None and stage_two_loss_weights is not None:
+        stage_two_loss_fn = training_utils.make_loss_fn(
+            force_fn,
+            weights=stage_two_loss_weights,
+            use_robust_loss=use_robust_loss,
+            robust_loss_alpha=robust_loss_alpha,
+            use_adaptive_robust_loss=use_adaptive_robust_loss,
+        )
+        stage_two_val_fn = training_utils.make_val_fn(
+            force_fn,
+            weights=stage_two_loss_weights,
+            use_robust_loss=config.training.get('use_robust_loss_validation', use_robust_loss),
+            robust_loss_alpha=config.training.get('robust_loss_alpha_validation', robust_loss_alpha),
+            use_adaptive_robust_loss=use_adaptive_robust_loss,
+        )
+
     if config.training.batch_max_num_nodes is None:
         assert config.training.batch_max_num_edges is None
         assert config.training.batch_max_num_pairs is None
@@ -404,7 +426,11 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             reduce_lr_patience=config.training.get('reduce_lr_patience', 10),
             reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 1e-2),
             reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 0.0),
-            reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0)
+            reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
+            # Two-stage loss reweighting.
+            stage_two_start_epoch=stage_two_start_epoch,
+            stage_two_loss_fn=stage_two_loss_fn,
+            stage_two_val_fn=stage_two_val_fn
         )
     else:
         training_utils.fit_from_iterator(
@@ -445,6 +471,10 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 1e-2),
             reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 0.0),
             reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
+            # Two-stage loss reweighting.
+            stage_two_start_epoch=stage_two_start_epoch,
+            stage_two_loss_fn=stage_two_loss_fn,
+            stage_two_val_fn=stage_two_val_fn,
             # Dataset info for effective epoch tracking
             dataset_info=training_data.dataset_info() if hasattr(training_data, 'dataset_info') else None,
         )

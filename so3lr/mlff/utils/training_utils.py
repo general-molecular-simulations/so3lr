@@ -898,7 +898,14 @@ def fit(
         reduce_lr_patience: int = 10,
         reduce_lr_min_scale: float = 1e-2,
         reduce_lr_min_delta: float = 0.0,
-        reduce_lr_cooldown: int = 0
+        reduce_lr_cooldown: int = 0,
+        # Two-stage loss reweighting: once ``epoch >= stage_two_start_epoch`` swap
+        # the training (and validation) loss to ``stage_two_loss_fn`` /
+        # ``stage_two_val_fn`` and reset the best-loss / early-stopping / plateau
+        # trackers (the loss scale changes between stages). ``None`` disables.
+        stage_two_start_epoch: int = None,
+        stage_two_loss_fn=None,
+        stage_two_val_fn=None
 ):
     """
     Fit model.
@@ -1014,7 +1021,33 @@ def fit(
                     f"patience={reduce_lr_patience} evals, min_scale={reduce_lr_min_scale}, "
                     f"min_delta={reduce_lr_min_delta}, cooldown={reduce_lr_cooldown}).")
 
+    # Two-stage loss reweighting bookkeeping; the swap happens at the epoch
+    # boundary >= ``stage_two_start_epoch``.
+    _stage_two_active = False
+    if stage_two_start_epoch is not None and stage_two_loss_fn is not None:
+        logger.info(f"Two-stage loss reweighting enabled (switch at epoch "
+                    f"{stage_two_start_epoch}).")
+
     for epoch in range(num_epochs):
+        # Switch to the stage-two loss at the configured epoch boundary.
+        if (stage_two_start_epoch is not None and stage_two_loss_fn is not None
+                and not _stage_two_active and epoch >= stage_two_start_epoch):
+            logger.info(f"Two-stage loss reweighting: switching to the stage-two "
+                        f"loss at epoch {epoch} (step {step}); resetting best-loss, "
+                        f"early-stopping and plateau trackers.")
+            training_step_fn = make_training_step_fn(
+                optimizer, stage_two_loss_fn, log_gradient_values)
+            validation_step_fn = make_validation_step_fn(
+                stage_two_val_fn if stage_two_val_fn is not None else stage_two_loss_fn)
+            # Loss scale changes between stages -> reset stall/plateau trackers.
+            best_eval_loss = float('inf')
+            evals_without_improvement = 0
+            plateau_best_loss = float('inf')
+            plateau_wait = 0
+            plateau_cooldown_counter = 0
+            header_printed = False
+            _stage_two_active = True
+
         # Shuffle the training data.
         numpy_rng.shuffle(training_data)
         # Create batched graphs from list of (graph, long_range) tuples.
@@ -1248,6 +1281,10 @@ def fit_from_iterator(
         reduce_lr_min_scale: float = 1e-2,
         reduce_lr_min_delta: float = 0.0,
         reduce_lr_cooldown: int = 0,
+        # Two-stage loss reweighting; see fit().
+        stage_two_start_epoch: int = None,
+        stage_two_loss_fn=None,
+        stage_two_val_fn=None,
 ):
     """
     Fit model.
@@ -1355,7 +1392,31 @@ def fit_from_iterator(
                     f"patience={reduce_lr_patience} evals, min_scale={reduce_lr_min_scale}, "
                     f"min_delta={reduce_lr_min_delta}, cooldown={reduce_lr_cooldown}).")
 
+    # Two-stage loss reweighting bookkeeping; see fit().
+    _stage_two_active = False
+    if stage_two_start_epoch is not None and stage_two_loss_fn is not None:
+        logger.info(f"Two-stage loss reweighting enabled (switch at epoch "
+                    f"{stage_two_start_epoch}).")
+
     for epoch in range(num_epochs):
+        # Switch to the stage-two loss at the configured epoch boundary.
+        if (stage_two_start_epoch is not None and stage_two_loss_fn is not None
+                and not _stage_two_active and epoch >= stage_two_start_epoch):
+            logger.info(f"Two-stage loss reweighting: switching to the stage-two "
+                        f"loss at epoch {epoch} (step {step}); resetting best-loss, "
+                        f"early-stopping and plateau trackers.")
+            training_step_fn = make_training_step_fn(
+                optimizer, stage_two_loss_fn, log_gradient_values)
+            validation_step_fn = make_validation_step_fn(
+                stage_two_val_fn if stage_two_val_fn is not None else stage_two_loss_fn)
+            best_eval_loss = float('inf')
+            evals_without_improvement = 0
+            plateau_best_loss = float('inf')
+            plateau_wait = 0
+            plateau_cooldown_counter = 0
+            header_printed = False
+            _stage_two_active = True
+
         if use_wandb:
             wandb.log({"epoch": epoch})
         print(f'Epoch {epoch} of {num_epochs}')
