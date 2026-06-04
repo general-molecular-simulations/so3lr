@@ -105,12 +105,25 @@ def _run_ensemble(ensemble, dtype):
     """Run a single ensemble and return max_rel_drift."""
     energy_fn, shift, positions, cell, masses, _, nbrs, nbrs_lr = _setup_system(dtype)
 
+    # x64 is enabled globally (see top of file), so metal_unit_system() returns
+    # float64 scalars. Cast every scalar quantity to the system dtype so the
+    # float32 run is genuinely single precision -- otherwise a float64 kT / tau
+    # upcasts the Nose-Hoover chain state while the momenta stay float32, which
+    # makes the chain's lax.scan carry dtypes disagree.
     unit_system = units.metal_unit_system()
-    dt = DT_FS * unit_system['time']
-    kT = 300.0 * unit_system['temperature']
-    P = 1.0 * unit_system['pressure']
-    thermostat_kwargs = {'tau': dt * 100}
-    barostat_kwargs = {'tau': dt * 1000}
+    dt = jnp.asarray(DT_FS * unit_system['time'], dtype)
+    kT = jnp.asarray(300.0 * unit_system['temperature'], dtype)
+    P = jnp.asarray(1.0 * unit_system['pressure'], dtype)
+    thermostat_kwargs = {'tau': jnp.asarray(dt * 100, dtype)}
+    barostat_kwargs = {'tau': jnp.asarray(dt * 1000, dtype)}
+
+    # Guard against precision mixing regressing (float64 scalars + float32
+    # system would upcast the thermostat chain and break its lax.scan carry).
+    expected_dtype = jnp.dtype(dtype)
+    assert dt.dtype == expected_dtype
+    assert kT.dtype == expected_dtype
+    assert P.dtype == expected_dtype
+    assert thermostat_kwargs['tau'].dtype == expected_dtype
 
     nbrs_idx = nbrs.idx
     nbrs_lr_idx = nbrs_lr.idx
