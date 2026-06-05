@@ -22,9 +22,12 @@ from jax_md import space, simulate, units, partition
 
 from so3lr.jaxmd_utils import neighbor_list_featurizer
 from so3lr.mlff.calculators.potential import PotentialSparse
+from so3lr.model_registry import resolve_model
 
 PACKAGE_DIR = pathlib.Path(__file__).parent.parent.resolve()
-MODEL_DIR = PACKAGE_DIR / 'sv2j_b128_l3nnn_2_nano_lr_full_2'
+# 'sv2j_b128_l3nnn_2_nano_lr_full_2' was the dev name for the bundled so3lr-m model.
+# Resolve via the registry so the test is runnable from a clean checkout/install.
+MODEL_DIR, MODEL_FROM_FILE, _ = resolve_model('so3lr-m')
 
 N_STEPS = 100
 DT_FS = 0.5e-3  # 0.5 fs in ps (metal units)
@@ -42,7 +45,7 @@ def _setup_system(dtype):
 
     mlff_potential = PotentialSparse.create_from_workdir(
         MODEL_DIR,
-        from_file=False,
+        from_file=MODEL_FROM_FILE,
         long_range_kwargs=dict(
             cutoff_lr=10.0,
             dispersion_energy_cutoff_lr_damping=2.0,
