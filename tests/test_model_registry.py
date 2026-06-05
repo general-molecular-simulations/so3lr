@@ -21,7 +21,7 @@ def test_defaults():
 
 def test_available_models():
     names = mr.available_models()
-    for expected in ("so3lr-s", "so3lr-m", "so3lr-l", "so3lr", "so3lr-og"):
+    for expected in ("so3lr-s", "so3lr-m", "so3lr-l", "so3lr", "so3lr-o"):
         assert expected in names
 
 
@@ -36,7 +36,7 @@ def test_resolve_bundled_models(name):
     assert head_index == 5
 
 
-@pytest.mark.parametrize("name", ["so3lr", "so3lr-og"])
+@pytest.mark.parametrize("name", ["so3lr", "so3lr-o"])
 def test_resolve_legacy_model(name):
     workdir, from_file, head_index = mr.resolve_model(name)
     assert workdir == PKG / "params"

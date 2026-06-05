@@ -44,9 +44,9 @@ SO3LR ships in three sizes. All are bundled inside the package, so you select on
 | `so3lr-s` | 2 | 128 | 4 | 4.5 | Fastest — quick tests and very large systems |
 | `so3lr-m` *(default)* | 3 | 128 | 4 | 4.5 | Balanced — general-purpose use |
 | `so3lr-l` | 3 | 256 | 8 | 5.0 | Most accurate — highest fidelity, largest model |
-| `so3lr-og` | 3 | 128 | 4 | 4.5 | Original SO3LR v1 — for reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558) |
+| `so3lr-o` | 3 | 128 | 4 | 4.5 | Original SO3LR v1 — for reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558) |
 
-If you do not specify a model, **`so3lr-m`** is used. `so3lr-og` (also reachable as `so3lr`) is the original v1 model kept for backward compatibility.
+If you do not specify a model, **`so3lr-m`** is used. `so3lr-o` (also reachable as `so3lr`) is the original v1 model kept for backward compatibility.
 
 ### Selecting a model
 
@@ -74,7 +74,7 @@ Custom and fine-tuned models still work — just pass a path instead of a name:
 So3lrCalculator(model="/path/to/finetuned")      # or  --model /path/to/finetuned  on the CLI
 ```
 
-> **Backward compatibility:** The no-arg default is now `so3lr-m`. To reproduce the **original SO3LR v1** model from the [JACS paper](https://doi.org/10.1021/jacs.5c09558), pass `model="so3lr"` (alias `"so3lr-og"`).
+> **Backward compatibility:** The no-arg default is now `so3lr-m`. To reproduce the **original SO3LR v1** model from the [JACS paper](https://doi.org/10.1021/jacs.5c09558), pass `model="so3lr"` (alias `"so3lr-o"`).
 
 ## Command Line Interface (CLI)
 
