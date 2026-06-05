@@ -722,7 +722,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     try:
         settings_path = Path(settings).expanduser().resolve()
         with open(settings_path, 'r') as f:
-            settings_dict = yaml.safe_load(f)
+            settings_dict = yaml.safe_load(f) or {}
     except (FileNotFoundError, yaml.YAMLError) as e:
         logger.error(f"Error loading settings file: {str(e)}")
         sys.exit(1)

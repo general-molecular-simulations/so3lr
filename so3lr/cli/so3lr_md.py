@@ -1770,6 +1770,161 @@ def validate_and_log_input(initial_geometry, input_file_path,
             f"verify this is intended.")
 
 
+def load_atom_masks(
+    mask_path: Optional[Union[str, Path]],
+    n_atoms: int,
+    mobile_atom_indices: Optional[Sequence[int]] = None,
+    fixed_atom_indices: Optional[Sequence[int]] = None,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Load mobile/fixed atom indices and return ``(mobile, fixed)`` arrays."""
+    mobile = None
+    fixed = None
+
+    if mask_path:
+        data = np.load(str(mask_path))
+        if 'mobile_atom_indices' in data:
+            mobile = np.asarray(data['mobile_atom_indices'], dtype=int)
+        if 'fixed_atom_indices' in data:
+            fixed = np.asarray(data['fixed_atom_indices'], dtype=int)
+
+    if mobile_atom_indices is not None:
+        mobile = np.asarray(mobile_atom_indices, dtype=int)
+    if fixed_atom_indices is not None:
+        fixed = np.asarray(fixed_atom_indices, dtype=int)
+
+    all_indices = np.arange(n_atoms, dtype=int)
+    if mobile is None and fixed is None:
+        return None, None
+    if mobile is None:
+        fixed_set = set(np.asarray(fixed, dtype=int).tolist())
+        mobile = np.asarray([i for i in all_indices if i not in fixed_set], dtype=int)
+    if fixed is None:
+        mobile_set = set(np.asarray(mobile, dtype=int).tolist())
+        fixed = np.asarray([i for i in all_indices if i not in mobile_set], dtype=int)
+
+    if np.any(mobile < 0) or np.any(mobile >= n_atoms):
+        raise ValueError('mobile_atom_indices contains out-of-range indices')
+    if np.any(fixed < 0) or np.any(fixed >= n_atoms):
+        raise ValueError('fixed_atom_indices contains out-of-range indices')
+    return mobile, fixed
+
+
+def make_mobile_mask(mobile_indices: Optional[np.ndarray], n_atoms: int, dtype) -> Optional[jnp.ndarray]:
+    if mobile_indices is None:
+        return None
+    mask = np.zeros((n_atoms, 1), dtype=np.float32)
+    mask[np.asarray(mobile_indices, dtype=int), 0] = 1.0
+    return jnp.asarray(mask, dtype=dtype)
+
+
+def positions_to_cartesian(position, box, fractional_coordinates: bool):
+    if fractional_coordinates and box is not None:
+        return raw_transform(box, position)
+    return position
+
+
+def cartesian_to_positions(cartesian_position, box, fractional_coordinates: bool):
+    if not fractional_coordinates or box is None:
+        return cartesian_position
+    if jnp.isscalar(box) or box.size == 1:
+        return cartesian_position / box
+    if box.ndim == 1:
+        return cartesian_position / box
+    if box.ndim == 2:
+        return jnp.linalg.solve(box, cartesian_position.T).T
+    raise ValueError(f'Box must be scalar, vector, or matrix. Found {box}.')
+
+
+def apply_atom_constraints_to_state(
+    state,
+    mobile_mask: Optional[jnp.ndarray],
+    reference_position,
+    box=None,
+    fractional_coordinates: bool = False,
+    reference_is_cartesian: bool = False,
+):
+    if mobile_mask is None:
+        return state
+    if reference_is_cartesian:
+        reference_position = cartesian_to_positions(reference_position, box, fractional_coordinates)
+    zero_momentum = jnp.zeros_like(state.momentum)
+    zero_force = jnp.zeros_like(state.force)
+    return state.set(
+        position=jnp.where(mobile_mask == 1, state.position, reference_position),
+        momentum=jnp.where(mobile_mask == 1, state.momentum, zero_momentum),
+        force=jnp.where(mobile_mask == 1, state.force, zero_force),
+    )
+
+
+def constrain_md_carry(
+    carry,
+    lr: bool,
+    mobile_mask: Optional[jnp.ndarray],
+    reference_position,
+    fractional_coordinates: bool,
+    reference_is_cartesian: bool,
+):
+    if mobile_mask is None:
+        return carry
+    if lr:
+        state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = carry
+        state = apply_atom_constraints_to_state(
+            state,
+            mobile_mask,
+            reference_position,
+            box=box,
+            fractional_coordinates=fractional_coordinates,
+            reference_is_cartesian=reference_is_cartesian,
+        )
+        box_for_nbrs = box_to_diag(box) if hasattr(box, 'ndim') and box.ndim == 2 else box
+        nbrs = nbrs.update(state.position, neighbor=nbrs.idx, box=box_for_nbrs)
+        nbrs_lr = nbrs_lr.update(state.position, neighbor=nbrs_lr.idx, box=box_for_nbrs)
+        return state, nbrs, nbrs_lr, box, k_grid, k_grid_disp
+    state, nbrs, box, k_grid, k_grid_disp = carry
+    state = apply_atom_constraints_to_state(
+        state,
+        mobile_mask,
+        reference_position,
+        box=box,
+        fractional_coordinates=fractional_coordinates,
+        reference_is_cartesian=reference_is_cartesian,
+    )
+    box_for_nbrs = box_to_diag(box) if hasattr(box, 'ndim') and box.ndim == 2 else box
+    nbrs = nbrs.update(state.position, neighbor=nbrs.idx, box=box_for_nbrs)
+    return state, nbrs, box, k_grid, k_grid_disp
+
+
+def wrap_step_with_constraints(
+    step_md_fn,
+    lr: bool,
+    mobile_mask: Optional[jnp.ndarray],
+    reference_position,
+    fractional_coordinates: bool,
+    reference_is_cartesian: bool,
+):
+    if mobile_mask is None:
+        return step_md_fn
+
+    @jax.jit
+    def constrained_step(i, carry):
+        return constrain_md_carry(
+            step_md_fn(i, carry),
+            lr,
+            mobile_mask,
+            reference_position,
+            fractional_coordinates,
+            reference_is_cartesian,
+        )
+
+    return constrained_step
+
+
+def output_position_array(position, box, fractional_coordinates: bool, output_cartesian_positions: bool):
+    if fractional_coordinates and output_cartesian_positions and box is not None:
+        return positions_to_cartesian(position, box, fractional_coordinates)
+    return position
+
+
 def perform_md(
     all_settings: Dict,
     opt_structure: Optional[jnp.ndarray] = None,
@@ -1848,6 +2003,13 @@ def perform_md(
     observables = all_settings.get('observables', [])
     output_atom_indices = all_settings.get('output_atom_indices', None)
     dispersion_tail_correction = all_settings.get('dispersion_tail_correction', False)
+
+    # Atom constraints / enhanced output (optional)
+    output_cartesian_positions = all_settings.get('output_cartesian_positions', False)
+    atom_mask_path = all_settings.get('atom_mask_path')
+    mobile_atom_indices_setting = all_settings.get('mobile_atom_indices')
+    fixed_atom_indices_setting = all_settings.get('fixed_atom_indices')
+    fixed_atom_constraint = all_settings.get('fixed_atom_constraint', 'cartesian_anchor')
 
     # Enhanced sampling (PySAGES)
     do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
@@ -1944,6 +2106,19 @@ def perform_md(
     dtype = jnp.float64 if precision == 'float64' else jnp.float32
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
+
+    mobile_atom_indices, fixed_atom_indices = load_atom_masks(
+        atom_mask_path,
+        n_atoms=position.shape[0],
+        mobile_atom_indices=mobile_atom_indices_setting,
+        fixed_atom_indices=fixed_atom_indices_setting,
+    )
+    mobile_mask = make_mobile_mask(mobile_atom_indices, position.shape[0], dtype)
+    if fixed_atom_indices is not None and len(fixed_atom_indices) > 0:
+        logger.info(
+            f'Fixed atoms: {len(fixed_atom_indices)}; mobile atoms: {len(mobile_atom_indices)}; '
+            f'constraint={fixed_atom_constraint}'
+        )
 
     save_buffer = min(md_cycles, save_buffer)
     # Initialize HDF5 storage
@@ -2350,6 +2525,31 @@ def perform_md(
     lr_overflow_extra = 0
     overflow_retries = 0
 
+    # Apply atom constraints (frozen/mobile atoms) to the initial state and wrap the
+    # integrator step so fixed atoms stay pinned each step. No-op when mobile_mask is None.
+    if mobile_mask is not None:
+        reference_is_cartesian = fixed_atom_constraint == 'cartesian_anchor'
+        reference_position = (
+            positions_to_cartesian(position, box, fractional_coordinates)
+            if reference_is_cartesian else position
+        )
+        state = apply_atom_constraints_to_state(
+            state,
+            mobile_mask,
+            reference_position,
+            box=box,
+            fractional_coordinates=fractional_coordinates,
+            reference_is_cartesian=reference_is_cartesian,
+        )
+        step_md_fn = wrap_step_with_constraints(
+            step_md_fn,
+            lr,
+            mobile_mask,
+            reference_position,
+            fractional_coordinates,
+            reference_is_cartesian,
+        )
+
     while cycle_md < md_cycles:
         old_time = time.time()
         if do_enhanced_sampling:
@@ -2519,7 +2719,10 @@ def perform_md(
             else:
                 logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{time_per_step:.2e}')
 
-            positions.append(np.array(state.position))
+            out_pos = output_position_array(
+                state.position, box, fractional_coordinates, output_cartesian_positions
+            )
+            positions.append(np.array(out_pos))
             momenta.append(np.array(state.momentum))
             if box is not None:
                 boxes.append(np.array(box_to_diag(box)))

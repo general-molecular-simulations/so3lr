@@ -142,6 +142,36 @@ so3lr nvt --input geometry.xyz --output trajectory.xyz --temperature 300 --md-cy
 
 The restart will continue the simulation from the exact state where it was saved, preserving atom positions, velocities, thermostat/barostat state, and simulation timestep.
 
+### Freezing atoms during MD
+
+A subset of atoms can be held fixed during any MD run (`nve` / `nvt` / `npt`). Frozen atoms keep their reference positions while their momenta and forces are zeroed every step, so the rest of the system evolves around them (useful e.g. for holding a surface, a binding pocket, or a substrate rigid). Constraints are configured through the MD **settings YAML** (run with `so3lr --settings settings.yaml`):
+
+```yaml
+# settings.yaml
+ensemble: nvt
+input_file: geometry.xyz
+model: so3lr-m
+md_T: 300
+md_cycles: 100
+md_steps: 100
+
+# --- atom constraints (all optional; omit to run unconstrained) ---
+fixed_atom_indices: [0, 1, 2]            # 0-based indices of atoms to freeze
+# mobile_atom_indices: [3, 4, 5]         # alternative: list the atoms allowed to MOVE (all others are frozen)
+# atom_mask_path: masks.npz              # alternative: load 'mobile_atom_indices'/'fixed_atom_indices' arrays from a .npz
+fixed_atom_constraint: cartesian_anchor  # default; pins frozen atoms in real (Cartesian) space, robust to box changes under NPT
+output_cartesian_positions: false        # for periodic runs, write saved positions in Cartesian coordinates
+```
+
+```shell script
+so3lr --settings settings.yaml
+```
+
+Notes:
+- Provide **either** `fixed_atom_indices` **or** `mobile_atom_indices` — the complement is derived automatically. If both are given, they are used as-is.
+- `atom_mask_path` points to a NumPy `.npz` holding `mobile_atom_indices` and/or `fixed_atom_indices` arrays; explicit `*_atom_indices` keys in the YAML override it.
+- With no constraint keys set, MD runs normally (the feature is a no-op). On start-up a constrained run logs e.g. `Fixed atoms: 3; mobile atoms: 97; constraint=cartesian_anchor`.
+
 Evaluate the SO3LR model on a dataset:
 
 ```shell script
