@@ -24,20 +24,37 @@ jobs:
         include:
           - group: 1
             name: "mlff"
+            install_extras: ""
             run_short: "pytest tests/mlff_tests/ -v --tb=short"
             run_full: "pytest tests/mlff_tests/ -v --tb=short --full"
           - group: 2
             name: "so3lr-cli"
+            install_extras: ""
             run_short: "pytest tests/test_cli_eval.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_cli.py -v --tb=short"
             run_full: "pytest tests/test_cli_eval.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_cli.py -v --tb=short --full"
           - group: 3
             name: "integration"
+            install_extras: ""
             run_short: "pytest tests/test_integration.py -v --tb=short"
             run_full: "pytest tests/test_integration.py -v --tb=short --full"
           - group: 4
             name: "so3lr-other"
+            install_extras: ""
             run_short: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py -v --tb=short"
             run_full: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_hessian.py -v --tb=short --full"
+          - group: 5
+            name: "pysages"
+            install_extras: "[pysages]"
+            # All pysages-touching interface tests must run on every PR
+            # (including the @pytest.mark.slow integration tests) to guarantee
+            # the PySAGES <-> SO3LR interface is exercised before merge.
+            # Both run_short and run_full therefore pass --full.
+            #
+            # test_pysages_doublewell.py is intentionally NOT listed here: it
+            # validates PySAGES' own jax-md backend (not the so3lr interface)
+            # and is opt-in only via explicit invocation.
+            run_short: "pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py -v --tb=short --full"
+            run_full: "pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py -v --tb=short --full"
     runs-on: ubuntu-latest
     name: "${{ matrix.name }}"
     timeout-minutes: ${{ (github.event.inputs.test_mode == 'full' || contains(github.event.head_commit.message, '[full tests]')) && 90 || 60 }}
@@ -62,7 +79,7 @@ jobs:
 
       - name: Test with pytest
         run: |
-          pip install .
+          pip install ".${{ matrix.install_extras }}"
           pip install pytest
           if [ "${{ github.event.inputs.test_mode }}" = "full" ] || [[ "${{ github.event.head_commit.message }}" == *"[full tests]"* ]]; then
             echo "Running FULL test suite"
