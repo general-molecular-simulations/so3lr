@@ -227,6 +227,11 @@ def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
         box_mass=box_mass_val,
         barostat=barostat,
         thermostat=thermostat,
+        # stress is a required field on the npt-anisotropic jax-md fork's
+        # NPTNoseHooverState (added with npt_nose_hoover_flex). PySAGES
+        # snapshots do not carry a stress value, so seed with zeros — the
+        # field is overwritten on the first integrator half-step.
+        stress=jnp.zeros((3, 3)),
     )
     new_state = jax_md.simulate.canonicalize_mass(new_state)
     new_state = new_state.set(momentum=new_state.mass * velocities)
