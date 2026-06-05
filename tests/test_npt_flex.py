@@ -10,11 +10,14 @@ from jax_md import space, quantity, simulate, units
 
 from so3lr.cli.so3lr_md import to_jax_md_custom, handle_box
 from so3lr.mlff.calculators.potential import PotentialSparse
+from so3lr.model_registry import resolve_model
 
 jax.config.update('jax_enable_x64', True)
 
 PACKAGE_DIR = pathlib.Path(__file__).parent.parent.resolve()
-MODEL_DIR = PACKAGE_DIR / 'sv2j_b128_l3nnn_2_nano_lr_full_2'
+# 'sv2j_b128_l3nnn_2_nano_lr_full_2' was the dev name for the bundled so3lr-m model.
+# Resolve via the registry so the test is runnable from a clean checkout/install.
+MODEL_DIR, MODEL_FROM_FILE, _ = resolve_model('so3lr-m')
 
 
 def _setup_system():
@@ -30,7 +33,7 @@ def _setup_system():
 
     mlff_potential = PotentialSparse.create_from_workdir(
         MODEL_DIR,
-        from_file=True,
+        from_file=MODEL_FROM_FILE,
         long_range_kwargs=dict(
             cutoff_lr=10.0,
             dispersion_energy_cutoff_lr_damping=2.0,
@@ -55,8 +58,8 @@ def _setup_system():
         disable_cell_list=True,
     )
 
-    from so3lr.cli.so3lr_md import neighbor_list_featurizer_custom
-    featurizer = neighbor_list_featurizer_custom(
+    from so3lr.jaxmd_utils import neighbor_list_featurizer
+    featurizer = neighbor_list_featurizer(
         displacement, species, total_charge=0., precision=jnp.float64,
         fractional_coordinates=True,
     )
