@@ -2172,6 +2172,38 @@ def perform_md(
 
         if restart_pysages:
             restart_data_pysages = load_pysages_state(restart_pysages_load_path)
+            # Match the dtypes of the pickled PySAGES result to the run precision,
+            # exactly as load_state() does for the .npz state above. The PySAGES
+            # snapshot is pickled at whatever dtype the *originating* run carried
+            # (a fresh run keeps e.g. the Nose-Hoover chain `tau` at float32 even
+            # under x64, because jax-md hardcodes `tau = f32(tau)` in its
+            # integrator factories). On restart that pickled snapshot seeds the
+            # fori_loop carry's snapshot slot, while the jax-md state comes from
+            # load_state() normalized to `dtype`. If the two disagree, the loop
+            # carry input (snapshot float32) != output (re-snapshot of the
+            # float64 state) and jax.lax.scan rejects it:
+            #   loop_carry[...].chain_data['tau']: float32 vs float64
+            #
+            # The PySAGES Result is a plain class (not a registered pytree), so
+            # we normalize its pytree-valued attributes (`snapshots` and
+            # `states`, which are lists of registered NamedTuples/dataclasses)
+            # rather than the Result itself -- a tree_map over the Result would
+            # treat it as a single opaque leaf and do nothing.
+            def _to_run_precision(x):
+                if hasattr(x, 'dtype') and jnp.issubdtype(
+                    jnp.asarray(x).dtype, jnp.floating
+                ):
+                    return jnp.asarray(x).astype(dtype)
+                return x
+
+            for _attr in ('snapshots', 'states'):
+                _val = getattr(restart_data_pysages, _attr, None)
+                if _val is not None:
+                    setattr(
+                        restart_data_pysages,
+                        _attr,
+                        jax.tree_util.tree_map(_to_run_precision, _val),
+                    )
 
     patched_potential_kwargs={}
     if "partial_charges" in observables:
