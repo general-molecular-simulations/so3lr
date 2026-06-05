@@ -7,7 +7,7 @@ import os
 import yaml
 import pytest
 
-from subprocess_env import so3lr_subprocess_env
+from subprocess_env import so3lr_subprocess_env, _parse_final_table_loss
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -72,21 +72,17 @@ def _assert_training_succeeded(result, workdir, max_loss=10.0):
     assert (workdir / 'hyperparameters.yaml').exists(), "hyperparameters.yaml not created"
     assert (workdir / 'checkpoints').exists(), "checkpoints directory not created"
 
-    combined_output = result.stdout + result.stderr
-    val_lines = [line for line in combined_output.splitlines() if line.startswith('val_')]
-    assert len(val_lines) > 0, (
-        f"No validation lines found in output.\n"
+    # Parse the final eval loss from the printed metrics table. The trainer logs
+    # validation checkpoints as rows of a table (print_metrics_header/row):
+    #   "        epoch |          step |    forces_mae | ... |          loss | ..."
+    final_loss = _parse_final_table_loss(result)
+    assert final_loss is not None, (
+        f"No metrics table row found in output.\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-
-    last_val_line = val_lines[-1]
-    match = re.search(r'eval_loss=([\d.]+)', last_val_line)
-    assert match is not None, f"Could not parse eval_loss from: {last_val_line}"
-
-    final_loss = float(match.group(1))
     assert 0 < final_loss < max_loss, (
-        f"Final eval_loss={final_loss} is outside reasonable range (0, {max_loss}).\n"
-        f"Last validation line: {last_val_line}"
+        f"Final loss={final_loss} is outside reasonable range (0, {max_loss}).\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
 @pytest.mark.slow

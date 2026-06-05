@@ -664,6 +664,15 @@ def run_evaluation(
                 new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
                 params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
 
+            # Tile the optional final bias too (use_final_bias_bool=True base models, e.g.
+            # the single-level SO3LR base / v1). Mirrors potential.py so finetuning a
+            # 1-level model into num_theory_levels works; bias-free models (so3lr-s/m/l)
+            # have no 'bias' key and are left untouched.
+            old_bias = params['params']['observables_0']['energy_dense_final'].get('bias')
+            if old_bias is not None and old_bias.shape[-1] == 1:
+                new_bias = jnp.tile(old_bias, (num_theory_levels,))
+                params['params']['observables_0']['energy_dense_final']['bias'] = new_bias
+
     print("=" * 50)
     print_param_shapes(params)
     print("=" * 50)
@@ -875,6 +884,15 @@ def run_fine_tuning(
             if old_kernel.shape[1] == 1:
                 new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
                 params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
+
+            # Tile the optional final bias too (use_final_bias_bool=True base models, e.g.
+            # the single-level SO3LR base / v1). Mirrors potential.py so finetuning a
+            # 1-level model into num_theory_levels works; bias-free models (so3lr-s/m/l)
+            # have no 'bias' key and are left untouched.
+            old_bias = params['params']['observables_0']['energy_dense_final'].get('bias')
+            if old_bias is not None and old_bias.shape[-1] == 1:
+                new_bias = jnp.tile(old_bias, (num_theory_levels,))
+                params['params']['observables_0']['energy_dense_final']['bias'] = new_bias
 
     print("=" * 50)
     print_param_shapes(params)
