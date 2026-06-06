@@ -8,7 +8,6 @@ license = "MIT"
 # package data so they are present in built wheels/sdists, not just editable installs.
 include = [
     { path = "so3lr/models/**/*", format = ["sdist", "wheel"] },
-    { path = "so3lr/params/**/*", format = ["sdist", "wheel"] },
 ]
 
 

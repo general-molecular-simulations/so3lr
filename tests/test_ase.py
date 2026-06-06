@@ -4,6 +4,11 @@ import pathlib
 import pytest
 from ase.io import read
 from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
+from so3lr.model_registry import resolve_model
+
+# Original/legacy SO3LR model, resolved via the registry so the test is
+# decoupled from the on-disk layout (the model now lives under models/so3lr).
+MODEL_DIR = resolve_model('so3lr')[0]
 
 
 @pytest.mark.parametrize('name', ['dha'])
@@ -15,7 +20,7 @@ def test_molecules(name: str):
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
     calc = AseCalculatorSparse.create_from_workdir(
-        workdir=package_dir / 'so3lr' / 'params',
+        workdir=MODEL_DIR,
         lr_cutoff=12.,
         dispersion_energy_cutoff_lr_damping=2.,
         from_file=True,
@@ -62,7 +67,7 @@ def test_water():
     ) * [2, 2, 2]
 
     calc = AseCalculatorSparse.create_from_workdir(
-        workdir=package_dir / 'so3lr' / 'params',
+        workdir=MODEL_DIR,
         lr_cutoff=12.,
         dispersion_energy_cutoff_lr_damping=2.,
         from_file=True,

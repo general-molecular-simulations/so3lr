@@ -9,6 +9,11 @@ from ase.io import read
 from jax_md import space, quantity
 from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr import jaxmd_utils
+from so3lr.model_registry import resolve_model
+
+# Original/legacy SO3LR model, resolved via the registry so the test is
+# decoupled from the on-disk layout (the model now lives under models/so3lr).
+MODEL_DIR = resolve_model('so3lr')[0]
 
 lr_cutoff = 12.0
 lr_cutoff_damp = 2.0
@@ -50,7 +55,7 @@ def test_molecules_with_box(name: str):
 
     # define mlff potential
     mlff_potential = PotentialSparse.create_from_workdir(
-        package_dir / 'so3lr' / 'params',
+        MODEL_DIR,
         from_file=True,
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,  # this controls whether elec and disp modules use force shifting and damping.
@@ -125,7 +130,7 @@ def test_molecules_free(name: str):
 
     # define mlff potential
     mlff_potential = PotentialSparse.create_from_workdir(
-        package_dir / 'so3lr' / 'params',
+        MODEL_DIR,
         from_file=True,
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,  # this controls whether elec and disp modules use force shifting and damping.
@@ -201,7 +206,7 @@ def test_water():
 
     # define mlff potential
     mlff_potential = PotentialSparse.create_from_workdir(
-        package_dir / 'so3lr' / 'params',
+        MODEL_DIR,
         from_file=True,
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,  # this controls whether elec and disp modules use force shifting and damping.

@@ -7,7 +7,7 @@ This document is for developers contributing to the SO3LR project. It covers rep
 - `so3lr/` — Main source code for the SO3LR model and CLI
 - `tests/` — Unit tests
 - `tests/integration/` — end-to-end integration tests
-- `params/` — Pretrained model checkpoint directory
+- `so3lr/models/` — Bundled pretrained model directories (`so3lr`, `so3lr-s`, `so3lr-m`, `so3lr-l`)
 - `pyproject.toml` — Python dependencies and build system
 
 ## Running Tests

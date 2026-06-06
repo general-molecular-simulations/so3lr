@@ -39,7 +39,7 @@ def test_resolve_bundled_models(name):
 @pytest.mark.parametrize("name", ["so3lr", "so3lr-o"])
 def test_resolve_legacy_model(name):
     workdir, from_file, head_index = mr.resolve_model(name)
-    assert workdir == PKG / "params"
+    assert workdir == PKG / "models" / "so3lr"
     # The legacy dir ships a canonical params.pkl, which the resolver prefers
     # over its (incomplete) orbax checkpoint, so from_file is True.
     assert (workdir / "params.pkl").exists()

@@ -15,6 +15,11 @@ import pathlib
 import pytest
 from ase.io import read
 from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
+from so3lr.model_registry import resolve_model
+
+# Original/legacy SO3LR model, resolved via the registry so the test is
+# decoupled from the on-disk layout (the model now lives under models/so3lr).
+MODEL_DIR = resolve_model('so3lr')[0]
 
 
 def get_package_dir():
@@ -40,7 +45,7 @@ class TestHessianShape:
         n_atoms = len(atoms)
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -80,7 +85,7 @@ class TestHessianShape:
         output_atom_indices = list(range(n_subset))
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -122,7 +127,7 @@ class TestHessianSymmetry:
         n_atoms = len(atoms)
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -212,7 +217,7 @@ class TestHessianNumerical:
 
         # Calculator for analytical Hessian
         calc_hessian = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -222,7 +227,7 @@ class TestHessianNumerical:
 
         # Calculator for numerical Hessian (reused)
         calc_numerical = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -321,7 +326,7 @@ class TestSubsystemHessianNumerical:
 
         # Calculator for analytical Hessian
         calc_hessian = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -332,7 +337,7 @@ class TestSubsystemHessianNumerical:
 
         # Calculator for numerical Hessian (reused)
         calc_numerical = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -382,7 +387,7 @@ class TestSubsystemHessianNumerical:
 
         # Get full Hessian
         calc_full = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -399,7 +404,7 @@ class TestSubsystemHessianNumerical:
 
         # Get subsystem Hessian
         calc_sub = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -447,7 +452,7 @@ class TestHessianConsistency:
 
         # Calculator without Hessian
         calc_no_hess = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -456,7 +461,7 @@ class TestHessianConsistency:
 
         # Calculator with Hessian
         calc_with_hess = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -497,7 +502,7 @@ class TestHessianConsistency:
 
         # Calculator without Hessian
         calc_no_hess = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -506,7 +511,7 @@ class TestHessianConsistency:
 
         # Calculator with Hessian
         calc_with_hess = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -555,7 +560,7 @@ class TestDifferentSubsystemRanges:
         output_atom_indices = list(range(start, end))
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -596,7 +601,7 @@ class TestDifferentSubsystemRanges:
         output_atom_indices = list(range(start, n_atoms))
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -634,7 +639,7 @@ class TestDifferentSubsystemRanges:
         output_atom_indices = [n_atoms // 2]
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,

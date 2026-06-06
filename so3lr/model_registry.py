@@ -27,8 +27,8 @@ _REGISTRY = {
     "so3lr-m": _MODELS / "so3lr-m",
     "so3lr-l": _MODELS / "so3lr-l",
     # Original vanilla SO3LR, kept reachable by name for reproducibility.
-    "so3lr": _PKG / "params",
-    "so3lr-o": _PKG / "params",
+    "so3lr": _MODELS / "so3lr",
+    "so3lr-o": _MODELS / "so3lr",
 }
 
 
@@ -65,11 +65,11 @@ def resolve_model(name_or_path=None):
                 f"and not an existing path."
             )
 
-    # Prefer a canonical params.pkl when present: the legacy (v1) model ships
-    # such a pickle export, and its bundled orbax checkpoint is incomplete (no
-    # _CHECKPOINT_METADATA), so loading from the pickle is both faithful to v1
-    # and robust. The new so3lr-s/m/l models have no params.pkl and therefore
-    # load from their orbax checkpoints/ directory.
+    # Prefer a canonical params.pkl when present. All bundled models now ship
+    # such a pickle export, so from_file is True for every registry entry. The
+    # legacy (so3lr / so3lr-o) directory additionally carries an orbax
+    # checkpoint, but it is incomplete (no _CHECKPOINT_METADATA), so the pickle
+    # is preferred as both faithful and robust.
     from_file = (workdir / "params.pkl").exists()
 
     return workdir, from_file, DEFAULT_HEAD_INDEX
