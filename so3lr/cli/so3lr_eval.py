@@ -359,9 +359,9 @@ def evaluate_so3lr_on(
         # Create parent directory if it doesn't exist
         save_to.parent.mkdir(parents=True, exist_ok=True)
 
-    # Initialize the model. A bundled name (so3lr-s/m/l/so3lr) or a custom path;
-    # None falls back to the default model.
-    from so3lr.model_registry import resolve_model, available_models
+    # Initialize the model. A bundled name (so3lr-s/m/l/so3lr/so3lr-o) or a
+    # custom path; None falls back to the default model.
+    from so3lr.model_registry import resolve_model, available_models, DEFAULT_MODEL
     workdir_path, _, _ = resolve_model(model_path)
     # Decide bundled vs. custom by comparing the *resolved* directory against
     # the registry's bundled paths, not by short-name membership of the raw
@@ -370,7 +370,16 @@ def evaluate_so3lr_on(
     # as 'bundled' (the old name-only check mislabelled this as custom).
     _bundled_paths = {resolve_model(n)[0] for n in available_models()}
     if workdir_path in _bundled_paths:
-        logger.info(f"Using bundled SO3LR model: {workdir_path.name}")
+        # Prefer the user-typed short name when it is a registry key. Without
+        # this, legacy 'so3lr' and 'so3lr-o' both log as 'params' because they
+        # share the same on-disk directory (_PKG / 'params').
+        if model_path is not None and model_path in available_models():
+            _name = model_path
+        elif model_path is None:
+            _name = DEFAULT_MODEL
+        else:
+            _name = workdir_path.name
+        logger.info(f"Using bundled SO3LR model: {_name}")
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
 

@@ -67,6 +67,13 @@ DataSetEntry = namedtuple('DataSetEntry', ('chunk_length', 'shape', 'dtype'))
 class HDF5Store(object):
     """
     Class to append value to a hdf5 file.
+
+    Note on observable naming: HDF5 datasets use the canonical internal
+    names emitted by the model ('partial_charges', 'hirshfeld_ratios',
+    'c6_ratios', 'dipole_vec', ...), not the ASE-friendly aliases used
+    by the extxyz writer ('charges', 'hirsh_ratios'). Specify the
+    canonical names in the YAML `observables:` list when
+    `output_format: hdf5`.
     """
 
     def __init__(self, datapath, datasets: Dict[str, DataSetEntry], compression="gzip", mode: str = "w-"):
@@ -493,6 +500,7 @@ def init_hdf5_store(
             )
         elif o in   ['partial_charges',
                     'hirshfeld_ratios',
+                    'c6_ratios',
                     'electrostatic_energy_kspace',
                     'electrostatic_energy',
                     'dispersion_energy',
@@ -634,8 +642,10 @@ def write_to_extxyz(
             in Cartesian Angstroms and are written directly.
 
     Returns:
-        Tuple of empty lists (momenta, positions, boxes) to clear memory on success.
-        On failure, returns the original lists.
+        Tuple of empty lists (momenta, positions, boxes, obs_dict) to clear memory
+        on success. On failure, logs the error and calls sys.exit(1) so the user
+        sees the failure rather than silently dropping frames for the rest of the run
+        (matches the HDF5 writer behavior).
     """
     try:
         # Ensure output_file is a Path object
@@ -694,12 +704,22 @@ def write_to_extxyz(
             if momenta and i < len(momenta):
                 atoms_copy.set_momenta(momenta[i])
 
+            # Canonicalize the extxyz column name so the eval-side reader
+            # (see NORMALIZE_TARGET in so3lr/cli/so3lr_eval.py) can locate the
+            # data without falling back on its alias table. Keep this map in
+            # lock-step with NORMALIZE_TARGET; do NOT collapse the model-
+            # specific nlh_repulsion / zbl_repulsion pair.
+            _extxyz_obs_alias = {
+                'charges': 'partial_charges',
+                'hirsh_ratios': 'hirshfeld_ratios',
+            }
             for o in obs_dict.keys():
-                if o == "partial_charges":
-                    atoms_copy.set_array('charges', np.asarray(obs_dict['partial_charges'][i]).flatten())
+                col = _extxyz_obs_alias.get(o, o)
+                if o in ("partial_charges", "charges"):
+                    atoms_copy.set_array('partial_charges', np.asarray(obs_dict[o][i]).flatten())
 
-                elif o == "hirshfeld_ratios":
-                    atoms_copy.set_array('hirsh_ratios', np.asarray(obs_dict['hirshfeld_ratios'][i]).flatten())
+                elif o in ("hirshfeld_ratios", "hirsh_ratios"):
+                    atoms_copy.set_array('hirshfeld_ratios', np.asarray(obs_dict[o][i]).flatten())
 
                 elif o == "c6_ratios":
                     atoms_copy.set_array('c6_ratios', np.asarray(obs_dict['c6_ratios'][i]).flatten())
@@ -708,7 +728,7 @@ def write_to_extxyz(
                     atoms_copy.info['dipole_vec'] = np.asarray(obs_dict['dipole_vec'][i]).flatten()
 
                 elif obs_dict[o][0].shape == (positions[0].shape[0],):
-                    atoms_copy.set_array(o, np.asarray(obs_dict[o][i]).flatten())
+                    atoms_copy.set_array(col, np.asarray(obs_dict[o][i]).flatten())
                 else:
                     logger.warning(
                         f"Observable '{o}' is not of shape (num_atoms,) and not supported by default for extxyz format."
@@ -731,11 +751,8 @@ def write_to_extxyz(
         return [], [], [], obs_dict
 
     except Exception as e:
-        logger.warning(f"Failed to write to extxyz file: {str(e)}")
-        # Return the original lists in case of failure
-        obs_dict = {o: [] for o in obs_dict.keys()}
-
-        return [], [], [], obs_dict
+        logger.error(f"Failed to write to extxyz file: {str(e)}")
+        sys.exit(1)
 
 
 def atoms_to_jnp(

@@ -526,6 +526,28 @@ def infer_output_format(output_file):
         return 'extxyz'
 
 
+def _format_runtime(seconds: float) -> str:
+    """Adaptive runtime formatter for the end-of-run 'Total runtime' line.
+
+    The legacy 'X.XX seconds (Y.YY hours)' format made the hours figure useless
+    for typical minute-scale MD runs (and the seconds figure useless for
+    multi-hour training jobs). Pick a unit pair appropriate to the magnitude:
+    s+ms below 1 min, m+s below 1 h, h+m at or above 1 h.
+    """
+    if seconds < 60.0:
+        total_ms = int(round(seconds * 1000))
+        s, ms = divmod(total_ms, 1000)
+        return f"{s} s {ms} ms"
+    if seconds < 3600.0:
+        total_s = int(round(seconds))
+        m, s = divmod(total_s, 60)
+        return f"{m} m {s} s"
+    total_s = int(round(seconds))
+    h, rem = divmod(total_s, 3600)
+    m = rem // 60
+    return f"{h} h {m} m"
+
+
 # ============================================================================
 # Decorator factories for common CLI options
 # ============================================================================
@@ -937,6 +959,21 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
 
     settings_dict = canonicalize_ensemble(settings_dict)
 
+    # Fast-fail on missing required keys before setup_logger / banner /
+    # get_hardware_info (which triggers a slow JAX init). `input_file` is the
+    # only truly-required YAML key with no YAML_DEFAULTS entry; without it,
+    # downstream perform_md / run would crash with an opaque TypeError on
+    # Path(None) / ase.read(None).
+    if not settings_dict.get('input_file'):
+        raise ValueError(
+            f"Missing required key 'input_file' in {settings_path.name}: "
+            f"path to the initial geometry file (any ASE-readable format, "
+            f"e.g. .xyz / .extxyz / .pdb). Add a line like\n"
+            f"  input_file: path/to/structure.xyz\n"
+            f"to the YAML, or pass it on the CLI via a subcommand "
+            f"(e.g. `so3lr nvt --input ...`)."
+        )
+
     # Default output filename uses ensemble-specific suffix, mirroring the CLI
     # subcommand pathway (see e.g. the nvt/npt/nve subcommands). Previously the
     # YAML branch left output_file=None and immediately crashed in
@@ -964,7 +1001,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     run(settings_dict)
     time_end = time.time()
     logger.info('Simulation completed successfully!')
-    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+    logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
 
 
 
@@ -1174,8 +1211,19 @@ def run_md_simulation(
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
-        'kspace_npt_cycles': kspace_npt_cycles,
     }
+
+    # Only insert kspace_npt_cycles when the user explicitly passed
+    # --kspace-npt-cycles on the command line. The Click default is None,
+    # which would otherwise override the documented 100-cycle fallback that
+    # perform_md applies via all_settings.get('kspace_npt_cycles', 100) and
+    # silently disable NPT k-space re-tuning for any CLI user who omits the
+    # flag. The YAML path already gets the 100 default by omission; this
+    # mirrors that behaviour for the CLI path. Uses the public Click API
+    # (same pattern as the tune-ewald subcommand below).
+    _ctx = click.get_current_context(silent=True)
+    if _ctx is not None and _ctx.get_parameter_source('kspace_npt_cycles') == click.core.ParameterSource.COMMANDLINE:
+        settings['kspace_npt_cycles'] = kspace_npt_cycles
 
     settings['md_T'] = temperature
     if ensemble == 'nve':
@@ -1205,7 +1253,7 @@ def run_md_simulation(
     time_end = time.time()
     logger.info("=" * 60)
     logger.info('Simulation completed successfully!')
-    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+    logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
 
 
 # Define the 'opt' subcommand
@@ -1302,10 +1350,13 @@ def fire_optimization(
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Total charge:              {total_charge}")
     logger.info(f"Spin (unpaired e-):        {num_unpaired_electrons}")
-    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
-    if model_path is not None:
-        
-        logger.info(f"Model path:                {model_path}")
+    # Mirror the MD / eval banner: log the resolved short name even when the
+    # user did not pass --model (otherwise the user has no record of which
+    # bundled checkpoint was loaded by default, e.g. so3lr-m vs. legacy v1).
+    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    _model = model_path or DEFAULT_MODEL
+    _kind = 'bundled' if _model in available_models() else 'custom path'
+    logger.info(f"Force field:               {_model} ({_kind})")
     logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
     
     if force_conv is not None:
@@ -1363,7 +1414,7 @@ def fire_optimization(
     time_end = time.time()
     logger.info("=" * 60)
     logger.info('Optimization completed successfully!')
-    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+    logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
 
 # Define the 'nvt' subcommand
 @cli.command(name='nvt', help="Run NVT molecular dynamics simulation with `so3lr nvt --input geometry.xyz`.")
@@ -1776,7 +1827,7 @@ def train_model(
     time_end = time.time()
     logger.info("=" * 60)
     logger.info("Training completed successfully!")
-    logger.info(f"Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)")
+    logger.info(f"Total runtime: {_format_runtime(time_end - time_start)}")
 
 
 # Define the 'tune-ewald' subcommand
@@ -1919,7 +1970,7 @@ def tune_ewald(
     time_end = time.time()
     logger.info("=" * 60)
     logger.info('Tuning completed successfully!')
-    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+    logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
 
 
 def main() -> None:
