@@ -1974,6 +1974,10 @@ def perform_md(
     kspace_dispersion_interp_nodes = all_settings.get('kspace_dispersion_interp_nodes', 4)
 
     # MD parameters
+    # md_dt is in PICOSECONDS here (the CLI YAML loader converted fs -> ps
+    # in so3lr_cli.parse_settings; see md_settings.yaml for the fs convention).
+    # It stays in ps until handle_units() below converts it to jax-md natural
+    # units for the integrator.
     md_dt = all_settings.get('md_dt')
     md_T = all_settings.get('md_T')
     md_P = all_settings.get('md_P')
@@ -2356,6 +2360,11 @@ def perform_md(
         logger.info('Dispersion tail correction enabled for NPT.')
 
     # Apply units
+    # Unit boundary: handle_units takes (dt in ps, T in K, P in bar) and returns
+    # the same quantities in jax-md natural units. After this block md_dt is
+    # NO LONGER in ps — every downstream use (nhc_tau, gamma, step_fn ctors,
+    # pysages interface) treats md_dt as a jax-md natural-units timestep.
+    # Anything past this point that wants ps must convert back.
     unit_dict = handle_units(
         units.metal_unit_system,
         md_dt,
@@ -2363,7 +2372,7 @@ def perform_md(
         md_P,
     )
 
-    md_dt = dtype(unit_dict['dt'])
+    md_dt = dtype(unit_dict['dt'])  # ps -> jax-md natural units
     md_T = dtype(unit_dict['T']) if unit_dict['T'] is not None else None
     md_P = dtype(unit_dict['P']) if unit_dict['P'] is not None else None
 

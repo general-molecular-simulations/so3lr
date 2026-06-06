@@ -30,7 +30,7 @@ output_file: trajectory.hdf5
 precision: float64
 ensemble: nvt
 md_T: 300
-md_dt: 0.0005
+md_dt: 0.5
 md_cycles: 2      # Keep small for fast tests
 md_steps: 2       # Keep small for fast tests
 relax_before_run: false

@@ -731,7 +731,11 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     if settings_dict.get('model_path') is None and settings_dict.get('model') is not None:
         settings_dict['model_path'] = settings_dict.pop('model')
 
-    # md_dt is written in fs in the YAML but run() expects ps
+    # Unit boundary: md_dt is in fs in the YAML / CLI (documented in
+    # md_settings.yaml and the CLI --dt help), but every internal consumer
+    # past this point — settings dict, perform_md, handle_units — expects
+    # picoseconds. Convert here once so the rest of the code only sees ps.
+    # NB: the 'md_dt' key stays the same; only its unit changes.
     if 'md_dt' in settings_dict:
         settings_dict['md_dt'] = settings_dict['md_dt'] / 1000
 
@@ -841,11 +845,15 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     logger.info("=" * 60)
 
     # Dump the full merged settings dict (after YAML_DEFAULTS applied, CLI->settings
-    # converted) so the log file alone is enough to reproduce the run. str() coercion
-    # keeps it robust to Path/array/non-serializable values. (md_dt is in ps.)
-    logger.info("Full merged settings (md_dt in ps):")
+    # converted) so the log file alone is enough to reproduce the run. md_dt is
+    # internally stored in ps; convert back to fs here so the dump matches the
+    # YAML/CLI convention and the file is copy-pasteable into a settings YAML.
+    logger.info("Full merged settings (md_dt in fs, matches YAML/CLI input):")
     for _k in sorted(s.keys()):
-        logger.info(f"    {_k}: {s[_k]}")
+        if _k == 'md_dt':
+            logger.info(f"    {_k}: {s[_k] * 1000}")
+        else:
+            logger.info(f"    {_k}: {s[_k]}")
     logger.info("=" * 60)
 
 # ============================================================================

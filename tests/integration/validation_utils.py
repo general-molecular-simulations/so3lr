@@ -301,7 +301,10 @@ class Validator:
         # Keys whose values are transformed or not logged directly
         default_skip = {
             'log_file',
-            'md_dt',              # logged as md_dt * 1000 (fs)
+            'md_dt',              # YAML md_dt is in fs and logged as fs, but the
+                                  # 'Timestep: ... fs' line uses :.4g formatting
+                                  # that doesn't match a plain string search;
+                                  # skip the explicit-value check here.
             'relax_before_run',   # logged as Enabled/Disabled
             'save_buffer',        # not logged
             'observables',        # list, not logged as-is
@@ -321,7 +324,10 @@ class Validator:
             'kspace_interp_nodes',
         }
         transformed_keys = {
-            'md_dt': lambda v: str(int(v * 1000)),  # Convert ps to fs
+            # NB: YAML md_dt is in fs (matches md_settings.yaml). Earlier versions
+            # of the integration YAMLs stored md_dt as ps and a 'ps -> fs' lambda
+            # lived here; both were corrected together. md_dt is in default_skip
+            # above (the log uses .4g formatting, so no exact string match).
             'relax_before_run': lambda v: 'Enabled' if v else 'Disabled',
             'ensemble': lambda v: v.upper() if isinstance(v, str) else str(v),
             'nhc_thermo': lambda v: str(int(v * 1000)) if isinstance(v, (int, float)) else str(v),
