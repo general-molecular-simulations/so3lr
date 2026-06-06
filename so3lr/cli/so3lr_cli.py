@@ -4,6 +4,7 @@ import sys
 import time
 import yaml
 import click
+import difflib
 import logging
 import warnings
 import platform
@@ -185,11 +186,15 @@ Run simulations using SO3LR Machine Learned Force Field.
 
 ## Commands
 
-so3lr opt [options]     Run geometry optimization
-so3lr nvt [options]     Run NVT (constant volume and temperature) MD simulation
-so3lr npt [options]     Run NPT (constant pressure and temperature) MD simulation
-so3lr nve [options]     Run NVE (constant volume and energy) MD simulation
-so3lr eval [options]    Run evaluation on a dataset
+so3lr opt [options]           Run geometry optimization
+so3lr nvt [options]           Run NVT (constant volume and temperature) MD simulation
+so3lr nvt-langevin [options]  Run NVT MD simulation with a Langevin thermostat
+so3lr npt [options]           Run NPT (constant pressure and temperature) MD simulation
+so3lr nve [options]           Run NVE (constant volume and energy) MD simulation
+so3lr eval [options]          Run evaluation (energies/forces/observables) on a dataset
+so3lr train [options]         Train a SO3LR/SO3krates model from a config file
+so3lr finetune [options]      Finetune an existing model on a new dataset
+so3lr tune-ewald [options]    Auto-tune Ewald/PME/P3M k-space parameters for a structure
 
 ## Usage Examples
 
@@ -453,13 +458,15 @@ Run simulations using SO3LR Machine Learned Force Field.
 
 ## Commands
 
-so3lr opt [options]          Run geometry optimization
-so3lr nvt [options]          Run NVT (constant volume and temperature) MD simulation
-so3lr npt [options]          Run NPT (constant pressure and temperature) MD simulation
-so3lr nve [options]          Run NVE (constant volume and energy) MD simulation
-so3lr eval [options]         Evaluate SO3LR model on a dataset
-so3lr finetune [options]     Finetune SO3LR model on a dataset
-so3lr train [options]        Train a SO3LR/SO3krates model from a config file
+so3lr opt [options]            Run geometry optimization
+so3lr nvt [options]            Run NVT (constant volume and temperature) MD simulation
+so3lr nvt-langevin [options]   Run NVT MD with a Langevin thermostat
+so3lr npt [options]            Run NPT (constant pressure and temperature) MD simulation
+so3lr nve [options]            Run NVE (constant volume and energy) MD simulation
+so3lr eval [options]           Evaluate SO3LR model on a dataset
+so3lr finetune [options]       Finetune SO3LR model on a dataset
+so3lr train [options]          Train a SO3LR/SO3krates model from a config file
+so3lr tune-ewald [options]     Auto-tune Ewald/PME/P3M k-space parameters
 
 ## Usage Examples
 
@@ -493,8 +500,11 @@ Use --help-full to see all available options.
 #   so3lr --settings md_settings.yaml
 
 def infer_output_format(output_file):
-    """Determine output format based on file extension."""
-    if output_file.endswith('.hdf5'):
+    """Determine output format based on file extension. Returns 'extxyz' for
+    None/empty input (caller is expected to supply an actual filename later)."""
+    if not output_file:
+        return 'extxyz'
+    if output_file.endswith('.hdf5') or output_file.endswith('.h5'):
         return 'hdf5'
     elif output_file.endswith('.xyz') or output_file.endswith('.extxyz'):
         return 'extxyz'
@@ -515,6 +525,9 @@ def common_io_options(f: Callable) -> Callable:
                      help='Output trajectory file (.hdf5 or .xyz). [default: <input>_<ensemble>.xyz]')(f)
     f = click.option('--log-file', default=None, type=click.Path(),
                      help='File to write logs to. [default: <output>.log]')(f)
+    f = click.option('--overwrite/--no-overwrite', 'overwrite', default=False,
+                     help='If the trajectory output already exists, overwrite it. '
+                          'Default is to refuse (rename your previous run, or pass --overwrite).')(f)
     return f
 
 
@@ -667,6 +680,115 @@ YAML_DEFAULTS: Dict[str, Any] = {
 }
 
 
+# Keys that are NOT in YAML_DEFAULTS but are legitimately read by perform_md /
+# the YAML loader / advanced subsystems. Listing them here lets the unknown-key
+# validator distinguish a real configurable knob from a user typo.
+KNOWN_YAML_KEYS_EXTRA: set = {
+    # Required / standard I/O (CLI defaults are None, not present in YAML_DEFAULTS)
+    'input_file', 'output_file', 'log_file', 'model_path', 'model',
+    'output_atom_indices', 'ensemble',
+    # Restart
+    'restart_load_path', 'restart_save_path', 'restart_reset',
+    # Atom constraints
+    'atom_mask_path', 'fixed_atom_indices', 'mobile_atom_indices',
+    'fixed_atom_constraint', 'output_cartesian_positions',
+    # K-space electrostatics
+    'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing',
+    'kspace_interp_nodes', 'kspace_npt_cycles',
+    # K-space dispersion
+    'kspace_dispersion', 'kspace_dispersion_smearing',
+    'kspace_dispersion_spacing', 'kspace_dispersion_interp_nodes',
+    # Numerical / safety knobs
+    'matmul_precision', 'minimum_cell_size_multiplier',
+    'energy_drift_threshold', 'dispersion_tail_correction',
+    # Ensemble-specific
+    'md_T', 'md_P', 'init_T', 'npt_coupling', 'num_unpaired_electrons',
+    # Enhanced sampling (PySAGES)
+    'do_enhanced_sampling', 'enforce_cartesian_coordinates', 'pysages_input',
+    'restart_pysages_save_path', 'restart_pysages_load_path',
+    # Minimization (overrides cycles/steps if set)
+    'force_convergence',
+    # Eval keys (allowed in the same YAML even though `so3lr eval` does not use
+    # --settings yet, since users often share a single YAML across runs)
+    'datafile', 'save_to', 'targets', 'batch_size', 'jit_compile',
+    # Derived (re-appears if a user copies the merged-settings log dump back in)
+    'output_format',
+    # Trajectory-overwrite policy: refuse pre-existing output by default;
+    # set true (CLI flag --overwrite) to permit truncation.
+    'overwrite',
+}
+
+
+# YAML keys that mirror the CLI flag spelling for the same setting. The YAML
+# loader canonicalises these to the internal name before any other processing,
+# so a user can write `temperature: 300` in the YAML and have it land as `md_T`.
+# Keep in sync with the CLI option names in run_md_simulation / nvt/npt/nve.
+YAML_KEY_ALIASES: Dict[str, str] = {
+    # Identity / model
+    'model':                'model_path',
+    # MD ensemble shorthand
+    'temperature':          'md_T',
+    'pressure':             'md_P',
+    'dt':                   'md_dt',
+    # Neighbor-list buffers (the CLI flags are --buffer-sr / --buffer-lr)
+    'buffer_sr':            'buffer_size_multiplier_sr',
+    'buffer_lr':            'buffer_size_multiplier_lr',
+    # NHC / thermostat shorthand
+    'nhc_chain':            'nhc_chain_length',
+    # Other CLI ↔ YAML mismatches users hit
+    'spin':                 'num_unpaired_electrons',
+    'observable':           'observables',
+    'force_conv':           'force_convergence',
+}
+
+
+def apply_yaml_key_aliases(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate CLI-flag-style YAML keys to their internal names.
+
+    Modifies and returns the dict in place. If both the alias and the canonical
+    key are present, the canonical wins and a warning is logged.
+    """
+    for alias, canonical in YAML_KEY_ALIASES.items():
+        if alias in settings_dict:
+            if canonical in settings_dict:
+                logger.warning(
+                    f"YAML has both '{alias}' (alias) and '{canonical}'; "
+                    f"using '{canonical}' and ignoring '{alias}'."
+                )
+                del settings_dict[alias]
+            else:
+                settings_dict[canonical] = settings_dict.pop(alias)
+    return settings_dict
+
+
+def known_yaml_keys() -> set:
+    """Union of every key the MD/YAML pipeline knows how to consume."""
+    return set(YAML_DEFAULTS.keys()) | KNOWN_YAML_KEYS_EXTRA | set(YAML_KEY_ALIASES.keys())
+
+
+def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Path] = None) -> None:
+    """Warn on unknown keys in a settings YAML, with did-you-mean suggestions.
+
+    A typo in a settings file used to be silent — the loader simply dropped the
+    unknown key on the floor and ran with defaults. This catches typos like
+    `md_t: 350` (real: md_T), `tempreature: 300`, or `hdf5_buffer_size: 50`
+    (real: save_buffer) and surfaces them before the simulation starts. Warns
+    rather than errors so that a YAML with a single typo does not silently
+    abort a multi-hour job; the warning is loud and lists candidate spellings.
+    """
+    known = known_yaml_keys()
+    unknown = sorted(set(settings_dict.keys()) - known)
+    if not unknown:
+        return
+    src = f" in {settings_path.name}" if settings_path else ""
+    for k in unknown:
+        suggestions = difflib.get_close_matches(k, sorted(known), n=3, cutoff=0.6)
+        msg = f"Unknown setting '{k}'{src}; ignoring."
+        if suggestions:
+            msg += f" Did you mean: {', '.join(suggestions)}?"
+        logger.warning(msg)
+
+
 def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Determine ensemble from settings dict, defaulting to NVT.
 
@@ -727,9 +849,15 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
         logger.error(f"Error loading settings file: {str(e)}")
         sys.exit(1)
 
-    # Accept 'model' as an alias for 'model_path' in the YAML.
-    if settings_dict.get('model_path') is None and settings_dict.get('model') is not None:
-        settings_dict['model_path'] = settings_dict.pop('model')
+    # Translate CLI-flag-style aliases (e.g. temperature -> md_T,
+    # pressure -> md_P, dt -> md_dt, model -> model_path) before any other
+    # processing. See YAML_KEY_ALIASES for the full mapping.
+    apply_yaml_key_aliases(settings_dict)
+
+    # Surface typos early. Unknown keys (e.g. `md_t` for `md_T`,
+    # `tempreature` for `md_T`) would otherwise be silently ignored and the
+    # default value used, wasting GPU time on the wrong physics.
+    validate_yaml_keys(settings_dict, settings_path)
 
     # Unit boundary: md_dt is in fs in the YAML / CLI (documented in
     # md_settings.yaml and the CLI --dt help), but every internal consumer
@@ -744,6 +872,16 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
         settings_dict.setdefault(key, default)
 
     settings_dict = canonicalize_ensemble(settings_dict)
+
+    # Default output filename uses ensemble-specific suffix, mirroring the CLI
+    # subcommand pathway (see e.g. the nvt/npt/nve subcommands). Previously the
+    # YAML branch left output_file=None and immediately crashed in
+    # infer_output_format. We compute the same `<input>_<ensemble>.xyz` here.
+    if not settings_dict.get('output_file') and settings_dict.get('input_file'):
+        _suffix = {'nvt': 'nvt', 'nvt-langevin': 'nvt_langevin', 'npt': 'npt', 'nve': 'nve'}
+        _ens = settings_dict.get('ensemble', 'nvt')
+        settings_dict['output_file'] = f"{Path(settings_dict['input_file']).stem}_{_suffix.get(_ens, _ens)}.xyz"
+
     settings_dict['output_format'] = infer_output_format(settings_dict.get('output_file', ''))
 
     # Default the log file to the settings YAML name with a .log extension
@@ -885,6 +1023,7 @@ def run_md_simulation(
     seed: int,
     observable: Optional[tuple],
     help: bool,
+    overwrite: bool = False,
     # Nose-Hoover thermostat (NVT/NPT)
     nhc_chain: Optional[int] = None,
     nhc_steps: Optional[int] = None,
@@ -950,6 +1089,7 @@ def run_md_simulation(
         'ensemble': ensemble,
         'observables': observable,
         'output_format': infer_output_format(output_file),
+        'overwrite': overwrite,
         'kspace_electrostatics': kspace_electrostatics,
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
@@ -1031,6 +1171,7 @@ def fire_optimization(
     kspace_interp_nodes: int,
     kspace_npt_cycles: Optional[int],
     help: bool,
+    overwrite: bool = False,
 ) -> None:
     """
     Run geometry optimization using the FIRE algorithm.
@@ -1117,6 +1258,7 @@ def fire_optimization(
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
+        'overwrite': overwrite,
     }
 
     # Add log settings to the settings dictionary
@@ -1349,7 +1491,7 @@ def eval_model(
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Finetuning settings.
-@click.option('--strategy', type=click.Choice(['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer','obs_0','obs_023','obs_23','obs_3','ll_fmlp','ll_obs_023']),
+@click.option('--strategy', type=click.Choice(['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer','obs_0','obs_023','obs_23','obs_3','ll_fmlp','ll_obs_023','freeze_long_range','forces_only']),
               default='full', help='Strategy for finetuning. [default: full]')
 @click.option('--config', '--config_path', 'config_path', type=click.Path(exists=False), default=None,
               help='Path to the finetuning config. If not provided is defaults to the one pre-defined in the SO3LR repo. [default: None]')
@@ -1383,9 +1525,9 @@ def finetune_model(
     Example:
         so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10
     """
-    # Print help if needed
-    #if not datafile or not workdir or help:
-    if not workdir or help:        
+    # Print help if needed (and reject the trivial `--workdir foo` invocation
+    # that previously crashed with TypeError because `datafile` was None).
+    if not datafile or not workdir or help:
         click.echo(SO3LR_ASCII)
         click.echo(finetune_model.get_help(click.get_current_context()))
         return
@@ -1402,7 +1544,7 @@ def finetune_model(
 
     # Log all settings
     logger.info("=" * 60)
-    logger.info(f"SO3LR Model Evaluation (v{__version__})")
+    logger.info(f"SO3LR Model Finetuning (v{__version__})")
     logger.info("=" * 60)
     logger.info(f"Dataset file:              {datafile}")
     logger.info(f"Workdir:                   {workdir}")
@@ -1410,7 +1552,7 @@ def finetune_model(
     logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
         logger.info(f"Model path:            {model_path}")
-    logger.info(f"Config:                    {'Default' if model_path else 'Custom'}")
+    logger.info(f"Config:                    {'Custom' if config_path else 'Default'}")
     if config_path is not None:
         logger.info(f"Config path:           {config_path}")
     logger.info(f"Number training points:    {num_train}")
@@ -1558,12 +1700,16 @@ def tune_ewald(
                 raise FileNotFoundError(f'Settings file not found: {settings}')
 
             with open(settings_path, 'r') as f:
-                settings_dict = yaml.safe_load(f)
+                settings_dict = yaml.safe_load(f) or {}
 
             logger.info(f"Loading settings from {settings}")
         except (FileNotFoundError, yaml.YAMLError) as e:
             logger.error(f"Error loading settings file: {str(e)}")
             sys.exit(1)
+
+        # Same alias + unknown-key validation as the top-level --settings path.
+        apply_yaml_key_aliases(settings_dict)
+        validate_yaml_keys(settings_dict, settings_path)
 
     # CLI params with internal names; buffer_sr/buffer_lr map to longer internal names
     _cli_params = {

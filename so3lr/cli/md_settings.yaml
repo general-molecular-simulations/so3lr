@@ -7,6 +7,27 @@
 # Note: keys use the internal naming convention (same as used by so3lr_md.py).
 #       CLI options use shortened aliases (e.g. --buffer-sr, --dt) as shown
 #       in comments below.
+#
+# CLI flag <-> YAML key mapping
+# ------------------------------
+# Most CLI flags use the same name as the YAML key; the ones that differ:
+#
+#   CLI flag                       YAML key                       Notes
+#   --temperature                  md_T                           NVT/NPT/Langevin target T
+#                                  init_T                         NVE initial-velocity T (NVE only)
+#   --pressure                     md_P                           setting it enables NPT
+#   --dt                           md_dt                          fs
+#   --buffer-sr                    buffer_size_multiplier_sr
+#   --buffer-lr                    buffer_size_multiplier_lr
+#   --nhc-chain                    nhc_chain_length
+#   --spin                         num_unpaired_electrons         2S (number of unpaired electrons)
+#   --observable                   observables (plural, list)
+#   --force-conv                   force_convergence
+#   --model                        model_path
+#
+# Either spelling works in this YAML: the loader translates CLI-style keys
+# (e.g. `temperature: 300`) to the canonical name before use. Unknown keys
+# trigger a warning with did-you-mean suggestions rather than silent fallback.
 
 ## General Settings
 ensemble: "nvt"                            # Ensemble type: "nvt", "nvt-langevin", "npt", "nve" [Default: "nvt"]

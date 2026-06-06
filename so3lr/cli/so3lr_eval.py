@@ -289,7 +289,12 @@ def evaluate_so3lr_on(
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
 
-    #TODO: add precision handling
+    # Configure JAX process-globals (x64, matmul precision). Without this
+    # call, `so3lr eval --precision float64` would silently downcast to
+    # float32 because eval bypasses run() (where MD configures these).
+    from .so3lr_md import setup_jax_globals
+    setup_jax_globals(precision=precision, matmul_precision='highest')
+
     so3lr_calc = make_so3lr(
         workdir=workdir_path,
         lr_cutoff=lr_cutoff,

@@ -81,12 +81,14 @@ So3lrCalculator(model="/path/to/finetuned")      # or  --model /path/to/finetune
 SO3LR provides a unified command-line interface that leverages the performance of JAX-MD under the hood (detailed in the JAX-MD section below). This allows you to perform geometry optimizations and MD simulations with simple commands. The CLI supports several key functionalities:
 
 - `so3lr opt`: Geometry optimization
-- `so3lr nvt`: NVT molecular dynamics
+- `so3lr nvt`: NVT molecular dynamics (Nose-Hoover chain thermostat)
+- `so3lr nvt-langevin`: NVT molecular dynamics with a Langevin thermostat
 - `so3lr npt`: NPT molecular dynamics
 - `so3lr nve`: NVE molecular dynamics
 - `so3lr eval`: Model evaluation on a dataset
 - `so3lr finetune`: Fine-tune the model on custom datasets
 - `so3lr train`: Train a SO3LR/SO3krates model from scratch
+- `so3lr tune-ewald`: Auto-tune Ewald/PME/P3M k-space parameters for a structure
 
 Each subcommand has its own set of options and can be run with `--help` to see all available parameters.
 

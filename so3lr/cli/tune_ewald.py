@@ -1094,11 +1094,15 @@ def tune(
         settings (dict): Dictionary containing the settings for the tuning process.
     """
 
-    # Set the precision
-    if settings.get('precision', "float32").lower() == 'float64':
-        jax.config.update("jax_enable_x64", True)
-    else:
-        jax.config.update("jax_enable_x64", False)
+    # Configure JAX process-globals (x64 + matmul precision). Centralised in
+    # setup_jax_globals so that every entry point sets the same things up
+    # consistently. Previously this only toggled x64 and never set the matmul
+    # precision, so tune-ewald drifted from the MD path on the same hardware.
+    from .so3lr_md import setup_jax_globals
+    setup_jax_globals(
+        precision=settings.get('precision', 'float32'),
+        matmul_precision=settings.get('matmul_precision', 'highest'),
+    )
 
     # Setup logger
     log_file = settings.get('log_file')

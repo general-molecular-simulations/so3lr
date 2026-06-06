@@ -177,6 +177,59 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
     return logger
 
 
+# Track whether setup_jax_globals has already configured the process so a
+# second call from a different entry point doesn't log "Matmul precision: ..."
+# twice and so we can tell if a caller's --precision/--matmul-precision is
+# being silently ignored because something configured JAX before us.
+_JAX_GLOBALS_CONFIGURED: Dict[str, Any] = {}
+
+
+def setup_jax_globals(precision: str = 'float32', matmul_precision: str = 'highest') -> None:
+    """Configure JAX process-globals that every SO3LR entry point depends on.
+
+    Must be called before any JAX op runs. Idempotent — subsequent calls with
+    identical arguments are silent; with different arguments they warn and
+    keep the first-call values (changing matmul_precision after the first
+    JIT'd function may silently re-trace).
+
+    Args:
+        precision: 'float32' or 'float64'. Drives jax_enable_x64 (always on,
+            since x64 is required for high_precision_sum / mixed-precision
+            integrator ops; the precision setting controls array dtype, not
+            kernel availability).
+        matmul_precision: 'default' / 'high' / 'highest'. 'highest' forces
+            full float32 matmuls (no TF32 fallback) which avoids drift on
+            GPUs at the cost of throughput.
+    """
+    if _JAX_GLOBALS_CONFIGURED:
+        prev_mp = _JAX_GLOBALS_CONFIGURED.get('matmul_precision')
+        prev_p = _JAX_GLOBALS_CONFIGURED.get('precision')
+        if prev_mp != matmul_precision or prev_p != precision:
+            logger.warning(
+                f"setup_jax_globals called again with different values "
+                f"(precision: {prev_p} -> {precision}, "
+                f"matmul_precision: {prev_mp} -> {matmul_precision}); "
+                f"keeping the original. Set both globals in your first call."
+            )
+        return
+
+    # Always enable x64 so that high_precision_sum and mixed-precision
+    # integrator ops work correctly. The 'precision' setting controls
+    # which dtype arrays are created in, not whether x64 is available.
+    jax.config.update("jax_enable_x64", True)
+
+    # Reduces drift for x32 precision simulations. Must be set before any
+    # JIT compilation that touches matmuls.
+    jax.config.update("jax_default_matmul_precision", matmul_precision)
+
+    _JAX_GLOBALS_CONFIGURED['precision'] = precision
+    _JAX_GLOBALS_CONFIGURED['matmul_precision'] = matmul_precision
+    logger.info(
+        f"JAX globals set: precision={precision}, "
+        f"matmul_precision={matmul_precision}, x64=enabled"
+    )
+
+
 def handle_units(
     unit_system: Callable[[], Dict[str, float]],
     dt: float,
@@ -1948,6 +2001,18 @@ def perform_md(
     output_file = all_settings.get('output_file')
     restart_save_path = all_settings.get('restart_save_path')
     restart_load_path = all_settings.get('restart_load_path')
+    overwrite = bool(all_settings.get('overwrite', False))
+
+    # Refuse to clobber existing output unless the user opted in via
+    # --overwrite. The previous behavior was format-dependent: HDF5 silently
+    # truncated, extxyz silently appended. With this guard the policy is
+    # uniform across formats and across restarts.
+    if output_file and Path(output_file).exists() and not overwrite and not restart_load_path:
+        raise RuntimeError(
+            f"Output file already exists: {output_file}. Refusing to overwrite. "
+            f"Pass --overwrite to overwrite, choose a different --output, or "
+            f"pass --restart-load to resume from a checkpoint."
+        )
 
     # Model parameters
     model_path = all_settings.get('model_path')
@@ -2946,10 +3011,26 @@ def perform_min(
     Returns:
         Union[jnp.ndarray, List[jnp.ndarray]]: Optimized structure or trajectory.
     """
+    # Configure JAX process-globals (x64, matmul precision). Idempotent if
+    # already called by run(); needed here for `so3lr opt`, which previously
+    # silently ignored --precision float64 because it never went through run().
+    setup_jax_globals(
+        precision=all_settings.get('precision', 'float32'),
+        matmul_precision=all_settings.get('matmul_precision', 'highest'),
+    )
+
     # Extract settings with defaults
     input_file = all_settings.get('input_file')
     output_file = all_settings.get('output_file')
     output_format = all_settings.get('output_format')
+    overwrite = bool(all_settings.get('overwrite', False))
+
+    # Refuse to clobber existing output unless --overwrite was passed.
+    if output_file and Path(output_file).exists() and not overwrite:
+        raise RuntimeError(
+            f"Output file already exists: {output_file}. Refusing to overwrite. "
+            f"Pass --overwrite to overwrite, or choose a different --output."
+        )
 
     # Model parameters
     model_path = all_settings.get('model_path')
@@ -3459,15 +3540,11 @@ def run(
 
     relax_before_run = settings.get('relax_before_run', True)
 
-    # Always enable x64 so that high_precision_sum and mixed-precision
-    # integrator ops work correctly. The 'precision' setting controls
-    # which dtype arrays are created in, not whether x64 is available.
-    jax.config.update("jax_enable_x64", True)
-
-    # Reduces drift for x32 precision simulations
-    matmul_precision = settings.get('matmul_precision', 'highest')
-    jax.config.update("jax_default_matmul_precision", matmul_precision)
-    logger.info(f"Matmul precision: {matmul_precision} (recommended)")
+    setup_jax_globals(
+        precision=settings.get('precision', 'float32'),
+        matmul_precision=settings.get('matmul_precision', 'highest'),
+    )
+    matmul_precision = _JAX_GLOBALS_CONFIGURED.get('matmul_precision', 'highest')
 
     # Check for allowed atom types
     input_file_path = settings.get('input_file')
