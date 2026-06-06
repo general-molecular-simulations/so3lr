@@ -11,8 +11,10 @@
 ## General Settings
 ensemble: "nvt"                            # Ensemble type: "nvt", "nvt-langevin", "npt", "nve" [Default: "nvt"]
 total_charge: 0                            # Total charge of the system [Default: 0]
+num_unpaired_electrons: 0                  # Spin: number of unpaired electrons (2S). [Default: 0]
 seed: 52                                   # Random seed for MD and thermostat initialization [Default: 52]
 precision: "float32"                       # Numerical precision: "float32" or "float64" [Default: "float32"]
+matmul_precision: "highest"                # JAX matmul precision: "default" / "high" / "highest". "highest" forces full float32 and avoids TF32 drift on GPUs. [Default: "highest"]
 
 ## Input/Output Settings
 input_file: "path/to/geometry.xyz"         # Path to the initial geometry file (required)
@@ -48,6 +50,12 @@ kspace_spacing: 2.0                       # Grid spacing for k-space summation i
 kspace_interp_nodes: 4                    # Number of interpolation nodes for PME/P3M [Default: 4]
 kspace_npt_cycles: null                   # Frequency (in MD cycles) to re-tune k-space grid in NPT [Default: null]
 
+## K-space Dispersion (optional, for periodic systems — separate from electrostatics)
+kspace_dispersion: null                   # K-space method for dispersion: null / "pme" [Default: null]
+kspace_dispersion_smearing: 2.0           # Smearing width for dispersion k-space summation in Å [Default: 2.0]
+kspace_dispersion_spacing: 3.0            # Grid spacing for dispersion k-space summation in Å [Default: 3.0]
+kspace_dispersion_interp_nodes: 4         # Number of interpolation nodes for dispersion PME [Default: 4]
+
 ## Atom Constraints (optional — freeze a subset of atoms during MD)
 fixed_atom_indices: null                   # 0-based indices of atoms to freeze, e.g. [0, 1, 2]. [Default: null]
 mobile_atom_indices: null                  # Alternative: indices of atoms allowed to MOVE; all others are frozen. [Default: null]
@@ -68,6 +76,7 @@ min_n_min: 2                               # FIRE: min steps in correct directio
 md_dt: 0.5                                 # MD timestep in femtoseconds [Default: 0.5]  (CLI: --dt)
 md_cycles: 100                             # Number of MD cycles to run [Default: 100]
 md_steps: 100                             # Number of steps per MD cycle [Default: 100]
+energy_drift_threshold: 0.05               # Per-atom total-energy drift (eV/atom) that triggers a neighbor-list rebuild / safety check [Default: 0.05]
 
 ## NVT / NPT Ensemble Settings
 md_T: 300.0                                # Target temperature in Kelvin (NVT/NPT/NVT-Langevin) [Default: 300.0]  (CLI: --temperature)
@@ -79,6 +88,7 @@ nhc_thermo: 100.0                          # Thermostat damping timescale factor
 md_P: null                                 # Target pressure in bar. Setting this enables NPT. [Default: null]  (CLI: --pressure)
 nhc_baro: 1000.0                           # Barostat damping timescale factor (tau = md_dt * nhc_baro) [Default: 1000.0]
 nhc_sy_steps: 3                            # Number of Suzuki-Yoshida integration steps [Default: 3]
+npt_coupling: "isotropic"                  # NPT box coupling: "isotropic" (cubic scaling) or "anisotropic" / "triclinic" (cell-vector flexibility). Requires the npt-anisotropic jax-md fork. [Default: "isotropic"]
 
 ## NVE Ensemble Settings
 init_T: 300.0                              # Initial temperature for velocity initialization (NVE only) [Default: 300.0]  (CLI: --temperature)
