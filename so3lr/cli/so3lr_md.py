@@ -99,15 +99,76 @@ class HDF5Store(object):
 logger = logging.getLogger("SO3LR")
 
 class RestartInNewEnsembleError(Exception):
-    def __init__(self, loaded_state, ensemble):
+    def __init__(self, loaded_state, ensemble, dropped_fields=None, reset_only=False):
         """
         Exception raised when the restart file contains a different ensemble
-        than the one specified in the simulation."""
+        than the one specified in the simulation, or when the user requested
+        a restart-with-reset (`restart_reset: true`). In either case, only
+        positions / momenta / masses / box are reused; thermostat and
+        barostat state are re-initialised from scratch.
+
+        Args:
+            loaded_state: The loaded NpzFile (kept on the exception so the
+                caller can re-derive position/mass/momentum/box).
+            ensemble: The ensemble the *current* run is targeting.
+            dropped_fields: List of restart-file fields that will be
+                discarded (thermostat / barostat / reference_box / ...).
+                Computed by `load_state`.
+            reset_only: True if the user asked for `restart_reset` (in which
+                case the ensemble may match but the user explicitly opted in
+                to re-initialising integrator state).
+        """
         self.ensemble = ensemble
         self.loaded_state = loaded_state
-        self.message = f"Restart file contains a different ensemble than the one specified.\n"\
-                       f"Requested ensemble: {str(self.ensemble).upper()} Loaded state: {str(self.loaded_state.get('ensemble',None)).upper()}.\n"\
-                       f"Only positions, momenta and box information is loaded from the restart file."
+        self.dropped_fields = list(dropped_fields) if dropped_fields else []
+        self.reset_only = bool(reset_only)
+        saved_ens = str(self.loaded_state.get('ensemble', None)).upper()
+        req_ens = str(self.ensemble).upper()
+        if reset_only:
+            header = (
+                f"Restart-with-reset requested (restart_reset=true) for "
+                f"ensemble={req_ens}; only positions, momenta, masses and "
+                f"box will be re-used from the restart file."
+            )
+        else:
+            header = (
+                f"Restart file was saved under ensemble={saved_ens}; loading "
+                f"into ensemble={req_ens}. Only positions, momenta, masses "
+                f"and box will be re-used from the restart file."
+            )
+        if self.dropped_fields:
+            header += (
+                f"\nThe following fields from the .npz will be "
+                f"re-initialised: {self.dropped_fields}."
+            )
+        self.message = header
+        super().__init__(self.message)
+    def __str__(self):
+        return self.message
+
+
+class RestartSchemaMismatchError(Exception):
+    """
+    Exception raised when the restart .npz is missing a field that the
+    target ensemble requires (e.g. a restart saved by an older so3lr that
+    did not yet write `thermostat_tau` is now being loaded by a newer
+    build that expects it). Carries the missing field name, the target
+    ensemble, and the list of fields actually present in the .npz so the
+    user can see at a glance what is wrong with the file.
+    """
+    def __init__(self, missing_field, ensemble, available_fields, path=None):
+        self.missing_field = missing_field
+        self.ensemble = ensemble
+        self.available_fields = sorted(available_fields)
+        self.path = path
+        loc = f" in {path}" if path else ""
+        self.message = (
+            f"Restart file{loc} is missing required field "
+            f"'{missing_field}' for ensemble={str(ensemble).upper()}. "
+            f"Found fields: {self.available_fields}. "
+            f"This usually means the restart was written by an older "
+            f"so3lr build whose .npz schema differs from the current one."
+        )
         super().__init__(self.message)
     def __str__(self):
         return self.message
@@ -2358,6 +2419,11 @@ def perform_md(
                 logger.info('Converting restart positions from cartesian to fractional coordinates.')
                 position = transform(1.0 / jnp.array(box), position)
             restart = False
+        except RestartSchemaMismatchError as e:
+            # Surface the full schema-mismatch message (missing field, ensemble,
+            # available fields) instead of letting it get wrapped into an
+            # opaque RuntimeError below.
+            raise RuntimeError(str(e)) from e
         except Exception as e:
             raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
 
@@ -2680,11 +2746,15 @@ def perform_md(
     pressure_unit = units.metal_unit_system()['pressure']
     is_flex_npt = isinstance(state, jax_md.simulate.NPTNoseHooverFlexState)
     if ensemble == 'npt':
+        # Header tabs MUST mirror the data-line tab count (see ~line 2712 and
+        # ~line 2947). Data uses a single \t between every column; previously
+        # the header padded with \t\t\t around the Box column, which made the
+        # column titles slide three tabs right of their values.
         if is_flex_npt:
             p_header, _ = format_pressure_tensor(state, npt_coupling, pressure_unit)
-            logger.info(f'Step\tE [eV]\tKE\tPE\tH\tTemp [K]\t{p_header}\t\t\tBox [A]\t\t\ttime/step [s]')
+            logger.info(f'Step\tE [eV]\tKE\tPE\tH\tTemp [K]\t{p_header}\tBox [A]\ttime/step [s]')
         else:
-            logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\t\t\tBox [A]\t\t\ttime/step [s]')
+            logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\tBox [A]\ttime/step [s]')
     else:
         logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\ttime/step [s]')
 
@@ -3525,26 +3595,92 @@ def load_state(
     """
 
     loaded_state = np.load(path_to_load, allow_pickle=True)
-    if restart_reset:
-        raise RestartInNewEnsembleError(loaded_state, ensemble)
-    if ensemble.lower() != loaded_state.get('ensemble',None):
-        raise RestartInNewEnsembleError(loaded_state, ensemble)
 
-    if ensemble.lower() == 'nve':
-        state = jax_md.simulate.NVEState(
-            position=jnp.array(loaded_state['position']),
-            momentum=jnp.array(loaded_state['momentum']),
-            force=jnp.array(loaded_state['force']),
-            mass=jnp.array(loaded_state['mass'])
+    # Helper: enumerate which fields in the .npz are about to be dropped if
+    # we cannot/won't reconstruct the integrator state (ensemble mismatch or
+    # restart_reset). We treat everything *except* the core position/momentum/
+    # mass/force/box/step/ensemble/fractional_coordinates as droppable.
+    _avail_fields = (
+        sorted(loaded_state.files)
+        if hasattr(loaded_state, 'files')
+        else sorted(loaded_state.keys())
+    )
+    _core_fields = {
+        'position', 'momentum', 'mass', 'force', 'box', 'step',
+        'ensemble', 'fractional_coordinates',
+    }
+    _dropped = [f for f in _avail_fields if f not in _core_fields]
+
+    if restart_reset:
+        raise RestartInNewEnsembleError(
+            loaded_state, ensemble,
+            dropped_fields=_dropped, reset_only=True,
+        )
+    if ensemble.lower() != loaded_state.get('ensemble', None):
+        # Log the mismatch BEFORE raising so the caller's warning surfaces the
+        # full picture (saved ensemble, requested ensemble, dropped fields).
+        logger.info(
+            f"Restart was saved under ensemble="
+            f"{str(loaded_state.get('ensemble', None)).upper()}; loading into "
+            f"ensemble={str(ensemble).upper()}; the following fields will be "
+            f"re-initialised: {_dropped}."
+        )
+        raise RestartInNewEnsembleError(
+            loaded_state, ensemble, dropped_fields=_dropped,
         )
 
+    if ensemble.lower() == 'nve':
+        try:
+            state = jax_md.simulate.NVEState(
+                position=jnp.array(loaded_state['position']),
+                momentum=jnp.array(loaded_state['momentum']),
+                force=jnp.array(loaded_state['force']),
+                mass=jnp.array(loaded_state['mass'])
+            )
+        except KeyError as _ke:
+            raise RestartSchemaMismatchError(
+                missing_field=str(_ke).strip("'\""),
+                ensemble=ensemble,
+                available_fields=_avail_fields,
+                path=path_to_load,
+            ) from _ke
+
     elif ensemble.lower() == 'nvt':
-        state = jax_md.simulate.NVTNoseHooverState(
-            position=jnp.array(loaded_state['position']),
-            momentum=jnp.array(loaded_state['momentum']),
-            force=jnp.array(loaded_state['force']),
-            mass=jnp.array(loaded_state['mass']),
-            chain=jax_md.simulate.NoseHooverChain(
+        try:
+            state = jax_md.simulate.NVTNoseHooverState(
+                position=jnp.array(loaded_state['position']),
+                momentum=jnp.array(loaded_state['momentum']),
+                force=jnp.array(loaded_state['force']),
+                mass=jnp.array(loaded_state['mass']),
+                chain=jax_md.simulate.NoseHooverChain(
+                    position=loaded_state['thermostat_position'],
+                    momentum=loaded_state['thermostat_momentum'],
+                    mass=loaded_state['thermostat_mass'],
+                    tau=loaded_state['thermostat_tau'],
+                    kinetic_energy=loaded_state['thermostat_kinetic_energy'],
+                    degrees_of_freedom=loaded_state['thermostat_degrees_of_freedom']
+                )
+            )
+        except KeyError as _ke:
+            raise RestartSchemaMismatchError(
+                missing_field=str(_ke).strip("'\""),
+                ensemble=ensemble,
+                available_fields=_avail_fields,
+                path=path_to_load,
+            ) from _ke
+
+    elif ensemble.lower() == 'npt':
+        is_flex = bool(loaded_state.get('npt_flex', False))
+        try:
+            nhc_barostat = jax_md.simulate.NoseHooverChain(
+                position=loaded_state['barostat_position'],
+                momentum=loaded_state['barostat_momentum'],
+                mass=loaded_state['barostat_mass'],
+                tau=loaded_state['barostat_tau'],
+                kinetic_energy=loaded_state['barostat_kinetic_energy'],
+                degrees_of_freedom=loaded_state['barostat_degrees_of_freedom']
+            )
+            nhc_thermostat = jax_md.simulate.NoseHooverChain(
                 position=loaded_state['thermostat_position'],
                 momentum=loaded_state['thermostat_momentum'],
                 mass=loaded_state['thermostat_mass'],
@@ -3552,64 +3688,67 @@ def load_state(
                 kinetic_energy=loaded_state['thermostat_kinetic_energy'],
                 degrees_of_freedom=loaded_state['thermostat_degrees_of_freedom']
             )
-        )
-
-    elif ensemble.lower() == 'npt':
-        is_flex = bool(loaded_state.get('npt_flex', False))
-        nhc_barostat = jax_md.simulate.NoseHooverChain(
-            position=loaded_state['barostat_position'],
-            momentum=loaded_state['barostat_momentum'],
-            mass=loaded_state['barostat_mass'],
-            tau=loaded_state['barostat_tau'],
-            kinetic_energy=loaded_state['barostat_kinetic_energy'],
-            degrees_of_freedom=loaded_state['barostat_degrees_of_freedom']
-        )
-        nhc_thermostat = jax_md.simulate.NoseHooverChain(
-            position=loaded_state['thermostat_position'],
-            momentum=loaded_state['thermostat_momentum'],
-            mass=loaded_state['thermostat_mass'],
-            tau=loaded_state['thermostat_tau'],
-            kinetic_energy=loaded_state['thermostat_kinetic_energy'],
-            degrees_of_freedom=loaded_state['thermostat_degrees_of_freedom']
-        )
-        if is_flex:
-            mass = loaded_state['mass']
-            if mass.ndim == 1:
-                mass = mass.reshape(-1, 1)
-            state = jax_md.simulate.NPTNoseHooverFlexState(
-                position=loaded_state['position'],
-                velocity=loaded_state['momentum'] / mass,
-                force=loaded_state['force'],
-                mass=mass,
-                reference_box=loaded_state['reference_box'],
-                box_position=loaded_state['box_position'],
-                box_velocity=loaded_state['box_momentum'] / loaded_state['box_mass'],
-                box_mass=loaded_state['box_mass'],
-                barostat=nhc_barostat,
-                thermostat=nhc_thermostat,
-                stress_tensor=loaded_state.get('stress_tensor', None),
-            )
-        else:
-            state = jax_md.simulate.NPTNoseHooverState(
-                position=loaded_state['position'],
-                momentum=loaded_state['momentum'],
-                force=loaded_state['force'],
-                mass=loaded_state['mass'],
-                reference_box=loaded_state['reference_box'],
-                box_position=loaded_state['box_position'],
-                box_momentum=loaded_state['box_momentum'],
-                box_mass=loaded_state['box_mass'],
-                barostat=nhc_barostat,
-                thermostat=nhc_thermostat,
-                stress=loaded_state.get('stress', np.float32(0.0)),
-            )
+        except KeyError as _ke:
+            raise RestartSchemaMismatchError(
+                missing_field=str(_ke).strip("'\""),
+                ensemble=ensemble,
+                available_fields=_avail_fields,
+                path=path_to_load,
+            ) from _ke
+        try:
+            if is_flex:
+                mass = loaded_state['mass']
+                if mass.ndim == 1:
+                    mass = mass.reshape(-1, 1)
+                state = jax_md.simulate.NPTNoseHooverFlexState(
+                    position=loaded_state['position'],
+                    velocity=loaded_state['momentum'] / mass,
+                    force=loaded_state['force'],
+                    mass=mass,
+                    reference_box=loaded_state['reference_box'],
+                    box_position=loaded_state['box_position'],
+                    box_velocity=loaded_state['box_momentum'] / loaded_state['box_mass'],
+                    box_mass=loaded_state['box_mass'],
+                    barostat=nhc_barostat,
+                    thermostat=nhc_thermostat,
+                    stress_tensor=loaded_state.get('stress_tensor', None),
+                )
+            else:
+                state = jax_md.simulate.NPTNoseHooverState(
+                    position=loaded_state['position'],
+                    momentum=loaded_state['momentum'],
+                    force=loaded_state['force'],
+                    mass=loaded_state['mass'],
+                    reference_box=loaded_state['reference_box'],
+                    box_position=loaded_state['box_position'],
+                    box_momentum=loaded_state['box_momentum'],
+                    box_mass=loaded_state['box_mass'],
+                    barostat=nhc_barostat,
+                    thermostat=nhc_thermostat,
+                    stress=loaded_state.get('stress', np.float32(0.0)),
+                )
+        except KeyError as _ke:
+            raise RestartSchemaMismatchError(
+                missing_field=str(_ke).strip("'\""),
+                ensemble=ensemble,
+                available_fields=_avail_fields,
+                path=path_to_load,
+            ) from _ke
     else:
         raise NotImplementedError('Only NVE, NVT and NPT ensembles are supported')
 
-    box = loaded_state['box']
+    try:
+        box = loaded_state['box']
+        cycle = loaded_state['step']
+    except KeyError as _ke:
+        raise RestartSchemaMismatchError(
+            missing_field=str(_ke).strip("'\""),
+            ensemble=ensemble,
+            available_fields=_avail_fields,
+            path=path_to_load,
+        ) from _ke
     if np.all(box == 0) or box is None:
         box = jnp.array([0.0], dtype=precision)
-    cycle = loaded_state['step']
 
     # Detect coordinate system mismatch and convert if needed.
     # Old restart files without the flag are assumed to use fractional

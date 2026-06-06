@@ -83,6 +83,9 @@ model:
   kspace_spacing: 1.0  # Mesh spacing (Angstrom) for PME/P3M grid, or wavelength for Ewald. Smaller = finer grid = more accurate.
 optimizer:
   name: muon  # Optimizer name. Any optimizer from optax (adam, adamw, sgd, etc.) or optax.contrib (muon) is supported.
+  # NOTE: optimizer_args below are MUON-specific (ns_steps, beta, nesterov, adaptive). If you change
+  # `name` to a different optimiser (adam, adamw, sgd, ...), you MUST clear these (set to null or
+  # replace with that optimiser's kwargs) -- otherwise optax raises an opaque TypeError at init.
   optimizer_args:  # Additional keyword arguments passed to the optimizer constructor. Set to null for default optimizer settings.
     ns_steps: 5  # Newton-Schulz iterations for orthogonalization
     beta: 0.95   # Momentum decay

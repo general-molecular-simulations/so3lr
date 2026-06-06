@@ -1114,8 +1114,13 @@ def tune(
     lr_cutoff = settings.get('lr_cutoff')
     total_charge = settings.get('total_charge')
     dispersion_damping = settings.get('dispersion_damping')
-    buffer_size_multiplier_lr = settings.get('buffer_size_multiplier_lr', 1.0)
-    buffer_size_multiplier_sr = settings.get('buffer_size_multiplier_sr', 1.0)
+    # Match DEFAULT_BUFFER_MULTIPLIER in so3lr_cli.py (1.25). The CLI wrapper
+    # always seeds these keys, but a Python-API caller invoking tune() with a
+    # bare settings dict previously got 1.0, diverging from the rest of the
+    # codebase. Hardcoded here (rather than imported from so3lr_cli) to avoid
+    # a circular import (so3lr_cli imports `tune` from this module).
+    buffer_size_multiplier_lr = settings.get('buffer_size_multiplier_lr', 1.25)
+    buffer_size_multiplier_sr = settings.get('buffer_size_multiplier_sr', 1.25)
     jit_compile = settings.get('jit_compile', True)
 
     # Ewald electrostatics settings

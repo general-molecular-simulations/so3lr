@@ -195,10 +195,28 @@ def save_to_file(
     
     # Convert the length to Python int to avoid JAX array issues with tqdm
     total = len(predicted_graphs)
-    
+
+    # Label keys that the dataloader fills with NaN when the source extxyz
+    # info{} did not actually carry that ground-truth value. The real model
+    # outputs live in the matching `_so3lr` keys, so writing NaN labels next
+    # to them produces confusing `energy=nan` / `dipole_vec="nan nan nan"`
+    # columns in the saved file. Strip a label key only if its stored value
+    # is fully non-finite (preserves real labels for evaluations on labelled
+    # data).
+    _label_keys_to_check = ('energy', 'dipole_vec')
+
+    def _is_all_nan(v):
+        try:
+            return bool(np.all(~np.isfinite(np.asarray(v, dtype=float))))
+        except (TypeError, ValueError):
+            return False
+
     # Use tqdm for progress reporting
     for predicted_graph in tqdm(predicted_graphs, desc="Saving predictions"):
         atoms = jraph_to_ase_atoms(predicted_graph)
+        for _k in _label_keys_to_check:
+            if _k in atoms.info and _is_all_nan(atoms.info[_k]):
+                del atoms.info[_k]
         write(save_to, images=atoms, append=True)
 
     logger.info(f'Successfully saved predictions for {total} structures')
@@ -278,7 +296,6 @@ def evaluate_so3lr_on(
     _label_targets = {
         'forces', 'energy', 'dipole_vec',
         'hirshfeld_ratios', 'a0_ratios', 'c6_ratios',
-        'stress',
     }
     _known_targets = _label_targets | OBSERVABLES
     import difflib as _difflib
@@ -363,6 +380,13 @@ def evaluate_so3lr_on(
     # to the model's output key so metric names (e.g. a0_ratios_rmse) match.
     legacy_model = bool(cfg['model'].get('legacy_so3lr_bool', False))
     ratio_key = 'hirshfeld_ratios' if legacy_model else 'a0_ratios'
+    _other_ratio = 'a0_ratios' if ratio_key == 'hirshfeld_ratios' else 'hirshfeld_ratios'
+    if _other_ratio in target_list:
+        logger.info(
+            f"Target '{_other_ratio}' renamed to '{ratio_key}' to match the "
+            f"{'legacy ' if legacy_model else ''}model's ratio head output key. "
+            f"Dataset labels under either key will still be matched."
+        )
     target_list = [ratio_key if t in ('hirshfeld_ratios', 'a0_ratios') else t for t in target_list]
 
     # Load the data
@@ -579,10 +603,43 @@ def evaluate_so3lr_on(
         metrics = jax.tree_util.tree_map(lambda x: float(x), metrics)
         metrics['datafile'] = str(datafile.as_uri())
 
-        # Display results
-        logger.info('Evaluation metrics (units are eV, Angstrom, and seconds):')
-        formatted_metrics = {k: f"{v:.3e}" if isinstance(v, float) else v for k, v in metrics.items()}
-        logger.info(pprint.pformat(formatted_metrics))
+        # Display results: a per-target table (MAE / RMSE / N + unit) is much
+        # easier to read than a flat pprint dict where *_mae / *_mse / *_rmse
+        # keys interleave with timing fields. The returned `metrics` dict is
+        # unchanged so downstream callers keep working.
+        _UNIT_MAP = {
+            'energy': 'eV',
+            'forces': 'eV/Ang',
+            'dipole_vec': 'e*Ang',
+            'stress': 'eV/Ang^3',
+            'hirshfeld_ratios': 'dimensionless',
+            'a0_ratios': 'dimensionless',
+            'c6_ratios': 'dimensionless',
+        }
+        # Targets that actually have ground-truth counts (skip observables
+        # which have no MAE/RMSE because no label is available).
+        _scored_targets = [t for t in target_list if t in tot_n and tot_n[t] > 0]
+        logger.info('Evaluation metrics:')
+        if _scored_targets:
+            _hdr = f"  {'target':<20}  {'MAE':>12}  {'RMSE':>12}  {'N':>10}  unit"
+            logger.info(_hdr)
+            logger.info('  ' + '-' * (len(_hdr) - 2))
+            for t in _scored_targets:
+                mae = metrics.get(f'{t}_mae', float('nan'))
+                rmse = metrics.get(f'{t}_rmse', float('nan'))
+                n = tot_n[t]
+                unit = _UNIT_MAP.get(t, '')
+                logger.info(
+                    f"  {t:<20}  {mae:>12.3e}  {rmse:>12.3e}  {n:>10d}  {unit}"
+                )
+        else:
+            logger.info('  (no labelled targets evaluated)')
+        logger.info(
+            f"  Timing: total={metrics['time_evaluation']:.3f}s, "
+            f"compile={metrics['time_compile']:.3f}s, "
+            f"per-batch={metrics['time_per_batch']:.3f}s, "
+            f"per-structure={metrics['time_per_structure']:.3f}s"
+        )
         logger.info('-' * 50)
 
         # Save predictions if requested
@@ -623,8 +680,6 @@ def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:
         return graph_mask
     elif x == 'forces':
         return node_mask
-    elif x == 'stress':
-        return graph_mask
     elif x == 'dipole_vec':
         return graph_mask
     elif x == 'hirshfeld_ratios':

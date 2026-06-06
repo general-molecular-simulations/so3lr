@@ -28,6 +28,10 @@
 # Either spelling works in this YAML: the loader translates CLI-style keys
 # (e.g. `temperature: 300`) to the canonical name before use. Unknown keys
 # trigger a warning with did-you-mean suggestions rather than silent fallback.
+#
+# Note: `so3lr eval` does not currently read a settings file — it is driven
+# entirely by CLI flags. A template for the eventual eval-settings schema
+# lives at so3lr/cli/eval_settings.yaml for reference.
 
 ## General Settings
 ensemble: "nvt"                            # Ensemble type: "nvt", "nvt-langevin", "npt", "nve" [Default: "nvt"]
@@ -109,7 +113,7 @@ nhc_thermo: 100.0                          # Thermostat damping timescale factor
 md_P: null                                 # Target pressure in bar. Setting this enables NPT. [Default: null]  (CLI: --pressure)
 nhc_baro: 1000.0                           # Barostat damping timescale factor (tau = md_dt * nhc_baro) [Default: 1000.0]
 nhc_sy_steps: 3                            # Number of Suzuki-Yoshida integration steps [Default: 3]
-npt_coupling: "isotropic"                  # NPT box coupling: "isotropic" (cubic scaling) or "anisotropic" / "triclinic" (cell-vector flexibility). Requires the npt-anisotropic jax-md fork. [Default: "isotropic"]
+npt_coupling: "isotropic"                  # NPT box coupling: "isotropic" (cubic scaling), "semi-isotropic" (independent in x/y vs z — bilayer-compatible), or "anisotropic" (full cell-vector flexibility). Requires the npt-anisotropic jax-md fork. [Default: "isotropic"]
 
 ## NVE Ensemble Settings
 init_T: 300.0                              # Initial temperature for velocity initialization (NVE only) [Default: 300.0]  (CLI: --temperature)
@@ -117,10 +121,3 @@ init_T: 300.0                              # Initial temperature for velocity in
 ## NVT-Langevin Settings
 langevin_removecmmotion: true              # Remove center-of-mass motion at each step [Default: true]  (CLI: --langevin-removecmmotion)
 langevin_thermo: 1.0                       # Langevin timescale parameter (gamma = 1.0 / (md_dt * langevin_thermo)) [Default: 1.0]  (CLI: --langevin-thermo)
-
-## Evaluation Settings (for so3lr eval)
-datafile: "path/to/dataset.extxyz"         # Path to dataset file for evaluation [Required]
-save_to: null                              # Output file for predictions (.extxyz). If null, not saved. [Default: null]
-jit_compile: true                          # Use JIT compilation for speed [Default: true]
-batch_size: 1                              # Number of molecules per batch [Default: 1]
-targets: "forces,dipole_vec,hirshfeld_ratios" # Comma-separated evaluation targets [Default: "forces,dipole_vec,hirshfeld_ratios"]

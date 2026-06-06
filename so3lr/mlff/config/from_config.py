@@ -265,7 +265,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     
     # Robust loss configuration
     use_robust_loss = config.training.get('use_robust_loss', False)
-    robust_loss_alpha = config.training.get('robust_loss_alpha', 1.99)
+    robust_loss_alpha = config.training.get('robust_loss_alpha', 1.0)
     use_adaptive_robust_loss = config.training.get('use_adaptive_robust_loss', False)
 
     # Validate: can't use both fixed and adaptive robust loss
@@ -997,7 +997,7 @@ def run_fine_tuning(
 
     # Robust loss configuration
     use_robust_loss = config.training.get('use_robust_loss', False)
-    robust_loss_alpha = config.training.get('robust_loss_alpha', 1.99)
+    robust_loss_alpha = config.training.get('robust_loss_alpha', 1.0)
     use_adaptive_robust_loss = config.training.get('use_adaptive_robust_loss', False)
 
     # Validate: can't use both fixed and adaptive robust loss
@@ -1188,6 +1188,16 @@ def data_loader_from_config(config):
         dataset_paths = [Path(d['path']).expanduser().resolve() for d in config.data.datasets]
         dataset_weights = [d.get('weight', 1.0) for d in config.data.datasets]
         tf_record_present = all(len([1 for x in os.scandir(p) if Path(x).suffix[:9] == '.tfrecord']) > 0 for p in dataset_paths)
+        # Multi-dataset training (config.data.datasets) is implemented only for the TFDS loader.
+        # If none/some of the paths contain .tfrecord shards the code below would fall through
+        # to the ASE/NPZ branch and crash with UnboundLocalError on data_filepath. Fail loudly.
+        if not tf_record_present:
+            raise ValueError(
+                "config.data.datasets (multi-dataset training) is only supported by the TFDS "
+                "dataloader, but no .tfrecord shards were found in one or more of: "
+                f"{[str(p) for p in dataset_paths]}. Either convert each dataset to TFDS shards "
+                "(see README), or use a single dataset via config.data.filepath."
+            )
     else:
         # Single dataset case (original functionality)
         data_filepath = data_path_from_config(config=config)
@@ -1204,6 +1214,20 @@ def data_loader_from_config(config):
             energy_unit=energy_unit
         )
     else:
+        # config.data.filter.min_distance / max_force are honoured only by the TFDS loader.
+        # If the user set them but we are about to instantiate an ASE/NPZ loader, warn loudly
+        # so the values are not silently ignored.
+        if hasattr(config.data, 'filter'):
+            _filt = config.data.filter
+            _min_d = _filt.min_distance if hasattr(_filt, 'min_distance') else None
+            _max_f = _filt.max_force if hasattr(_filt, 'max_force') else None
+            if _min_d is not None or _max_f is not None:
+                logger.warning(
+                    "config.data.filter.* is honoured only by the TFDS dataloader. "
+                    f"You set min_distance={_min_d}, max_force={_max_f}, but the ASE/NPZ "
+                    "loader will IGNORE these values -- no structures will be filtered out. "
+                    "Convert the dataset to TFDS shards if filtering is required."
+                )
         if data_filepath.is_file():
             if data_filepath.suffix == '.npz':
                 loader = data.NpzDataLoaderSparse(input_file=data_filepath)

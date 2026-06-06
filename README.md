@@ -227,7 +227,7 @@ The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fy
 > [!IMPORTANT]
 > SO3LR was not trained on energies, so only relative energies are meaningful. Labels are assumed to be in `eV` and `Ångström`. For gas-phase simulations, we suggest using `--lr-cutoff 100`.
 
-The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld ratios are optional. If they are not present in the data, the metrics will simply be `NaN`.
+The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and the per-atom ratio head. The ratio head is named `a0_ratios` for the new `so3lr-s/m/l` models (polarizability volume ratios) and `hirshfeld_ratios` for the legacy `so3lr` model -- you can pass either name to `--targets` and the CLI will normalize it to whatever the chosen model actually outputs (and accept dataset labels stored under either key). Energy and forces are assumed to be present in the datafile, while dipole vectors and `a0_ratios`/`hirshfeld_ratios` labels are optional. If they are not present in the data, the metrics will simply be `NaN`.
 
 **Observable targets** — intermediate model quantities (no ground truth required) can be added to `--targets`. They are saved to the output extxyz file alongside the standard predictions:
 

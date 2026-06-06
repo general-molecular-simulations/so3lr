@@ -248,6 +248,19 @@ Evaluate SO3LR on a dataset with all options:
       --targets forces,dipole_vec,hirshfeld_ratios --precision float32
       --model /path/to/model --log-file eval.log
 
+Finetune SO3LR on a new dataset:
+  so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr
+      --num-train 50 --num-valid 10 --strategy full
+      --config /path/to/finetune.yaml --model /path/to/model
+
+Train a SO3krates/SO3LR model from a config file:
+  so3lr train --config config.yaml
+
+Auto-tune k-space electrostatics parameters (Ewald/PME/P3M):
+  so3lr tune-ewald --input geometry.xyz --kspace-electrostatics ewald
+      --kspace-smearing 4.0 --kspace-spacing 2.0 --kspace-interp-nodes 4
+      --lr-cutoff 12.0 --model /path/to/model
+
 """
 
 # Run with settings file:
@@ -517,6 +530,39 @@ def infer_output_format(output_file):
 # Decorator factories for common CLI options
 # ============================================================================
 
+def _validate_model_choice(ctx, param, value):
+    """Click callback: resolve ``--model`` at parse time so typos fail fast.
+
+    A typo like ``--model so3lr-x`` used to fail 20-40 s into JAX / orbax
+    initialisation. By calling :func:`so3lr.model_registry.resolve_model` here we
+    surface unknown-name / missing-path errors before any heavy import, and add
+    a ``difflib`` did-you-mean over the bundled-model list.
+
+    Returns ``value`` unchanged on success (including ``None``, which downstream
+    code interprets as the default model). Re-raises any resolution failure as
+    :class:`click.BadParameter` so Click prints a clean, traceback-free error
+    alongside the offending option.
+    """
+    if value is None:
+        return value
+    # model_registry is intentionally JAX-free (only imports pathlib), so this
+    # import is safe to do during Click parsing without forcing a slow init.
+    from ..model_registry import available_models, resolve_model
+    try:
+        resolve_model(value)
+    except FileNotFoundError:
+        names = available_models()
+        suggestions = difflib.get_close_matches(str(value), names, n=3, cutoff=0.5)
+        msg = (
+            f"Model '{value}' is not a bundled name and no such directory exists. "
+            f"Bundled names: {', '.join(names)}."
+        )
+        if suggestions:
+            msg += f" Did you mean: {', '.join(suggestions)}?"
+        raise click.BadParameter(msg, ctx=ctx, param=param)
+    return value
+
+
 def common_io_options(f: Callable) -> Callable:
     """Common input/output options for all MD commands."""
     f = click.option('--input', '--input_file', 'input_file', type=click.Path(exists=True, dir_okay=False),
@@ -534,13 +580,18 @@ def common_io_options(f: Callable) -> Callable:
 def common_model_options(f: Callable) -> Callable:
     """Common model options for all commands."""
     f = click.option('--model', '--model_path', '--model-path', 'model_path', type=str, default=None,
+                     callback=_validate_model_choice,
                      help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
                           'or a path to a custom MLFF model directory. '
                           'If not provided, so3lr-m is used. [default: so3lr-m]')(f)
     f = click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
                      help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')(f)
     f = click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
-                     help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')(f)
+                     help=f'Long-range cutoff distance in Å. The default ({DEFAULT_LR_CUTOFF}) '
+                          f'is intended for condensed-phase systems with periodic boundaries; '
+                          f'for gas-phase / non-periodic systems use --lr-cutoff 100 so the '
+                          f'long-range electrostatics and dispersion are not artificially truncated. '
+                          f'[default: {DEFAULT_LR_CUTOFF}]')(f)
     f = click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
                      help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}]')(f)
     f = click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
@@ -1159,7 +1210,7 @@ def run_md_simulation(
 @click.option('--min-n-min', 'min_n_min', default=DEFAULT_MIN_N_MIN, type=int,
               help='Minimum number of steps moving in the correct direction before dt is updated. [default: 2]')
 @click.option('--force-conv', default=None, type=float,
-              help='Force convergence criterion in eV/Å, overrides --cycles and --steps. [default: None]')
+              help='Force convergence criterion in eV/Å, overrides --min-cycles and --min-steps. [default: None]')
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def fire_optimization(
     input_file: Optional[str],
@@ -1380,6 +1431,7 @@ def nve_md(**kwargs) -> None:
               help='File to write logs to [default: None].')
 # Model settings group
 @click.option('--model', '--model_path', 'model_path', type=str, default=None,
+              callback=_validate_model_choice,
               help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
                    'or a path to a custom MLFF model directory. '
                    'If not provided, so3lr-m is used. [default: so3lr-m]')
@@ -1399,7 +1451,8 @@ def nve_md(**kwargs) -> None:
                    'info{} is used (defaulting to 1 when absent, i.e. singlet).')
 # Evaluation settings
 @click.option('--batch-size', default=1, type=int,
-              help='Number of molecules per batch. [default: 1]')
+              help='Number of molecules per batch. '
+                   '[default: 1; consider 16-64 on GPU for throughput on large datasets]')
 @click.option('--targets', default='forces,dipole_vec,hirshfeld_ratios', type=str,
               help='Comma-separated list of targets to evaluate. '
                    'Standard targets: forces, energy, dipole_vec, hirshfeld_ratios '
@@ -1536,8 +1589,9 @@ def eval_model(
 @click.option('--strategy', type=click.Choice(['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer','obs_0','obs_023','obs_23','obs_3','ll_fmlp','ll_obs_023','freeze_long_range','forces_only']),
               default='full', help='Strategy for finetuning. [default: full]')
 @click.option('--config', '--config_path', 'config_path', type=click.Path(exists=False), default=None,
-              help='Path to the finetuning config. If not provided is defaults to the one pre-defined in the SO3LR repo. [default: None]')
+              help='Path to the finetuning config. If not provided, defaults to so3lr/config/finetune.yaml shipped with the package. [default: None]')
 @click.option('--model', '--model_path', 'model_path', type=click.Path(exists=False), default=None,
+              callback=_validate_model_choice,
               help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
 # Training settings
 @click.option('--num-train', '--num_train', default=None, type=int, help='Number of data points used for gradient calculations.')
@@ -1727,8 +1781,9 @@ def tune_ewald(
     Example:
         so3lr tune-ewald --input geometry.xyz --kspace-electrostatics pme
     """
-     # Print help if needed
-    if help:
+     # Print help if needed (and handle the no-args invocation that
+     # previously fell through and crashed when input_file was None).
+    if (not input_file and not settings) or help:
         click.echo(SO3LR_ASCII)
         click.echo(tune_ewald.get_help(click.get_current_context()))
         return
@@ -1772,7 +1827,10 @@ def tune_ewald(
     _cli_key_for = {'buffer_size_multiplier_sr': 'buffer_sr', 'buffer_size_multiplier_lr': 'buffer_lr'}
     for internal_key, val in _cli_params.items():
         cli_key = _cli_key_for.get(internal_key, internal_key)
-        if ctx._parameter_source[cli_key] == click.core.ParameterSource.COMMANDLINE:
+        # Use the public Click API rather than the private `_parameter_source`
+        # mapping; both behave identically on Click 8.x but the public method
+        # is the documented forward-compatible accessor.
+        if ctx.get_parameter_source(cli_key) == click.core.ParameterSource.COMMANDLINE:
             settings_dict[internal_key] = val
         else:
             settings_dict.setdefault(internal_key, val)
