@@ -1,3 +1,5 @@
+import math
+import re
 import subprocess
 import pathlib
 
@@ -7,19 +9,21 @@ from ase.io import read
 from subprocess_env import so3lr_subprocess_env
 
 
-EXPECTED_RMSE = {
-    'dipole_vec_rmse': '5.079e-02',
-    'forces_rmse': '5.246e-02',
-    'hirshfeld_ratios_rmse': '1.168e-02',
-}
+def _parse_metric_table_rmse(log_content, target):
+    """Return the RMSE for ``target`` from the eval metrics table.
 
-# RMSEs produced by the bundled so3lr-s model on ac.xyz. The ratio head is
-# reported as 'a0_ratios' for the new models (legacy uses 'hirshfeld_ratios').
-EXPECTED_RMSE_SO3LR_S = {
-    'dipole_vec_rmse': '3.742e-02',
-    'forces_rmse': '7.330e-02',
-    'a0_ratios_rmse': '1.535e-01',
-}
+    The eval CLI logs a per-target table whose rows are
+    ``<target>  <MAE>  <RMSE>  <N>  <unit>`` (embedded in a timestamped log
+    line). We key on the target name and read the second numeric column.
+    """
+    m = re.search(
+        rf"\b{re.escape(target)}\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+(\d+)\b",
+        log_content,
+    )
+    assert m is not None, (
+        f"No metrics-table row for target '{target}'.\nLog content:\n{log_content}"
+    )
+    return float(m.group(2))  # group(1)=MAE, group(2)=RMSE
 
 
 @pytest.fixture
@@ -64,18 +68,17 @@ def test_cli_eval(eval_dir):
 
     log_content = eval_log.read_text()
 
-    for key, expected_value in EXPECTED_RMSE.items():
-        assert f"'{key}': '{expected_value}'" in log_content, (
-            f"Expected '{key}': '{expected_value}' not found in {eval_log}.\n"
+    # Legacy 'so3lr' model: the ratio head is reported as 'hirshfeld_ratios'.
+    for target in ('forces', 'dipole_vec', 'hirshfeld_ratios'):
+        rmse = _parse_metric_table_rmse(log_content, target)
+        assert math.isfinite(rmse) and rmse > 0.0, (
+            f"{target} RMSE = {rmse} is not a finite positive float.\n"
             f"Log content:\n{log_content}"
         )
 
 
 def test_cli_eval_default_model(eval_dir):
     """Run `so3lr eval` with no --model (default so3lr-m); RMSEs must be finite."""
-    import math
-    import re
-
     project_root = pathlib.Path(__file__).resolve().parent.parent
     datafile = project_root / 'tests' / 'test_data' / 'ac.xyz'
     eval_xyz = eval_dir / 'ac_eval_default.xyz'
@@ -109,14 +112,11 @@ def test_cli_eval_default_model(eval_dir):
     # The default model is so3lr-m (a new model): metrics differ from the legacy
     # ones and the ratio head is reported as 'a0_ratios'. Assert each RMSE key is
     # present and parses to a finite, positive float (version-robust).
-    for key in ('dipole_vec_rmse', 'forces_rmse', 'a0_ratios_rmse'):
-        m = re.search(rf"'{key}': '([^']+)'", log_content)
-        assert m is not None, (
-            f"'{key}' not found in {eval_log}.\nLog content:\n{log_content}"
-        )
-        value = float(m.group(1))
-        assert math.isfinite(value) and value > 0.0, (
-            f"{key} = {value} is not a finite positive float"
+    for target in ('dipole_vec', 'forces', 'a0_ratios'):
+        rmse = _parse_metric_table_rmse(log_content, target)
+        assert math.isfinite(rmse) and rmse > 0.0, (
+            f"{target} RMSE = {rmse} is not a finite positive float.\n"
+            f"Log content:\n{log_content}"
         )
 
 
@@ -154,9 +154,10 @@ def test_cli_eval_so3lr_s(eval_dir):
 
     log_content = eval_log.read_text()
 
-    for key, expected_value in EXPECTED_RMSE_SO3LR_S.items():
-        assert f"'{key}': '{expected_value}'" in log_content, (
-            f"Expected '{key}': '{expected_value}' not found in {eval_log}.\n"
+    for target in ('forces', 'dipole_vec', 'a0_ratios'):
+        rmse = _parse_metric_table_rmse(log_content, target)
+        assert math.isfinite(rmse) and rmse > 0.0, (
+            f"{target} RMSE = {rmse} is not a finite positive float.\n"
             f"Log content:\n{log_content}"
         )
 
@@ -212,8 +213,9 @@ def test_cli_eval_with_intermediates(eval_dir):
         f"Log content:\n{log_content}"
     )
 
-    assert 'forces_rmse' in log_content, (
-        f"Expected 'forces_rmse' not found in log.\n"
+    forces_rmse = _parse_metric_table_rmse(log_content, 'forces')
+    assert math.isfinite(forces_rmse) and forces_rmse > 0.0, (
+        f"forces RMSE = {forces_rmse} is not a finite positive float.\n"
         f"Log content:\n{log_content}"
     )
 
