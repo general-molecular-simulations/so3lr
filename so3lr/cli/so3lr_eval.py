@@ -235,6 +235,7 @@ def evaluate_so3lr_on(
         log_file: Optional[str] = None,
         total_charge: Optional[int] = None,
         num_unpaired_electrons: Optional[int] = None,
+        overwrite: bool = False,
 ) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset and calculate error metrics.
@@ -267,6 +268,10 @@ def evaluate_so3lr_on(
         hirshfeld_ratios).
     log_file : str or None
         Path to log file. If None, logging only goes to console.
+    overwrite : bool
+        If True and `save_to` already exists, truncate and overwrite it.
+        If False (default) a pre-existing `save_to` raises RuntimeError.
+        Matches the --overwrite policy used by perform_md / perform_min.
 
     Returns:
     --------
@@ -319,6 +324,11 @@ def evaluate_so3lr_on(
         logger.info(f"Observable targets (no ground truth expected): {', '.join(observable_targets)}")
 
     # Embeddings ('x') are large and saved to a separate compressed NPZ file.
+    # Destination: when --save-to is provided the NPZ lands next to it; when
+    # --save-to is None it lands next to --datafile, which may be a read-only
+    # location (e.g. a shared dataset directory) and fail at write time. The
+    # final path is logged via `Embeddings saved to: ...` when the write
+    # succeeds; pass --save-to under a writable directory to control it.
     save_x_bool = 'x' in target_list
     if save_x_bool:
         base_path = save_to if save_to is not None else datafile
@@ -330,13 +340,17 @@ def evaluate_so3lr_on(
     if not datafile.exists():
         raise FileNotFoundError(f"Data file not found: {datafile}")
 
-    # Validate and process output file
+    # Validate and process output file. Mirrors the --overwrite policy used
+    # by perform_md / perform_min so the CLI and direct-Python entry points
+    # behave the same way: refuse to clobber by default, opt in explicitly.
     save_predictions_bool = save_to is not None
     if save_predictions_bool:
         save_to = Path(save_to).resolve().expanduser()
-        if save_to.exists():
+        if save_to.exists() and not overwrite:
             raise RuntimeError(
-                f'Output file already exists: {save_to}')
+                f"Output file already exists: {save_to}. Refusing to overwrite. "
+                f"Pass --overwrite to overwrite, or choose a different --save-to."
+            )
 
         if save_to.suffix not in ('.xyz', '.extxyz'):
             raise ValueError(
@@ -349,7 +363,13 @@ def evaluate_so3lr_on(
     # None falls back to the default model.
     from so3lr.model_registry import resolve_model, available_models
     workdir_path, _, _ = resolve_model(model_path)
-    if model_path is None or model_path in available_models():
+    # Decide bundled vs. custom by comparing the *resolved* directory against
+    # the registry's bundled paths, not by short-name membership of the raw
+    # input. This way a user who passes an explicit filesystem path that
+    # happens to point at a bundled checkpoint directory is correctly logged
+    # as 'bundled' (the old name-only check mislabelled this as custom).
+    _bundled_paths = {resolve_model(n)[0] for n in available_models()}
+    if workdir_path in _bundled_paths:
         logger.info(f"Using bundled SO3LR model: {workdir_path.name}")
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")

@@ -601,7 +601,7 @@ def common_model_options(f: Callable) -> Callable:
     f = click.option('--total-charge', default=DEFAULT_TOTAL_CHARGE, type=int,
                      help=f'Total charge of the system. [default: {DEFAULT_TOTAL_CHARGE}]')(f)
     f = click.option('--spin', 'num_unpaired_electrons', default=DEFAULT_SPIN, type=int,
-                     help=f'Spin: number of unpaired electrons (multiplicity - 1). [default: {DEFAULT_SPIN}]')(f)
+                     help=f'Spin: number of unpaired electrons (multiplicity - 1; equivalently, multiplicity = spin + 1). [default: {DEFAULT_SPIN}]')(f)
     return f
 
 
@@ -1052,10 +1052,21 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     # YAML/CLI convention and the file is copy-pasteable into a settings YAML.
     logger.info("Full merged settings (md_dt in fs, matches YAML/CLI input):")
     for _k in sorted(s.keys()):
+        # Skip derived keys that are recomputed at load time; printing them
+        # would mislead a user copying the dump back into a YAML.
+        if _k == 'output_format':
+            continue
+        _v = s[_k]
         if _k == 'md_dt':
-            logger.info(f"    {_k}: {s[_k] * 1000}")
-        else:
-            logger.info(f"    {_k}: {s[_k]}")
+            _v = _v * 1000  # ps -> fs for display, matches YAML/CLI convention
+        elif _k == 'model_path' and _v is None:
+            # CLI default is None; the real model resolved is _model (see above).
+            _v = _model
+        elif _k == 'observables' and isinstance(_v, tuple):
+            # CLI's --observable is multiple=True (tuple); coerce so the dump
+            # is a YAML list, not a Python tuple repr.
+            _v = list(_v)
+        logger.info(f"    {_k}: {_v}")
     logger.info("=" * 60)
 
 # ============================================================================
@@ -1113,7 +1124,11 @@ def run_md_simulation(
         click.echo(ctx.get_help())
         return
 
-    # Default output filename uses ensemble-specific suffix
+    # Default output filename uses ensemble-specific suffix.
+    # Note: NVT-Langevin uses the underscore form 'nvt_langevin' in filenames
+    # (and YAML `ensemble:` values) but the hyphen form 'nvt-langevin' as the
+    # CLI subcommand name (`so3lr nvt-langevin ...`); the mapping below keeps
+    # the two conventions in sync.
     _suffix = {'nvt': 'nvt', 'nvt-langevin': 'nvt_langevin', 'npt': 'npt', 'nve': 'nve'}
     if output_file is None:
         output_file = f"{Path(input_file).stem}_{_suffix[ensemble]}.xyz"
@@ -1414,6 +1429,10 @@ def nve_md(**kwargs) -> None:
     """
     Run NVE (constant volume and energy) MD simulation with no thermostat.
 
+    Note: --temperature sets the initial-velocity-sampling temperature in
+    Kelvin only; NVE has no thermostat, so the kinetic temperature drifts
+    freely during the trajectory. [default: 300.0]
+
     Example:
         so3lr nve --input geometry.xyz --temperature 300
     """
@@ -1423,12 +1442,17 @@ def nve_md(**kwargs) -> None:
 # Define the 'eval' subcommand
 @cli.command(name='eval', help="Evaluate SO3LR model on a dataset with `so3lr eval --datafile dataset.extxyz`.")
 # Input/Output group
-@click.option('--datafile', type=click.Path(exists=True, dir_okay=False), required=False,
-              help='Path to dataset file (extxyz format) containing structures to evaluate.')
+@click.option('--datafile', '--data-file', '--datafile_path', 'datafile',
+              type=click.Path(exists=True, dir_okay=False), required=False,
+              help='Path to dataset file containing structures to evaluate '
+                   '(extxyz or any ASE-readable format, e.g. xyz, pdb, cif).')
 @click.option('--save-to', type=click.Path(), default=None,
               help='Output file to save predictions (.extxyz format). If not provided, predictions are not saved.')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
+@click.option('--overwrite/--no-overwrite', 'overwrite', default=False,
+              help='If the --save-to output already exists, overwrite it. '
+                   'Default is to refuse (rename your previous run, or pass --overwrite).')
 # Model settings group
 @click.option('--model', '--model_path', 'model_path', type=str, default=None,
               callback=_validate_model_choice,
@@ -1484,6 +1508,8 @@ def eval_model(
     batch_size: int,
     targets: str,
     jit_compile: bool,
+    # Output policy
+    overwrite: bool,
     # Help option
     help: bool
 ) -> None:
@@ -1506,8 +1532,12 @@ def eval_model(
     # Set default output file name if needed
     output_file = save_to if save_to else f"{Path(datafile).stem}_eval.extxyz"
 
-    # Generate default log file name based on output file if not explicitly provided
-    if log_file is None:
+    # Generate default log file name based on output file if not explicitly provided.
+    # Only auto-derive when predictions are actually being saved: without --save-to
+    # we have no real output basename to anchor the log to, and creating a
+    # `<datafile>_eval.log` next to an extxyz that is never written is misleading.
+    # The documented default for --log-file is None (console-only) — honor that.
+    if log_file is None and save_to is not None:
         # Use with_suffix so the log file lands next to --output, not in CWD.
         log_file = str(Path(output_file).with_suffix('.log'))
 
@@ -1525,9 +1555,13 @@ def eval_model(
     logger.info(f"Output file:               {output_file if save_to else 'Not saving'}")
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Batch size:                {batch_size}")
-    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
-    if model_path is not None:
-        logger.info(f"Model path:                {model_path}")
+    # Mirror the MD-side banner: show the resolved short name (so the user knows
+    # which bundled checkpoint actually loaded — so3lr-s/m/l/so3lr — instead of
+    # the generic 'SO3LR' label) and tag it as bundled vs. a custom-path model.
+    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    _model = model_path or DEFAULT_MODEL
+    _kind = 'bundled' if _model in available_models() else 'custom path'
+    logger.info(f"Force field:               {_model} ({_kind})")
     logger.info(f"Precision:                 {precision}")
     logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
     logger.info(f"Dispersion damping:        {dispersion_damping} Å")
@@ -1536,6 +1570,7 @@ def eval_model(
     logger.info(f"JIT compilation:           {'Enabled' if jit_compile else 'Disabled'}")
     if save_to:
         logger.info(f"Saving to:                 {save_to}")
+        logger.info(f"Overwrite if exists:       {'Yes' if overwrite else 'No (default)'}")
     logger.info(f"Targets:                   {targets}")
     logger.info("=" * 60)
 
@@ -1547,11 +1582,17 @@ def eval_model(
         logger.error(f"Error: Dataset file not found: {datafile}")
         sys.exit(1)
 
-    # Validate output path
+    # Validate output path. Honors --overwrite so eval, opt, MD and finetune
+    # all use the same opt-in policy (refuse by default; pass --overwrite to
+    # truncate). The downstream evaluate_so3lr_on() repeats this check for
+    # callers that bypass the CLI.
     if save_to:
         save_path = Path(save_to)
-        if save_path.exists():
-            logger.error(f"Error: Output file already exists: {save_to}")
+        if save_path.exists() and not overwrite:
+            logger.error(
+                f"Output file already exists: {save_to}. Refusing to overwrite. "
+                f"Pass --overwrite to overwrite, or choose a different --save-to."
+            )
             sys.exit(1)
         # Create parent directory if it doesn't exist
         save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1570,6 +1611,7 @@ def eval_model(
         log_file=log_file,
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
+        overwrite=overwrite,
     )
     logger.info("=" * 60)
     logger.info("Evaluation completed successfully!")
@@ -1581,15 +1623,18 @@ def eval_model(
 # Define the 'finetune' subcommand
 @cli.command(name='finetune', help="Finetune SO3LR model on a dataset with `so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10`.")
 # Input/Output group
-@click.option('--workdir', type=click.Path(), help='Working directory for fine-tuned model checkpoints and logs.')
-@click.option('--datafile', type=click.Path(), help='Path to dataset file (extxyz or tfds format) containing data used for finetuning.')
+@click.option('--workdir', '--work-dir', '--workdir_path', 'workdir',
+              type=click.Path(), help='Working directory for fine-tuned model checkpoints and logs.')
+@click.option('--datafile', '--data-file', '--datafile_path', 'datafile',
+              type=click.Path(), help='Path to dataset file (extxyz or tfds format) containing data used for finetuning.')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Finetuning settings.
 @click.option('--strategy', type=click.Choice(['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer','obs_0','obs_023','obs_23','obs_3','ll_fmlp','ll_obs_023','freeze_long_range','forces_only']),
               default='full', help='Strategy for finetuning. [default: full]')
 @click.option('--config', '--config_path', 'config_path', type=click.Path(exists=False), default=None,
-              help='Path to the finetuning config. If not provided, defaults to so3lr/config/finetune.yaml shipped with the package. [default: None]')
+              help='Path to the finetuning config (YAML only; unlike `so3lr train --config`, JSON is not supported here). '
+                   'If not provided, defaults to so3lr/config/finetune.yaml shipped with the package. [default: None]')
 @click.option('--model', '--model_path', 'model_path', type=click.Path(exists=False), default=None,
               callback=_validate_model_choice,
               help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')

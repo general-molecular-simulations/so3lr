@@ -1470,7 +1470,14 @@ def dipole_vec_unit_from_config(config):
     # We need to define elementary charge, as it is not defined in ase.units.
     e = 1.
 
-    return eval(dipole_vec_unit)
+    try:
+        return eval(dipole_vec_unit)
+    except Exception as exc:
+        raise ValueError(
+            f"Could not parse unit string {dipole_vec_unit!r} for data.dipole_vec_unit. "
+            f"Use ASE.units expressions like 'e * Angstrom' or 'Debye' "
+            f"(note the spaces around operators)."
+        ) from exc
 
 
 def charge_unit_from_config(config):
@@ -1479,15 +1486,38 @@ def charge_unit_from_config(config):
     # We need to define elementary charge, as it is not defined in ase.units.
     e = 1.
 
-    return eval(electric_charge_unit)
+    try:
+        return eval(electric_charge_unit)
+    except Exception as exc:
+        raise ValueError(
+            f"Could not parse unit string {electric_charge_unit!r} for data.electric_charge_unit. "
+            f"Use ASE.units expressions like 'e' or '1.0' "
+            f"(note the spaces around operators)."
+        ) from exc
 
 def energy_unit_from_config(config):
-    energy_unit = eval(config.data.energy_unit)
+    energy_unit_str = config.data.energy_unit
+    try:
+        energy_unit = eval(energy_unit_str)
+    except Exception as exc:
+        raise ValueError(
+            f"Could not parse unit string {energy_unit_str!r} for data.energy_unit. "
+            f"Use ASE.units expressions like 'kcal / mol' or 'eV' "
+            f"(note the spaces around operators)."
+        ) from exc
     return energy_unit
 
 
 def length_unit_from_config(config):
-    length_unit = eval(config.data.length_unit)
+    length_unit_str = config.data.length_unit
+    try:
+        length_unit = eval(length_unit_str)
+    except Exception as exc:
+        raise ValueError(
+            f"Could not parse unit string {length_unit_str!r} for data.length_unit. "
+            f"Use ASE.units expressions like 'Angstrom' or 'Bohr' "
+            f"(note the spaces around operators)."
+        ) from exc
     return length_unit
 
 def check_config(config):

@@ -105,6 +105,14 @@ Each subcommand has its own set of options and can be run with `--help` to see a
 so3lr opt --help
 ```
 
+All MD subcommands also accept a single `--settings` YAML file that bundles every CLI flag (plus features that have no CLI flag, like atom constraints and enhanced sampling). This is the recommended way to drive longer or more elaborate runs:
+
+```shell script
+so3lr --settings settings.yaml
+```
+
+See the *Freezing atoms during MD*, *Long-Range Electrostatics*, and *Enhanced Sampling with PySAGES* sections below for example settings files.
+
 Optimize a structure using the FIRE algorithm:
 
 ```shell script
@@ -227,7 +235,7 @@ The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fy
 > [!IMPORTANT]
 > SO3LR was not trained on energies, so only relative energies are meaningful. Labels are assumed to be in `eV` and `Ångström`. For gas-phase simulations, we suggest using `--lr-cutoff 100`.
 
-The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and the per-atom ratio head. The ratio head is named `a0_ratios` for the new `so3lr-s/m/l` models (polarizability volume ratios) and `hirshfeld_ratios` for the legacy `so3lr` model -- you can pass either name to `--targets` and the CLI will normalize it to whatever the chosen model actually outputs (and accept dataset labels stored under either key). Energy and forces are assumed to be present in the datafile, while dipole vectors and `a0_ratios`/`hirshfeld_ratios` labels are optional. If they are not present in the data, the metrics will simply be `NaN`.
+The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and the per-atom ratio head. The ratio head is named `a0_ratios` for the new `so3lr-s/m/l` models (polarizability volume ratios) and `hirshfeld_ratios` for the legacy `so3lr` model -- you can pass either name to `--targets` and the CLI will normalize it to whatever the chosen model actually outputs (and accept dataset labels stored under either key). The new `so3lr-s/m/l` models additionally predict `c6_ratios` (per-atom C6-coefficient ratios used by the dispersion term); pass `c6_ratios` to `--targets` to score it against dataset labels stored under the same key. Energy and forces are assumed to be present in the datafile, while dipole vectors, `a0_ratios`/`hirshfeld_ratios`, and `c6_ratios` labels are optional. If they are not present in the data, the metrics will simply be `NaN`.
 
 **Observable targets** — intermediate model quantities (no ground truth required) can be added to `--targets`. They are saved to the output extxyz file alongside the standard predictions:
 
@@ -310,6 +318,23 @@ Basic training command:
 so3lr train --config config.yaml
 ```
 
+### Training on multiple datasets
+
+Instead of a single `data.filepath`, you can list several datasets under `data.datasets` and the trainer will draw from them according to per-dataset `weight` values:
+
+```yaml
+data:
+  filepath: null
+  datasets:
+    - path: /data/dataset_a.extxyz
+      weight: 1.0
+      # num_train: 5000   # optional per-dataset cap (TFDS only)
+    - path: /data/dataset_b.extxyz
+      weight: 0.5
+```
+
+The `num_train` per-dataset cap is only honored by the **TFDS** dataloader — install via `pip install .[tfds]` (see *Optional extras*). With the default ASE-based loader the `weight` field is still used to control sampling, but per-dataset `num_train` caps are ignored.
+
 ### Optional training features
 
 The `training:` block of the config supports a few optional features, all
@@ -323,7 +348,7 @@ disabled by default (see the commented entries in `so3lr/config/config.yaml`):
   validation loss has not improved (by more than `early_stopping_min_delta`) for
   `N` consecutive evaluations.
 - **Reduce LR on plateau** — `reduce_lr_on_plateau: true` multiplies the learning
-  rate by `reduce_lr_factor` (default `0.5`) whenever the validation loss stalls
+  rate by `reduce_lr_factor` (default `0.75`) whenever the validation loss stalls
   for `reduce_lr_patience` evaluations, down to a floor of
   `learning_rate * reduce_lr_min_scale`. This composes with the configured
   `learning_rate_schedule`.
@@ -454,6 +479,8 @@ print(f"Partial charges: {partial_charges}")
 | `electrostatic_energy_undamped` | Undamped electrostatic energy | `(n_atoms,)` |
 | `dispersion_energy_undamped` | Undamped dispersion energy | `(n_atoms,)` |
 | `x` | Final-layer per-atom embeddings | `(n_atoms, features)` |
+
+> **Note:** Every observable in the table above is also reachable from the CLI via `so3lr eval --targets <name>` — the names are identical. The only special case is `x`, which is written to a separate `<output>_x.npz` (see the *Atom embeddings* example above) rather than the extxyz file.
 
 > **Note:** The `zbl_repulsion` key returns the model's short-range repulsion energy. For `so3lr-s/m/l` this is a parameter-free NLH repulsion (also available under the clearer alias `nlh_repulsion`); for the legacy `so3lr` model it is the original ZBL repulsion. The `zbl_repulsion` key is kept for backward compatibility.
 

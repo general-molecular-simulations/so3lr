@@ -3092,7 +3092,16 @@ def perform_md(
     except RuntimeError:
         backend = "cpu"
 
-    if average_time_per_step is not None and backend in ["gpu", "cuda", "rocm"]:
+    # The 3.25e-6 s/atom baseline was measured on an A100 GPU, so the warning is
+    # only meaningful on A100 hardware. On other GPUs (slower cards, ROCm/MI-series,
+    # consumer GPUs) the comparison is misleading, so gate it on the actual device kind.
+    try:
+        device_kind = jax.devices()[0].device_kind
+    except Exception:
+        device_kind = ""
+    is_a100 = "A100" in (device_kind or "")
+
+    if average_time_per_step is not None and backend in ["gpu", "cuda", "rocm"] and is_a100:
         if average_time_per_step > 1.2 * 3.25e-6 * len(initial_geometry):
             logger.warning('Ideally, the average time per step should be close to {:.2e} seconds (measured on an A100 GPU)'.format(
                 3.25e-6 * len(initial_geometry)))

@@ -35,6 +35,9 @@
 
 ## General Settings
 ensemble: "nvt"                            # Ensemble type: "nvt", "nvt-langevin", "npt", "nve" [Default: "nvt"]
+                                           # Note: the Langevin ensemble is spelled "nvt-langevin" (hyphen) here and as a CLI
+                                           # subcommand, but Python identifiers and auto-generated log/trajectory file
+                                           # suffixes use "nvt_langevin" (underscore). The two refer to the same ensemble.
 total_charge: 0                            # Total charge of the system [Default: 0]
 num_unpaired_electrons: 0                  # Spin: number of unpaired electrons (2S). [Default: 0]
 seed: 52                                   # Random seed for MD and thermostat initialization [Default: 52]
@@ -45,7 +48,7 @@ matmul_precision: "highest"                # JAX matmul precision: "default" / "
 input_file: "path/to/geometry.xyz"         # Path to the initial geometry file (required)
 output_file: null                          # Output trajectory file (e.g. trajectory.hdf5, traj.xyz). Format inferred from extension. [Default: <input_stem>_<ensemble>.xyz]
 log_file: null                             # Log file path [Default: <output_stem>.log]
-save_buffer: 50                            # Number of frames to buffer before writing [Default: 50]
+save_buffer: 50                            # Number of MD CYCLES (not raw steps) to buffer before flushing to disk [Default: 50]
 observables: []                            # Observable quantities to compute and save (e.g. ["partial_charges", "dipole_vec"])
 output_atom_indices: null                  # Optional list of atom indices to include in output [Default: null]
 
@@ -57,7 +60,7 @@ restart_reset: false                       # Reset accumulated thermostat/barost
 ## Enhanced Sampling (PySAGES) — optional, requires pip install so3lr[pysages]
 do_enhanced_sampling: false                # Enable enhanced sampling via PySAGES [Default: false]
 pysages_input: "./pysages_input.yaml"      # Path to PySAGES settings file (CVs, method, grid) [Default: "./pysages_input.yaml"]
-enforce_cartesian_coordinates: false       # Use Cartesian (not fractional) coordinates for periodic systems. Auto-enabled when do_enhanced_sampling is true. [Default: false]
+enforce_cartesian_coordinates: false       # Integrator coordinate system: use Cartesian (not fractional) coordinates for periodic systems. Auto-enabled when do_enhanced_sampling is true. (NOT the trajectory output format — see output_cartesian_positions below.) [Default: false]
 restart_pysages_save_path: null            # Path to save PySAGES state for restarting [Default: null]
 restart_pysages_load_path: null            # Path to load PySAGES state from a previous run [Default: null]
 
@@ -86,15 +89,15 @@ fixed_atom_indices: null                   # 0-based indices of atoms to freeze,
 mobile_atom_indices: null                  # Alternative: indices of atoms allowed to MOVE; all others are frozen. [Default: null]
 atom_mask_path: null                       # Alternative: .npz file with 'mobile_atom_indices'/'fixed_atom_indices' arrays (explicit YAML keys override it). [Default: null]
 fixed_atom_constraint: cartesian_anchor    # How frozen atoms are anchored: "cartesian_anchor" pins them in real (Cartesian) space, robust to NPT box changes. [Default: cartesian_anchor]
-output_cartesian_positions: false          # For periodic runs, write saved trajectory positions in Cartesian coordinates. [Default: false]
+output_cartesian_positions: false          # Trajectory output format: for periodic runs, write saved positions in Cartesian coordinates. (NOT the integrator coord system — see enforce_cartesian_coordinates above.) [Default: false]
 
 ## Minimization Settings (used before MD if relax_before_run: true, or with so3lr opt)
 relax_before_run: true                     # Perform geometry relaxation before MD run [Default: true]
 force_convergence: null                    # Force convergence criterion in eV/Å. Overrides min_cycles/min_steps if set. [Default: null]  (CLI: --force-conv)
 min_cycles: 10                             # Number of minimization cycles [Default: 10]
 min_steps: 10                             # Number of minimization steps per cycle [Default: 10]
-min_start_dt: 0.05                         # Initial timestep factor for FIRE minimizer [Default: 0.05]
-min_max_dt: 0.1                            # Maximum timestep factor for FIRE minimizer [Default: 0.1]
+min_start_dt: 0.05                         # FIRE minimizer initial timestep, in jax-md natural units (passed to FIRE as dt_start). Not in fs. [Default: 0.05]
+min_max_dt: 0.1                            # FIRE minimizer maximum timestep, in jax-md natural units (passed to FIRE as dt_max). Not in fs. [Default: 0.1]
 min_n_min: 2                               # FIRE: min steps in correct direction before dt update [Default: 2]
 
 ## Molecular Dynamics Settings
@@ -107,17 +110,25 @@ energy_drift_threshold: 0.05               # Per-atom total-energy drift (eV/ato
 md_T: 300.0                                # Target temperature in Kelvin (NVT/NPT/NVT-Langevin) [Default: 300.0]  (CLI: --temperature)
 nhc_chain_length: 3                        # Length of the Nose-Hoover thermostat chain [Default: 3]  (CLI: --nhc-chain)
 nhc_steps: 2                               # Number of Nose-Hoover integration steps per MD step [Default: 2]
-nhc_thermo: 100.0                          # Thermostat damping timescale factor (tau = md_dt * nhc_thermo) [Default: 100.0]
+nhc_thermo: 100.0                          # Nose-Hoover thermostat damping factor. Effective damping timescale tau is roughly nhc_thermo * md_dt (e.g. ~50 fs at the default md_dt=0.5 fs). The literal formula tau = md_dt * nhc_thermo holds only after the internal ps -> jax-md natural-units conversion. [Default: 100.0]
 
 ## NPT-specific Settings
 md_P: null                                 # Target pressure in bar. Setting this enables NPT. [Default: null]  (CLI: --pressure)
-nhc_baro: 1000.0                           # Barostat damping timescale factor (tau = md_dt * nhc_baro) [Default: 1000.0]
+nhc_baro: 1000.0                           # Nose-Hoover barostat damping factor. Effective damping timescale tau is roughly nhc_baro * md_dt (e.g. ~500 fs at the default md_dt=0.5 fs). The literal formula tau = md_dt * nhc_baro holds only after the internal ps -> jax-md natural-units conversion. [Default: 1000.0]
 nhc_sy_steps: 3                            # Number of Suzuki-Yoshida integration steps [Default: 3]
 npt_coupling: "isotropic"                  # NPT box coupling: "isotropic" (cubic scaling), "semi-isotropic" (independent in x/y vs z — bilayer-compatible), or "anisotropic" (full cell-vector flexibility). Requires the npt-anisotropic jax-md fork. [Default: "isotropic"]
 
 ## NVE Ensemble Settings
-init_T: 300.0                              # Initial temperature for velocity initialization (NVE only) [Default: 300.0]  (CLI: --temperature)
+init_T: 300.0                              # Initial temperature (K) for velocity initialization, NVE only [Default: 300.0]  (CLI: --temperature)
+                                           # For NVE, either md_T or init_T may seed the initial velocities; if both are set, init_T wins.
 
 ## NVT-Langevin Settings
 langevin_removecmmotion: true              # Remove center-of-mass motion at each step [Default: true]  (CLI: --langevin-removecmmotion)
-langevin_thermo: 1.0                       # Langevin timescale parameter (gamma = 1.0 / (md_dt * langevin_thermo)) [Default: 1.0]  (CLI: --langevin-thermo)
+langevin_thermo: 1.0                       # Langevin timescale parameter (gamma = 1.0 / (md_dt * langevin_thermo)) [Default: 1.0]
+
+## Advanced (optional, rarely tuned)
+# The following keys are recognised by perform_md but are not part of the standard CLI surface.
+# Set them only if you understand the implications.
+#
+# dispersion_tail_correction: false        # Add an analytic long-range dispersion (C6) tail correction to the energy. Currently supported only with ensemble="npt" and models that expose per-atom a0_ratios/C6_ratios. [Default: false]
+# minimum_cell_size_multiplier: 1.0        # Multiplier applied to the neighbor-list minimum cell size (both short- and long-range). Increase to coarsen the cell grid (fewer / larger cells), decrease to refine. [Default: 1.0]  (CLI: --langevin-thermo)

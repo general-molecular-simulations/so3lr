@@ -32,8 +32,8 @@ optimizer:
 training:
   allow_restart: true  # If a checkpoint dir already exists in workdir, RESUME finetuning from it (no checkpoints are overwritten). Set false to refuse and require a fresh workdir.
   num_epochs: 100  # Number of epochs.
-  num_train: null  # Number of training points to draw from data.filepath.
-  num_valid: null  # Number of validation points to draw from data.filepath.
+  num_train: null  # Number of training points to draw from data.filepath. The CLI flag --num-train takes precedence when set.
+  num_valid: null  # Number of validation points to draw from data.filepath. The CLI flag --num-valid takes precedence when set.
   batch_max_num_nodes: null  # Maximal number of nodes per batch. Must be at least maximal number of atoms + 1 in the data set.
   batch_max_num_edges: null  # Maximal number of edges per batch. Must be at least maximal number of edges + 1 in the data set.
   batch_max_num_pairs: null
@@ -58,6 +58,10 @@ training:
   log_gradient_values: False  # Log the norm of the gradients for each set of weights.
   use_wandb: true  # Use wandb for logging.
   wandb_init_args:  # Arguments to wandb.init(). See https://docs.wandb.ai/ref/python/init. The config itself is passed as config to wandb.init().
+    # Uncomment `name:` to pin the run name in the WandB dashboard; if left
+    # commented out, wandb.init() auto-generates a random run name. A common
+    # convention is to set it to the --workdir basename so the WandB run and
+    # the local checkpoint directory share a label.
     # name: finetune_so3lr
     project: so3lr
     group: finetune_so3lr
