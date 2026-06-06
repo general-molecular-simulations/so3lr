@@ -1,6 +1,15 @@
 workdir: first_experiment  # Output directory for checkpoints and hyperparameters.
 data:
   filepath: null  # Path to the training data file. Supports any ASE-readable format (.xyz, .extxyz, .pdb, etc.) or .npz files.
+  # --- Multi-dataset alternative to `filepath` (uncomment to enable) ---
+  # Set `filepath: null` and provide a list of datasets here instead. Each entry mixes a path
+  # with a sampling `weight` (defaults to 1.0) and an optional `num_train` (TFDS dataloader only).
+  # datasets:
+  #   - path: /data/dataset_a.extxyz
+  #     weight: 1.0
+  #     # num_train: 5000  # Optional cap per-dataset; only used by the TFDS dataloader.
+  #   - path: /data/dataset_b.extxyz
+  #     weight: 0.5
   energy_unit: eV  # Unit of energy labels in the data file.
   length_unit: Angstrom  # Unit of position/distance labels in the data file.
   electric_charge_unit: e  # Unit of charge labels in the data file.
@@ -45,6 +54,7 @@ model:
   use_charge_embed: false  # Add an embedding of the total molecular charge to atomic features. Requires charge info in the input data.
   use_spin_embed: false  # Add an embedding of the number of unpaired electrons to atomic features. Requires spin info in the input data.
   energy_regression_dim: 128  # Hidden dimension of the energy readout MLP that maps final features to atomic energies.
+  energy_final_mlp_widths: null  # Optional list of hidden widths for a multi-layer energy readout MLP (e.g. [128, 64]). null = single hidden layer of size energy_regression_dim.
   energy_activation_fn: silu  # Activation function applied in the energy readout MLP before the final linear layer. Options: identity (none), silu, etc.
   energy_learn_atomic_type_scales: true  # Learn a per-element multiplicative scale factor for predicted atomic energies.
   energy_learn_atomic_type_shifts: true  # Learn a per-element additive shift for predicted atomic energies.
@@ -56,6 +66,7 @@ model:
   dispersion_energy_scale: 1.2  # Damping for the dispersion energy contribution.
   zbl_repulsion_bool: true  # Add a Ziegler-Biersack-Littmark (ZBL) short-range repulsion term. Prevents unphysical atom overlap.
   use_final_bias_bool: false  # Include a bias term in the final linear layer of the energy readout MLP.
+  legacy_so3lr_bool: false  # Use the legacy SO3LR-v1 architecture for reproducing the JACS paper. Should stay false for new training runs.
   kspace_electrostatics: null  # K-space method for electrostatic + dispersion during training. Options: null (disabled), pme, p3m, ewald.
   kspace_smearing: 2.0  # Smearing parameter (Angstrom) for Ewald splitting. Controls real-space vs k-space partition.
   kspace_spacing: 1.0  # Mesh spacing (Angstrom) for PME/P3M grid, or wavelength for Ewald. Smaller = finer grid = more accurate.
