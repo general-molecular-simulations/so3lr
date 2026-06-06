@@ -3588,6 +3588,12 @@ def save_state(
             state_dict['stress_tensor'] = state.stress_tensor
         else:
             state_dict['stress'] = state.stress
+
+    if ensemble.lower() == 'nvt-langevin':
+        # The BAOAB Langevin state (NVTLangevinState) carries only an RNG key
+        # beyond the core position/momentum/force/mass fields. Persist it so the
+        # stochastic trajectory continues deterministically across a restart.
+        state_dict.update(rng=state.rng)
     state_dict.update(ensemble=ensemble)
     np.savez(path_to_save, **state_dict)
 
@@ -3760,8 +3766,31 @@ def load_state(
                 available_fields=_avail_fields,
                 path=path_to_load,
             ) from _ke
+
+    elif ensemble.lower() == 'nvt-langevin':
+        # The Langevin integrator state is fully described by the core fields
+        # plus the RNG key (see save_state). A restart file written before
+        # Langevin restarts were supported lacks 'rng' and surfaces as a clear
+        # schema mismatch rather than an opaque crash.
+        try:
+            state = jax_md.simulate.NVTLangevinState(
+                position=jnp.array(loaded_state['position']),
+                momentum=jnp.array(loaded_state['momentum']),
+                force=jnp.array(loaded_state['force']),
+                mass=jnp.array(loaded_state['mass']),
+                rng=jnp.array(loaded_state['rng']),
+            )
+        except KeyError as _ke:
+            raise RestartSchemaMismatchError(
+                missing_field=str(_ke).strip("'\""),
+                ensemble=ensemble,
+                available_fields=_avail_fields,
+                path=path_to_load,
+            ) from _ke
     else:
-        raise NotImplementedError('Only NVE, NVT and NPT ensembles are supported')
+        raise NotImplementedError(
+            'Only NVE, NVT, NVT-Langevin and NPT ensembles are supported'
+        )
 
     try:
         box = loaded_state['box']

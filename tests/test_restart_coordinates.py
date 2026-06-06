@@ -15,6 +15,7 @@ import importlib.util
 
 import pytest
 import numpy as np
+import jax
 import jax.numpy as jnp
 import jax_md
 
@@ -22,7 +23,12 @@ import yaml
 
 from jax_md.space import transform
 
-from so3lr.cli.so3lr_md import save_state, load_state, RestartInNewEnsembleError
+from so3lr.cli.so3lr_md import (
+    save_state,
+    load_state,
+    RestartInNewEnsembleError,
+    RestartSchemaMismatchError,
+)
 
 
 TEST_DATA_DIR = pathlib.Path(__file__).resolve().parent / "test_data"
@@ -117,6 +123,23 @@ def _make_nve_state(position, momentum, force, mass):
         momentum=momentum,
         force=force,
         mass=mass,
+    )
+
+
+def _make_langevin_state(position, momentum, force, mass, rng=None):
+    """Create a minimal NVTLangevinState for testing.
+
+    The BAOAB Langevin state is fully described by the core
+    position/momentum/force/mass fields plus an RNG key.
+    """
+    if rng is None:
+        rng = jax.random.PRNGKey(0)
+    return jax_md.simulate.NVTLangevinState(
+        position=position,
+        momentum=momentum,
+        force=force,
+        mass=mass,
+        rng=rng,
     )
 
 
@@ -249,6 +272,111 @@ class TestSaveLoadCoordinateFlag:
         np.testing.assert_allclose(loaded_state.momentum, mom, atol=1e-10)
         np.testing.assert_allclose(loaded_state.force, force, atol=1e-10)
         assert cycle == 5
+
+
+class TestLangevinRestart:
+    """Regression tests for NVT-Langevin restart (save_state/load_state).
+
+    A langevin run records ``ensemble='nvt-langevin'``. Previously load_state
+    had no branch for it and fell through to ``NotImplementedError``, so any
+    attempt to resume an NVT-Langevin trajectory crashed. The Langevin state
+    (jax_md ``NVTLangevinState``) is fully described by the core
+    position/momentum/force/mass fields plus the RNG key, which save_state now
+    persists so the stochastic trajectory continues deterministically.
+    """
+
+    def test_langevin_restart_roundtrip(self, tmp_path):
+        """Saving then loading an NVT-Langevin state recovers the full state.
+
+        Before the fix this raised NotImplementedError on load.
+        """
+        pos = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+        mass = jnp.array([[1.0], [16.0]])
+        state = _make_langevin_state(pos, mom, force, mass,
+                                     rng=jax.random.PRNGKey(42))
+        box = jnp.array([10.0, 10.0, 10.0])
+        path = str(tmp_path / "restart_langevin.npz")
+
+        save_state(state, box, 7, path, ensemble='nvt-langevin',
+                   fractional_coordinates=True)
+        loaded_state, _, cycle = load_state(
+            path, ensemble='nvt-langevin', fractional_coordinates=True
+        )
+
+        assert isinstance(loaded_state, jax_md.simulate.NVTLangevinState)
+        np.testing.assert_allclose(loaded_state.position, pos, atol=1e-10)
+        np.testing.assert_allclose(loaded_state.momentum, mom, atol=1e-10)
+        np.testing.assert_allclose(loaded_state.force, force, atol=1e-10)
+        assert int(np.asarray(cycle)) == 7
+
+    def test_langevin_restart_persists_rng(self, tmp_path):
+        """The RNG key is written to the .npz and restored exactly, so the
+        stochastic trajectory continues deterministically across the restart."""
+        pos = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+        mass = jnp.array([[1.0], [16.0]])
+        rng = jax.random.PRNGKey(123)
+        state = _make_langevin_state(pos, mom, force, mass, rng=rng)
+        box = jnp.array([10.0, 10.0, 10.0])
+        path = str(tmp_path / "restart_langevin.npz")
+
+        save_state(state, box, 0, path, ensemble='nvt-langevin')
+
+        data = np.load(path, allow_pickle=True)
+        assert 'rng' in list(data.files)
+        np.testing.assert_array_equal(np.asarray(data['rng']), np.asarray(rng))
+
+        loaded_state, _, _ = load_state(
+            path, ensemble='nvt-langevin', fractional_coordinates=True
+        )
+        np.testing.assert_array_equal(np.asarray(loaded_state.rng),
+                                      np.asarray(rng))
+
+    def test_langevin_restart_without_rng_raises_schema_mismatch(self, tmp_path):
+        """A restart file written before Langevin restarts were supported has
+        no 'rng' field; loading it must raise a clear RestartSchemaMismatchError
+        rather than the historical opaque NotImplementedError."""
+        path = str(tmp_path / "legacy_langevin.npz")
+        # Emulate a legacy langevin .npz: core fields + ensemble, but no rng.
+        np.savez(
+            path,
+            position=np.array([[0.1, 0.2, 0.3]]),
+            momentum=np.array([[1.0, 2.0, 3.0]]),
+            force=np.array([[0.0, 0.0, 0.0]]),
+            mass=np.array([[1.0]]),
+            box=np.array([10.0, 10.0, 10.0]),
+            step=0,
+            fractional_coordinates=True,
+            ensemble='nvt-langevin',
+        )
+        with pytest.raises(RestartSchemaMismatchError):
+            load_state(path, ensemble='nvt-langevin',
+                       fractional_coordinates=True)
+
+    def test_langevin_restart_fractional_to_cartesian(self, tmp_path):
+        """Coordinate conversion applies to langevin restarts like the other
+        ensembles: fractional save -> cartesian load multiplies positions by
+        the box and leaves momenta/forces unchanged."""
+        box = jnp.array([25.0, 25.0, 25.0])
+        frac_pos = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+        mass = jnp.array([[1.0], [16.0]])
+        state = _make_langevin_state(frac_pos, mom, force, mass)
+        path = str(tmp_path / "restart_langevin_frac.npz")
+
+        save_state(state, box, 0, path, ensemble='nvt-langevin',
+                   fractional_coordinates=True)
+        loaded_state, _, _ = load_state(
+            path, ensemble='nvt-langevin', fractional_coordinates=False
+        )
+
+        np.testing.assert_allclose(loaded_state.position, frac_pos * box, atol=1e-10)
+        np.testing.assert_allclose(loaded_state.momentum, mom, atol=1e-10)
+        np.testing.assert_allclose(loaded_state.force, force, atol=1e-10)
 
 
 class TestCoordinateConversion:
