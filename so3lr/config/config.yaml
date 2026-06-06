@@ -116,13 +116,9 @@ training:
   # use_ema: false  # Keep an exponential moving average (EMA) of the weights. The raw weights keep training while the EMA shadow copy is used for validation metrics and saved in the checkpoint -- usually more stable/accurate at deployment.
   # ema_decay: 0.999  # EMA decay factor; closer to 1.0 means slower, smoother averaging. Only used when use_ema is true.
   # early_stopping_patience: null  # Stop training once the validation loss has not improved for this many consecutive evaluations (each eval happens every eval_every_num_steps). null disables early stopping.
-  # early_stopping_min_delta: 0.0  # Minimum decrease in validation loss that counts as an improvement for early stopping.
   # reduce_lr_on_plateau: false  # Shrink the learning rate when the validation loss plateaus. Multiplies the LR by an injectable factor on top of learning_rate_schedule above.
-  # reduce_lr_factor: 0.5  # Factor the learning rate is multiplied by on each plateau. Only used when reduce_lr_on_plateau is true.
-  # reduce_lr_patience: 10  # Number of evaluations without improvement before the learning rate is reduced.
-  # reduce_lr_min_scale: 0.01  # Floor on the cumulative LR multiplier; the effective minimum learning rate is learning_rate * reduce_lr_min_scale.
-  # reduce_lr_min_delta: 0.0  # Minimum decrease in validation loss that counts as an improvement for the plateau detector.
-  # reduce_lr_cooldown: 0  # Number of evaluations to wait after a reduction before counting plateaus again.
+  # reduce_lr_factor: 0.75  # Factor the learning rate is multiplied by on each plateau. Only used when reduce_lr_on_plateau is true.
+  # reduce_lr_patience: 1000  # Number of evaluations without improvement before the learning rate is reduced.
   # stage_two_start_epoch: null  # Epoch at which to switch to a second set of loss weights (two-stage training). The best-loss, early-stopping and plateau trackers reset at the switch. null disables two-stage training.
   # stage_two_loss_weights:  # Loss weights applied from stage_two_start_epoch onward. Same keys as loss_weights. Only used when stage_two_start_epoch is set.
   #   energy: 0.1

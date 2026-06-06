@@ -419,13 +419,13 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             ema_decay=config.training.get('ema_decay', 0.999),
             # Early stopping.
             early_stopping_patience=config.training.get('early_stopping_patience', None),
-            early_stopping_min_delta=config.training.get('early_stopping_min_delta', 0.0),
+            early_stopping_min_delta=config.training.get('early_stopping_min_delta', 1e-4),
             # Reduce LR on plateau.
             reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False),
-            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.5),
-            reduce_lr_patience=config.training.get('reduce_lr_patience', 10),
-            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 1e-2),
-            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 0.0),
+            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.75),
+            reduce_lr_patience=config.training.get('reduce_lr_patience', 1000),
+            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 0.0),
+            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 1e-4),
             reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
             # Two-stage loss reweighting.
             stage_two_start_epoch=stage_two_start_epoch,
@@ -463,13 +463,13 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             ema_decay=config.training.get('ema_decay', 0.999),
             # Early stopping.
             early_stopping_patience=config.training.get('early_stopping_patience', None),
-            early_stopping_min_delta=config.training.get('early_stopping_min_delta', 0.0),
+            early_stopping_min_delta=config.training.get('early_stopping_min_delta', 1e-4),
             # Reduce LR on plateau.
             reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False),
-            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.5),
-            reduce_lr_patience=config.training.get('reduce_lr_patience', 10),
-            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 1e-2),
-            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 0.0),
+            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.75),
+            reduce_lr_patience=config.training.get('reduce_lr_patience', 1000),
+            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 0.0),
+            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 1e-4),
             reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
             # Two-stage loss reweighting.
             stage_two_start_epoch=stage_two_start_epoch,
