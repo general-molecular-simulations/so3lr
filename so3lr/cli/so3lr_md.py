@@ -2142,7 +2142,9 @@ def perform_md(
     # --overwrite. The previous behavior was format-dependent: HDF5 silently
     # truncated, extxyz silently appended. With this guard the policy is
     # uniform across formats and across restarts.
-    if output_file and Path(output_file).exists() and not overwrite and not restart_load_path:
+    if (output_file and Path(output_file).exists() and not overwrite
+            and not restart_load_path
+            and not all_settings.get('_relax_wrote_output')):
         raise RuntimeError(
             f"Output file already exists: {output_file}. Refusing to overwrite. "
             f"Pass --overwrite to overwrite, choose a different --output, or "
@@ -3940,6 +3942,11 @@ def run(
             opt_structure = None
         else:
             opt_structure = perform_min(settings, log_input=False)
+            # perform_min just wrote the optimization trajectory to output_file
+            # (extxyz). Mark it so the MD overwrite guard below does not refuse
+            # the file THIS run's own relax phase created. Stale output left by a
+            # previous run is still caught by perform_min's own guard above.
+            settings['_relax_wrote_output'] = True
             logger.info("=" * 60)
     else:
         opt_structure = None
