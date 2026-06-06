@@ -131,7 +131,29 @@ def _run_ensemble(ensemble, dtype):
     nbrs_idx = nbrs.idx
     nbrs_lr_idx = nbrs_lr.idx
 
-    if ensemble == 'NVT':
+    if ensemble == 'NVE':
+        # Plain velocity-Verlet: conserved quantity is the total energy
+        # E = PE + KE (the jax-md fork has no nve_invariant). kT only seeds the
+        # initial Maxwell-Boltzmann momenta (init_fn's required arg); it does
+        # not enter the dynamics. Passing it to nve() would be silently dropped
+        # into **sim_kwargs, so it must go to init_fn instead.
+        init_fn, apply_fn = simulate.nve(energy_fn, shift, dt=dt)
+        return _measure_drift(
+            init_fn, apply_fn,
+            lambda state, **kw: energy_fn(state.position, **kw)
+            + simulate.kinetic_energy(state),
+            init_args=(positions,),
+            init_kwargs=dict(kT=kT, mass=masses,
+                             neighbor=nbrs_idx, neighbor_lr=nbrs_lr_idx,
+                             box=cell),
+            step_kwargs=dict(neighbor=nbrs_idx, neighbor_lr=nbrs_lr_idx,
+                             box=cell),
+            invariant_kwargs=dict(neighbor=nbrs_idx, neighbor_lr=nbrs_lr_idx,
+                                  box=cell),
+            n_steps=N_STEPS,
+        )
+
+    elif ensemble == 'NVT':
         init_fn, apply_fn = simulate.nvt_nose_hoover(
             energy_fn, shift, dt=dt, kT=kT, tau=dt * 100,
         )
@@ -198,7 +220,7 @@ def _run_ensemble(ensemble, dtype):
         )
 
 
-ALL_ENSEMBLES = ['NVT', 'NPT_iso', 'NPT_flex_iso', 'NPT_flex_semi_iso', 'NPT_flex_aniso']
+ALL_ENSEMBLES = ['NVE', 'NVT', 'NPT_iso', 'NPT_flex_iso', 'NPT_flex_semi_iso', 'NPT_flex_aniso']
 
 
 @pytest.mark.parametrize('ensemble', ALL_ENSEMBLES)
