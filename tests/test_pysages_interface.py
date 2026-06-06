@@ -241,6 +241,10 @@ class TestImportGuard:
             'precision': 'float32',
             'seed': 42,
             'save_buffer': 10,
+            # Valid for the nvt-langevin parametrization so the langevin-thermo
+            # input check passes and we reach the method/ensemble gate (the
+            # behaviour under test). Ignored for the npt/nve cases.
+            'langevin_thermo': 1.0,
         }
         with pytest.raises(ValueError, match="only supports the NVT ensemble"):
             md_module.perform_md(settings)
