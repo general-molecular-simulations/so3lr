@@ -1,15 +1,7 @@
 import flax.linen as nn
 import jax.numpy as jnp
-import json
-import os
 
-from pathlib import Path
 from typing import (Any, Callable, Dict, Sequence)
-
-from so3lr.mlff.nn.layer import get_layer
-from so3lr.mlff.nn.embed import get_embedding_module
-from so3lr.mlff.nn.observable import get_observable_module
-from so3lr.mlff.io import read_json
 
 Array = Any
 
@@ -30,12 +22,6 @@ class StackNetSparse(nn.Module):
         if len(self.observables) == 0:
             msg = "At least one observable module in `observables` is required."
             raise ValueError(msg)
-
-    @classmethod
-    def create_from_ckpt_dir(cls, ckpt_dir: str):
-        h_path = Path(ckpt_dir).absolute().resolve() / 'hyperparameters.json'
-        stack_net = init_stack_net_sparse(read_json(h_path))
-        return stack_net
 
     @nn.compact
     def __call__(self,
@@ -106,31 +92,6 @@ class StackNetSparse(nn.Module):
         # return jax.tree_util.tree_map(lambda y: y[..., None], observables)
         return observables
 
-    def __dict_repr__(self):
-        geometry_embeddings = [x.__dict_repr__() for x in self.geometry_embeddings]
-        feature_embeddings = []
-        layers = []
-        observables = []
-        for x in self.feature_embeddings:
-            feature_embeddings += [x.__dict_repr__()]
-        for (n, x) in enumerate(self.layers):
-            layers += [x.__dict_repr__()]
-        for x in self.observables:
-            observables += [x.__dict_repr__()]
-
-        return {'stack_net_sparse': {'geometry_embeddings': geometry_embeddings,
-                                     'feature_embeddings': feature_embeddings,
-                                     'layers': layers,
-                                     'observables': observables,
-                                     'prop_keys': self.prop_keys,
-                                     'n_layers': len(layers),
-                                     'use_residual_scalars': self.use_residual_scalars}}
-
-    def to_json(self, ckpt_dir, name='hyperparameters.json'):
-        j = self.__dict_repr__()
-        with open(os.path.join(ckpt_dir, name), 'w', encoding='utf-8') as f:
-            json.dump(j, f, ensure_ascii=False, indent=4)
-
     def reset_prop_keys(self, prop_keys, sub_modules=True) -> None:
         self.prop_keys.update(prop_keys)
         if sub_modules:
@@ -145,21 +106,3 @@ class StackNetSparse(nn.Module):
     def reset_output_convention(self, output_convention):
         for o in self.observables:
             o.reset_output_convention(output_convention=output_convention)
-
-
-def init_stack_net_sparse(h) -> StackNetSparse:
-    _h = h['stack_net_sparse']
-    geom_embs = [get_embedding_module(*tuple(x.items())[0]) for x in _h['geometry_embeddings']]
-    feature_embs = [get_embedding_module(*tuple(x.items())[0]) for x in _h['feature_embeddings']]
-    lays = [get_layer(*tuple(x.items())[0]) for x in _h['layers']]
-    obs = [get_observable_module(*tuple(x.items())[0]) for x in _h['observables']]
-    use_residual_scalars = _h.get('use_residual_scalars', False)
-    return StackNetSparse(
-        **{'geometry_embeddings': geom_embs,
-           'feature_embeddings': feature_embs,
-           'layers': lays,
-           'observables': obs,
-           'prop_keys': _h['prop_keys'],
-           'use_residual_scalars': use_residual_scalars
-           }
-    )

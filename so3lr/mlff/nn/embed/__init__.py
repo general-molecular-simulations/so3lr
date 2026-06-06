@@ -5,5 +5,3 @@ from .embed_sparse import (
     SpinEmbedSparse,
     ChargeEmbedSparse
 )
-
-from .h_register import get_embedding_module
