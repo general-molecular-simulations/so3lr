@@ -1848,6 +1848,7 @@ def tune_ewald(
     input_file: str,
     output_file: Optional[str],
     log_file: Optional[str],
+    overwrite: bool,
     # Model settings group
     model_path: Optional[str],
     precision: str,
