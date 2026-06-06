@@ -243,8 +243,30 @@ def evaluate_so3lr_on(
 
     total_time_start = time.time()
 
-    # Parse targets into a list
-    target_list = targets.split(',')
+    # Parse targets into a list (whitespace-tolerant, empty entries dropped).
+    # Previously a comma+space ('forces, dipole_vec') silently produced
+    # untrimmed ' dipole_vec' which failed the membership check downstream
+    # and dropped the target. Validate against the known set and warn with
+    # did-you-mean suggestions before any heavy work starts.
+    target_list = [t.strip() for t in targets.split(',') if t.strip()]
+    _label_targets = {
+        'forces', 'energy', 'dipole_vec',
+        'hirshfeld_ratios', 'a0_ratios', 'c6_ratios',
+        'stress',
+    }
+    _known_targets = _label_targets | OBSERVABLES
+    import difflib as _difflib
+    _unknown = [t for t in target_list if t not in _known_targets]
+    if _unknown:
+        msgs = []
+        for t in _unknown:
+            sugg = _difflib.get_close_matches(t, sorted(_known_targets), n=3, cutoff=0.6)
+            msgs.append(f"  '{t}'" + (f"  (did you mean: {', '.join(sugg)})" if sugg else ''))
+        raise ValueError(
+            "Unknown --targets entries:\n" + "\n".join(msgs) +
+            f"\nKnown labels: {sorted(_label_targets)}; "
+            f"known observables: {sorted(OBSERVABLES)}."
+        )
     logger.info(f"Evaluating targets: {', '.join(target_list)}")
 
     # Determine which targets are observables (need output_intermediate_quantities)

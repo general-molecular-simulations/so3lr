@@ -1081,9 +1081,11 @@ def run_fine_tuning(
     adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
 
     ckpt_dir = workdir / 'checkpoints'
-    if Path(ckpt_dir).exists():
+    if Path(ckpt_dir).exists() and not config.training.allow_restart:
         raise ValueError(
-            f"Checkpoint directory {ckpt_dir} already exists."
+            f"Checkpoint directory {ckpt_dir} already exists. Pass "
+            f"`training.allow_restart: true` in the config to resume from "
+            f"it, or choose a different --workdir."
         )
 
     _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)

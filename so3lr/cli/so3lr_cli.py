@@ -533,7 +533,7 @@ def common_io_options(f: Callable) -> Callable:
 
 def common_model_options(f: Callable) -> Callable:
     """Common model options for all commands."""
-    f = click.option('--model', '--model_path', 'model_path', type=str, default=None,
+    f = click.option('--model', '--model_path', '--model-path', 'model_path', type=str, default=None,
                      help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
                           'or a path to a custom MLFF model directory. '
                           'If not provided, so3lr-m is used. [default: so3lr-m]')(f)
@@ -577,7 +577,18 @@ def common_md_options(f: Callable) -> Callable:
     f = click.option('--seed', default=DEFAULT_SEED, type=int,
                      help=f'Random seed for MD. [default: {DEFAULT_SEED}]')(f)
     f = click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
-                     help=f'Observables to compute and save. [default: {DEFAULT_OBSERVABLES}]')(f)
+                     type=click.Choice([
+                         'nn_energy', 'partial_charges', 'electrostatic_energy',
+                         'dispersion_energy', 'zbl_repulsion',
+                         'nlh_repulsion',
+                         'electrostatic_energy_undamped', 'dispersion_energy_undamped',
+                         'x',
+                     ]),
+                     help='Observable to compute and save during MD. Repeatable. '
+                          'Allowed: nn_energy, partial_charges, electrostatic_energy, '
+                          'dispersion_energy, zbl_repulsion, nlh_repulsion, '
+                          'electrostatic_energy_undamped, dispersion_energy_undamped, x. '
+                          '[default: none]')(f)
     f = click.option('--help', '-h', is_flag=True, help='Show brief command overview.')(f)
     return f
 
@@ -617,7 +628,8 @@ def langevin_options(f: Callable) -> Callable:
 
 def kspace_options(f: Callable) -> Callable:
     """K-space electrostatics options for periodic systems."""
-    f = click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None, type=str,
+    f = click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None,
+                     type=click.Choice(['ewald', 'pme', 'p3m'], case_sensitive=False),
                      help='K-space method for long-range electrostatics: "ewald", "pme", or "p3m". [default: None]')(f)
     f = click.option('--kspace-smearing', 'kspace_smearing', default=DEFAULT_KSPACE_SMEARING, type=float,
                      help=f'Smearing width for k-space summation in Å. [default: {DEFAULT_KSPACE_SMEARING}]')(f)

@@ -2050,6 +2050,15 @@ def perform_md(
     md_steps = all_settings.get('md_steps')
     ensemble = all_settings.get('ensemble')
 
+    # NVE has no thermostat, so 'md_T' only seeds the initial velocity sample.
+    # If the user specified 'init_T' (documented in md_settings.yaml under the
+    # NVE section), honour it. The CLI subcommand path already sets both to the
+    # same --temperature value; this path matters for YAML-only NVE runs.
+    if ensemble == 'nve':
+        _init_T = all_settings.get('init_T')
+        if _init_T is not None:
+            md_T = _init_T
+
     # Nose-Hoover thermostat parameters
     nhc_chain_length = all_settings.get('nhc_chain_length')
     nhc_steps = all_settings.get('nhc_steps')
@@ -2078,7 +2087,21 @@ def perform_md(
     atom_mask_path = all_settings.get('atom_mask_path')
     mobile_atom_indices_setting = all_settings.get('mobile_atom_indices')
     fixed_atom_indices_setting = all_settings.get('fixed_atom_indices')
-    fixed_atom_constraint = all_settings.get('fixed_atom_constraint', 'cartesian_anchor')
+
+    # Normalise the constraint mode so spellings like 'Cartesian_anchor' or
+    # 'cartesian-anchor' do not silently fall back to fractional anchoring
+    # (which under NPT lets the "frozen" atoms physically drift when the box
+    # rescales). Recognised values: 'cartesian_anchor', 'fractional'.
+    _allowed_constraint_modes = {'cartesian_anchor', 'fractional'}
+    fixed_atom_constraint_raw = all_settings.get('fixed_atom_constraint', 'cartesian_anchor')
+    fixed_atom_constraint = str(fixed_atom_constraint_raw).strip().lower().replace('-', '_')
+    if fixed_atom_constraint not in _allowed_constraint_modes:
+        raise ValueError(
+            f"Unknown fixed_atom_constraint={fixed_atom_constraint_raw!r}. "
+            f"Allowed values: {sorted(_allowed_constraint_modes)}. "
+            f"Note: 'cartesian_anchor' (default, NPT-safe) and 'fractional' "
+            f"are the only supported modes."
+        )
 
     # Enhanced sampling (PySAGES)
     do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
@@ -2144,6 +2167,16 @@ def perform_md(
     if md_P is not None and cell is None:
         raise ValueError(
             'Cell must be defined for NPT simulations. The input geometry does not contain cell information.')
+
+    # K-space electrostatics (Ewald/PME/P3M) is only meaningful for periodic
+    # systems. Without a cell the model still runs but the long-range term is
+    # nonsense — refuse so we do not silently produce wrong physics.
+    if kspace_electrostatics is not None and cell is None:
+        raise ValueError(
+            f"kspace_electrostatics={kspace_electrostatics!r} requires a periodic "
+            f"cell, but the input geometry has none. Either supply a cell, or "
+            f"omit kspace_electrostatics."
+        )
 
     if cell is not None:
         # PySAGES requires Cartesian positions, BUT for NPT we must keep JAX-MD internal
@@ -2604,7 +2637,11 @@ def perform_md(
 
     momenta, positions, boxes = [], [], []
     cycle_md = 0
-    current_cycle = 0
+    # NB: current_cycle is initialised to 0 above (line ~2243) and overwritten
+    # by load_state() when a restart .npz is loaded. We must NOT reset it
+    # again here, otherwise the log step counter restarts at zero after a
+    # restart (the run looks like a fresh run in the log even though state
+    # is correctly loaded).
     total_time_for_steps = 0
     first_loop = True
 
@@ -3056,6 +3093,27 @@ def perform_min(
     min_max_dt = all_settings.get('min_max_dt')
     min_n_min = all_settings.get('min_n_min')
     force_convergence = all_settings.get('force_convergence')  # eV/A, can be None
+
+    # Atom-constraint settings. perform_min does NOT enforce these (FIRE-with-
+    # constraints is not yet implemented), but the previous behavior was to
+    # silently ignore them — so `relax_before_run: true` with frozen atoms
+    # would drift the "frozen" atoms during pre-MD relaxation, putting the
+    # MD constraint logic at the wrong reference position. Refuse here with
+    # a clear message so the user can either drop the constraints or disable
+    # the pre-MD relaxation. (When perform_md calls perform_min, the same
+    # check fires before any work is done.)
+    _mob = all_settings.get('mobile_atom_indices')
+    _fix = all_settings.get('fixed_atom_indices')
+    _msk = all_settings.get('atom_mask_path')
+    if any(v is not None for v in (_mob, _fix, _msk)):
+        raise NotImplementedError(
+            "Atom constraints (fixed_atom_indices / mobile_atom_indices / "
+            "atom_mask_path) are not supported during geometry optimization "
+            "(`so3lr opt` or `relax_before_run: true`): the FIRE minimizer "
+            "would silently drift the 'frozen' atoms before MD step 0. "
+            "Either remove the constraint settings, or set "
+            "`relax_before_run: false` and pre-relax in a separate step."
+        )
 
     # Geometry, cell and charge
     input_file_path = all_settings.get('input_file')

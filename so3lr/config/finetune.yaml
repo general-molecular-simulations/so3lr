@@ -30,7 +30,7 @@ optimizer:
   gradient_clipping_args: null
   num_of_nans_to_ignore: 0  # Number of repeated update/gradient steps that ignore NaNs before raising on error.
 training:
-  allow_restart: true  # Re-starting from checkpoint is allowed. This will overwrite existing checkpoints so only use if this is desired.
+  allow_restart: true  # If a checkpoint dir already exists in workdir, RESUME finetuning from it (no checkpoints are overwritten). Set false to refuse and require a fresh workdir.
   num_epochs: 100  # Number of epochs.
   num_train: null  # Number of training points to draw from data.filepath.
   num_valid: null  # Number of validation points to draw from data.filepath.

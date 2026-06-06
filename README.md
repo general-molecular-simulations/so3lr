@@ -309,7 +309,9 @@ so3lr eval --datafile sapt10k_prepared.xyz --targets energy --save-to sapt10k_ev
 ```
 
 Finally, compute the binding energy:
-```shell script
+```python
+from ase.io import read
+
 mols = read('sapt10k_eval.xyz', index=':')
 energy = [a.info['energy_so3lr'] for a in mols]
 bind_energy = [energy[i]-energy[i+1] for i in range(0, len(energy), 2)]
@@ -356,7 +358,7 @@ import numpy as np
 from so3lr import So3lrCalculator
 from ase import Atoms
 
-atoms = Atoms('H2O', positions=[(0, 0, 0), (0.96, 0, 0), (0.24, 0.93, 0)])
+atoms = Atoms('OH2', positions=[(0, 0, 0), (0.96, 0, 0), (-0.24, 0.93, 0)])
 atoms.info['charge'] = 0.0
 
 calc = So3lrCalculator(
@@ -616,7 +618,7 @@ K-space electrostatics should be used for:
 - **Charged systems** where long-range Coulomb interactions are important
 - Systems where electrostatic cutoffs would introduce artifacts
 
-For **gas-phase/molecular systems**, use `lr_cutoff=1000` instead (no k-space needed).
+For **gas-phase/molecular systems**, use `lr_cutoff=100` instead (no k-space needed). This matches the gas-phase recommendation used throughout the eval examples above.
 
 ### ASE Calculator with K-Space Electrostatics
 

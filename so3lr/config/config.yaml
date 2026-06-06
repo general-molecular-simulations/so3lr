@@ -87,7 +87,7 @@ optimizer:
     max_norm: 10
   num_of_nans_to_ignore: 0  # Number of consecutive NaN gradients to skip before raising an error. Useful for handling rare numerical instabilities.
 training:
-  allow_restart: true  # Allow restarting training from the latest checkpoint in workdir. Existing checkpoints will be overwritten.
+  allow_restart: true  # If a checkpoint dir already exists in workdir, RESUME training from it (no checkpoints are overwritten). Set false to refuse and require a fresh workdir. NB: a resumed run silently keeps the old wandb run-id, so iterating on hyperparameters into the same workdir produces a single wandb run with mixed settings.
   num_epochs: 100  # Total number of training epochs (full passes over the training set).
   num_train: 950  # Number of structures to use for training, drawn from the dataset.
   num_valid: 50  # Number of structures to use for validation, drawn from the dataset.
