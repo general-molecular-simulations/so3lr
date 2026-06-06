@@ -98,8 +98,11 @@ class Gaussian(nn.Module):
 
         Returns: The expanded distances, shape: (...,n,n,L)
         """
-        widths = self.param('widths', _init_widths(self.r_0, self.r_cut, self.n_rbf), ())
-        centers = self.param('centers', _init_centers(self.r_0, self.r_cut, self.n_rbf), ())
+        # Centers/widths span the grid [0, r_cut] (lower edge 0., the SchNet
+        # convention shared by PhysNet/Fourier/Bernstein, none of which carry an
+        # r_0 field). Previously referenced an undeclared `self.r_0`.
+        widths = self.param('widths', _init_widths(0., self.r_cut, self.n_rbf), ())
+        centers = self.param('centers', _init_centers(0., self.r_cut, self.n_rbf), ())
         return jnp.exp(-0.5 / (widths**2) * (r - centers) ** 2)
 
 
