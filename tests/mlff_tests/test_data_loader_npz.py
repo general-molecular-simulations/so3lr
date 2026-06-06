@@ -1,3 +1,5 @@
+import shutil
+
 import numpy as np
 import jraph
 import numpy.testing as npt
@@ -237,3 +239,35 @@ def test_jraph_dynamically_batch(calculate_neighbors_lr: bool):
                     n_pairs=k * (num_atoms * num_atoms - num_atoms) + 1
             ):
                 npt.assert_equal(np.sum(jraph.get_graph_padding_mask(x)), np.array([k]))
+
+
+def test_data_load_input_folder_aggregates(tmp_path):
+    """Folder mode aggregates every .npz in the directory.
+
+    Regression: load() previously read self.input_file directly, so
+    input_folder mode (used by from_config.data_loader_from_config for
+    directory inputs) crashed with `self.input_file is None`.
+    """
+    src = pkg_resources.resource_filename(__name__, 'test_data/ethanol.npz')
+    # Two copies (2000 frames each) -> aggregated dataset of 4000 frames.
+    shutil.copy(src, tmp_path / 'a.npz')
+    shutil.copy(src, tmp_path / 'b.npz')
+
+    loader = NpzDataLoaderSparse(input_folder=str(tmp_path))
+    # cardinality already aggregated across files; load() must match it.
+    npt.assert_equal(loader.cardinality(), 4000)
+
+    # Pick one frame from each file (index 2500 is in the second file),
+    # proving load() iterates the whole multi-file dataset with a global index
+    # (and no longer crashes in folder mode). Only two graphs are built, so the
+    # test stays fast despite the 4000-frame iteration.
+    all_data, _ = loader.load(
+        cutoff=5.,
+        calculate_neighbors_lr=False,
+        cutoff_lr=10.,
+        pick_idx=np.array([0, 2500]),
+    )
+    npt.assert_equal(len(all_data), 2)
+    graph0, lr0 = all_data[0]
+    npt.assert_(isinstance(graph0, jraph.GraphsTuple))
+    npt.assert_(isinstance(lr0, dict))
