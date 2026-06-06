@@ -1,3 +1,14 @@
+# =============================================================================
+# Default config trains a vanilla SO3krates (no long-range physics).
+# To train an SO3LR-flavored model, set the following keys to true and provide
+# a long-range cutoff:
+#   data.neighbors_lr_bool: true        # build long-range neighbor lists
+#   data.neighbors_lr_cutoff: 12.0      # long-range cutoff in Angstrom (example)
+#   model.electrostatic_energy_bool: true
+#   model.dispersion_energy_bool: true
+#   model.zbl_repulsion_bool: true      # already true by default
+# See README "Training from Scratch" for details.
+# =============================================================================
 workdir: first_experiment  # Output directory for checkpoints and hyperparameters.
 data:
   filepath: null  # Path to the training data file. Supports any ASE-readable format (.xyz, .extxyz, .pdb, etc.) or .npz files.

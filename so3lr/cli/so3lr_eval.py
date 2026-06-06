@@ -33,6 +33,22 @@ OBSERVABLES = {
     'x',  # final-layer atom embeddings; saved to _x.npz, not extxyz
 }
 
+# Map common user-facing alias names to the canonical observable/target name.
+# Applied at CLI parse time only (NOT added to OBSERVABLES itself, to avoid
+# the same quantity being counted twice in downstream loops). Keep the table
+# small and unambiguous; map each alias to a single canonical name.
+NORMALIZE_TARGET = {
+    # Hirshfeld / a0 volume-ratio label aliases (canonical name is
+    # chosen later, per-model, based on legacy_so3lr_bool).
+    'hirsh_ratios': 'hirshfeld_ratios',
+    # Charges: extxyz files sometimes store this as 'charges'.
+    'charges': 'partial_charges',
+    # The s/m/l models call their short-range repulsion 'nlh_repulsion';
+    # legacy models call it 'zbl_repulsion'. Both names stay in OBSERVABLES
+    # so a missing-from-prediction key is still handled gracefully; we do
+    # not collapse them here.
+}
+
 
 def process_predictions(
     save_to: Optional[str],
@@ -198,7 +214,9 @@ def evaluate_so3lr_on(
         model_path: Optional[str] = None,
         precision: str = 'float32',
         targets: str = 'forces,dipole_vec,hirshfeld_ratios',
-        log_file: Optional[str] = None
+        log_file: Optional[str] = None,
+        total_charge: Optional[int] = None,
+        num_unpaired_electrons: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset and calculate error metrics.
@@ -249,6 +267,14 @@ def evaluate_so3lr_on(
     # and dropped the target. Validate against the known set and warn with
     # did-you-mean suggestions before any heavy work starts.
     target_list = [t.strip() for t in targets.split(',') if t.strip()]
+    # Normalize user-typed alias names to canonical names BEFORE the
+    # known-targets membership check, so `--targets charges,hirsh_ratios`
+    # works just like `--targets partial_charges,hirshfeld_ratios`.
+    _aliased = [(t, NORMALIZE_TARGET[t]) for t in target_list if t in NORMALIZE_TARGET]
+    if _aliased:
+        for _orig, _canon in _aliased:
+            logger.warning(f"Target alias '{_orig}' -> '{_canon}' (using canonical name).")
+        target_list = [NORMALIZE_TARGET.get(t, t) for t in target_list]
     _label_targets = {
         'forces', 'energy', 'dipole_vec',
         'hirshfeld_ratios', 'a0_ratios', 'c6_ratios',
@@ -355,6 +381,26 @@ def evaluate_so3lr_on(
         )
     except Exception as e:
         raise RuntimeError(f"Error loading data: {str(e)}")
+
+    # Override per-structure total_charge / num_unpaired_electrons globals if
+    # the user passed explicit CLI flags. Without this, the dataloader silently
+    # defaults to neutral singlet (charge=0, multiplicity=1) for inputs whose
+    # extxyz info{} lacks `charge=` / `multiplicity=`, so charged or open-shell
+    # systems would be evaluated as neutral singlets without warning.
+    if total_charge is not None or num_unpaired_electrons is not None:
+        _override = {}
+        if total_charge is not None:
+            _override['total_charge'] = np.array(total_charge, dtype=np.int16).reshape(-1)
+            logger.info(f"Overriding total_charge -> {total_charge} for all structures.")
+        if num_unpaired_electrons is not None:
+            _override['num_unpaired_electrons'] = np.array(num_unpaired_electrons, dtype=np.int16).reshape(-1)
+            logger.info(f"Overriding num_unpaired_electrons -> {num_unpaired_electrons} for all structures.")
+        _new_data = []
+        for _graph, _lr_data in data:
+            _new_globals = dict(_graph.globals)
+            _new_globals.update(_override)
+            _new_data.append((_graph._replace(globals=_new_globals), _lr_data))
+        data = _new_data
 
 #   # Check for allowed atom types
 #   allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}

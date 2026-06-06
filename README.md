@@ -35,6 +35,15 @@ cd so3lr
 pip install .
 ```
 
+> **Requires Python 3.12+.** The package is pinned to `python = ">=3.12"` in `pyproject.toml`; older interpreters (e.g. 3.10 / 3.11 on some clusters) will fail at `pip install` with a resolver error. Use `python3.12 -m venv` (or `uv venv --python 3.12`) before installing.
+
+### Optional extras
+
+The base install is JAX-only and lightweight. Two extras are available:
+
+- `pip install .[pysages]` — installs PySAGES for enhanced-sampling MD (collective variables, ABF, metadynamics, harmonic bias).
+- `pip install .[tfds]` — installs `tensorflow-cpu` + `tensorflow-datasets` for the fast TFDS-based data loader used by training/fine-tuning (needed only if you want to point `--datafile` at a TFDS dataset or run `tests/mlff_tests/test_data_loader_tfds.py`).
+
 ## Models
 
 SO3LR ships in three sizes. All are bundled inside the package, so you select one **by short name** — no download or path needed. They trade off speed against accuracy:
@@ -144,6 +153,26 @@ so3lr nvt --input geometry.xyz --output trajectory.xyz --temperature 300 --md-cy
 
 The restart will continue the simulation from the exact state where it was saved, preserving atom positions, velocities, thermostat/barostat state, and simulation timestep.
 
+#### What restart_save preserves (and what it doesn't)
+
+The `.npz` written by `--restart-save` is produced by `save_state()` in `so3lr/cli/so3lr_md.py` and reloaded by `load_state()` in the same file. The exact set of fields is:
+
+**Preserved across a restart:**
+- atomic positions, momenta, forces, masses
+- the simulation box and the `fractional_coordinates` flag (so a cartesian/fractional mismatch between save and restart runs is detected and converted automatically)
+- the cycle / step counter (the run resumes at the saved cycle, not from 0)
+- the ensemble tag (NVT/NPT/NVE), and for NVT/NPT the full Nose-Hoover chain state of both the thermostat and the barostat (position, momentum, mass, tau, kinetic energy, degrees of freedom)
+- for NPT: the reference box, box position/momentum/mass, and the saved stress (or stress_tensor under `npt_flex`)
+- enhanced-sampling (PySAGES) state, when `restart_pysages_save_path` is also used — saved/loaded as a separate `.pkl` (see the PySAGES section below)
+
+**NOT preserved (regenerated on each launch):**
+- the JAX/NumPy PRNG keys, including the Langevin-thermostat key — `nvt-langevin` runs reseed from `--seed` on restart, so trajectories are not bit-identical past the restart point
+- elapsed wall-clock time (the wall-time log resets to zero for the restarted process)
+- neighbor-list allocations and JIT-compiled functions (rebuilt on launch from current geometry and buffer multipliers)
+- output/log file buffers (the new run appends a fresh header to the log and continues writing the trajectory file)
+
+For `nvt-langevin`, this means restart preserves the dynamical state but not the stochastic noise stream; for the deterministic NVT/NPT Nose-Hoover and NVE integrators, the restart is reproducible up to numerics.
+
 ### Freezing atoms during MD
 
 A subset of atoms can be held fixed during any MD run (`nve` / `nvt` / `npt`). Frozen atoms keep their reference positions while their momenta and forces are zeroed every step, so the rest of the system evolves around them (useful e.g. for holding a surface, a binding pocket, or a substrate rigid). Constraints are configured through the MD **settings YAML** (run with `so3lr --settings settings.yaml`):
@@ -173,6 +202,17 @@ Notes:
 - Provide **either** `fixed_atom_indices` **or** `mobile_atom_indices` — the complement is derived automatically. If both are given, they are used as-is.
 - `atom_mask_path` points to a NumPy `.npz` holding `mobile_atom_indices` and/or `fixed_atom_indices` arrays; explicit `*_atom_indices` keys in the YAML override it.
 - With no constraint keys set, MD runs normally (the feature is a no-op). On start-up a constrained run logs e.g. `Fixed atoms: 3; mobile atoms: 97; constraint=cartesian_anchor`.
+
+### Restricting trajectory output to a subset of atoms
+
+The `output_atom_indices` YAML key (also surfaced as `--output-atom-indices` on the CLI) restricts the saved trajectory to a chosen subset of atoms — the MD itself still propagates the full system, but only the listed atoms are written to the `.hdf5` / `.xyz` trajectory at each save step. This is useful for keeping trajectory files small in large solvent boxes when you only care about a solute, a binding pocket, an interface slab, or a tagged ligand:
+
+```yaml
+# settings.yaml — save only the first 50 atoms (e.g. the solute) of a solvated box
+output_atom_indices: [0, 1, 2, ..., 49]
+```
+
+The full box and the full per-step energies/forces are still computed; only the trajectory writer is filtered. Leave it as `null` (default) to dump every atom.
 
 Evaluate the SO3LR model on a dataset:
 
@@ -782,7 +822,7 @@ SO3LR runs normally without PySAGES installed. The enhanced sampling features ar
 
 ### Supported Ensembles
 
-Enhanced sampling currently supports **NVT (Nose-Hoover thermostat)** only. NPT, NVE, and NVT-Langevin are not yet supported.
+Enhanced sampling works in any ensemble that SO3LR's MD engine supports — **NVT (Nose-Hoover), NPT, and NVE** — *for the non-adaptive methods*. The adaptive methods that learn a bias on-the-fly (`abf`, `spectralabf`, `metad`) currently require **NVT only**, because they assume a canonical sampling distribution when accumulating the free-energy estimator. `harmonic` (umbrella sampling / string method) and `unbiased` (CV tracking only) impose no such constraint and run in NVT / NPT / NVE alike. `nvt-langevin` is not yet wired to PySAGES.
 
 ### Supported Methods
 
@@ -899,9 +939,10 @@ restart_pysages_save_path: "./restart_pysages_2.pkl"
 
 ## Coming soon!
 
-- Fast TFDS dataloader
 - General robust loss
 - Multi-head fine-tuning
+
+(The previously listed *Fast TFDS dataloader* now ships — install via `pip install .[tfds]`; see the *Optional extras* note in the Installation section.)
 
 If you would like to see new features, add your own functionality, or share ideas, please reach out or open an issue. We are always happy to collaborate and hear your thoughts!
 

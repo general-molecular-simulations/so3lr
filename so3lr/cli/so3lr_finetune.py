@@ -44,12 +44,18 @@ def finetune_so3lr(
     # Setup logging
     setup_logger(log_file)
 
-    # Initialize the model
-    if model_path is None:
-        logger.info("Using default SO3LR potential")
-        model_path = package_dir / 'params'
+    # Initialize the model. Route through the central model registry so the
+    # default matches the documented SO3LR model (so3lr-m), instead of silently
+    # falling back to the legacy `params/` checkpoint that lived next to this
+    # file. A user-supplied path is also resolved through the registry so that
+    # bundled names (so3lr-s/m/l) and filesystem paths both work.
+    from so3lr.model_registry import resolve_model, available_models
+    workdir_path, _, _ = resolve_model(model_path)
+    if model_path is None or model_path in available_models():
+        logger.info(f"Using bundled SO3LR model: {workdir_path.name}")
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
+    model_path = workdir_path
     
     if config_path is None:
         # Use the default config for finetuning.
@@ -75,6 +81,11 @@ def finetune_so3lr(
     else:
         if finetune_cfg.training.num_valid is None:
             raise ValueError(f'num_valid must not be `None`. Either set it in your config at {config_path} or via the CLI argument `--num-valid`.')
+
+    # Catch misconfigurations (e.g. neighbors_lr_bool=True with no
+    # neighbors_lr_cutoff) up front rather than letting them fail late inside
+    # the data loader. Mirrors the call already present in so3lr_train.py.
+    from_config.check_config(finetune_cfg)
 
     from_config.run_fine_tuning(
         finetune_cfg,

@@ -519,7 +519,7 @@ def infer_output_format(output_file):
 
 def common_io_options(f: Callable) -> Callable:
     """Common input/output options for all MD commands."""
-    f = click.option('--input', '--input_file', 'input_file', type=click.Path(exists=False),
+    f = click.option('--input', '--input_file', 'input_file', type=click.Path(exists=True, dir_okay=False),
                      help='Input geometry file (any ASE-readable format). [default: None]')(f)
     f = click.option('--output', '--output_file', 'output_file', type=click.Path(),
                      help='Output trajectory file (.hdf5 or .xyz). [default: <input>_<ensemble>.xyz]')(f)
@@ -568,7 +568,7 @@ def common_md_options(f: Callable) -> Callable:
                      help=f'Number of steps per MD cycle. [default: {DEFAULT_MD_STEPS_PER_CYCLE}]')(f)
     f = click.option('--restart-save', type=click.Path(), default=None,
                      help='Path to save restart data.')(f)
-    f = click.option('--restart-load', type=click.Path(exists=False), default=None,
+    f = click.option('--restart-load', type=click.Path(exists=True, dir_okay=False), default=None,
                      help='Path to load restart data from a previous run.')(f)
     f = click.option('--relax/--no-relax', default=True,
                      help='Perform geometry relaxation before MD. [default: enabled]')(f)
@@ -586,7 +586,8 @@ def common_md_options(f: Callable) -> Callable:
                      ]),
                      help='Observable to compute and save during MD. Repeatable. '
                           'Allowed: nn_energy, partial_charges, electrostatic_energy, '
-                          'dispersion_energy, zbl_repulsion, nlh_repulsion, '
+                          'dispersion_energy, zbl_repulsion (legacy name) / nlh_repulsion '
+                          '(canonical for so3lr-s/m/l; same quantity, different model output key), '
                           'electrostatic_energy_undamped, dispersion_energy_undamped, x. '
                           '[default: none]')(f)
     f = click.option('--help', '-h', is_flag=True, help='Show brief command overview.')(f)
@@ -818,7 +819,7 @@ def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
 @click.group(cls=CustomCommandClass, invoke_without_command=True,
              help="Run molecular dynamics using SO3LR Machine Learned Force Field.",
              context_settings={"help_option_names": []})
-@click.option('--settings', type=click.Path(exists=False), default=None,
+@click.option('--settings', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Path to YAML settings file. All simulation parameters are read from this file.')
 @click.option('--help-full', is_flag=True,
               help='Show detailed information about MD settings.')
@@ -1067,7 +1068,8 @@ def run_md_simulation(
         output_file = f"{Path(input_file).stem}_{_suffix[ensemble]}.xyz"
 
     if log_file is None:
-        log_file = f"{Path(output_file).stem}.log"
+        # Use with_suffix so the log file lands next to --output, not in CWD.
+        log_file = str(Path(output_file).with_suffix('.log'))
 
     setup_logger(log_file)
     logger.info(SO3LR_ASCII)
@@ -1201,6 +1203,15 @@ def fire_optimization(
         click.echo(fire_optimization.get_help(click.get_current_context()))
         return
 
+    # HDF5 output is not supported for `opt` (the writer falls back to xyz
+    # silently otherwise, leaving the file in a different location than the
+    # banner advertises). Error out early so the user picks an .xyz/.extxyz path.
+    if output_file is not None and Path(output_file).suffix.lower() in ('.hdf5', '.h5'):
+        raise click.UsageError(
+            f"--output '{output_file}': HDF5 output is not supported for `so3lr opt`. "
+            f"Use an .xyz or .extxyz extension instead."
+        )
+
     # Generate default output file name if not provided
     if input_file is not None and output_file is None:
         input_path = Path(input_file)
@@ -1208,7 +1219,8 @@ def fire_optimization(
 
     # Generate default log file name based on output file if not explicitly provided
     if log_file is None:
-        log_file = f"{Path(output_file).stem}.log"
+        # Use with_suffix so the log file lands next to --output, not in CWD.
+        log_file = str(Path(output_file).with_suffix('.log'))
 
     # Setup logging with default levels
     setup_logger(log_file)
@@ -1360,7 +1372,7 @@ def nve_md(**kwargs) -> None:
 # Define the 'eval' subcommand
 @cli.command(name='eval', help="Evaluate SO3LR model on a dataset with `so3lr eval --datafile dataset.extxyz`.")
 # Input/Output group
-@click.option('--datafile', type=click.Path(exists=False), required=False,
+@click.option('--datafile', type=click.Path(exists=True, dir_okay=False), required=False,
               help='Path to dataset file (extxyz format) containing structures to evaluate.')
 @click.option('--save-to', type=click.Path(), default=None,
               help='Output file to save predictions (.extxyz format). If not provided, predictions are not saved.')
@@ -1377,15 +1389,26 @@ def nve_md(**kwargs) -> None:
               help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')
 @click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
               help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}].')
+@click.option('--total-charge', 'total_charge', default=None, type=int,
+              help='Override total charge for every structure in the dataset. '
+                   'If omitted, the per-structure `charge=` field in extxyz info{} is used '
+                   '(defaulting to 0 when absent).')
+@click.option('--spin', 'num_unpaired_electrons', default=None, type=int,
+              help='Override spin (number of unpaired electrons = multiplicity - 1) for every '
+                   'structure. If omitted, the per-structure `multiplicity=` field in extxyz '
+                   'info{} is used (defaulting to 1 when absent, i.e. singlet).')
 # Evaluation settings
 @click.option('--batch-size', default=1, type=int,
               help='Number of molecules per batch. [default: 1]')
 @click.option('--targets', default='forces,dipole_vec,hirshfeld_ratios', type=str,
               help='Comma-separated list of targets to evaluate. '
-                   'Standard targets: forces, energy, dipole_vec, hirshfeld_ratios. '
+                   'Standard targets: forces, energy, dipole_vec, hirshfeld_ratios '
+                   '(canonical; aliases hirsh_ratios and a0_ratios are accepted, '
+                   'and the new so3lr-s/m/l models report ratios as a0_ratios). '
                    'Observables (saved to output, metrics only if ground truth exists): '
-                   'nn_energy, partial_charges, electrostatic_energy, dispersion_energy, '
-                   'zbl_repulsion, electrostatic_energy_undamped, dispersion_energy_undamped. '
+                   'nn_energy, partial_charges (alias: charges), electrostatic_energy, dispersion_energy, '
+                   'nlh_repulsion (canonical for so3lr-s/m/l; legacy models use zbl_repulsion), '
+                   'electrostatic_energy_undamped, dispersion_energy_undamped. '
                    'Embeddings: x (final-layer per-atom features, saved to <output>_x.npz). '
                    '[default: forces,dipole_vec,hirshfeld_ratios]')
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
@@ -1402,6 +1425,8 @@ def eval_model(
     precision: str,
     lr_cutoff: float,
     dispersion_damping: float,
+    total_charge: Optional[int],
+    num_unpaired_electrons: Optional[int],
     # Evaluation settings
     batch_size: int,
     targets: str,
@@ -1430,7 +1455,8 @@ def eval_model(
 
     # Generate default log file name based on output file if not explicitly provided
     if log_file is None:
-        log_file = f"{Path(output_file).stem}.log"
+        # Use with_suffix so the log file lands next to --output, not in CWD.
+        log_file = str(Path(output_file).with_suffix('.log'))
 
     # Setup logging with default levels
     setup_logger(log_file)
@@ -1452,6 +1478,8 @@ def eval_model(
     logger.info(f"Precision:                 {precision}")
     logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
     logger.info(f"Dispersion damping:        {dispersion_damping} Å")
+    logger.info(f"Total charge:              {'(from info{} or 0)' if total_charge is None else total_charge}")
+    logger.info(f"Spin (unpaired e-):        {'(from info{} or 0)' if num_unpaired_electrons is None else num_unpaired_electrons}")
     logger.info(f"JIT compilation:           {'Enabled' if jit_compile else 'Disabled'}")
     if save_to:
         logger.info(f"Saving to:                 {save_to}")
@@ -1486,7 +1514,9 @@ def eval_model(
         model_path=model_path,
         precision=precision,
         targets=targets,
-        log_file=log_file
+        log_file=log_file,
+        total_charge=total_charge,
+        num_unpaired_electrons=num_unpaired_electrons,
     )
     logger.info("=" * 60)
     logger.info("Evaluation completed successfully!")
@@ -1594,7 +1624,7 @@ def finetune_model(
 
 
 @cli.command(name='train', help="Train a SO3krates model from a config file with `so3lr train --config config.yaml`.")
-@click.option('--config', 'config_path', type=click.Path(exists=False), default=None,
+@click.option('--config', 'config_path', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Path to the training config file (YAML or JSON).')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
@@ -1652,7 +1682,7 @@ def train_model(
 
 # Define the 'tune-ewald' subcommand
 @cli.command(name='tune-ewald', help="Tune k-space electrostatics parameters (Ewald/PME/P3M): `so3lr tune-ewald --input geometry.xyz`.")
-@click.option('--settings', type=click.Path(exists=False), default=None,
+@click.option('--settings', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Path to YAML settings file.')
 @common_io_options
 @common_model_options
@@ -1785,7 +1815,7 @@ def tune_ewald(
     tune(settings_dict)
     time_end = time.time()
     logger.info("=" * 60)
-    logger.info('Tunings completed successfully!')
+    logger.info('Tuning completed successfully!')
     logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
 
 

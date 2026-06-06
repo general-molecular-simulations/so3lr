@@ -227,7 +227,18 @@ def ASE_to_jraph(
     # Read additional properties from .info and .arrays in Atoms object.
     total_charge = mol.info.get('charge')
     multiplicity = mol.info.get('multiplicity')
-    hirshfeld_ratios = mol.arrays.get('hirsh_ratios')
+    # The polarizability/volume-ratio label has been stored under several keys
+    # over time. Accept any of them and pick the first that exists, so users
+    # don't silently get NaN labels when their extxyz uses the canonical
+    # 'hirshfeld_ratios' name or the new-model 'a0_ratios' name. Aliases
+    # checked, in order of preference:
+    #   'hirshfeld_ratios' (canonical) -> 'hirsh_ratios' (legacy short form)
+    #   -> 'a0_ratios' (so3lr-s/m/l output name).
+    hirshfeld_ratios = None
+    for _ratio_key in ('hirshfeld_ratios', 'hirsh_ratios', 'a0_ratios'):
+        if _ratio_key in mol.arrays:
+            hirshfeld_ratios = mol.arrays.get(_ratio_key)
+            break
 
     # Total charges are assumed to be zero when not specified.
     if total_charge is None:

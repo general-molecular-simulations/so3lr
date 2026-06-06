@@ -825,7 +825,25 @@ def run_fine_tuning(
             f'`ll_obs_023`)'
         )
     
-    # Finalize the config for IO
+    # Finalize the config for IO.
+    # The fine-tuned model's architecture is fully determined by the
+    # checkpoint we are starting from, so any `model:` block in the user's
+    # finetune YAML cannot actually take effect — the saved hyperparameters
+    # are authoritative. Previously this assignment was silent; now warn
+    # loudly so users notice that their model: overrides are being dropped.
+    if 'model' in config and config.model is not None:
+        try:
+            user_model_keys = sorted(config.model.keys())
+        except Exception:
+            user_model_keys = []
+        if user_model_keys:
+            logger.warning(
+                'Ignoring user-supplied `model:` block in finetune config; '
+                'the checkpoint at %s defines the model architecture. '
+                'Dropped keys: %s',
+                start_from_workdir,
+                user_model_keys,
+            )
     config.model = config_start_from_workdir.model
     # For average number of neighbors message normalization, we have to overwrite the average
     # number of neighbors in case a finetuned model will serve as starting point for another finetuning run.

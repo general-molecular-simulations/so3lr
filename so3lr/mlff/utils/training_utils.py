@@ -465,6 +465,7 @@ property_to_mae = {
     'forces': node_mae_loss,
     'dipole_vec': graph_mae_loss_per_atom,
     'hirshfeld_ratios': node_mae_loss,
+    'a0_ratios': node_mae_loss,
     'c6_ratios': node_mae_loss,
 }
 
@@ -474,8 +475,15 @@ property_to_loss = {
     'forces': node_mse_loss,
     'dipole_vec': graph_mse_loss_per_atom,
     'hirshfeld_ratios': node_mse_loss,
+    'a0_ratios': node_mse_loss,
     'c6_ratios': node_mse_loss,
 }
+
+# Ratio-head alias: legacy SO3LR emits 'hirshfeld_ratios'; the new so3lr-s/m/l
+# models emit 'a0_ratios' (per-atom static-polarizability ratios). Loaded data
+# is always keyed 'hirshfeld_ratios'. We accept either spelling in loss_weights
+# and remap at the loss-fn entry point so users do not see a KeyError.
+_RATIO_ALIAS = {'hirshfeld_ratios': 'a0_ratios', 'a0_ratios': 'hirshfeld_ratios'}
 
 def make_loss_fn(
     obs_fn: Callable, weights: Dict, scales: Dict = None,
@@ -503,11 +511,34 @@ def make_loss_fn(
     _scales = {k: jnp.ones(1) for k in targets} if scales is None else scales
     target_to_idx = {t: i for i, t in enumerate(targets)}
 
+    # One-time announcement if a ratio target is present; the actual rename
+    # happens at JIT-trace time inside loss_fn below.
+    for _t in targets:
+        if _t in _RATIO_ALIAS:
+            logger.info(
+                f"[loss] ratio target '{_t}' is alias-aware: model output "
+                f"'{_RATIO_ALIAS[_t]}' (if present) will be remapped to '{_t}'."
+            )
+            break
+
     @jax.jit
     def loss_fn(params, batch: Dict[str, jnp.ndarray]):
         inputs = {k: v for k, v in batch.items() if k not in targets}
         outputs_true = {k: v for k, v in batch.items() if k in targets}
         outputs_predict = obs_fn(params, **inputs)
+
+        # Rename ratio-head key if the model emits 'a0_ratios' while the user
+        # weighted 'hirshfeld_ratios' (or vice-versa). Trace-time only: the
+        # dict keys are Python-level so this does not affect the jitted graph.
+        outputs_predict = dict(outputs_predict)
+        for _t in targets:
+            _alias = _RATIO_ALIAS.get(_t)
+            if _alias is None:
+                continue
+            if _t not in outputs_predict and _alias in outputs_predict:
+                outputs_predict[_t] = outputs_predict.pop(_alias)
+            if _t not in outputs_true and _alias in outputs_true:
+                outputs_true[_t] = outputs_true.pop(_alias)
 
         # Extract adaptive robust loss parameters if enabled
         adaptive_alphas = None
@@ -605,6 +636,18 @@ def make_val_fn(
         inputs = {k: v for k, v in batch.items() if k not in targets}
         outputs_true = {k: v for k, v in batch.items() if k in targets}
         outputs_predict = obs_fn(params, **inputs)
+
+        # Mirror the ratio-head alias rename used in make_loss_fn.
+        outputs_predict = dict(outputs_predict)
+        for _t in targets:
+            _alias = _RATIO_ALIAS.get(_t)
+            if _alias is None:
+                continue
+            if _t not in outputs_predict and _alias in outputs_predict:
+                outputs_predict[_t] = outputs_predict.pop(_alias)
+            if _t not in outputs_true and _alias in outputs_true:
+                outputs_true[_t] = outputs_true.pop(_alias)
+
         metrics = {}
 
         # Extract adaptive robust loss parameters if enabled

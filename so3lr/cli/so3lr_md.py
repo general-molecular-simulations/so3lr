@@ -357,6 +357,14 @@ def init_hdf5_store(
     num_box_entries: int,
     exist_ok: bool = False,
     observables: Optional[Sequence[str]] = [],
+    so3lr_version: Optional[str] = None,
+    ensemble: Optional[str] = None,
+    md_dt_fs: Optional[float] = None,
+    md_steps: Optional[int] = None,
+    atomic_numbers: Optional[Any] = None,
+    cell_a0: Optional[Any] = None,
+    input_file: Optional[str] = None,
+    model_path: Optional[str] = None,
 ) -> HDF5Store:
     """
     Initialize an HDF5 storage object for trajectory data.
@@ -367,6 +375,15 @@ def init_hdf5_store(
         num_atoms: Number of atoms in the system.
         num_box_entries: Number of entries in the box vector (typically 3).
         exist_ok: Whether to overwrite the file if it exists.
+        observables: Observable names that get their own dataset.
+        so3lr_version: SO3LR package version recorded as a root attribute.
+        ensemble: Ensemble label (nve/nvt/nvt-langevin/npt) recorded as a root attribute.
+        md_dt_fs: MD timestep in femtoseconds recorded as a root attribute.
+        md_steps: Number of inner integration steps per write cycle.
+        atomic_numbers: 1D iterable of atomic numbers for the initial geometry.
+        cell_a0: Initial cell as a (3,3) or (3,) array in Angstrom. Zeros if non-periodic.
+        input_file: Original input geometry filename.
+        model_path: Resolved SO3LR model name or path.
 
     Raises:
         RuntimeError: If the file exists and exist_ok is set to False.
@@ -429,7 +446,38 @@ def init_hdf5_store(
                 f"Observable '{o}' is not recognized or not supported for HDF5 storage."
             )
 
-    return HDF5Store(save_path, datasets=dataset, mode='w')
+    store = HDF5Store(save_path, datasets=dataset, mode='w')
+
+    # Write self-describing root-group attributes so the .hdf5 file carries
+    # provenance on its own (model, ensemble, timestep, system, observables).
+    # Only supplied values are written; defaults stay absent. All values are
+    # coerced to plain numpy/string types — no nested dicts.
+    try:
+        with h5py.File(save_path, mode='a') as h5f:
+            if so3lr_version is not None:
+                h5f.attrs['so3lr_version'] = str(so3lr_version)
+            if ensemble is not None:
+                h5f.attrs['ensemble'] = str(ensemble)
+            if md_dt_fs is not None:
+                h5f.attrs['md_dt_fs'] = float(md_dt_fs)
+            if md_steps is not None:
+                h5f.attrs['md_steps'] = int(md_steps)
+            if atomic_numbers is not None:
+                h5f.attrs['atomic_numbers'] = np.asarray(
+                    atomic_numbers, dtype=np.int32
+                )
+            if cell_a0 is not None:
+                h5f.attrs['cell_a0'] = np.asarray(cell_a0, dtype=np.float32)
+            if observables is not None:
+                h5f.attrs['observables'] = ','.join(str(o) for o in observables)
+            if input_file is not None:
+                h5f.attrs['input_file'] = str(input_file)
+            if model_path is not None:
+                h5f.attrs['model_path'] = str(model_path)
+    except Exception as e:
+        logger.warning(f"Could not write HDF5 root attributes: {e}")
+
+    return store
 
 
 def write_to_hdf5(
@@ -693,6 +741,12 @@ def check_cell(
     Returns:
         np.ndarray: The validated cell matrix if all checks pass, or None if the cell is zero.
     """
+    # Sanity check the long-range cutoff up front, before the all-zero cell
+    # early return. Otherwise non-periodic systems would silently accept a
+    # too-small lr_cutoff because this check used to live below the return.
+    if lr_cutoff < 10 and (kspace_electrostatics == None or kspace_smearing == None):
+        raise ValueError(f'Long-range cutoff below 10 Å is not supported yet. Provided cutoff: {lr_cutoff} Å.')
+
     if np.all(cell == 0):
         return None
     
@@ -703,9 +757,6 @@ def check_cell(
 
     # if np.any(np.diag(cell) < lr_cutoff * 2):
     #     raise ValueError(f'Each dimension of the cell {np.diag(cell)} must be at least twice the long-range cutoff distance [{lr_cutoff} Å].')
-        
-    if lr_cutoff < 10 and (kspace_electrostatics == None or kspace_smearing == None):
-        raise ValueError(f'Long-range cutoff below 10 Å is not supported yet. Provided cutoff: {lr_cutoff} Å.')
 
     return cell
 
@@ -1113,6 +1164,9 @@ def compute_quantities(
                     k_grid=k_grid,
                     k_grid_disp=k_grid_disp
                 )
+        elif ensemble == 'nve':
+            # NVE: the conserved quantity is the total energy E = KE + PE.
+            H = KE + PE
         else:
             H = None
 
@@ -1146,6 +1200,9 @@ def compute_quantities(
                 k_grid=k_grid,
                 k_grid_disp=k_grid_disp
             )
+        elif ensemble == 'nve':
+            # NVE: the conserved quantity is the total energy E = KE + PE.
+            H = KE + PE
         else:
             H = None
 
@@ -2073,6 +2130,15 @@ def perform_md(
     langevin_removecmmotion = all_settings.get('langevin_removecmmotion')
     langevin_thermo = all_settings.get('langevin_thermo')
 
+    # langevin_thermo is the dimensionless timescale used to build the friction
+    # gamma = 1 / (md_dt * langevin_thermo). A zero (or negative) value silently
+    # produces ZeroDivisionError / inf gamma far downstream; catch it here.
+    if ensemble == 'nvt-langevin' and (langevin_thermo is None or langevin_thermo <= 0):
+        raise ValueError(
+            f"--langevin-thermo must be > 0 (received {langevin_thermo}). "
+            f"It is a dimensionless timescale; the friction is gamma = 1 / (md_dt * langevin_thermo)."
+        )
+
     # Format control
     output_format = all_settings.get('output_format')
     save_buffer = all_settings.get('save_buffer')
@@ -2231,6 +2297,21 @@ def perform_md(
         else:
             num_atoms = len(output_atom_indices)
 
+        # Record initial cell (zeros if non-periodic) for self-describing attrs.
+        try:
+            _cell_a0 = np.asarray(initial_geometry.get_cell(), dtype=np.float32)
+        except Exception:
+            _cell_a0 = np.zeros((3, 3), dtype=np.float32)
+        try:
+            _atomic_numbers_attr = np.asarray(
+                initial_geometry.get_atomic_numbers(), dtype=np.int32
+            )
+        except Exception:
+            _atomic_numbers_attr = None
+        # md_dt is in picoseconds at this point (the CLI parser converts fs->ps).
+        # Record the user-facing femtosecond value as the root attr.
+        _md_dt_fs = float(md_dt) * 1000.0 if md_dt is not None else None
+        from .. import __version__ as _so3lr_version
         hdf5_store = init_hdf5_store(
             save_to=output_file,
             batch_size=save_buffer,
@@ -2238,6 +2319,14 @@ def perform_md(
             num_box_entries=box.shape[0],
             exist_ok=True,
             observables = observables,
+            so3lr_version=_so3lr_version,
+            ensemble=ensemble,
+            md_dt_fs=_md_dt_fs,
+            md_steps=md_steps,
+            atomic_numbers=_atomic_numbers_attr,
+            cell_a0=_cell_a0,
+            input_file=input_file,
+            model_path=model_path,
         )
 
     current_cycle = 0
@@ -2935,12 +3024,12 @@ def perform_md(
 
     if average_time_per_step is not None and backend in ["gpu", "cuda", "rocm"]:
         if average_time_per_step > 1.2 * 3.25e-6 * len(initial_geometry):
-            logger.warn('Ideally, the average time per step should be close to {:.2e} seconds (measured on an A100 GPU)'.format(
+            logger.warning('Ideally, the average time per step should be close to {:.2e} seconds (measured on an A100 GPU)'.format(
                 3.25e-6 * len(initial_geometry)))
-            logger.warn('Consider decreasing the buffer sizes if the system has equilibrated (--buffer-sr 1.15, --buffer-lr 1.1)')
-            logger.warn('and/or increasing the number of steps in each jax.lax.fori_loop (--steps 1000)')
+            logger.warning('Consider decreasing the buffer sizes if the system has equilibrated (--buffer-sr 1.15, --buffer-lr 1.1)')
+            logger.warning('and/or increasing the number of steps in each jax.lax.fori_loop (--steps 1000)')
             if output_format == 'extxyz':
-                logger.warn('and/or saving the trajectory in HDF5 format (--output traj_name.hdf5)')
+                logger.warning('and/or saving the trajectory in HDF5 format (--output traj_name.hdf5)')
 
 
 def create_min_fn(
@@ -3242,9 +3331,13 @@ def perform_min(
     minimization_trajectory = []
     minimization_trajectory.append(np.array(position))
 
-    num_cycles = 0
+    # `min_cycles` is a hard ceiling on outer FIRE cycles. With
+    # `force_convergence` set, the loop exits early once f_max drops below
+    # the threshold; otherwise it runs the full `min_cycles` cycles and
+    # warns the user that the requested convergence was never reached.
+    total_iter = 0
     i = 1
-    while num_cycles < min_cycles:
+    while total_iter < min_cycles:
         if lr:
             min_state, nbrs, nbrs_lr = jax.lax.fori_loop(
                 0,
@@ -3293,23 +3386,32 @@ def perform_min(
         minimization_trajectory.append(np.array(min_state.position))
 
         # Check if force convergence criterion is met
-        if force_convergence is not None:
-            if f_max > force_convergence:
-                num_cycles -= 1
-            else:
-                logger.info(
-                    f"Convergence criterion met at step {i*min_steps}: Fmax = {f_max:.3f} eV/Å")
-                break
+        if force_convergence is not None and f_max <= force_convergence:
+            logger.info(
+                f"Convergence criterion met at step {i*min_steps}: Fmax = {f_max:.3f} eV/Å")
+            break
 
-        num_cycles += 1
+        total_iter += 1
         i += 1
+    else:
+        # Loop exited because the hard min_cycles ceiling was hit without
+        # meeting the requested force_convergence threshold (if any).
+        if force_convergence is not None and f_max > force_convergence:
+            logger.warning(
+                f"FIRE minimization hit the min_cycles ceiling "
+                f"({min_cycles} cycles * {min_steps} steps = "
+                f"{min_cycles*min_steps} total steps) without reaching "
+                f"force_convergence={force_convergence:.3f} eV/Å "
+                f"(last Fmax = {f_max:.3f} eV/Å). Saving best-so-far "
+                f"positions. Increase --min-cycles or relax --force-conv "
+                f"if tighter convergence is required.")
 
     # Save optimization result and return optimized geometry
     positions = minimization_trajectory
     if output_format == 'extxyz':
         write_to_extxyz(output_file, initial_geometry, boxes=box, momenta=None, positions=positions)
     elif output_format == 'hdf5':
-        logger.warn(f"Output format is 'hdf5', changing output file extension to 'xyz' for minimization.") #TODO: Saving in xyz for simplicity for now, add hdf5 support
+        logger.warning(f"Output format is 'hdf5', changing output file extension to 'xyz' for minimization.") #TODO: Saving in xyz for simplicity for now, add hdf5 support
         output_file = output_file.rsplit('.', 1)[0] + '_opt.xyz'
         write_to_extxyz(output_file, initial_geometry, boxes=box, momenta=None, positions=positions)
         # write_to_hdf5(hdf5_store, momenta=None, positions=positions, boxes=box)
