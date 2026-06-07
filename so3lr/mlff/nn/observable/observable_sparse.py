@@ -140,9 +140,20 @@ def _batched_kspace_dispersion(kspace_module, inputs):
         return safe_scale(-q_disp * potentials * _Hartree, mask_g)
 
     node_mask = inputs['node_mask']
-    c6_ratios = inputs.get('c6_ratios')
-    if c6_ratios is None:
-        c6_ratios = jnp.zeros_like(node_mask, dtype=inputs['positions'].dtype)
+    # Resolve per-atom C6 ratios exactly like the non-batched
+    # DispersionEnergyKspace.__call__ does. The previous silent jnp.zeros
+    # fallback zeroed reciprocal-space dispersion for every batched/PBC
+    # structure: EnergySparse never writes 'c6_ratios' into ``inputs``, so the
+    # .get() always missed and the dispersion charges collapsed to zero.
+    if kspace_module.legacy:
+        hirshfeld_ratios = inputs.get('hirshfeld_ratios')
+        if hirshfeld_ratios is None:
+            hirshfeld_ratios = kspace_module.hirshfeld_ratios(inputs)['hirshfeld_ratios']
+        c6_ratios = hirshfeld_ratios ** 2
+    else:
+        c6_ratios = inputs.get('c6_ratios')
+        if c6_ratios is None:
+            c6_ratios = kspace_module.c6_ratios(inputs)['c6_ratios']
 
     return _vmap_kspace_per_graph(
         _solve_single, inputs,
