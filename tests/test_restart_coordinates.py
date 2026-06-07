@@ -49,7 +49,7 @@ _BASE_MD_SETTINGS = {
     'min_max_dt': 0.1,
     'min_n_min': 2,
     'min_print': True,
-    'md_dt': 0.0005,
+    'md_dt': 0.5,  # fs (the CLI/YAML convention; converted fs->ps internally)
     'md_T': 300,
     'md_cycles': 2,
     'md_steps': 500,
