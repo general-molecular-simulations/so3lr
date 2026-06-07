@@ -32,8 +32,11 @@ def validate():
         'stderr.log',
         required_strings=['completed successfully',
                           'Loading state from',
-                          'Restart file contains a different ensemble than the one specified.',
-                          'Requested ensemble: NVT'],
+                          # RestartInNewEnsembleError message (reworded in fdf60ff):
+                          # "Restart file was saved under ensemble=NVE; loading
+                          #  into ensemble=NVT. ..."
+                          'Restart file was saved under ensemble=NVE',
+                          'loading into ensemble=NVT'],
     )
 
     # Check all settings are reflected in logs

@@ -7,7 +7,7 @@ log_file: so3lr.log
 
 # Model settings
 precision: float64
-lr_cutoff: 5.0
+lr_cutoff: 12.0  # SO3LR requires >= 10 A (see check_cell); matches the other non-PBC cases
 dispersion_damping: 1.0
 buffer_size_multiplier_sr: 1.25
 buffer_size_multiplier_lr: 1.25
