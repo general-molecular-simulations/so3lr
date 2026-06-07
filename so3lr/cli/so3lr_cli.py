@@ -786,7 +786,7 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     'kspace_dispersion_spacing', 'kspace_dispersion_interp_nodes',
     # Numerical / safety knobs
     'matmul_precision', 'minimum_cell_size_multiplier',
-    'energy_drift_threshold', 'dispersion_tail_correction',
+    'energy_drift_threshold', 'drift_warmup_ps', 'dispersion_tail_correction',
     # Ensemble-specific
     'md_T', 'md_P', 'init_T', 'npt_coupling', 'num_unpaired_electrons',
     # Enhanced sampling (PySAGES)

@@ -104,7 +104,8 @@ min_n_min: 2                               # FIRE: min steps in correct directio
 md_dt: 0.5                                 # MD timestep in femtoseconds [Default: 0.5]  (CLI: --dt)
 md_cycles: 100                             # Number of MD cycles to run [Default: 100]
 md_steps: 100                             # Number of steps per MD cycle [Default: 100]
-energy_drift_threshold: 0.05               # Per-atom total-energy drift (eV/atom) that triggers a neighbor-list rebuild / safety check [Default: 0.05]
+energy_drift_threshold: 0.1                # Drift RATE of the conserved quantity (NVE: total E; NVT/NPT: NH invariant) in meV/atom/ps that triggers a one-time warning. Reference taken after warmup. Floor ~0.011 (dt=0.5 fs, any precision); dt=1 fs reaches 0.025-0.058; 0.1 only flags clearly-unstable runs. [Default: 0.1]
+drift_warmup_ps: 5.0                       # Equilibration window (ps) skipped before the drift reference is set, and the min baseline before the first check. Early-run drift is expected and not flagged. Warning can first fire at ~2x this. [Default: 5.0]
 
 ## NVT / NPT Ensemble Settings
 md_T: 300.0                                # Target temperature in Kelvin (NVT/NPT/NVT-Langevin) [Default: 300.0]  (CLI: --temperature)

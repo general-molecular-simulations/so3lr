@@ -2644,6 +2644,7 @@ def perform_md(
         md_P,
     )
 
+    md_dt_ps = float(md_dt)  # capture ps value before it becomes jax-md natural units (used by the drift watchdog below)
     md_dt = dtype(unit_dict['dt'])  # ps -> jax-md natural units
     md_T = dtype(unit_dict['T']) if unit_dict['T'] is not None else None
     md_P = dtype(unit_dict['P']) if unit_dict['P'] is not None else None
@@ -2805,13 +2806,31 @@ def perform_md(
     else:
         logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
 
-    # Reference for the conserved-quantity drift check in the loop below. H is
-    # the Nose-Hoover invariant for NVE/NVT/NPT and should stay ~constant; large
-    # drift signals integration error. NVT-Langevin is stochastic (its KE+PE is
-    # not conserved) and is excluded.
-    H0 = float(H) if (H is not None and np.isfinite(float(H)) and float(H) != 0.0) else None
+    # --- Conserved-quantity drift watchdog --------------------------------
+    # For NVE the conserved quantity is the total energy E = KE+PE; for the
+    # Nose-Hoover NVT/NPT thermostats it is the NH invariant. compute_quantities()
+    # returns the appropriate one in `H`. We track its drift as a RATE
+    # normalised per atom and per ps (meV/atom/ps) -- a size- and length-
+    # independent measure, unlike a relative % of the (huge) absolute energy.
+    #
+    # Calibrated on 1 ns NVE water (SO3LR-M, 12288 atoms): well-behaved
+    # dt=0.5 fs runs drift <=0.011 meV/atom/ps (float32 == float64 here; the
+    # ~0.011 is a model/PME floor, not a precision effect); dt=1.0 fs runs reach
+    # 0.025-0.058. The default 0.1 threshold sits above all of these, so it only
+    # fires when the integration is clearly unstable (wrong timestep, blow-up).
+    #
+    # The reference is taken AFTER an equilibration warmup (drift_warmup_ps),
+    # because (a) the first ps are a thermal transient where some drift is
+    # normal and (b) a rate measured over <~1 ps is swamped by per-step noise
+    # (~0.05 eV here). The same warmup is reused as the minimum baseline before
+    # the first evaluation, so the earliest a warning can fire is ~2*warmup ps.
+    # The warning fires at most once. NVT-Langevin is stochastic (KE+PE not
+    # conserved) and is excluded.
+    energy_drift_threshold = float(all_settings.get('energy_drift_threshold', 0.1))  # meV/atom/ps
+    drift_warmup_ps = float(all_settings.get('drift_warmup_ps', 5.0))
+    drift_ref_H = None      # conserved quantity at the reference point (eV)
+    drift_ref_t = None      # simulated time at the reference point (ps)
     drift_warned = False
-    energy_drift_threshold = float(all_settings.get('energy_drift_threshold', 0.05))
 
     momenta, positions, boxes = [], [], []
     cycle_md = 0
@@ -3012,19 +3031,35 @@ def perform_md(
                 raise RuntimeError(
                     "MD simulation diverged: NaN/Inf detected in energy or temperature.")
 
-            # Warn (once) on large drift of the conserved quantity. Skipped for
-            # the stochastic Langevin thermostat, where KE+PE is not conserved.
-            if (not drift_warned and H0 is not None and H is not None
-                    and ensemble != 'nvt-langevin' and np.isfinite(float(H))):
-                rel_drift = abs(float(H) - H0) / abs(H0)
-                if rel_drift > energy_drift_threshold:
-                    logger.warning(
-                        f"Conserved-quantity drift {rel_drift:.1%} exceeds "
-                        f"{energy_drift_threshold:.0%} at step {current_cycle*md_steps} "
-                        f"(H0={H0:.4f} eV, H={float(H):.4f} eV). This usually means the "
-                        f"integration is unstable; consider a smaller timestep or float64 "
-                        f"precision. (Set energy_drift_threshold to tune/silence this.)")
-                    drift_warned = True
+            # Watchdog: drift RATE of the conserved quantity in meV/atom/ps.
+            # The reference is set once, after drift_warmup_ps of equilibration;
+            # the warning then fires at most once. Skipped for stochastic
+            # Langevin, where KE+PE is not conserved.
+            if (not drift_warned and ensemble != 'nvt-langevin'
+                    and H is not None and np.isfinite(float(H)) and float(H) != 0.0):
+                t_ps = current_cycle * md_steps * md_dt_ps
+                if drift_ref_H is None:
+                    # Still warming up: set the reference once past the warmup.
+                    if t_ps >= drift_warmup_ps:
+                        drift_ref_H = float(H)
+                        drift_ref_t = t_ps
+                else:
+                    window_ps = t_ps - drift_ref_t
+                    # Require at least one warmup of baseline so the rate is not
+                    # dominated by per-step noise.
+                    if window_ps >= drift_warmup_ps:
+                        n_atoms_md = state.position.shape[0]
+                        drift_rate = (float(H) - drift_ref_H) / n_atoms_md / window_ps * 1000.0
+                        if abs(drift_rate) > energy_drift_threshold:
+                            logger.warning(
+                                f"Conserved-quantity drift {drift_rate:+.3f} meV/atom/ps exceeds "
+                                f"{energy_drift_threshold:.3f} meV/atom/ps at step "
+                                f"{current_cycle*md_steps} (measured over {window_ps:.1f} ps after a "
+                                f"{drift_warmup_ps:.1f} ps warmup). This usually means the integration "
+                                f"is unstable; consider a smaller timestep or float64 precision. "
+                                f"(Set energy_drift_threshold [meV/atom/ps] to tune, or drift_warmup_ps "
+                                f"to change the equilibration window; some drift early in the run is normal.)")
+                            drift_warned = True
 
             if ensemble == 'npt':
                 p_str = ''
