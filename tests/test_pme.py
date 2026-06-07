@@ -24,6 +24,11 @@ from ase.calculators.calculator import Calculator
 
 from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 from so3lr import So3lrCalculator, So3lrPotential, to_jax_md
+from so3lr.model_registry import resolve_model
+
+# Original/legacy SO3LR model, resolved via the registry so the test is
+# decoupled from the on-disk layout (the model now lives under models/so3lr).
+MODEL_DIR = resolve_model('so3lr')[0]
 import jax_md
 
 # Enable 64-bit precision
@@ -119,7 +124,7 @@ class TestPMEDirectComparison:
 
         # Create SO3LR calculator with observables
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -209,7 +214,7 @@ class TestPMEDirectComparison:
         atoms.info['k_smearing'] = np.array([smearing])
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -274,7 +279,7 @@ class TestASECalculatorKSpaceReporting:
             lambda **kwargs: (dummy_neighbors, dummy_partitioning),
         )
 
-        with caplog.at_level(logging.MLFF):
+        with caplog.at_level(logging.INFO, logger="SO3LR"):
             calc.calculate(atoms)
 
         assert 'Using k-space grid from atoms.info; it overrides ASE calculator k-space kwargs.' in caplog.text
@@ -312,7 +317,7 @@ class TestASECalculatorKSpaceReporting:
         )
         monkeypatch.setitem(sys.modules, 'jaxpme', fake_jaxpme)
 
-        with caplog.at_level(logging.MLFF):
+        with caplog.at_level(logging.INFO, logger="SO3LR"):
             calc.calculate(atoms)
 
         assert 'Generating PME k-space grid from ASE calculator kwargs.' in caplog.text
@@ -347,7 +352,7 @@ class TestPMEEnergyDecomposition:
 
         # Get calculation with both short-range and k-space electrostatics
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,

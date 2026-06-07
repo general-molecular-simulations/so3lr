@@ -13,12 +13,7 @@ from pathlib import Path
 
 import logging
 
-from functools import partial, partialmethod
-
-logging.MLFF = 35
-logging.addLevelName(logging.MLFF, 'MLFF')
-logging.Logger.trace = partialmethod(logging.Logger.log, logging.MLFF)
-logging.mlff = partial(logging.log, logging.MLFF)
+logger = logging.getLogger("SO3LR")
 
 
 def compute_senders_and_receivers_np(
@@ -106,18 +101,18 @@ class AseDataLoaderSparse:
 
         file_list = self.make_file_list()
 
-        logging.mlff(f"Loading data from file_list: {file_list} ...")
+        logger.info(f"Loading data from file_list: {file_list} ...")
 
         i = 0
         for file_path in file_list:
-            logging.mlff(
+            logger.info(
                 f"Load data from {file_path}."
             )
-            logging.mlff(
+            logger.info(
                 f"Calculate short range neighbors within cutoff={cutoff} Ang."
             )
             if calculate_neighbors_lr:
-                logging.mlff(
+                logger.info(
                     f"Calculate long-range neighbors within cutoff_lr={cutoff_lr} Ang."
                 )
             for a in tqdm(iread(file_path), mininterval=60, maxinterval=600):
@@ -148,8 +143,8 @@ class AseDataLoaderSparse:
                 raise RuntimeError(
                     f'`max(pick_idx) = {max(pick_idx)} >= cardinality = {i} of the dataset`.'
                 )
-        logging.mlff("... done!")
-        logging.mlff(
+        logger.info("... done!")
+        logger.info(
             f"Data stats: max_num_of_nodes={max_num_of_nodes}, "
             f"max_num_of_edges={max_num_of_edges}, "
             f"max_num_of_pairs={max_num_of_pairs}"
@@ -216,7 +211,7 @@ def ASE_to_jraph(
         energy = np.array([np.nan])
 
     max_num_theory_levels = 16
-    theory_level = np.reshape(0, (1,))
+    theory_level = np.reshape(5, (1,))
     theory_mask = np.eye(max_num_theory_levels)[theory_level] # (1, num_theory_levels)
 
     # Dipoles are NaN when not present.
@@ -232,7 +227,18 @@ def ASE_to_jraph(
     # Read additional properties from .info and .arrays in Atoms object.
     total_charge = mol.info.get('charge')
     multiplicity = mol.info.get('multiplicity')
-    hirshfeld_ratios = mol.arrays.get('hirsh_ratios')
+    # The polarizability/volume-ratio label has been stored under several keys
+    # over time. Accept any of them and pick the first that exists, so users
+    # don't silently get NaN labels when their extxyz uses the canonical
+    # 'hirshfeld_ratios' name or the new-model 'a0_ratios' name. Aliases
+    # checked, in order of preference:
+    #   'hirshfeld_ratios' (canonical) -> 'hirsh_ratios' (legacy short form)
+    #   -> 'a0_ratios' (so3lr-s/m/l output name).
+    hirshfeld_ratios = None
+    for _ratio_key in ('hirshfeld_ratios', 'hirsh_ratios', 'a0_ratios'):
+        if _ratio_key in mol.arrays:
+            hirshfeld_ratios = mol.arrays.get(_ratio_key)
+            break
 
     # Total charges are assumed to be zero when not specified.
     if total_charge is None:
@@ -327,7 +333,7 @@ def ASE_to_jraph(
     global_context = {
         "energy": energy.reshape(-1),
         "theory_level": theory_level.reshape(-1),
-        "theory_mask": theory_mask, #.reshape(1, max_num_theory_levels),
+        "theory_mask": theory_mask, #.reshape(1, max_num_theory_levels), TODO: double check if I need to add .reshape...
         "stress": stress.reshape(1, 6),
         "dipole_vec": dipole.reshape(1, 3),
         "total_charge": total_charge.reshape(-1),

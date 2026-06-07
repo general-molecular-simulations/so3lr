@@ -1,26 +1,58 @@
 """Command line interfaces for SO3LR."""
 import os
 import sys
-import jax
-import ase
 import time
 import yaml
 import click
+import difflib
 import logging
 import warnings
 import platform
 import numpy as np
 
 from pathlib import Path
-from ase.io import read, write
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 
 from .. import __version__
-from .so3lr_eval import evaluate_so3lr_on
-from .so3lr_finetune import finetune_so3lr
-from .so3lr_train import train_so3lr
-from .so3lr_md import perform_min, run, setup_logger
-from .tune_ewald import tune
+
+# NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
+# submodules, which pull in jax/flax/jax-md/glp/orbax) are deferred so that
+# `so3lr --help` / `so3lr <cmd> --help` stay fast and do not trigger JAX
+# initialization. The thin wrappers below import the real implementation lazily
+# on first call, keeping every call site unchanged.
+def setup_logger(*args, **kwargs):
+    from .so3lr_md import setup_logger as _f
+    return _f(*args, **kwargs)
+
+
+def run(*args, **kwargs):
+    from .so3lr_md import run as _f
+    return _f(*args, **kwargs)
+
+
+def perform_min(*args, **kwargs):
+    from .so3lr_md import perform_min as _f
+    return _f(*args, **kwargs)
+
+
+def evaluate_so3lr_on(*args, **kwargs):
+    from .so3lr_eval import evaluate_so3lr_on as _f
+    return _f(*args, **kwargs)
+
+
+def finetune_so3lr(*args, **kwargs):
+    from .so3lr_finetune import finetune_so3lr as _f
+    return _f(*args, **kwargs)
+
+
+def train_so3lr(*args, **kwargs):
+    from .so3lr_train import train_so3lr as _f
+    return _f(*args, **kwargs)
+
+
+def tune(*args, **kwargs):
+    from .tune_ewald import tune as _f
+    return _f(*args, **kwargs)
 
 # Get logger
 logger = logging.getLogger("SO3LR")
@@ -47,6 +79,7 @@ def get_hardware_info():
 
     Checks if JAX is using GPU or CPU and prints relevant device properties.
     """
+    import jax
     try:
         backend = jax.default_backend()
         devices = jax.local_devices(backend=backend)
@@ -109,6 +142,7 @@ DEFAULT_PRECISION = 'float32'
 DEFAULT_LR_CUTOFF = 12.0  # Angstrom
 DEFAULT_SEED = 52
 DEFAULT_TOTAL_CHARGE = 0
+DEFAULT_SPIN = 0  # number of unpaired electrons (multiplicity - 1)
 DEFAULT_DISPERSION_DAMPING = 2.0  # Angstrom
 DEFAULT_BUFFER_MULTIPLIER = 1.25
 DEFAULT_SAVE_BUFFER = 50
@@ -152,11 +186,15 @@ Run simulations using SO3LR Machine Learned Force Field.
 
 ## Commands
 
-so3lr opt [options]     Run geometry optimization
-so3lr nvt [options]     Run NVT (constant volume and temperature) MD simulation
-so3lr npt [options]     Run NPT (constant pressure and temperature) MD simulation
-so3lr nve [options]     Run NVE (constant volume and energy) MD simulation
-so3lr eval [options]    Run evaluation on a dataset
+so3lr opt [options]           Run geometry optimization
+so3lr nvt [options]           Run NVT (constant volume and temperature) MD simulation
+so3lr nvt-langevin [options]  Run NVT MD simulation with a Langevin thermostat
+so3lr npt [options]           Run NPT (constant pressure and temperature) MD simulation
+so3lr nve [options]           Run NVE (constant volume and energy) MD simulation
+so3lr eval [options]          Run evaluation (energies/forces/observables) on a dataset
+so3lr train [options]         Train a SO3LR/SO3krates model from a config file
+so3lr finetune [options]      Finetune an existing model on a new dataset
+so3lr tune-ewald [options]    Auto-tune Ewald/PME/P3M k-space parameters for a structure
 
 ## Usage Examples
 
@@ -209,6 +247,19 @@ Evaluate SO3LR on a dataset with all options:
       --dispersion-damping 2.0 --jit-compile --save-to predictions.extxyz
       --targets forces,dipole_vec,hirshfeld_ratios --precision float32
       --model /path/to/model --log-file eval.log
+
+Finetune SO3LR on a new dataset:
+  so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr
+      --num-train 50 --num-valid 10 --strategy full
+      --config /path/to/finetune.yaml --model /path/to/model
+
+Train a SO3krates/SO3LR model from a config file:
+  so3lr train --config config.yaml
+
+Auto-tune k-space electrostatics parameters (Ewald/PME/P3M):
+  so3lr tune-ewald --input geometry.xyz --kspace-electrostatics ewald
+      --kspace-smearing 4.0 --kspace-spacing 2.0 --kspace-interp-nodes 4
+      --lr-cutoff 12.0 --model /path/to/model
 
 """
 
@@ -420,13 +471,15 @@ Run simulations using SO3LR Machine Learned Force Field.
 
 ## Commands
 
-so3lr opt [options]          Run geometry optimization
-so3lr nvt [options]          Run NVT (constant volume and temperature) MD simulation
-so3lr npt [options]          Run NPT (constant pressure and temperature) MD simulation
-so3lr nve [options]          Run NVE (constant volume and energy) MD simulation
-so3lr eval [options]         Evaluate SO3LR model on a dataset
-so3lr finetune [options]     Finetune SO3LR model on a dataset
-so3lr train [options]        Train a SO3LR/SO3krates model from a config file
+so3lr opt [options]            Run geometry optimization
+so3lr nvt [options]            Run NVT (constant volume and temperature) MD simulation
+so3lr nvt-langevin [options]   Run NVT MD with a Langevin thermostat
+so3lr npt [options]            Run NPT (constant pressure and temperature) MD simulation
+so3lr nve [options]            Run NVE (constant volume and energy) MD simulation
+so3lr eval [options]           Evaluate SO3LR model on a dataset
+so3lr finetune [options]       Finetune SO3LR model on a dataset
+so3lr train [options]          Train a SO3LR/SO3krates model from a config file
+so3lr tune-ewald [options]     Auto-tune Ewald/PME/P3M k-space parameters
 
 ## Usage Examples
 
@@ -460,8 +513,11 @@ Use --help-full to see all available options.
 #   so3lr --settings md_settings.yaml
 
 def infer_output_format(output_file):
-    """Determine output format based on file extension."""
-    if output_file.endswith('.hdf5'):
+    """Determine output format based on file extension. Returns 'extxyz' for
+    None/empty input (caller is expected to supply an actual filename later)."""
+    if not output_file:
+        return 'extxyz'
+    if output_file.endswith('.hdf5') or output_file.endswith('.h5'):
         return 'hdf5'
     elif output_file.endswith('.xyz') or output_file.endswith('.extxyz'):
         return 'extxyz'
@@ -470,29 +526,94 @@ def infer_output_format(output_file):
         return 'extxyz'
 
 
+def _format_runtime(seconds: float) -> str:
+    """Adaptive runtime formatter for the end-of-run 'Total runtime' line.
+
+    The legacy 'X.XX seconds (Y.YY hours)' format made the hours figure useless
+    for typical minute-scale MD runs (and the seconds figure useless for
+    multi-hour training jobs). Pick a unit pair appropriate to the magnitude:
+    s+ms below 1 min, m+s below 1 h, h+m at or above 1 h.
+    """
+    if seconds < 60.0:
+        total_ms = int(round(seconds * 1000))
+        s, ms = divmod(total_ms, 1000)
+        return f"{s} s {ms} ms"
+    if seconds < 3600.0:
+        total_s = int(round(seconds))
+        m, s = divmod(total_s, 60)
+        return f"{m} m {s} s"
+    total_s = int(round(seconds))
+    h, rem = divmod(total_s, 3600)
+    m = rem // 60
+    return f"{h} h {m} m"
+
+
 # ============================================================================
 # Decorator factories for common CLI options
 # ============================================================================
 
+def _validate_model_choice(ctx, param, value):
+    """Click callback: resolve ``--model`` at parse time so typos fail fast.
+
+    A typo like ``--model so3lr-x`` used to fail 20-40 s into JAX / orbax
+    initialisation. By calling :func:`so3lr.model_registry.resolve_model` here we
+    surface unknown-name / missing-path errors before any heavy import, and add
+    a ``difflib`` did-you-mean over the bundled-model list.
+
+    Returns ``value`` unchanged on success (including ``None``, which downstream
+    code interprets as the default model). Re-raises any resolution failure as
+    :class:`click.BadParameter` so Click prints a clean, traceback-free error
+    alongside the offending option.
+    """
+    if value is None:
+        return value
+    # model_registry is intentionally JAX-free (only imports pathlib), so this
+    # import is safe to do during Click parsing without forcing a slow init.
+    from ..model_registry import available_models, resolve_model
+    try:
+        resolve_model(value)
+    except FileNotFoundError:
+        names = available_models()
+        suggestions = difflib.get_close_matches(str(value), names, n=3, cutoff=0.5)
+        msg = (
+            f"Model '{value}' is not a bundled name and no such directory exists. "
+            f"Bundled names: {', '.join(names)}."
+        )
+        if suggestions:
+            msg += f" Did you mean: {', '.join(suggestions)}?"
+        raise click.BadParameter(msg, ctx=ctx, param=param)
+    return value
+
+
 def common_io_options(f: Callable) -> Callable:
     """Common input/output options for all MD commands."""
-    f = click.option('--input', '--input_file', 'input_file', type=click.Path(exists=False),
+    f = click.option('--input', '--input_file', 'input_file', type=click.Path(exists=True, dir_okay=False),
                      help='Input geometry file (any ASE-readable format). [default: None]')(f)
     f = click.option('--output', '--output_file', 'output_file', type=click.Path(),
                      help='Output trajectory file (.hdf5 or .xyz). [default: <input>_<ensemble>.xyz]')(f)
     f = click.option('--log-file', default=None, type=click.Path(),
                      help='File to write logs to. [default: <output>.log]')(f)
+    f = click.option('--overwrite/--no-overwrite', 'overwrite', default=False,
+                     help='If the trajectory output already exists, overwrite it. '
+                          'Default is to refuse (rename your previous run, or pass --overwrite).')(f)
     return f
 
 
 def common_model_options(f: Callable) -> Callable:
     """Common model options for all commands."""
-    f = click.option('--model', '--model_path', 'model_path', type=click.Path(exists=False),
-                     help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')(f)
+    f = click.option('--model', '--model_path', '--model-path', 'model_path', type=str, default=None,
+                     callback=_validate_model_choice,
+                     help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
+                          'or a path to a custom MLFF model directory. '
+                          'If not provided, so3lr-m is used. [default: so3lr-m]')(f)
     f = click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
                      help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')(f)
     f = click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
-                     help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')(f)
+                     help=f'Long-range cutoff distance in Å. The default ({DEFAULT_LR_CUTOFF}) '
+                          f'is intended for condensed-phase systems with periodic boundaries; '
+                          f'for gas-phase / non-periodic systems use --lr-cutoff 100 so the '
+                          f'long-range electrostatics and dispersion are not artificially truncated. '
+                          f'[default: {DEFAULT_LR_CUTOFF}]')(f)
     f = click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
                      help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}]')(f)
     f = click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
@@ -501,6 +622,8 @@ def common_model_options(f: Callable) -> Callable:
                      help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')(f)
     f = click.option('--total-charge', default=DEFAULT_TOTAL_CHARGE, type=int,
                      help=f'Total charge of the system. [default: {DEFAULT_TOTAL_CHARGE}]')(f)
+    f = click.option('--spin', 'num_unpaired_electrons', default=DEFAULT_SPIN, type=int,
+                     help=f'Spin: number of unpaired electrons (multiplicity - 1; equivalently, multiplicity = spin + 1). [default: {DEFAULT_SPIN}]')(f)
     return f
 
 
@@ -518,7 +641,7 @@ def common_md_options(f: Callable) -> Callable:
                      help=f'Number of steps per MD cycle. [default: {DEFAULT_MD_STEPS_PER_CYCLE}]')(f)
     f = click.option('--restart-save', type=click.Path(), default=None,
                      help='Path to save restart data.')(f)
-    f = click.option('--restart-load', type=click.Path(exists=False), default=None,
+    f = click.option('--restart-load', type=click.Path(exists=True, dir_okay=False), default=None,
                      help='Path to load restart data from a previous run.')(f)
     f = click.option('--relax/--no-relax', default=True,
                      help='Perform geometry relaxation before MD. [default: enabled]')(f)
@@ -527,7 +650,19 @@ def common_md_options(f: Callable) -> Callable:
     f = click.option('--seed', default=DEFAULT_SEED, type=int,
                      help=f'Random seed for MD. [default: {DEFAULT_SEED}]')(f)
     f = click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
-                     help=f'Observables to compute and save. [default: {DEFAULT_OBSERVABLES}]')(f)
+                     type=click.Choice([
+                         'nn_energy', 'partial_charges', 'electrostatic_energy',
+                         'dispersion_energy', 'zbl_repulsion',
+                         'nlh_repulsion',
+                         'electrostatic_energy_undamped', 'dispersion_energy_undamped',
+                         'x',
+                     ]),
+                     help='Observable to compute and save during MD. Repeatable. '
+                          'Allowed: nn_energy, partial_charges, electrostatic_energy, '
+                          'dispersion_energy, zbl_repulsion (legacy name) / nlh_repulsion '
+                          '(canonical for so3lr-s/m/l; same quantity, different model output key), '
+                          'electrostatic_energy_undamped, dispersion_energy_undamped, x. '
+                          '[default: none]')(f)
     f = click.option('--help', '-h', is_flag=True, help='Show brief command overview.')(f)
     return f
 
@@ -567,7 +702,8 @@ def langevin_options(f: Callable) -> Callable:
 
 def kspace_options(f: Callable) -> Callable:
     """K-space electrostatics options for periodic systems."""
-    f = click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None, type=str,
+    f = click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None,
+                     type=click.Choice(['ewald', 'pme', 'p3m'], case_sensitive=False),
                      help='K-space method for long-range electrostatics: "ewald", "pme", or "p3m". [default: None]')(f)
     f = click.option('--kspace-smearing', 'kspace_smearing', default=DEFAULT_KSPACE_SMEARING, type=float,
                      help=f'Smearing width for k-space summation in Å. [default: {DEFAULT_KSPACE_SMEARING}]')(f)
@@ -605,6 +741,7 @@ YAML_DEFAULTS: Dict[str, Any] = {
     'buffer_size_multiplier_sr':  DEFAULT_BUFFER_MULTIPLIER,
     'buffer_size_multiplier_lr':  DEFAULT_BUFFER_MULTIPLIER,
     'total_charge':               DEFAULT_TOTAL_CHARGE,
+    'num_unpaired_electrons':     DEFAULT_SPIN,
     'seed':                       DEFAULT_SEED,
     'save_buffer':                DEFAULT_SAVE_BUFFER,
     'md_dt':                      DEFAULT_TIMESTEP / 1000,  # stored in ps
@@ -616,6 +753,7 @@ YAML_DEFAULTS: Dict[str, Any] = {
     'nhc_thermo':                 DEFAULT_NHC_THERMO,
     'nhc_baro':                   DEFAULT_NHC_BARO,
     'nhc_sy_steps':               DEFAULT_SUZUKI_YOSHIDA_STEPS,
+    'npt_coupling':               'isotropic',
     'langevin_removecmmotion':    DEFAULT_LANGEVIN_REMOVECMMOTION,
     'langevin_thermo':            DEFAULT_LANGEVIN_THERMO,
     'relax_before_run':           True,
@@ -626,6 +764,115 @@ YAML_DEFAULTS: Dict[str, Any] = {
     'min_n_min':                  DEFAULT_MIN_N_MIN,
     'observables':                list(DEFAULT_OBSERVABLES),
 }
+
+
+# Keys that are NOT in YAML_DEFAULTS but are legitimately read by perform_md /
+# the YAML loader / advanced subsystems. Listing them here lets the unknown-key
+# validator distinguish a real configurable knob from a user typo.
+KNOWN_YAML_KEYS_EXTRA: set = {
+    # Required / standard I/O (CLI defaults are None, not present in YAML_DEFAULTS)
+    'input_file', 'output_file', 'log_file', 'model_path', 'model',
+    'output_atom_indices', 'ensemble',
+    # Restart
+    'restart_load_path', 'restart_save_path', 'restart_reset',
+    # Atom constraints
+    'atom_mask_path', 'fixed_atom_indices', 'mobile_atom_indices',
+    'fixed_atom_constraint', 'output_cartesian_positions',
+    # K-space electrostatics
+    'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing',
+    'kspace_interp_nodes', 'kspace_npt_cycles',
+    # K-space dispersion
+    'kspace_dispersion', 'kspace_dispersion_smearing',
+    'kspace_dispersion_spacing', 'kspace_dispersion_interp_nodes',
+    # Numerical / safety knobs
+    'matmul_precision', 'minimum_cell_size_multiplier',
+    'energy_drift_threshold', 'drift_warmup_ps', 'dispersion_tail_correction',
+    # Ensemble-specific
+    'md_T', 'md_P', 'init_T', 'npt_coupling', 'num_unpaired_electrons',
+    # Enhanced sampling (PySAGES)
+    'do_enhanced_sampling', 'enforce_cartesian_coordinates', 'pysages_input',
+    'restart_pysages_save_path', 'restart_pysages_load_path',
+    # Minimization (overrides cycles/steps if set)
+    'force_convergence',
+    # Eval keys (allowed in the same YAML even though `so3lr eval` does not use
+    # --settings yet, since users often share a single YAML across runs)
+    'datafile', 'save_to', 'targets', 'batch_size', 'jit_compile',
+    # Derived (re-appears if a user copies the merged-settings log dump back in)
+    'output_format',
+    # Trajectory-overwrite policy: refuse pre-existing output by default;
+    # set true (CLI flag --overwrite) to permit truncation.
+    'overwrite',
+}
+
+
+# YAML keys that mirror the CLI flag spelling for the same setting. The YAML
+# loader canonicalises these to the internal name before any other processing,
+# so a user can write `temperature: 300` in the YAML and have it land as `md_T`.
+# Keep in sync with the CLI option names in run_md_simulation / nvt/npt/nve.
+YAML_KEY_ALIASES: Dict[str, str] = {
+    # Identity / model
+    'model':                'model_path',
+    # MD ensemble shorthand
+    'temperature':          'md_T',
+    'pressure':             'md_P',
+    'dt':                   'md_dt',
+    # Neighbor-list buffers (the CLI flags are --buffer-sr / --buffer-lr)
+    'buffer_sr':            'buffer_size_multiplier_sr',
+    'buffer_lr':            'buffer_size_multiplier_lr',
+    # NHC / thermostat shorthand
+    'nhc_chain':            'nhc_chain_length',
+    # Other CLI ↔ YAML mismatches users hit
+    'spin':                 'num_unpaired_electrons',
+    'observable':           'observables',
+    'force_conv':           'force_convergence',
+}
+
+
+def apply_yaml_key_aliases(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate CLI-flag-style YAML keys to their internal names.
+
+    Modifies and returns the dict in place. If both the alias and the canonical
+    key are present, the canonical wins and a warning is logged.
+    """
+    for alias, canonical in YAML_KEY_ALIASES.items():
+        if alias in settings_dict:
+            if canonical in settings_dict:
+                logger.warning(
+                    f"YAML has both '{alias}' (alias) and '{canonical}'; "
+                    f"using '{canonical}' and ignoring '{alias}'."
+                )
+                del settings_dict[alias]
+            else:
+                settings_dict[canonical] = settings_dict.pop(alias)
+    return settings_dict
+
+
+def known_yaml_keys() -> set:
+    """Union of every key the MD/YAML pipeline knows how to consume."""
+    return set(YAML_DEFAULTS.keys()) | KNOWN_YAML_KEYS_EXTRA | set(YAML_KEY_ALIASES.keys())
+
+
+def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Path] = None) -> None:
+    """Warn on unknown keys in a settings YAML, with did-you-mean suggestions.
+
+    A typo in a settings file used to be silent — the loader simply dropped the
+    unknown key on the floor and ran with defaults. This catches typos like
+    `md_t: 350` (real: md_T), `tempreature: 300`, or `hdf5_buffer_size: 50`
+    (real: save_buffer) and surfaces them before the simulation starts. Warns
+    rather than errors so that a YAML with a single typo does not silently
+    abort a multi-hour job; the warning is loud and lists candidate spellings.
+    """
+    known = known_yaml_keys()
+    unknown = sorted(set(settings_dict.keys()) - known)
+    if not unknown:
+        return
+    src = f" in {settings_path.name}" if settings_path else ""
+    for k in unknown:
+        suggestions = difflib.get_close_matches(k, sorted(known), n=3, cutoff=0.6)
+        msg = f"Unknown setting '{k}'{src}; ignoring."
+        if suggestions:
+            msg += f" Did you mean: {', '.join(suggestions)}?"
+        logger.warning(msg)
 
 
 def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -645,7 +892,7 @@ def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
 @click.group(cls=CustomCommandClass, invoke_without_command=True,
              help="Run molecular dynamics using SO3LR Machine Learned Force Field.",
              context_settings={"help_option_names": []})
-@click.option('--settings', type=click.Path(exists=False), default=None,
+@click.option('--settings', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Path to YAML settings file. All simulation parameters are read from this file.')
 @click.option('--help-full', is_flag=True,
               help='Show detailed information about MD settings.')
@@ -683,12 +930,26 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     try:
         settings_path = Path(settings).expanduser().resolve()
         with open(settings_path, 'r') as f:
-            settings_dict = yaml.safe_load(f)
+            settings_dict = yaml.safe_load(f) or {}
     except (FileNotFoundError, yaml.YAMLError) as e:
         logger.error(f"Error loading settings file: {str(e)}")
         sys.exit(1)
 
-    # md_dt is written in fs in the YAML but run() expects ps
+    # Translate CLI-flag-style aliases (e.g. temperature -> md_T,
+    # pressure -> md_P, dt -> md_dt, model -> model_path) before any other
+    # processing. See YAML_KEY_ALIASES for the full mapping.
+    apply_yaml_key_aliases(settings_dict)
+
+    # Surface typos early. Unknown keys (e.g. `md_t` for `md_T`,
+    # `tempreature` for `md_T`) would otherwise be silently ignored and the
+    # default value used, wasting GPU time on the wrong physics.
+    validate_yaml_keys(settings_dict, settings_path)
+
+    # Unit boundary: md_dt is in fs in the YAML / CLI (documented in
+    # md_settings.yaml and the CLI --dt help), but every internal consumer
+    # past this point — settings dict, perform_md, handle_units — expects
+    # picoseconds. Convert here once so the rest of the code only sees ps.
+    # NB: the 'md_dt' key stays the same; only its unit changes.
     if 'md_dt' in settings_dict:
         settings_dict['md_dt'] = settings_dict['md_dt'] / 1000
 
@@ -697,7 +958,37 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
         settings_dict.setdefault(key, default)
 
     settings_dict = canonicalize_ensemble(settings_dict)
+
+    # Fast-fail on missing required keys before setup_logger / banner /
+    # get_hardware_info (which triggers a slow JAX init). `input_file` is the
+    # only truly-required YAML key with no YAML_DEFAULTS entry; without it,
+    # downstream perform_md / run would crash with an opaque TypeError on
+    # Path(None) / ase.read(None).
+    if not settings_dict.get('input_file'):
+        raise ValueError(
+            f"Missing required key 'input_file' in {settings_path.name}: "
+            f"path to the initial geometry file (any ASE-readable format, "
+            f"e.g. .xyz / .extxyz / .pdb). Add a line like\n"
+            f"  input_file: path/to/structure.xyz\n"
+            f"to the YAML, or pass it on the CLI via a subcommand "
+            f"(e.g. `so3lr nvt --input ...`)."
+        )
+
+    # Default output filename uses ensemble-specific suffix, mirroring the CLI
+    # subcommand pathway (see e.g. the nvt/npt/nve subcommands). Previously the
+    # YAML branch left output_file=None and immediately crashed in
+    # infer_output_format. We compute the same `<input>_<ensemble>.xyz` here.
+    if not settings_dict.get('output_file') and settings_dict.get('input_file'):
+        _suffix = {'nvt': 'nvt', 'nvt-langevin': 'nvt_langevin', 'npt': 'npt', 'nve': 'nve'}
+        _ens = settings_dict.get('ensemble', 'nvt')
+        settings_dict['output_file'] = f"{Path(settings_dict['input_file']).stem}_{_suffix.get(_ens, _ens)}.xyz"
+
     settings_dict['output_format'] = infer_output_format(settings_dict.get('output_file', ''))
+
+    # Default the log file to the settings YAML name with a .log extension
+    # (e.g. `npt.yaml` -> `npt.log`), unless the YAML specifies `log_file`.
+    if not settings_dict.get('log_file'):
+        settings_dict['log_file'] = str(settings_path.with_suffix('.log'))
 
     setup_logger(settings_dict.get('log_file'))
     logger.info(SO3LR_ASCII)
@@ -710,7 +1001,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     run(settings_dict)
     time_end = time.time()
     logger.info('Simulation completed successfully!')
-    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+    logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
 
 
 
@@ -723,7 +1014,8 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     """Log all simulation settings from the internal settings dict."""
     ensemble = s.get('ensemble', 'nvt')
     _label = {'nvt': 'NVT', 'nvt-langevin': 'NVT (Langevin)', 'npt': 'NPT', 'nve': 'NVE'}
-    dt_fs = s.get('md_dt', DEFAULT_TIMESTEP)  # fs for display
+    dt_ps = s.get('md_dt', DEFAULT_TIMESTEP / 1000)  # md_dt is stored internally in ps
+    dt_fs = dt_ps * 1000  # for display in fs
     total_steps = s.get('md_cycles', DEFAULT_MD_CYCLES) * s.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)
     simulation_time = total_steps * s.get('md_dt', DEFAULT_TIMESTEP / 1000)  # ps
 
@@ -733,15 +1025,17 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     logger.info(f"Initial geometry:          {s.get('input_file')}")
     logger.info(f"Output file:               {s.get('output_file')}")
     logger.info(f"Log file:                  {s.get('log_file')}")
-    logger.info(f"Force field:               {'Custom MLFF' if s.get('model_path') else 'SO3LR'}")
-    if s.get('model_path'):
-        logger.info(f"Model path:                {s['model_path']}")
+    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    _model = s.get('model_path') or DEFAULT_MODEL
+    _kind = 'bundled' if _model in available_models() else 'custom path'
+    logger.info(f"Force field:               {_model} ({_kind})")
     logger.info(f"Precision:                 {s.get('precision', DEFAULT_PRECISION)}")
     logger.info(f"Long-range cutoff:         {s.get('lr_cutoff', DEFAULT_LR_CUTOFF)} Å")
     logger.info(f"Dispersion damping:        {s.get('dispersion_damping', DEFAULT_DISPERSION_DAMPING)} Å")
     logger.info(f"Short-range buffer:        {s.get('buffer_size_multiplier_sr', DEFAULT_BUFFER_MULTIPLIER)}")
     logger.info(f"Long-range buffer:         {s.get('buffer_size_multiplier_lr', DEFAULT_BUFFER_MULTIPLIER)}")
     logger.info(f"Total charge:              {s.get('total_charge', DEFAULT_TOTAL_CHARGE)}")
+    logger.info(f"Spin (unpaired e-):        {s.get('num_unpaired_electrons', DEFAULT_SPIN)}")
     logger.info(f"Temperature:               {s.get('md_T', s.get('init_T', DEFAULT_TEMPERATURE))} K")
     if ensemble == 'npt':
         logger.info(f"Pressure:                  {s.get('md_P')} bar")
@@ -749,17 +1043,18 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
     logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
     logger.info(f"MD cycles:                 {s.get('md_cycles', DEFAULT_MD_CYCLES)}")
     logger.info(f"Steps per cycle:           {s.get('md_steps', DEFAULT_MD_STEPS_PER_CYCLE)}")
-    logger.info(f"Timestep:                  {dt_fs} ps")
+    logger.info(f"Timestep:                  {dt_fs:.4g} fs")
     logger.info(f"Saving buffer size:        {s.get('save_buffer', DEFAULT_SAVE_BUFFER)}")
     if ensemble in ('nvt', 'npt'):
         logger.info(f"NHC chain length:          {s.get('nhc_chain_length', DEFAULT_NHC_CHAIN_LENGTH)}")
         logger.info(f"Nose-Hoover steps:         {s.get('nhc_steps', DEFAULT_NHC_INTEGRATION_STEPS)}")
-        logger.info(f"Nose-Hoover Tdamp:         {s.get('nhc_thermo', DEFAULT_NHC_THERMO) * dt_fs} fs")
+        logger.info(f"Nose-Hoover Tdamp:         {s.get('nhc_thermo', DEFAULT_NHC_THERMO) * dt_fs:.4g} fs")
     if ensemble == 'npt':
-        logger.info(f"Nose-Hoover Pdamp:         {s.get('nhc_baro', DEFAULT_NHC_BARO) * dt_fs} fs")
+        logger.info(f"Nose-Hoover Pdamp:         {s.get('nhc_baro', DEFAULT_NHC_BARO) * dt_fs:.4g} fs")
     if ensemble == 'nvt-langevin':
         logger.info(f"Center of Mass Motion Removal: {s.get('langevin_removecmmotion', DEFAULT_LANGEVIN_REMOVECMMOTION)}")
-        logger.info(f"Langevin friction value:   {s.get('langevin_thermo', DEFAULT_LANGEVIN_THERMO) * dt_fs}")
+        _gamma = 1.0 / (dt_ps * s.get('langevin_thermo', DEFAULT_LANGEVIN_THERMO))
+        logger.info(f"Langevin friction (gamma): {_gamma:.4g} 1/ps")
     logger.info(f"Random seed:               {s.get('seed', DEFAULT_SEED)}")
     logger.info(f"Observables:               {s.get('observables', DEFAULT_OBSERVABLES)}")
     if s.get('restart_load_path'):
@@ -788,6 +1083,29 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
         logger.info(f"Restart reset:             {s['restart_reset']}")
     logger.info("=" * 60)
 
+    # Dump the full merged settings dict (after YAML_DEFAULTS applied, CLI->settings
+    # converted) so the log file alone is enough to reproduce the run. md_dt is
+    # internally stored in ps; convert back to fs here so the dump matches the
+    # YAML/CLI convention and the file is copy-pasteable into a settings YAML.
+    logger.info("Full merged settings (md_dt in fs, matches YAML/CLI input):")
+    for _k in sorted(s.keys()):
+        # Skip derived keys that are recomputed at load time; printing them
+        # would mislead a user copying the dump back into a YAML.
+        if _k == 'output_format':
+            continue
+        _v = s[_k]
+        if _k == 'md_dt':
+            _v = _v * 1000  # ps -> fs for display, matches YAML/CLI convention
+        elif _k == 'model_path' and _v is None:
+            # CLI default is None; the real model resolved is _model (see above).
+            _v = _model
+        elif _k == 'observables' and isinstance(_v, tuple):
+            # CLI's --observable is multiple=True (tuple); coerce so the dump
+            # is a YAML list, not a Python tuple repr.
+            _v = list(_v)
+        logger.info(f"    {_k}: {_v}")
+    logger.info("=" * 60)
+
 # ============================================================================
 # Shared MD simulation runner
 # ============================================================================
@@ -804,6 +1122,7 @@ def run_md_simulation(
     buffer_sr: float,
     buffer_lr: float,
     total_charge: int,
+    num_unpaired_electrons: int,
     save_buffer: int,
     temperature: float,
     dt: float,
@@ -816,6 +1135,7 @@ def run_md_simulation(
     seed: int,
     observable: Optional[tuple],
     help: bool,
+    overwrite: bool = False,
     # Nose-Hoover thermostat (NVT/NPT)
     nhc_chain: Optional[int] = None,
     nhc_steps: Optional[int] = None,
@@ -841,13 +1161,18 @@ def run_md_simulation(
         click.echo(ctx.get_help())
         return
 
-    # Default output filename uses ensemble-specific suffix
+    # Default output filename uses ensemble-specific suffix.
+    # Note: NVT-Langevin uses the underscore form 'nvt_langevin' in filenames
+    # (and YAML `ensemble:` values) but the hyphen form 'nvt-langevin' as the
+    # CLI subcommand name (`so3lr nvt-langevin ...`); the mapping below keeps
+    # the two conventions in sync.
     _suffix = {'nvt': 'nvt', 'nvt-langevin': 'nvt_langevin', 'npt': 'npt', 'nve': 'nve'}
     if output_file is None:
         output_file = f"{Path(input_file).stem}_{_suffix[ensemble]}.xyz"
 
     if log_file is None:
-        log_file = f"{Path(output_file).stem}.log"
+        # Use with_suffix so the log file lands next to --output, not in CWD.
+        log_file = str(Path(output_file).with_suffix('.log'))
 
     setup_logger(log_file)
     logger.info(SO3LR_ASCII)
@@ -867,6 +1192,7 @@ def run_md_simulation(
         'buffer_size_multiplier_lr': buffer_lr,
         'save_buffer': save_buffer,
         'total_charge': total_charge,
+        'num_unpaired_electrons': num_unpaired_electrons,
         'seed': seed,
         'restart_load_path': restart_load,
         'restart_save_path': restart_save,
@@ -880,12 +1206,24 @@ def run_md_simulation(
         'ensemble': ensemble,
         'observables': observable,
         'output_format': infer_output_format(output_file),
+        'overwrite': overwrite,
         'kspace_electrostatics': kspace_electrostatics,
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
-        'kspace_npt_cycles': kspace_npt_cycles,
     }
+
+    # Only insert kspace_npt_cycles when the user explicitly passed
+    # --kspace-npt-cycles on the command line. The Click default is None,
+    # which would otherwise override the documented 100-cycle fallback that
+    # perform_md applies via all_settings.get('kspace_npt_cycles', 100) and
+    # silently disable NPT k-space re-tuning for any CLI user who omits the
+    # flag. The YAML path already gets the 100 default by omission; this
+    # mirrors that behaviour for the CLI path. Uses the public Click API
+    # (same pattern as the tune-ewald subcommand below).
+    _ctx = click.get_current_context(silent=True)
+    if _ctx is not None and _ctx.get_parameter_source('kspace_npt_cycles') == click.core.ParameterSource.COMMANDLINE:
+        settings['kspace_npt_cycles'] = kspace_npt_cycles
 
     settings['md_T'] = temperature
     if ensemble == 'nve':
@@ -915,7 +1253,7 @@ def run_md_simulation(
     time_end = time.time()
     logger.info("=" * 60)
     logger.info('Simulation completed successfully!')
-    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+    logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
 
 
 # Define the 'opt' subcommand
@@ -935,7 +1273,7 @@ def run_md_simulation(
 @click.option('--min-n-min', 'min_n_min', default=DEFAULT_MIN_N_MIN, type=int,
               help='Minimum number of steps moving in the correct direction before dt is updated. [default: 2]')
 @click.option('--force-conv', default=None, type=float,
-              help='Force convergence criterion in eV/Å, overrides --cycles and --steps. [default: None]')
+              help='Force convergence criterion in eV/Å, overrides --min-cycles and --min-steps. [default: None]')
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def fire_optimization(
     input_file: Optional[str],
@@ -948,6 +1286,7 @@ def fire_optimization(
     buffer_sr: float,
     buffer_lr: float,
     total_charge: int,
+    num_unpaired_electrons: int,
     min_cycles: int,
     min_steps: int,
     min_start_dt: float,
@@ -960,6 +1299,7 @@ def fire_optimization(
     kspace_interp_nodes: int,
     kspace_npt_cycles: Optional[int],
     help: bool,
+    overwrite: bool = False,
 ) -> None:
     """
     Run geometry optimization using the FIRE algorithm.
@@ -977,6 +1317,15 @@ def fire_optimization(
         click.echo(fire_optimization.get_help(click.get_current_context()))
         return
 
+    # HDF5 output is not supported for `opt` (the writer falls back to xyz
+    # silently otherwise, leaving the file in a different location than the
+    # banner advertises). Error out early so the user picks an .xyz/.extxyz path.
+    if output_file is not None and Path(output_file).suffix.lower() in ('.hdf5', '.h5'):
+        raise click.UsageError(
+            f"--output '{output_file}': HDF5 output is not supported for `so3lr opt`. "
+            f"Use an .xyz or .extxyz extension instead."
+        )
+
     # Generate default output file name if not provided
     if input_file is not None and output_file is None:
         input_path = Path(input_file)
@@ -984,7 +1333,8 @@ def fire_optimization(
 
     # Generate default log file name based on output file if not explicitly provided
     if log_file is None:
-        log_file = f"{Path(output_file).stem}.log"
+        # Use with_suffix so the log file lands next to --output, not in CWD.
+        log_file = str(Path(output_file).with_suffix('.log'))
 
     # Setup logging with default levels
     setup_logger(log_file)
@@ -999,10 +1349,14 @@ def fire_optimization(
     logger.info(f"Output geometry:           {output_file}")
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Total charge:              {total_charge}")
-    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
-    if model_path is not None:
-        
-        logger.info(f"Model path:                {model_path}")
+    logger.info(f"Spin (unpaired e-):        {num_unpaired_electrons}")
+    # Mirror the MD / eval banner: log the resolved short name even when the
+    # user did not pass --model (otherwise the user has no record of which
+    # bundled checkpoint was loaded by default, e.g. so3lr-m vs. legacy v1).
+    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    _model = model_path or DEFAULT_MODEL
+    _kind = 'bundled' if _model in available_models() else 'custom path'
+    logger.info(f"Force field:               {_model} ({_kind})")
     logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
     
     if force_conv is not None:
@@ -1040,10 +1394,12 @@ def fire_optimization(
         'buffer_size_multiplier_sr': buffer_sr,
         'buffer_size_multiplier_lr': buffer_lr,
         'total_charge': total_charge,
+        'num_unpaired_electrons': num_unpaired_electrons,
         'kspace_electrostatics': kspace_electrostatics,
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
+        'overwrite': overwrite,
     }
 
     # Add log settings to the settings dictionary
@@ -1058,7 +1414,7 @@ def fire_optimization(
     time_end = time.time()
     logger.info("=" * 60)
     logger.info('Optimization completed successfully!')
-    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+    logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
 
 # Define the 'nvt' subcommand
 @cli.command(name='nvt', help="Run NVT molecular dynamics simulation with `so3lr nvt --input geometry.xyz`.")
@@ -1124,6 +1480,10 @@ def nve_md(**kwargs) -> None:
     """
     Run NVE (constant volume and energy) MD simulation with no thermostat.
 
+    Note: --temperature sets the initial-velocity-sampling temperature in
+    Kelvin only; NVE has no thermostat, so the kinetic temperature drifts
+    freely during the trajectory. [default: 300.0]
+
     Example:
         so3lr nve --input geometry.xyz --temperature 300
     """
@@ -1133,30 +1493,50 @@ def nve_md(**kwargs) -> None:
 # Define the 'eval' subcommand
 @cli.command(name='eval', help="Evaluate SO3LR model on a dataset with `so3lr eval --datafile dataset.extxyz`.")
 # Input/Output group
-@click.option('--datafile', type=click.Path(exists=False), required=False,
-              help='Path to dataset file (extxyz format) containing structures to evaluate.')
+@click.option('--datafile', '--data-file', '--datafile_path', 'datafile',
+              type=click.Path(exists=True, dir_okay=False), required=False,
+              help='Path to dataset file containing structures to evaluate '
+                   '(extxyz or any ASE-readable format, e.g. xyz, pdb, cif).')
 @click.option('--save-to', type=click.Path(), default=None,
               help='Output file to save predictions (.extxyz format). If not provided, predictions are not saved.')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
+@click.option('--overwrite/--no-overwrite', 'overwrite', default=False,
+              help='If the --save-to output already exists, overwrite it. '
+                   'Default is to refuse (rename your previous run, or pass --overwrite).')
 # Model settings group
-@click.option('--model', '--model_path', 'model_path', type=click.Path(exists=False),
-              help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
+@click.option('--model', '--model_path', 'model_path', type=str, default=None,
+              callback=_validate_model_choice,
+              help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
+                   'or a path to a custom MLFF model directory. '
+                   'If not provided, so3lr-m is used. [default: so3lr-m]')
 @click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
               help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')
 @click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
               help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}].')
+@click.option('--total-charge', 'total_charge', default=None, type=int,
+              help='Override total charge for every structure in the dataset. '
+                   'If omitted, the per-structure `charge=` field in extxyz info{} is used '
+                   '(defaulting to 0 when absent).')
+@click.option('--spin', 'num_unpaired_electrons', default=None, type=int,
+              help='Override spin (number of unpaired electrons = multiplicity - 1) for every '
+                   'structure. If omitted, the per-structure `multiplicity=` field in extxyz '
+                   'info{} is used (defaulting to 1 when absent, i.e. singlet).')
 # Evaluation settings
 @click.option('--batch-size', default=1, type=int,
-              help='Number of molecules per batch. [default: 1]')
+              help='Number of molecules per batch. '
+                   '[default: 1; consider 16-64 on GPU for throughput on large datasets]')
 @click.option('--targets', default='forces,dipole_vec,hirshfeld_ratios', type=str,
               help='Comma-separated list of targets to evaluate. '
-                   'Standard targets: forces, energy, dipole_vec, hirshfeld_ratios. '
+                   'Standard targets: forces, energy, dipole_vec, hirshfeld_ratios '
+                   '(canonical; aliases hirsh_ratios and a0_ratios are accepted, '
+                   'and the new so3lr-s/m/l models report ratios as a0_ratios). '
                    'Observables (saved to output, metrics only if ground truth exists): '
-                   'nn_energy, partial_charges, electrostatic_energy, dispersion_energy, '
-                   'zbl_repulsion, electrostatic_energy_undamped, dispersion_energy_undamped. '
+                   'nn_energy, partial_charges (alias: charges), electrostatic_energy, dispersion_energy, '
+                   'nlh_repulsion (canonical for so3lr-s/m/l; legacy models use zbl_repulsion), '
+                   'electrostatic_energy_undamped, dispersion_energy_undamped. '
                    'Embeddings: x (final-layer per-atom features, saved to <output>_x.npz). '
                    '[default: forces,dipole_vec,hirshfeld_ratios]')
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
@@ -1173,10 +1553,14 @@ def eval_model(
     precision: str,
     lr_cutoff: float,
     dispersion_damping: float,
+    total_charge: Optional[int],
+    num_unpaired_electrons: Optional[int],
     # Evaluation settings
     batch_size: int,
     targets: str,
     jit_compile: bool,
+    # Output policy
+    overwrite: bool,
     # Help option
     help: bool
 ) -> None:
@@ -1199,9 +1583,14 @@ def eval_model(
     # Set default output file name if needed
     output_file = save_to if save_to else f"{Path(datafile).stem}_eval.extxyz"
 
-    # Generate default log file name based on output file if not explicitly provided
-    if log_file is None:
-        log_file = f"{Path(output_file).stem}.log"
+    # Generate default log file name based on output file if not explicitly provided.
+    # Only auto-derive when predictions are actually being saved: without --save-to
+    # we have no real output basename to anchor the log to, and creating a
+    # `<datafile>_eval.log` next to an extxyz that is never written is misleading.
+    # The documented default for --log-file is None (console-only) — honor that.
+    if log_file is None and save_to is not None:
+        # Use with_suffix so the log file lands next to --output, not in CWD.
+        log_file = str(Path(output_file).with_suffix('.log'))
 
     # Setup logging with default levels
     setup_logger(log_file)
@@ -1217,15 +1606,22 @@ def eval_model(
     logger.info(f"Output file:               {output_file if save_to else 'Not saving'}")
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Batch size:                {batch_size}")
-    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
-    if model_path is not None:
-        logger.info(f"Model path:                {model_path}")
+    # Mirror the MD-side banner: show the resolved short name (so the user knows
+    # which bundled checkpoint actually loaded — so3lr-s/m/l/so3lr — instead of
+    # the generic 'SO3LR' label) and tag it as bundled vs. a custom-path model.
+    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    _model = model_path or DEFAULT_MODEL
+    _kind = 'bundled' if _model in available_models() else 'custom path'
+    logger.info(f"Force field:               {_model} ({_kind})")
     logger.info(f"Precision:                 {precision}")
     logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
     logger.info(f"Dispersion damping:        {dispersion_damping} Å")
+    logger.info(f"Total charge:              {'(from info{} or 0)' if total_charge is None else total_charge}")
+    logger.info(f"Spin (unpaired e-):        {'(from info{} or 0)' if num_unpaired_electrons is None else num_unpaired_electrons}")
     logger.info(f"JIT compilation:           {'Enabled' if jit_compile else 'Disabled'}")
     if save_to:
         logger.info(f"Saving to:                 {save_to}")
+        logger.info(f"Overwrite if exists:       {'Yes' if overwrite else 'No (default)'}")
     logger.info(f"Targets:                   {targets}")
     logger.info("=" * 60)
 
@@ -1237,11 +1633,17 @@ def eval_model(
         logger.error(f"Error: Dataset file not found: {datafile}")
         sys.exit(1)
 
-    # Validate output path
+    # Validate output path. Honors --overwrite so eval, opt, MD and finetune
+    # all use the same opt-in policy (refuse by default; pass --overwrite to
+    # truncate). The downstream evaluate_so3lr_on() repeats this check for
+    # callers that bypass the CLI.
     if save_to:
         save_path = Path(save_to)
-        if save_path.exists():
-            logger.error(f"Error: Output file already exists: {save_to}")
+        if save_path.exists() and not overwrite:
+            logger.error(
+                f"Output file already exists: {save_to}. Refusing to overwrite. "
+                f"Pass --overwrite to overwrite, or choose a different --save-to."
+            )
             sys.exit(1)
         # Create parent directory if it doesn't exist
         save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1257,7 +1659,10 @@ def eval_model(
         model_path=model_path,
         precision=precision,
         targets=targets,
-        log_file=log_file
+        log_file=log_file,
+        total_charge=total_charge,
+        num_unpaired_electrons=num_unpaired_electrons,
+        overwrite=overwrite,
     )
     logger.info("=" * 60)
     logger.info("Evaluation completed successfully!")
@@ -1269,16 +1674,20 @@ def eval_model(
 # Define the 'finetune' subcommand
 @cli.command(name='finetune', help="Finetune SO3LR model on a dataset with `so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10`.")
 # Input/Output group
-@click.option('--workdir', type=click.Path(), help='Working directory for fine-tuned model checkpoints and logs.')
-@click.option('--datafile', type=click.Path(), help='Path to dataset file (extxyz or tfds format) containing data used for finetuning.')
+@click.option('--workdir', '--work-dir', '--workdir_path', 'workdir',
+              type=click.Path(), help='Working directory for fine-tuned model checkpoints and logs.')
+@click.option('--datafile', '--data-file', '--datafile_path', 'datafile',
+              type=click.Path(), help='Path to dataset file (extxyz or tfds format) containing data used for finetuning.')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Finetuning settings.
-@click.option('--strategy', type=click.Choice(['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer']),
+@click.option('--strategy', type=click.Choice(['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer','obs_0','obs_023','obs_23','obs_3','ll_fmlp','ll_obs_023','freeze_long_range','forces_only']),
               default='full', help='Strategy for finetuning. [default: full]')
 @click.option('--config', '--config_path', 'config_path', type=click.Path(exists=False), default=None,
-              help='Path to the finetuning config. If not provided is defaults to the one pre-defined in the SO3LR repo. [default: None]')
+              help='Path to the finetuning config (YAML only; unlike `so3lr train --config`, JSON is not supported here). '
+                   'If not provided, defaults to so3lr/config/finetune.yaml shipped with the package. [default: None]')
 @click.option('--model', '--model_path', 'model_path', type=click.Path(exists=False), default=None,
+              callback=_validate_model_choice,
               help='Path to MLFF model directory. If not provided, SO3LR is used. [default: None]')
 # Training settings
 @click.option('--num-train', '--num_train', default=None, type=int, help='Number of data points used for gradient calculations.')
@@ -1308,9 +1717,9 @@ def finetune_model(
     Example:
         so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10
     """
-    # Print help if needed
-    #if not datafile or not workdir or help:
-    if not workdir or help:        
+    # Print help if needed (and reject the trivial `--workdir foo` invocation
+    # that previously crashed with TypeError because `datafile` was None).
+    if not datafile or not workdir or help:
         click.echo(SO3LR_ASCII)
         click.echo(finetune_model.get_help(click.get_current_context()))
         return
@@ -1327,7 +1736,7 @@ def finetune_model(
 
     # Log all settings
     logger.info("=" * 60)
-    logger.info(f"SO3LR Model Evaluation (v{__version__})")
+    logger.info(f"SO3LR Model Finetuning (v{__version__})")
     logger.info("=" * 60)
     logger.info(f"Dataset file:              {datafile}")
     logger.info(f"Workdir:                   {workdir}")
@@ -1335,7 +1744,7 @@ def finetune_model(
     logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
     if model_path is not None:
         logger.info(f"Model path:            {model_path}")
-    logger.info(f"Config:                    {'Default' if model_path else 'Custom'}")
+    logger.info(f"Config:                    {'Custom' if config_path else 'Default'}")
     if config_path is not None:
         logger.info(f"Config path:           {config_path}")
     logger.info(f"Number training points:    {num_train}")
@@ -1350,7 +1759,6 @@ def finetune_model(
         logger.error(f"Error: Dataset file not found: {datafile}")
         sys.exit(1)
 
-    # Call the evaluate_so3lr_on function from so3lr_eval.py
     finetune_so3lr(
         datafile=datafile,
         workdir=workdir,
@@ -1366,7 +1774,7 @@ def finetune_model(
 
 
 @cli.command(name='train', help="Train a SO3krates model from a config file with `so3lr train --config config.yaml`.")
-@click.option('--config', 'config_path', type=click.Path(exists=False), default=None,
+@click.option('--config', 'config_path', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Path to the training config file (YAML or JSON).')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
@@ -1392,9 +1800,10 @@ def train_model(
         logger.error(f"Error: Config file not found: {config_path}")
         sys.exit(1)
 
-    # Setup logging
+    # Setup logging: default the log file to the config name with a .log
+    # extension (e.g. `config.yaml` -> `config.log`).
     if log_file is None:
-        log_file = Path(config_path).stem + "_training.log"
+        log_file = str(Path(config_path).with_suffix('.log'))
 
     setup_logger(log_file)
 
@@ -1418,12 +1827,12 @@ def train_model(
     time_end = time.time()
     logger.info("=" * 60)
     logger.info("Training completed successfully!")
-    logger.info(f"Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)")
+    logger.info(f"Total runtime: {_format_runtime(time_end - time_start)}")
 
 
 # Define the 'tune-ewald' subcommand
 @cli.command(name='tune-ewald', help="Tune k-space electrostatics parameters (Ewald/PME/P3M): `so3lr tune-ewald --input geometry.xyz`.")
-@click.option('--settings', type=click.Path(exists=False), default=None,
+@click.option('--settings', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Path to YAML settings file.')
 @common_io_options
 @common_model_options
@@ -1439,6 +1848,7 @@ def tune_ewald(
     input_file: str,
     output_file: Optional[str],
     log_file: Optional[str],
+    overwrite: bool,
     # Model settings group
     model_path: Optional[str],
     precision: str,
@@ -1447,6 +1857,7 @@ def tune_ewald(
     buffer_sr: float,
     buffer_lr: float,
     total_charge: int,
+    num_unpaired_electrons: int,
     jit_compile: bool,
     kspace_electrostatics: str,
     kspace_smearing: float,
@@ -1467,8 +1878,9 @@ def tune_ewald(
     Example:
         so3lr tune-ewald --input geometry.xyz --kspace-electrostatics pme
     """
-     # Print help if needed
-    if help:
+     # Print help if needed (and handle the no-args invocation that
+     # previously fell through and crashed when input_file was None).
+    if (not input_file and not settings) or help:
         click.echo(SO3LR_ASCII)
         click.echo(tune_ewald.get_help(click.get_current_context()))
         return
@@ -1482,12 +1894,16 @@ def tune_ewald(
                 raise FileNotFoundError(f'Settings file not found: {settings}')
 
             with open(settings_path, 'r') as f:
-                settings_dict = yaml.safe_load(f)
+                settings_dict = yaml.safe_load(f) or {}
 
             logger.info(f"Loading settings from {settings}")
         except (FileNotFoundError, yaml.YAMLError) as e:
             logger.error(f"Error loading settings file: {str(e)}")
             sys.exit(1)
+
+        # Same alias + unknown-key validation as the top-level --settings path.
+        apply_yaml_key_aliases(settings_dict)
+        validate_yaml_keys(settings_dict, settings_path)
 
     # CLI params with internal names; buffer_sr/buffer_lr map to longer internal names
     _cli_params = {
@@ -1508,14 +1924,22 @@ def tune_ewald(
     _cli_key_for = {'buffer_size_multiplier_sr': 'buffer_sr', 'buffer_size_multiplier_lr': 'buffer_lr'}
     for internal_key, val in _cli_params.items():
         cli_key = _cli_key_for.get(internal_key, internal_key)
-        if ctx._parameter_source[cli_key] == click.core.ParameterSource.COMMANDLINE:
+        # Use the public Click API rather than the private `_parameter_source`
+        # mapping; both behave identically on Click 8.x but the public method
+        # is the documented forward-compatible accessor.
+        if ctx.get_parameter_source(cli_key) == click.core.ParameterSource.COMMANDLINE:
             settings_dict[internal_key] = val
         else:
             settings_dict.setdefault(internal_key, val)
 
-    # Generate default log file name based on output file if not explicitly provided
+    # Default the log file to the settings YAML name with a .log extension when
+    # a settings file is given (e.g. `tune.yaml` -> `tune.log`); otherwise fall
+    # back to the input-geometry name.
     if settings_dict.get('log_file') is None:
-        settings_dict.update({'log_file': f"{Path(input_file).stem}_tune-kspace.log"})
+        if settings is not None:
+            settings_dict['log_file'] = str(Path(settings).with_suffix('.log'))
+        else:
+            settings_dict['log_file'] = f"{Path(input_file).stem}_tune-kspace.log"
 
     # Setup logging with default levels
     setup_logger(settings_dict.get('log_file'))
@@ -1534,6 +1958,7 @@ def tune_ewald(
     logger.info(f"Precision:                 {settings_dict.get('precision')}")
     logger.info(f"Long-range cutoff:         {settings_dict.get('lr_cutoff')} Å")
     logger.info(f"Total charge:              {settings_dict.get('total_charge')}")
+    logger.info(f"Spin (unpaired e-):        {settings_dict.get('num_unpaired_electrons')}")
     logger.info(f"JIT compilation:           {'Enabled' if settings_dict.get('jit_compile') else 'Disabled'}")
 
 
@@ -1545,18 +1970,16 @@ def tune_ewald(
     tune(settings_dict)
     time_end = time.time()
     logger.info("=" * 60)
-    logger.info('Tunings completed successfully!')
-    logger.info(f'Total runtime: {(time_end - time_start):.2f} seconds ({(time_end - time_start)/3600:.2f} hours)')
+    logger.info('Tuning completed successfully!')
+    logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
 
 
 def main() -> None:
     """Entry point for the command line interface."""
+    os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2') # Suppress TF logging
 
     cli(standalone_mode=False)
 
 
 if __name__ == '__main__':
     main()
-
-
-

@@ -5,10 +5,13 @@ from so3lr.mlff.nn.layer import SO3kratesLayerSparse
 from so3lr.mlff.nn.observable import EnergySparse
 from so3lr.mlff.nn.observable import ElectrostaticEnergySparse
 from so3lr.mlff.nn.observable import ElectrostaticEnergyKspace
+from so3lr.mlff.nn.observable import DispersionEnergyKspace
 from so3lr.mlff.nn.observable import DispersionEnergySparse
 from so3lr.mlff.nn.observable import ZBLRepulsionSparse
+from so3lr.mlff.nn.observable import NLHRepulsionSparse
 from so3lr.mlff.nn.observable import DipoleVecSparse
 from so3lr.mlff.nn.observable import HirshfeldSparse
+from so3lr.mlff.nn.observable import C6RatiosSparse
 from so3lr.mlff.nn.observable import PartialChargesSparse
 
 from typing import Optional, Sequence, Any
@@ -43,6 +46,7 @@ def init_so3krates_sparse(
         use_charge_embed: bool = False,
         use_spin_embed: bool = False,
         energy_regression_dim: int = 128,
+        energy_final_mlp_widths: Optional[Sequence[int]] = None,
         energy_activation_fn: str = 'identity',
         energy_learn_atomic_type_scales: bool = False,
         energy_learn_atomic_type_shifts: bool = False,
@@ -53,7 +57,10 @@ def init_so3krates_sparse(
         dispersion_energy_bool: bool = False,
         dispersion_energy_cutoff_lr_damping: Optional[float] = None,
         dispersion_energy_scale: float = 1.0,
+        dispersion_energy_kspace_do_ewald_bool: bool = False,
+        dispersion_energy_kspace_interp_nodes: int = 4,
         zbl_repulsion_bool: bool = False,
+        legacy_so3lr_bool: bool = False,  # Use original vanilla-SO3LR heads (learnable ZBL, attention Hirshfeld, no c6 head).
         use_final_bias_bool: bool = True,
         return_representations_bool: bool = False,
         input_convention: str = 'positions',
@@ -110,15 +117,43 @@ def init_so3krates_sparse(
         activation_fn=getattr(
             nn.activation, energy_activation_fn
         ) if energy_activation_fn != 'identity' else lambda u: u,
-    ) 
+        legacy=legacy_so3lr_bool,
+    )
+
+    # Legacy SO3LR has no dedicated C6 head; C6 is derived from Hirshfeld ratios.
+    c6_ratios = None if legacy_so3lr_bool else C6RatiosSparse(
+        prop_keys=None,
+        output_is_zero_at_init=output_is_zero_at_init,
+        regression_dim=energy_regression_dim,
+        activation_fn=getattr(
+            nn.activation, energy_activation_fn
+        ) if energy_activation_fn != 'identity' else lambda u: u,
+    )
+
+    # do_dispersion_kspace is True when dispersion_energy_kspace_do_ewald_bool
+    # is explicitly set (even to False, meaning PME not Ewald). The flag is None
+    # when dispersion kspace is not configured at all.
+    _do_disp_kspace = dispersion_energy_kspace_do_ewald_bool is not None
 
     dispersion_energy = DispersionEnergySparse(
         prop_keys=None,
         hirshfeld_ratios=hirshfeld_ratios,
+        c6_ratios=c6_ratios,
         cutoff_lr=cutoff_lr,
         cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
         dispersion_energy_scale=dispersion_energy_scale,
-        neighborlist_format=neighborlist_format_lr
+        neighborlist_format=neighborlist_format_lr,
+        do_dispersion_kspace=_do_disp_kspace,
+        legacy=legacy_so3lr_bool,
+    )
+
+    dispersion_energy_kspace = DispersionEnergyKspace(
+        prop_keys=None,
+        hirshfeld_ratios=hirshfeld_ratios,
+        c6_ratios=c6_ratios,
+        do_ewald=dispersion_energy_kspace_do_ewald_bool if dispersion_energy_kspace_do_ewald_bool is not None else False,
+        interpolation_nodes=dispersion_energy_kspace_interp_nodes,
+        legacy=legacy_so3lr_bool,
     )
 
     electrostatic_energy_kspace = ElectrostaticEnergyKspace(
@@ -142,14 +177,18 @@ def init_so3krates_sparse(
         partial_charges=partial_charges
     )
 
-    zbl_repulsion = ZBLRepulsionSparse(
-        prop_keys=None
-    )
-    
+    # Legacy SO3LR uses the original learnable ZBL repulsion; newer models use NLH.
+    # Both share module_name='zbl_repulsion'.
+    if legacy_so3lr_bool:
+        zbl_repulsion = ZBLRepulsionSparse(prop_keys=None)
+    else:
+        zbl_repulsion = NLHRepulsionSparse(prop_keys=None)
+
     energy = EnergySparse(
         prop_keys=None,
         output_is_zero_at_init=output_is_zero_at_init,
         regression_dim=energy_regression_dim,
+        final_mlp_widths=energy_final_mlp_widths,
         activation_fn=getattr(
             nn.activation, energy_activation_fn
         ) if energy_activation_fn != 'identity' else lambda u: u,
@@ -158,6 +197,7 @@ def init_so3krates_sparse(
         electrostatic_energy=electrostatic_energy,
         electrostatic_energy_kspace=electrostatic_energy_kspace,
         dispersion_energy=dispersion_energy,
+        dispersion_energy_kspace=dispersion_energy_kspace,
         partial_charges=partial_charges,
         hirshfeld_ratios=hirshfeld_ratios,
         zbl_repulsion=zbl_repulsion,
@@ -168,11 +208,18 @@ def init_so3krates_sparse(
         use_final_bias_bool=use_final_bias_bool,
     )
 
+    # Legacy SO3LR exposes only [energy, dipole_vec, hirshfeld] (observables_0/1/2);
+    # newer models add the c6 head (observables_3). Order is preserved so checkpoint
+    # parameter keys (observables_N) line up.
+    observables = [energy, dipole_vec, hirshfeld_ratios]
+    if not legacy_so3lr_bool:
+        observables.append(c6_ratios)
+
     return StackNetSparse(
         geometry_embeddings=[geometry_embed],
         feature_embeddings=embedding_modules,
         layers=layers,
-        observables=[energy, dipole_vec, hirshfeld_ratios],
+        observables=observables,
         return_representations_bool=return_representations_bool,
         use_residual_scalars=use_residual_scalars,
         prop_keys=None

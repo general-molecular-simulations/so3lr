@@ -28,10 +28,12 @@ class BernsteinBasis(nn.Module):
     gamma_init: float = 0.9448630629184640
 
     def setup(self) -> None:
-        b = jnp.stack(list(map(lambda x: log_binomial_coefficient(self.n_rbf - 1, x), np.arange(self.n_rbf))))
+        b = np.array(
+            [log_binomial_coefficient(self.n_rbf - 1, x) for x in range(self.n_rbf)]
+        )
         # shape: (K)
-        k = jnp.arange(self.n_rbf)  # shape: (K)
-        k_rev = jnp.arange(self.n_rbf)[::-1]  # shape: (K)
+        k = jnp.arange(self.n_rbf, dtype=jnp.int32)  # shape: (K)
+        k_rev = jnp.arange(self.n_rbf, dtype=jnp.int32)[::-1]  # shape: (K)
 
         def log_bernstein_polynomial(x):
             """
@@ -42,13 +44,15 @@ class BernsteinBasis(nn.Module):
             Returns:
 
             """
-            k_x = k * jnp.log(jnp.where(k != 0., x, 1.))
-            kk_x = k_rev * jnp.log(jnp.where(k_rev != 0., 1 - x, 1.))
+            _b = jnp.asarray(b, dtype=x.dtype)
+            _one = jnp.ones((), dtype=x.dtype)
+            k_x = k * jnp.log(jnp.where(k != 0, x, _one))
+            kk_x = k_rev * jnp.log(jnp.where(k_rev != 0, _one - x, _one))
 
-            return b + k_x + kk_x
+            return _b + k_x + kk_x
 
         self.log_bernstein_polynomial = log_bernstein_polynomial
-        self.gamma = jnp.float32(self.gamma_init)
+        self.gamma = self.gamma_init
 
     @nn.compact
     def __call__(self, r_ij) -> jnp.ndarray:
@@ -60,7 +64,8 @@ class BernsteinBasis(nn.Module):
         Returns:
 
         """
-        exp_r = jnp.exp(-self.gamma * r_ij)  # shape: (...,1)
+        gamma = jnp.asarray(self.gamma, dtype=r_ij.dtype)
+        exp_r = jnp.exp(-gamma * r_ij)  # shape: (...,1)
 
         # the cases exp_r=0 and exp_r=1 are the boundaries which give inf for the log_polynomial. They correspond
         # to the extreme cases of r_ij = 0 and r_ij = +/- inf, which are only possible in theory but might appear
@@ -93,8 +98,11 @@ class Gaussian(nn.Module):
 
         Returns: The expanded distances, shape: (...,n,n,L)
         """
-        widths = self.param('widths', _init_widths(self.r_0, self.r_cut, self.n_rbf), ())
-        centers = self.param('centers', _init_centers(self.r_0, self.r_cut, self.n_rbf), ())
+        # Centers/widths span the grid [0, r_cut] (lower edge 0., the SchNet
+        # convention shared by PhysNet/Fourier/Bernstein, none of which carry an
+        # r_0 field). Previously referenced an undeclared `self.r_0`.
+        widths = self.param('widths', _init_widths(0., self.r_cut, self.n_rbf), ())
+        centers = self.param('centers', _init_centers(0., self.r_cut, self.n_rbf), ())
         return jnp.exp(-0.5 / (widths**2) * (r - centers) ** 2)
 
 

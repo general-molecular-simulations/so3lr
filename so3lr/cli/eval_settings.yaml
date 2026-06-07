@@ -1,0 +1,24 @@
+# Evaluation Settings template for SO3LR
+#
+# NOTE: This template is NOT yet wired up. As of this commit, `so3lr eval`
+# reads only CLI flags — passing `--settings eval_settings.yaml` will have
+# no effect. The file is kept here as a forward-looking schema for the
+# eventual eval-settings loader. For now, see `so3lr eval --help` for the
+# supported flags (--datafile, --save-to, --jit-compile / --no-jit-compile,
+# --batch-size, --targets, --total-charge, --spin, --model, etc.).
+#
+# Keys mirror the eval-CLI flag names where they differ:
+#
+#   CLI flag                       YAML key
+#   --datafile                     datafile
+#   --save-to                      save_to
+#   --jit-compile / --no-jit-...   jit_compile
+#   --batch-size                   batch_size
+#   --targets                      targets
+
+## Evaluation Settings (for so3lr eval) — not yet wired up
+datafile: "path/to/dataset.extxyz"         # Path to dataset file for evaluation [Required]
+save_to: null                              # Output file for predictions (.extxyz). If null, not saved. [Default: null]
+jit_compile: true                          # Use JIT compilation for speed [Default: true]
+batch_size: 1                              # Number of molecules per batch [Default: 1]
+targets: "forces,dipole_vec,hirshfeld_ratios" # Comma-separated evaluation targets [Default: "forces,dipole_vec,hirshfeld_ratios"]

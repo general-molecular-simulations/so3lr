@@ -47,6 +47,8 @@ def get_observable_fn_sparse(model: StackNetSparse, observable: str = None):
                 theory_mask: jnp.ndarray = None,
                 k_grid: jnp.ndarray = None,
                 k_smearing: jnp.ndarray = None,
+                k_grid_disp: jnp.ndarray = None,
+                k_smearing_disp: jnp.ndarray = None,
                 residue_segments: jnp.ndarray = None,
                 residue_charge: jnp.ndarray = None,
                 **kwargs
@@ -76,8 +78,10 @@ def get_observable_fn_sparse(model: StackNetSparse, observable: str = None):
                 idx_i_lr=idx_i_lr,
                 idx_j_lr=idx_j_lr,
                 theory_mask=theory_mask,
-                k_grid = k_grid,
-                k_smearing = k_smearing,
+                k_grid=k_grid,
+                k_smearing=k_smearing,
+                k_grid_disp=k_grid_disp,
+                k_smearing_disp=k_smearing_disp,
                 residue_segments=residue_segments,
                 residue_charge=residue_charge,
             )
@@ -103,6 +107,8 @@ def get_observable_fn_sparse(model: StackNetSparse, observable: str = None):
                 theory_mask: jnp.ndarray = None,
                 k_grid: jnp.ndarray = None,
                 k_smearing: jnp.ndarray = None,
+                k_grid_disp: jnp.ndarray = None,
+                k_smearing_disp: jnp.ndarray = None,
                 residue_segments: jnp.ndarray = None,
                 residue_charge: jnp.ndarray = None,
                 **kwargs
@@ -113,7 +119,7 @@ def get_observable_fn_sparse(model: StackNetSparse, observable: str = None):
 
                 graph_mask = jnp.ones((1,)).astype(jnp.bool_)  # (1)
                 node_mask = jnp.ones((len(positions),)).astype(jnp.bool_)  # (num_nodes)
-                batch_segments = jnp.zeros_like(atomic_numbers)  # (num_nodes)   
+                batch_segments = jnp.zeros_like(atomic_numbers)  # (num_nodes)
 
             inputs = dict(
                 positions=positions,
@@ -132,8 +138,10 @@ def get_observable_fn_sparse(model: StackNetSparse, observable: str = None):
                 idx_i_lr=idx_i_lr,
                 idx_j_lr=idx_j_lr,
                 theory_mask=theory_mask,
-                k_grid = k_grid,
-                k_smearing = k_smearing,
+                k_grid=k_grid,
+                k_smearing=k_smearing,
+                k_grid_disp=k_grid_disp,
+                k_smearing_disp=k_smearing_disp,
                 residue_segments=residue_segments,
                 residue_charge=residue_charge,
             )
@@ -162,6 +170,8 @@ def get_energy_and_force_fn_sparse(model: StackNetSparse):
                   theory_mask: jnp.ndarray = None,
                   k_grid: jnp.ndarray = None,
                   k_smearing: jnp.ndarray = None,
+                  k_grid_disp: jnp.ndarray = None,
+                  k_smearing_disp: jnp.ndarray = None,
                   residue_segments: jnp.ndarray = None,
                   residue_charge: jnp.ndarray = None,
                   ):
@@ -189,8 +199,10 @@ def get_energy_and_force_fn_sparse(model: StackNetSparse):
                       idx_i_lr=idx_i_lr,
                       idx_j_lr=idx_j_lr,
                       theory_mask=theory_mask,
-                      k_grid = k_grid,
-                      k_smearing = k_smearing,
+                      k_grid=k_grid,
+                      k_smearing=k_smearing,
+                      k_grid_disp=k_grid_disp,
+                      k_smearing_disp=k_smearing_disp,
                       residue_segments=residue_segments,
                       residue_charge=residue_charge,
                       )
@@ -219,6 +231,8 @@ def get_energy_and_force_fn_sparse(model: StackNetSparse):
             theory_mask: jnp.ndarray = None,
             k_grid: jnp.ndarray = None,
             k_smearing: jnp.ndarray = None,
+            k_grid_disp: jnp.ndarray = None,
+            k_smearing_disp: jnp.ndarray = None,
             residue_segments: jnp.ndarray = None,
             residue_charge: jnp.ndarray = None,
             *args,
@@ -244,8 +258,10 @@ def get_energy_and_force_fn_sparse(model: StackNetSparse):
                           idx_i_lr,
                           idx_j_lr,
                           theory_mask,
-                          k_grid = k_grid,
-                          k_smearing = k_smearing,
+                          k_grid=k_grid,
+                          k_smearing=k_smearing,
+                          k_grid_disp=k_grid_disp,
+                          k_smearing_disp=k_smearing_disp,
                           residue_segments=residue_segments,
                           residue_charge=residue_charge,
                           )
@@ -256,7 +272,7 @@ def get_energy_and_force_fn_sparse(model: StackNetSparse):
 
             graph_mask = jnp.ones((1,)).astype(jnp.bool_)  # (1)
             node_mask = jnp.ones((len(positions),)).astype(jnp.bool_)  # (num_nodes)
-            batch_segments = jnp.zeros_like(atomic_numbers)  # (num_nodes) 
+            batch_segments = jnp.zeros_like(atomic_numbers)  # (num_nodes)
 
         inputs = dict(positions=positions,
                       atomic_numbers=atomic_numbers,
@@ -274,8 +290,10 @@ def get_energy_and_force_fn_sparse(model: StackNetSparse):
                       idx_i_lr=idx_i_lr,
                       idx_j_lr=idx_j_lr,
                       theory_mask=theory_mask,
-                      k_grid = k_grid,
-                      k_smearing = k_smearing,
+                      k_grid=k_grid,
+                      k_smearing=k_smearing,
+                      k_grid_disp=k_grid_disp,
+                      k_smearing_disp=k_smearing_disp,
                       residue_segments=residue_segments,
                       residue_charge=residue_charge,
                       )
@@ -298,6 +316,11 @@ def get_energy_and_force_fn_sparse(model: StackNetSparse):
             hirshfeld_ratios = model_output['hirshfeld_ratios']  # (num_graphs)
             hirshfeld_ratios = safe_scale(hirshfeld_ratios, node_mask)  # (num_graphs)
             result['hirshfeld_ratios'] = hirshfeld_ratios
+        
+        if 'c6_ratios' in model_output:
+            c6_ratios = model_output['c6_ratios']  # (num_graphs)
+            c6_ratios = safe_scale(c6_ratios, node_mask)  # (num_graphs)
+            result['c6_ratios'] = c6_ratios
 
         return result
 

@@ -128,6 +128,24 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
         npt.assert_(isinstance(lr0, dict))
         # PBC long-range should have cell_offsets
         npt.assert_(lr0.get('cell_offsets_lr') is not None)
+
+        # Long-range pair bookkeeping must be self-consistent (mirrors the
+        # no-PBC branch). n_pairs == len(idx_i_lr) == len(idx_j_lr) and the
+        # cell offsets carry one (3,) shift per pair. With cutoff_lr=15 Å and a
+        # 192-atom periodic cell there must be many pairs.
+        num_pairs = int(np.asarray(lr0['n_pairs'])[0])
+        idx_i_lr = np.asarray(lr0['idx_i_lr'])
+        idx_j_lr = np.asarray(lr0['idx_j_lr'])
+        cell_offsets_lr = np.asarray(lr0['cell_offsets_lr'])
+        npt.assert_(num_pairs > 0)
+        npt.assert_equal(len(idx_i_lr), num_pairs)
+        npt.assert_equal(len(idx_j_lr), num_pairs)
+        npt.assert_equal(cell_offsets_lr.shape, (num_pairs, 3))
+        npt.assert_equal(np.isnan(idx_i_lr).any(), False)
+        npt.assert_equal(np.isnan(idx_j_lr).any(), False)
+        # Indices must reference valid atoms in the 192-atom cell.
+        npt.assert_(idx_i_lr.min() >= 0 and idx_i_lr.max() < 192)
+        npt.assert_(idx_j_lr.min() >= 0 and idx_j_lr.max() < 192)
     else:
         all_data, data_stats = loader.load(
             cutoff=4.,

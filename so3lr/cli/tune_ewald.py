@@ -119,7 +119,7 @@ def get_forces_rs_at_fixed_distance(energy, positions, q, fixed_distance, **para
 
 
 @jax.jit
-def dispersion_vdw_QDO_energy(hirshfeld_ratios, r, idx_i, idx_j,  atomic_numbers, sigma, cutoff_lr, cutoff_lr_damping):
+def dispersion_vdw_QDO_energy(hirshfeld_ratios, r, idx_i, idx_j,  atomic_numbers, sigma, cutoff_lr, cutoff_lr_damping, c6_ratios=None):
     input_dtype = hirshfeld_ratios.dtype
 
     # Calculate alpha_ij and C6_ij using mixing rules
@@ -128,6 +128,7 @@ def dispersion_vdw_QDO_energy(hirshfeld_ratios, r, idx_i, idx_j,  atomic_numbers
         idx_i,
         idx_j,
         hirshfeld_ratios,
+        c6_ratios=c6_ratios,
     )
     # Use cubic fit for gamma
     gamma_ij = gamma_cubic_fit(alpha_ij)
@@ -971,6 +972,7 @@ def tune_dispersion_sr(
     exponent: int = 1,
     accuracy: float = 0.001,
     model_kwargs: dict[str, Any] = {},
+    c6_ratios: jnp.ndarray = None,
 ) -> tuple[float, dict[str, Any], float]:
     min_dimension = float(np.min(jnp.linalg.norm(cell, axis=1)))
 
@@ -992,7 +994,8 @@ def tune_dispersion_sr(
         cell=cell,
         positions=positions,
         exponent=exponent,
-        error_bounds=NativeErrorBounds_Dispersion(hirshfeld_ratios=hirshfeld_ratios, 
+        error_bounds=NativeErrorBounds_Dispersion(hirshfeld_ratios=hirshfeld_ratios,
+                                                  c6_ratios=c6_ratios,
                                                   cell=cell, positions=positions,
                                                   displacement=displacement,
                                                   nbrs_lr=nbrs_lr, nbrs_lr_distances=nbrs_lr_distances,
@@ -1021,20 +1024,23 @@ class NativeErrorBounds_Dispersion(TuningErrorBounds):
         nbrs_lr: jnp.ndarray,
         nbrs_lr_distances: jnp.ndarray,
         atomic_numbers: jnp.ndarray,
-        dispersion_energy_scale: float = 1.2
+        dispersion_energy_scale: float = 1.2,
+        c6_ratios: jnp.ndarray = None,
     ):
         super().__init__(hirshfeld_ratios, cell, positions)
         self.nbrs_lr = nbrs_lr
         self.nbrs_lr_distances = nbrs_lr_distances
         self._positions = positions
         self._charges = hirshfeld_ratios
+        self._c6_ratios = c6_ratios
         self.displacement = displacement
         self.dispersion_energy_scale = dispersion_energy_scale
         self.atomic_numbers = atomic_numbers
 
         idx_i, idx_j = self.nbrs_lr[0], self.nbrs_lr[1]
         self.best_full_force = get_forces_rs(partial(dispersion_vdw_QDO_energy, atomic_numbers=self.atomic_numbers,
-                                                     sigma=self.dispersion_energy_scale, cutoff_lr=None, cutoff_lr_damping=None),
+                                                     sigma=self.dispersion_energy_scale, cutoff_lr=None, cutoff_lr_damping=None,
+                                                     c6_ratios=self._c6_ratios),
                                              self._positions, self._charges, self.displacement,
                                              idx_i=idx_i, idx_j=idx_j)
 
@@ -1046,11 +1052,13 @@ class NativeErrorBounds_Dispersion(TuningErrorBounds):
         idx_i, idx_j = nbrs[0], nbrs[1]
 
         full_force = get_forces_rs(partial(dispersion_vdw_QDO_energy, atomic_numbers=self.atomic_numbers,
-                                           sigma=sigma, cutoff_lr=cutoff, cutoff_lr_damping=None),
+                                           sigma=sigma, cutoff_lr=cutoff, cutoff_lr_damping=None,
+                                           c6_ratios=self._c6_ratios),
                                    self._positions, self._charges, self.displacement,
                                    idx_i=idx_i, idx_j=idx_j)
         interp_force = get_forces_rs(partial(dispersion_vdw_QDO_energy, atomic_numbers=self.atomic_numbers,
-                                             sigma=sigma, cutoff_lr=cutoff, cutoff_lr_damping=cutoff_lr_damping),
+                                             sigma=sigma, cutoff_lr=cutoff, cutoff_lr_damping=cutoff_lr_damping,
+                                             c6_ratios=self._c6_ratios),
                                      self._positions, self._charges, self.displacement,
                                      idx_i=idx_i, idx_j=idx_j)
         return full_force, jnp.sqrt(jnp.sum(jnp.square(full_force - interp_force)) / (len(self._positions)))
@@ -1086,11 +1094,15 @@ def tune(
         settings (dict): Dictionary containing the settings for the tuning process.
     """
 
-    # Set the precision
-    if settings.get('precision', "float32").lower() == 'float64':
-        jax.config.update("jax_enable_x64", True)
-    else:
-        jax.config.update("jax_enable_x64", False)
+    # Configure JAX process-globals (x64 + matmul precision). Centralised in
+    # setup_jax_globals so that every entry point sets the same things up
+    # consistently. Previously this only toggled x64 and never set the matmul
+    # precision, so tune-ewald drifted from the MD path on the same hardware.
+    from .so3lr_md import setup_jax_globals
+    setup_jax_globals(
+        precision=settings.get('precision', 'float32'),
+        matmul_precision=settings.get('matmul_precision', 'highest'),
+    )
 
     # Setup logger
     log_file = settings.get('log_file')
@@ -1102,8 +1114,13 @@ def tune(
     lr_cutoff = settings.get('lr_cutoff')
     total_charge = settings.get('total_charge')
     dispersion_damping = settings.get('dispersion_damping')
-    buffer_size_multiplier_lr = settings.get('buffer_size_multiplier_lr', 1.0)
-    buffer_size_multiplier_sr = settings.get('buffer_size_multiplier_sr', 1.0)
+    # Match DEFAULT_BUFFER_MULTIPLIER in so3lr_cli.py (1.25). The CLI wrapper
+    # always seeds these keys, but a Python-API caller invoking tune() with a
+    # bare settings dict previously got 1.0, diverging from the rest of the
+    # codebase. Hardcoded here (rather than imported from so3lr_cli) to avoid
+    # a circular import (so3lr_cli imports `tune` from this module).
+    buffer_size_multiplier_lr = settings.get('buffer_size_multiplier_lr', 1.25)
+    buffer_size_multiplier_sr = settings.get('buffer_size_multiplier_sr', 1.25)
     jit_compile = settings.get('jit_compile', True)
 
     # Ewald electrostatics settings
@@ -1160,13 +1177,11 @@ def tune(
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
             output_intermediate_quantities=[
-                'partial_charges', 'hirshfeld_ratios'],
+                'partial_charges', 'hirshfeld_ratios', 'c6_ratios'],
         )
     else:
-        # Verify model path exists
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(
-                f"Custom model path not found: {model_path}")
+        # model_path may be a bundled name (so3lr-s/m/l/so3lr) or a path;
+        # load_model resolves both and raises if neither is valid.
         # logger.info(f"Using custom MLFF potential from: {model_path}")
         potential = load_model(
             model_path,
@@ -1176,7 +1191,7 @@ def tune(
             kspace_electrostatics=kspace_electrostatics,
             # kspace_interp_nodes=kspace_interp_nodes,
             output_intermediate_quantities=[
-                'partial_charges', 'hirshfeld_ratios'],
+                'partial_charges', 'hirshfeld_ratios', 'c6_ratios'],
         )
 
     model_kwargs = dict(
@@ -1198,8 +1213,8 @@ def tune(
         total_charge=total_charge,
         precision=precision,
         fractional_coordinates=fractional_coordinates,
-        buffer_size_multiplier_lr=buffer_size_multiplier_sr,
-        buffer_size_multiplier_sr=buffer_size_multiplier_lr,
+        buffer_size_multiplier_sr=buffer_size_multiplier_sr,
+        buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         has_aux=True,
     )
 
@@ -1228,6 +1243,7 @@ def tune(
     )
     charges = obs_data[1]['partial_charges']
     hirshfeld_ratios = obs_data[1]['hirshfeld_ratios']
+    c6_ratios = obs_data[1]['c6_ratios']
 
     if box.shape == (3, 3):
         cell = box
@@ -1360,14 +1376,17 @@ def tune(
             accuracy=accuracy,
             exponent=1,  # Native short-range uses 1/r potential
             model_kwargs=dispersion_model_kwargs,
+            c6_ratios=c6_ratios,
         )
     else:
         raise ValueError(
             f"Unknown kspace_electrostatics type: {kspace_electrostatics}. Must be 'ewald', 'pme', 'p3m', or 'cutoff'.")
 
+    recommended_param = None
     if any(err < accuracy for err in errs):
         param, timing, error = params[timings.index(min(timings))], min(
             timings), errs[timings.index(min(timings))]
+        recommended_param = param  # fastest param that still meets the accuracy target
         if kspace_electrostatics == 'cutoff':
             logger.info(
                 f"Optimally timed parameters for cutoff electrostatics with an estimated force error below {accuracy}eV/A:")
@@ -1378,7 +1397,7 @@ def tune(
             logger.info(f"  lr_cutoff: {param['cutoff']}")
             logger.info(f"  kspace_smearing: {param['smearing']}")
             logger.info(f"  kspace_spacing: {param['spacing']}")
-            if 'interpolation_nodes' in params:
+            if 'interpolation_nodes' in param:
                 logger.info(
                     f"  kspace_interp_nodes: {param['interpolation_nodes']}")
         elif kspace_dispersion == 'cutoff':
@@ -1401,7 +1420,7 @@ def tune(
         logger.info(f"  lr_cutoff: {param['cutoff']}")
         logger.info(f"  kspace_smearing: {param['smearing']}")
         logger.info(f"  kspace_spacing: {param['spacing']}")
-        if 'interpolation_nodes' in params:
+        if 'interpolation_nodes' in param:
             logger.info(
                 f"  kspace_interp_nodes: {param['interpolation_nodes']}")
     elif kspace_dispersion == 'cutoff':
@@ -1410,3 +1429,36 @@ def tune(
         logger.info(f"  dispersion_damping: {param['cutoff_lr_damping']}")
     logger.info(f"  timing: {timing}")
     logger.info(f"  force error estimate [eV/A]: {error}")
+
+    # Print a ready-to-run MD command using the tuned parameters so users know
+    # exactly how to launch a simulation next. Prefer the fastest param that met
+    # the accuracy target; otherwise fall back to the smallest-error param.
+    rec = recommended_param if recommended_param is not None else param
+    if kspace_electrostatics in ('ewald', 'pme', 'p3m'):
+        _interp = rec.get('interpolation_nodes')
+        _interp_flag = f" --kspace-interp-nodes {int(_interp)}" if _interp is not None else ""
+        logger.info("=" * 60)
+        logger.info("To run MD with these k-space parameters, e.g. NPT (CLI):")
+        logger.info(
+            f"  so3lr npt --input {input_file_path} --lr-cutoff {rec['cutoff']} "
+            f"--kspace-electrostatics {kspace_electrostatics} "
+            f"--kspace-smearing {rec['smearing']} --kspace-spacing {rec['spacing']}{_interp_flag} "
+            f"--temperature 300 --pressure 1.0"
+        )
+        logger.info("Or add the following to your settings.yaml:")
+        logger.info(f"  lr_cutoff: {rec['cutoff']}")
+        logger.info(f"  kspace_electrostatics: {kspace_electrostatics}")
+        logger.info(f"  kspace_smearing: {rec['smearing']}")
+        logger.info(f"  kspace_spacing: {rec['spacing']}")
+        if _interp is not None:
+            logger.info(f"  kspace_interp_nodes: {int(_interp)}")
+        logger.info("=" * 60)
+    elif kspace_electrostatics == 'cutoff' or kspace_dispersion == 'cutoff':
+        logger.info("=" * 60)
+        logger.info("To run MD with this cutoff, e.g. NVT (CLI):")
+        logger.info(
+            f"  so3lr nvt --input {input_file_path} --lr-cutoff {rec['cutoff']} --temperature 300"
+        )
+        logger.info("Or add the following to your settings.yaml:")
+        logger.info(f"  lr_cutoff: {rec['cutoff']}")
+        logger.info("=" * 60)

@@ -1,9 +1,16 @@
 [tool.poetry]
 name = "so3lr"
-version = "0.1.0"
+version = "0.2.0"
 description = "SO3krates Universal Pairwise Force Field with Long Range Interactions (SO3LR) for Molecular Simulation"
 authors = ["Adil Kabylda, Thorben Frank"]
 license = "MIT"
+
+include = [
+    { path = "so3lr/models/**/*", format = ["sdist", "wheel"] },
+    { path = "so3lr/mlff/sph_ops/*.pickle", format = ["sdist", "wheel"] },
+    { path = "so3lr/mlff/sph_ops/*.npz", format = ["sdist", "wheel"] },
+    { path = "so3lr/mlff/utils/robust_loss_jax/data/*.npz", format = ["sdist", "wheel"] },
+]
 
 
 [tool.poetry.dependencies]
@@ -24,13 +31,19 @@ pyyaml = "*"
 ml_collections = "*"
 click = "*"
 jraph = { git = "https://github.com/google-deepmind/jraph.git", branch = "master", optional = false }
-jax-md = { git = "https://github.com/jax-md/jax-md.git", branch = "main" , optional = false }
+jax-md = { git = "https://github.com/kabylda/jax-md.git", branch = "npt-anisotropic", optional = false }
 glp = { git = "https://github.com/fbruenig/glp.git", branch = "electrostatics_neighbourlist", optional = false }
-jax-pme = { git = "https://github.com/lab-cosmo/jax-pme", branch = "main" , optional = false }
+jax-pme = { git = "https://github.com/fbruenig/jax-pme", branch = "main" , optional = false }
 pysages = { git = "https://github.com/em819/PySAGES.git", branch = "nve_npt_ensembles", optional = true }
+tensorflow-cpu = { version = "*", optional = true }
+tensorflow-datasets = { version = "*", optional = true }
 
 [tool.poetry.extras]
 pysages = ["pysages"]
+# Only needed for the TFDS-based data loader and its tests
+# (tests/mlff_tests/test_data_loader_tfds.py). Kept optional so the base
+# install stays light and JAX-only.
+tfds = ["tensorflow-cpu", "tensorflow-datasets"]
 
 
 [tool.poetry.group.dev.dependencies]

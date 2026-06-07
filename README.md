@@ -1,7 +1,7 @@
-![workflow-test-ci](https://github.com/general-molecular-simulation/so3lr/actions/workflows/CI.yml/badge.svg)
+![workflow-test-ci](https://github.com/general-molecular-simulations/so3lr/actions/workflows/CI.yml/badge.svg)
 [![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb)
-[![cite-link](https://img.shields.io/badge/how_to-cite-000000)](https://github.com/general-molecular-simulation/so3lr?tab=readme-ov-file#Citation)
+[![cite-link](https://img.shields.io/badge/how_to-cite-000000)](https://github.com/general-molecular-simulations/so3lr?tab=readme-ov-file#Citation)
 [![preprint-link](https://img.shields.io/badge/paper-JACS-FFCE34)](https://doi.org/10.1021/jacs.5c09558)
 [![data](https://zenodo.org/badge/DOI/10.5281/zenodo.14779793.svg)](https://doi.org/10.5281/zenodo.14779793)
 ![Logo](./logo.png)
@@ -35,23 +35,83 @@ cd so3lr
 pip install .
 ```
 
+> **Requires Python 3.12+.** The package is pinned to `python = ">=3.12"` in `pyproject.toml`; older interpreters (e.g. 3.10 / 3.11 on some clusters) will fail at `pip install` with a resolver error. Use `python3.12 -m venv` (or `uv venv --python 3.12`) before installing.
+
+### Optional extras
+
+The base install is JAX-only and lightweight. Two extras are available:
+
+- `pip install .[pysages]` — installs PySAGES for enhanced-sampling MD (collective variables, ABF, metadynamics, harmonic bias).
+- `pip install .[tfds]` — installs `tensorflow-cpu` + `tensorflow-datasets` for the fast TFDS-based data loader used by training/fine-tuning (needed only if you want to point `--datafile` at a TFDS dataset or run `tests/mlff_tests/test_data_loader_tfds.py`).
+
+## Models
+
+SO3LR ships in three sizes. All are bundled inside the package, so you select one **by short name** — no download or path needed. They trade off speed against accuracy:
+
+| Model | Layers | Features | Heads | Cutoff (Å) | Best for |
+|-------|--------|----------|-------|-----------|----------|
+| `so3lr-s` | 2 | 128 | 4 | 4.5 | Fastest — quick tests and very large systems |
+| `so3lr-m` *(default)* | 3 | 128 | 4 | 4.5 | Balanced — general-purpose use |
+| `so3lr-l` | 3 | 256 | 8 | 5.0 | Most accurate — highest fidelity, largest model |
+| `so3lr-o` | 3 | 128 | 4 | 4.5 | Original SO3LR v1 — for reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558) |
+
+If you do not specify a model, **`so3lr-m`** is used. `so3lr-o` (also reachable as `so3lr`) is the original v1 model kept for backward compatibility.
+
+### Selecting a model
+
+The same names work across every interface:
+
+```python
+# Python / ASE
+from so3lr import So3lrCalculator
+calc = So3lrCalculator(model="so3lr-l")          # also "so3lr-s" / "so3lr-m"
+```
+
+```shell script
+# CLI (works with opt / nvt / npt / nve / eval)
+so3lr nvt --input geometry.xyz --model so3lr-l
+```
+
+```yaml
+# In an MD settings YAML (model: is an alias of model_path:)
+model: so3lr-l
+```
+
+Custom and fine-tuned models still work — just pass a path instead of a name:
+
+```python
+So3lrCalculator(model="/path/to/finetuned")      # or  --model /path/to/finetuned  on the CLI
+```
+
+> **Backward compatibility:** The no-arg default is now `so3lr-m`. To reproduce the **original SO3LR v1** model from the [JACS paper](https://doi.org/10.1021/jacs.5c09558), pass `model="so3lr"` (alias `"so3lr-o"`).
+
 ## Command Line Interface (CLI)
 
 SO3LR provides a unified command-line interface that leverages the performance of JAX-MD under the hood (detailed in the JAX-MD section below). This allows you to perform geometry optimizations and MD simulations with simple commands. The CLI supports several key functionalities:
 
 - `so3lr opt`: Geometry optimization
-- `so3lr nvt`: NVT molecular dynamics
+- `so3lr nvt`: NVT molecular dynamics (Nose-Hoover chain thermostat)
+- `so3lr nvt-langevin`: NVT molecular dynamics with a Langevin thermostat
 - `so3lr npt`: NPT molecular dynamics
 - `so3lr nve`: NVE molecular dynamics
 - `so3lr eval`: Model evaluation on a dataset
 - `so3lr finetune`: Fine-tune the model on custom datasets
 - `so3lr train`: Train a SO3LR/SO3krates model from scratch
+- `so3lr tune-ewald`: Auto-tune Ewald/PME/P3M k-space parameters for a structure
 
 Each subcommand has its own set of options and can be run with `--help` to see all available parameters.
 
 ```shell script
 so3lr opt --help
 ```
+
+All MD subcommands also accept a single `--settings` YAML file that bundles every CLI flag (plus features that have no CLI flag, like atom constraints and enhanced sampling). This is the recommended way to drive longer or more elaborate runs:
+
+```shell script
+so3lr --settings settings.yaml
+```
+
+See the *Freezing atoms during MD*, *Long-Range Electrostatics*, and *Enhanced Sampling with PySAGES* sections below for example settings files.
 
 Optimize a structure using the FIRE algorithm:
 
@@ -101,18 +161,81 @@ so3lr nvt --input geometry.xyz --output trajectory.xyz --temperature 300 --md-cy
 
 The restart will continue the simulation from the exact state where it was saved, preserving atom positions, velocities, thermostat/barostat state, and simulation timestep.
 
+#### What restart_save preserves (and what it doesn't)
+
+The `.npz` written by `--restart-save` is produced by `save_state()` in `so3lr/cli/so3lr_md.py` and reloaded by `load_state()` in the same file. The exact set of fields is:
+
+**Preserved across a restart:**
+- atomic positions, momenta, forces, masses
+- the simulation box and the `fractional_coordinates` flag (so a cartesian/fractional mismatch between save and restart runs is detected and converted automatically)
+- the cycle / step counter (the run resumes at the saved cycle, not from 0)
+- the ensemble tag (NVT/NPT/NVE), and for NVT/NPT the full Nose-Hoover chain state of both the thermostat and the barostat (position, momentum, mass, tau, kinetic energy, degrees of freedom)
+- for NPT: the reference box, box position/momentum/mass, and the saved stress (or stress_tensor under `npt_flex`)
+- enhanced-sampling (PySAGES) state, when `restart_pysages_save_path` is also used — saved/loaded as a separate `.pkl` (see the PySAGES section below)
+
+**NOT preserved (regenerated on each launch):**
+- the JAX/NumPy PRNG keys, including the Langevin-thermostat key — `nvt-langevin` runs reseed from `--seed` on restart, so trajectories are not bit-identical past the restart point
+- elapsed wall-clock time (the wall-time log resets to zero for the restarted process)
+- neighbor-list allocations and JIT-compiled functions (rebuilt on launch from current geometry and buffer multipliers)
+- output/log file buffers (the new run appends a fresh header to the log and continues writing the trajectory file)
+
+For `nvt-langevin`, this means restart preserves the dynamical state but not the stochastic noise stream; for the deterministic NVT/NPT Nose-Hoover and NVE integrators, the restart is reproducible up to numerics.
+
+### Freezing atoms during MD
+
+A subset of atoms can be held fixed during any MD run (`nve` / `nvt` / `npt`). Frozen atoms keep their reference positions while their momenta and forces are zeroed every step, so the rest of the system evolves around them (useful e.g. for holding a surface, a binding pocket, or a substrate rigid). Constraints are configured through the MD **settings YAML** (run with `so3lr --settings settings.yaml`):
+
+```yaml
+# settings.yaml
+ensemble: nvt
+input_file: geometry.xyz
+model: so3lr-m
+md_T: 300
+md_cycles: 100
+md_steps: 100
+
+# --- atom constraints (all optional; omit to run unconstrained) ---
+fixed_atom_indices: [0, 1, 2]            # 0-based indices of atoms to freeze
+# mobile_atom_indices: [3, 4, 5]         # alternative: list the atoms allowed to MOVE (all others are frozen)
+# atom_mask_path: masks.npz              # alternative: load 'mobile_atom_indices'/'fixed_atom_indices' arrays from a .npz
+fixed_atom_constraint: cartesian_anchor  # default; pins frozen atoms in real (Cartesian) space, robust to box changes under NPT
+output_cartesian_positions: false        # for periodic runs, write saved positions in Cartesian coordinates
+```
+
+```shell script
+so3lr --settings settings.yaml
+```
+
+Notes:
+- Provide **either** `fixed_atom_indices` **or** `mobile_atom_indices` — the complement is derived automatically. If both are given, they are used as-is.
+- `atom_mask_path` points to a NumPy `.npz` holding `mobile_atom_indices` and/or `fixed_atom_indices` arrays; explicit `*_atom_indices` keys in the YAML override it.
+- With no constraint keys set, MD runs normally (the feature is a no-op). On start-up a constrained run logs e.g. `Fixed atoms: 3; mobile atoms: 97; constraint=cartesian_anchor`.
+
+### Restricting trajectory output to a subset of atoms
+
+The `output_atom_indices` YAML key (also surfaced as `--output-atom-indices` on the CLI) restricts the saved trajectory to a chosen subset of atoms — the MD itself still propagates the full system, but only the listed atoms are written to the `.hdf5` / `.xyz` trajectory at each save step. This is useful for keeping trajectory files small in large solvent boxes when you only care about a solute, a binding pocket, an interface slab, or a tagged ligand:
+
+```yaml
+# settings.yaml — save only the first 50 atoms (e.g. the solute) of a solvated box
+output_atom_indices: [0, 1, 2, ..., 49]
+```
+
+The full box and the full per-step energies/forces are still computed; only the trajectory writer is filtered. Leave it as `null` (default) to dump every atom.
+
 Evaluate the SO3LR model on a dataset:
 
 ```shell script
 so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 100 --save-to predictions.extxyz
 ```
 
+Add `--model so3lr-s` (or `so3lr-l`) to evaluate a different bundled model; without it, `so3lr-m` is used.
+
 The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread).
 
 > [!IMPORTANT]
 > SO3LR was not trained on energies, so only relative energies are meaningful. Labels are assumed to be in `eV` and `Ångström`. For gas-phase simulations, we suggest using `--lr-cutoff 100`.
 
-The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and `hirshfeld_ratios`. Energy and forces are assumed to be present in the datafile, while dipole vectors and Hirshfeld ratios are optional. If they are not present in the data, the metrics will simply be `NaN`.
+The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and the per-atom ratio head. The ratio head is named `a0_ratios` for the new `so3lr-s/m/l` models (polarizability volume ratios) and `hirshfeld_ratios` for the legacy `so3lr` model -- you can pass either name to `--targets` and the CLI will normalize it to whatever the chosen model actually outputs (and accept dataset labels stored under either key). The new `so3lr-s/m/l` models additionally predict `c6_ratios` (per-atom C6-coefficient ratios used by the dispersion term); pass `c6_ratios` to `--targets` to score it against dataset labels stored under the same key. Energy and forces are assumed to be present in the datafile, while dipole vectors, `a0_ratios`/`hirshfeld_ratios`, and `c6_ratios` labels are optional. If they are not present in the data, the metrics will simply be `NaN`.
 
 **Observable targets** — intermediate model quantities (no ground truth required) can be added to `--targets`. They are saved to the output extxyz file alongside the standard predictions:
 
@@ -173,6 +296,18 @@ so3lr finetune --datafile dataset.xyz --workdir so3lr_finetuned --num-train 1000
 
 You can customize the training process with a config file (`--config custom_finetune.yaml`), choose different fine-tuning strategies (`--strategy full`), or fine-tune from a previously trained model (`--model-path ./previous_finetune_workdir`). Possible strategies include `full`, `final_mlp`, `last_layer`, `last_layer_and_final_mlp`, `first_layer`, and `first_layer_and_last_layer`. We recommend using the `full` or `last_layer_and_final_mlp` strategies. The default configuration in `so3lr/config/finetune.yaml` includes settings for the optimizer, learning rate schedule, batch size, loss weights, and data filtering. To use a fine-tuned model, use the `--model path_to_finetuned_model` flag.
 
+### Fine-tuning on forces only (recommended: `freeze_long_range`)
+
+SO3LR's long-range energy terms are driven by dedicated prediction heads: electrostatics from the partial-charge/dipole head, and dispersion from the polarizability (`a0_ratios`) and `c6_ratios` heads. These heads are trained against their own labels (dipoles/charges, Hirshfeld/polarizability, C6). If your fine-tuning dataset contains **only forces** (no dipole/charge/Hirshfeld/C6 labels) and you train with `--strategy full`, the force gradients will silently drag these heads away from their physically-meaningful values — degrading the electrostatics and dispersion even though the forces look fine.
+
+For forces-only datasets, use the dedicated strategy that **freezes the long-range heads** and trains only the short-range representation and energy head:
+
+```shell script
+so3lr finetune --datafile forces_only.xyz --strategy freeze_long_range --num-train 1000 --num-valid 100
+```
+
+`freeze_long_range` (alias `forces_only`) freezes the dipole/partial-charge, `a0_ratios`, and `c6_ratios` heads (`observables_1/2/3`) while keeping the message-passing layers and the energy head (`observables_0`) trainable, so the pretrained electrostatics and dispersion are preserved. If your dataset *does* include dipole/Hirshfeld/C6 labels, prefer `full` (or add those terms to `loss_weights`) so the long-range heads adapt with supervision.
+
 ## Training from Scratch
 
 You can train a SO3krates model from scratch using a YAML configuration file. The default configuration is in `so3lr/config/config.yaml` and includes settings for the model architecture, optimizer, learning rate schedule, batch size, loss weights, and data filtering.
@@ -182,6 +317,45 @@ Basic training command:
 ```shell script
 so3lr train --config config.yaml
 ```
+
+### Training on multiple datasets
+
+Instead of a single `data.filepath`, you can list several datasets under `data.datasets` and the trainer will draw from them according to per-dataset `weight` values:
+
+```yaml
+data:
+  filepath: null
+  datasets:
+    - path: /data/dataset_a.extxyz
+      weight: 1.0
+      # num_train: 5000   # optional per-dataset cap (TFDS only)
+    - path: /data/dataset_b.extxyz
+      weight: 0.5
+```
+
+The `num_train` per-dataset cap is only honored by the **TFDS** dataloader — install via `pip install .[tfds]` (see *Optional extras*). With the default ASE-based loader the `weight` field is still used to control sampling, but per-dataset `num_train` caps are ignored.
+
+### Optional training features
+
+The `training:` block of the config supports a few optional features, all
+disabled by default (see the commented entries in `so3lr/config/config.yaml`):
+
+- **EMA of weights** — `use_ema: true` (with `ema_decay`, default `0.999`) keeps an
+  exponential moving average of the parameters. The raw weights keep training
+  while the smoothed EMA copy is used for validation and saved in the checkpoint,
+  which is usually more stable and accurate at deployment.
+- **Early stopping** — `early_stopping_patience: <N>` halts training once the
+  validation loss has not improved (by more than `early_stopping_min_delta`) for
+  `N` consecutive evaluations.
+- **Reduce LR on plateau** — `reduce_lr_on_plateau: true` multiplies the learning
+  rate by `reduce_lr_factor` (default `0.75`) whenever the validation loss stalls
+  for `reduce_lr_patience` evaluations, down to a floor of
+  `learning_rate * reduce_lr_min_scale`. This composes with the configured
+  `learning_rate_schedule`.
+- **Two-stage loss reweighting** — set `stage_two_start_epoch: <epoch>` and
+  `stage_two_loss_weights:` to switch to a second set of loss weights partway
+  through training (e.g. start energy-heavy, then emphasise forces). The
+  best-loss, early-stopping and plateau trackers reset at the switch.
 
 ## Dimer Binding Energy Calculations
 
@@ -200,7 +374,9 @@ so3lr eval --datafile sapt10k_prepared.xyz --targets energy --save-to sapt10k_ev
 ```
 
 Finally, compute the binding energy:
-```shell script
+```python
+from ase.io import read
+
 mols = read('sapt10k_eval.xyz', index=':')
 energy = [a.info['energy_so3lr'] for a in mols]
 bind_energy = [energy[i]-energy[i+1] for i in range(0, len(energy), 2)]
@@ -218,6 +394,7 @@ atoms = Atoms('H2', positions=[(0, 0, 0), (0, 0, 0.74)])
 atoms.info['charge'] = 0.0
 
 calc = So3lrCalculator(
+    model="so3lr-m",         # bundled model; also "so3lr-s" / "so3lr-l" or a path. Default: so3lr-m
     calculate_stress=False,
     lr_cutoff=100, # for gas-phase systems
     dtype=np.float64
@@ -246,7 +423,7 @@ import numpy as np
 from so3lr import So3lrCalculator
 from ase import Atoms
 
-atoms = Atoms('H2O', positions=[(0, 0, 0), (0.96, 0, 0), (0.24, 0.93, 0)])
+atoms = Atoms('OH2', positions=[(0, 0, 0), (0.96, 0, 0), (-0.24, 0.93, 0)])
 atoms.info['charge'] = 0.0
 
 calc = So3lrCalculator(
@@ -295,12 +472,17 @@ print(f"Partial charges: {partial_charges}")
 | `nn_energy` | Neural network energy contribution | `(n_atoms,)` |
 | `electrostatic_energy` | Damped electrostatic energy | `(n_atoms,)` |
 | `dispersion_energy` | Damped dispersion energy | `(n_atoms,)` |
-| `zbl_repulsion` | ZBL short-range repulsion | `(n_atoms,)` |
+| `zbl_repulsion` | Short-range repulsion (NLH for so3lr-s/m/l, ZBL for legacy `so3lr`) | `(n_atoms,)` |
+| `nlh_repulsion` | NLH short-range repulsion (so3lr-s/m/l; alias of `zbl_repulsion`) | `(n_atoms,)` |
 | `partial_charges` | Atomic partial charges | `(n_atoms,)` |
 | `hirshfeld_ratios` | Hirshfeld volume ratios | `(n_atoms,)` |
 | `electrostatic_energy_undamped` | Undamped electrostatic energy | `(n_atoms,)` |
 | `dispersion_energy_undamped` | Undamped dispersion energy | `(n_atoms,)` |
 | `x` | Final-layer per-atom embeddings | `(n_atoms, features)` |
+
+> **Note:** Every observable in the table above is also reachable from the CLI via `so3lr eval --targets <name>` — the names are identical. The only special case is `x`, which is written to a separate `<output>_x.npz` (see the *Atom embeddings* example above) rather than the extxyz file.
+
+> **Note:** The `zbl_repulsion` key returns the model's short-range repulsion energy. For `so3lr-s/m/l` this is a parameter-free NLH repulsion (also available under the clearer alias `nlh_repulsion`); for the legacy `so3lr` model it is the original ZBL repulsion. The `zbl_repulsion` key is kept for backward compatibility.
 
 ### Observable Gradients
 
@@ -503,7 +685,7 @@ K-space electrostatics should be used for:
 - **Charged systems** where long-range Coulomb interactions are important
 - Systems where electrostatic cutoffs would introduce artifacts
 
-For **gas-phase/molecular systems**, use `lr_cutoff=1000` instead (no k-space needed).
+For **gas-phase/molecular systems**, use `lr_cutoff=100` instead (no k-space needed). This matches the gas-phase recommendation used throughout the eval examples above.
 
 ### ASE Calculator with K-Space Electrostatics
 
@@ -613,6 +795,43 @@ The `k_spacing` controls the k-space grid density:
 - For PME/P3M: `k_spacing ≈ smearing / 8` is a good starting point
 - For Ewald: `k_spacing ≈ smearing / 2` is typical
 
+#### Automatic tuning with `so3lr tune-ewald`
+
+Rather than choosing `smearing`/`spacing` by hand, the `tune-ewald` command grid-searches
+real-space cutoff, smearing, and grid resolution for a given structure and reports the
+parameter set that reaches a target force accuracy at the lowest cost:
+
+```shell script
+# Tune PME parameters for a periodic box (use float64 for the accuracy estimate)
+so3lr tune-ewald --input water_box.xyz \
+    --kspace-electrostatics pme \
+    --lr-cutoff 12.0 \
+    --precision float64
+```
+
+- `--kspace-electrostatics`: method to tune — `ewald`, `pme`, or `p3m`.
+- `--lr-cutoff`: long-range cutoff (Å); used as the upper bound of the cutoff search.
+- `--precision`: run the tuning in `float64` so the error bounds are meaningful.
+- Other model flags (`--model`, `--total-charge`, `--dispersion-damping`, buffer sizes)
+  are shared with the MD commands.
+
+Results (including per-candidate error/timing bounds and the recommended
+`smearing`/`spacing`/`interp-nodes`) are written to the log file, and the command
+prints a ready-to-run MD invocation plus the equivalent settings-YAML keys.
+
+Plug the recommended values into your MD run either on the CLI
+(`--kspace-smearing` / `--kspace-spacing` / `--kspace-interp-nodes`) or, for a
+`so3lr --settings settings.yaml` run, by adding the matching keys to the YAML:
+
+```yaml
+# settings.yaml
+lr_cutoff: 12.0
+kspace_electrostatics: pme      # ewald / pme / p3m
+kspace_smearing: 4.0            # recommended value from tune-ewald
+kspace_spacing: 0.5            # recommended value from tune-ewald
+kspace_interp_nodes: 4         # for pme / p3m
+```
+
 ## Enhanced Sampling with PySAGES
 
 SO3LR integrates with [PySAGES](https://github.com/SSAGESLabs/PySAGES), a JAX-based enhanced sampling library, to enable biased molecular dynamics simulations with collective variables (CVs). This allows free energy calculations and enhanced exploration of configuration space directly within SO3LR's JAX-MD engine.
@@ -630,7 +849,7 @@ SO3LR runs normally without PySAGES installed. The enhanced sampling features ar
 
 ### Supported Ensembles
 
-Enhanced sampling currently supports **NVT (Nose-Hoover thermostat)** only. NPT, NVE, and NVT-Langevin are not yet supported.
+Enhanced sampling works in any ensemble that SO3LR's MD engine supports — **NVT (Nose-Hoover), NPT, and NVE** — *for the non-adaptive methods*. The adaptive methods that learn a bias on-the-fly (`abf`, `spectralabf`, `metad`) currently require **NVT only**, because they assume a canonical sampling distribution when accumulating the free-energy estimator. `harmonic` (umbrella sampling / string method) and `unbiased` (CV tracking only) impose no such constraint and run in NVT / NPT / NVE alike. `nvt-langevin` is not yet wired to PySAGES.
 
 ### Supported Methods
 
@@ -747,9 +966,10 @@ restart_pysages_save_path: "./restart_pysages_2.pkl"
 
 ## Coming soon!
 
-- Fast TFDS dataloader
 - General robust loss
 - Multi-head fine-tuning
+
+(The previously listed *Fast TFDS dataloader* now ships — install via `pip install .[tfds]`; see the *Optional extras* note in the Installation section.)
 
 If you would like to see new features, add your own functionality, or share ideas, please reach out or open an issue. We are always happy to collaborate and hear your thoughts!
 

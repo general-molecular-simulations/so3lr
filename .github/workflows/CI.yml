@@ -24,7 +24,11 @@ jobs:
         include:
           - group: 1
             name: "mlff"
-            install_extras: ""
+            # The TFDS data-loader test (test_data_loader_tfds.py) imports
+            # tensorflow at module top, which would abort collection on a
+            # base install. The [tfds] extra pulls in tensorflow-cpu +
+            # tensorflow-datasets so the test runs in CI.
+            install_extras: "[tfds]"
             run_short: "pytest tests/mlff_tests/ -v --tb=short"
             run_full: "pytest tests/mlff_tests/ -v --tb=short --full"
           - group: 2

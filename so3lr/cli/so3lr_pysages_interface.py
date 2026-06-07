@@ -31,7 +31,8 @@ logger = logging.getLogger("SO3LR")
 
 
 def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
-                                  ensemble='nvt', nbrs_lr=None, k_grid=None):
+                                  ensemble='nvt', nbrs_lr=None, k_grid=None,
+                                  k_grid_disp=None):
     """
     Create the PySAGES context generator function that wraps SO3LR's MD step.
 
@@ -45,6 +46,7 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
         ensemble: Ensemble type ('nvt', 'nve', or 'npt').
         nbrs_lr: Long-range neighbor list (optional).
         k_grid: K-space grid for Ewald/PME electrostatics (optional).
+        k_grid_disp: K-space grid for dispersion PME (optional).
 
     Returns:
         A callable that generates a PySAGES JaxMDContext.
@@ -59,7 +61,8 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
                 state0 = state0.set(position=transform(jnp.array(box), state0.position))
             return pb.JaxMDContextState(
                 state0,
-                dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box, k_grid=k_grid)
+                dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box,
+                     k_grid=k_grid, k_grid_disp=k_grid_disp)
             )
     else:
         def init_fn_pysages():
@@ -68,7 +71,8 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
                 state0 = state0.set(position=transform(jnp.array(box), state0.position))
             return pb.JaxMDContextState(
                 state0,
-                dict(nbrs=nbrs, box=box, k_grid=k_grid)
+                dict(nbrs=nbrs, box=box,
+                     k_grid=k_grid, k_grid_disp=k_grid_disp)
             )
 
     if lr:
@@ -79,6 +83,7 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
             nbrs_lr = context_state.extras["nbrs_lr"]
             box = context_state.extras["box"]
             k_grid = context_state.extras["k_grid"]
+            k_grid_disp = context_state.extras["k_grid_disp"]
             i = 0
 
             if ensemble == 'npt':
@@ -87,8 +92,8 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
                 state = state.set(position=frac_positions)
 
 
-            state, nbrs, nbrs_lr, box, k_grid = step_md_fn(
-                i, (state, nbrs, nbrs_lr, box, k_grid)
+            state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = step_md_fn(
+                i, (state, nbrs, nbrs_lr, box, k_grid, k_grid_disp)
             )
 
             if ensemble == 'npt':
@@ -99,7 +104,8 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
 
             return pb.JaxMDContextState(
                 state,
-                dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box, k_grid=k_grid)
+                dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box,
+                     k_grid=k_grid, k_grid_disp=k_grid_disp)
             )
     else:
         def step_fn_pysages(context_state):
@@ -108,6 +114,7 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
             nbrs = context_state.extras["nbrs"]
             box = context_state.extras["box"]
             k_grid = context_state.extras["k_grid"]
+            k_grid_disp = context_state.extras["k_grid_disp"]
             i = 0
 
             if ensemble == 'npt':
@@ -115,8 +122,8 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
                 frac_positions = transform(inv_box_vec, state.position)  # Cartesian -> fractional
                 state = state.set(position=frac_positions)
 
-            state, nbrs, box, k_grid = step_md_fn(
-                i, (state, nbrs, box, k_grid)
+            state, nbrs, box, k_grid, k_grid_disp = step_md_fn(
+                i, (state, nbrs, box, k_grid, k_grid_disp)
             )
 
             if ensemble == 'npt':
@@ -126,7 +133,8 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
 
             return pb.JaxMDContextState(
                 state,
-                dict(nbrs=nbrs, box=box, k_grid=k_grid)
+                dict(nbrs=nbrs, box=box,
+                     k_grid=k_grid, k_grid_disp=k_grid_disp)
             )
 
     def generate_context_pysages():
@@ -219,6 +227,11 @@ def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
         box_mass=box_mass_val,
         barostat=barostat,
         thermostat=thermostat,
+        # stress is a required field on the npt-anisotropic jax-md fork's
+        # NPTNoseHooverState (added with npt_nose_hoover_flex). PySAGES
+        # snapshots do not carry a stress value, so seed with zeros — the
+        # field is overwritten on the first integrator half-step.
+        stress=jnp.zeros((3, 3)),
     )
     new_state = jax_md.simulate.canonicalize_mass(new_state)
     new_state = new_state.set(momentum=new_state.mass * velocities)
@@ -226,7 +239,8 @@ def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
 
 
 def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T, dt,
-                                nbrs, ensemble='nvt', nbrs_lr=None, k_grid=None):
+                                nbrs, ensemble='nvt', nbrs_lr=None,
+                                k_grid=None, k_grid_disp=None):
     """
     Extract the final state from PySAGES results and rebuild SO3LR state.
 
@@ -236,13 +250,15 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T, dt,
         init_fn: SO3LR init function.
         rng_key: JAX random key.
         md_T: Target temperature.
+        dt: MD timestep (used to apply the post-snapshot bias momentum kick).
         nbrs: Short-range neighbor list.
         ensemble: Ensemble type ('nvt', 'nve', or 'npt').
         nbrs_lr: Long-range neighbor list (optional).
         k_grid: K-space grid (passed through unchanged).
+        k_grid_disp: Dispersion-PME k-space grid (passed through unchanged).
 
     Returns:
-        Tuple of (new_state, nbrs, nbrs_lr, new_box, k_grid).
+        Tuple of (new_state, nbrs, nbrs_lr, new_box, k_grid, k_grid_disp).
     """
     def get_velocities(snapshot):
         V, _ = snapshot.vel_mass
@@ -361,7 +377,7 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T, dt,
             )
 
 
-    return new_state, nbrs, nbrs_lr, new_box, k_grid
+    return new_state, nbrs, nbrs_lr, new_box, k_grid, k_grid_disp
 
 
 def parse_pysages_input(input_path):

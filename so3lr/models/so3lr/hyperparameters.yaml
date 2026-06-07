@@ -121,7 +121,7 @@ data:
     '98': -163.6181213551537
     '99': -163.6181213551537
   energy_unit: eV
-  filepath: /project/home/p200243/kabylda/datasets/universal_datasets/universal_long_aug.xyz
+  filepath: universal_long_aug.xyz
   length_unit: Angstrom
   neighbors_lr_bool: true
   neighbors_lr_cutoff: 100.
@@ -164,6 +164,8 @@ model:
   use_charge_embed: true
   use_spin_embed: true
   zbl_repulsion_bool: true
+  legacy_so3lr_bool: true
+  use_final_bias_bool: true
 neighborlist_format_lr: sparse
 optimizer:
   gradient_clipping: clip_by_global_norm
@@ -189,6 +191,7 @@ training:
     dipole_vec: 1.0
     forces: 10.0
     hirshfeld_ratios: 1.0
+    # c6_ratios: 1.0
   model_seed: 7
   num_epochs: 100
   num_train: 3846600

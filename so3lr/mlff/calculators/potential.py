@@ -64,6 +64,9 @@ def load_model_from_workdir(
         cfg.electrostatic_energy_kspace_method = long_range_kwargs.get('coulomb_kspace_method', 'pme')
         cfg.electrostatic_energy_kspace_interp_nodes = int(long_range_kwargs.get('coulomb_kspace_interp_nodes', 4))
 
+        cfg.dispersion_energy_kspace_do_ewald_bool = long_range_kwargs.get('dispersion_kspace_do_ewald', None)
+        cfg.dispersion_energy_kspace_interp_nodes = int(long_range_kwargs.get('dispersion_kspace_interp_nodes', 4))
+
         if dispersion_energy_bool is True:
             dispersion_energy_cutoff_lr_damping = long_range_kwargs['dispersion_energy_cutoff_lr_damping']
             if cutoff_lr is not None:
@@ -126,6 +129,31 @@ def load_model_from_workdir(
             old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
             new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
             params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
+
+            # Tile the optional final bias (legacy models with use_final_bias_bool).
+            old_bias = params['params']['observables_0']['energy_dense_final'].get('bias')
+            if old_bias is not None and old_bias.shape[-1] == 1:
+                params['params']['observables_0']['energy_dense_final']['bias'] = jnp.tile(
+                    old_bias, (num_theory_levels,)
+                )
+
+    # # Initialize missing C6RatiosSparse params (observables_3) if not in checkpoint.
+    # # C6RatiosSparse was added after the model was trained. With embedding=1.0 and
+    # # final Dense=0, c6_ratios defaults to 1.0 (free-atom C6 values).
+    # if 'observables_3' not in params['params']:
+    #     num_features = cfg.model.num_features
+    #     regression_dim = cfg.model.energy_regression_dim
+    #     params['params']['observables_3'] = {
+    #         'Embed_0': {'embedding': jnp.ones((100, 1), dtype=jnp.float32)},
+    #         'c6_ratios_dense_regression': {
+    #             'kernel': jnp.zeros((num_features, int(regression_dim / 2)), dtype=jnp.float32),
+    #             'bias': jnp.zeros((int(regression_dim / 2),), dtype=jnp.float32),
+    #         },
+    #         'c6_ratios_dense_final': {
+    #             'kernel': jnp.zeros((int(regression_dim / 2), 1), dtype=jnp.float32),
+    #             'bias': jnp.zeros((1,), dtype=jnp.float32),
+    #         },
+    #     }
 
     return net, params
 
@@ -290,6 +318,8 @@ class PotentialSparse(MachineLearningPotential):
                 'theory_mask': getattr(graph, 'theory_mask', None),
                 'k_grid': getattr(graph, 'k_grid', None),
                 'k_smearing': getattr(graph, 'k_smearing', None),
+                'k_grid_disp': getattr(graph, 'k_grid_disp', None),
+                'k_smearing_disp': getattr(graph, 'k_smearing_disp', None),
                 'residue_charge': getattr(graph, 'residue_charge', None),
                 'residue_segments': getattr(graph, 'residue_segments', None),
             }

@@ -4,6 +4,7 @@ Pytest configuration for so3lr tests.
 Adds a --full option to run comprehensive versions of tests.
 By default, slow tests run a lighter version (e.g., fewer atoms).
 """
+import jax
 import pytest
 
 # This table needs to be manually maintained by developers as new tests are added and timings are collected.
@@ -32,7 +33,16 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
-    """Configure pytest with custom markers."""
+    """Configure pytest with custom markers and full-precision matmul.
+
+    The numerical tests (symmetry, batching, PME-vs-direct, gradients) assert
+    tight tolerances that hold in exact arithmetic. On GPU, JAX's default f32
+    matmul uses reduced-precision tensor-core passes (bf16/TF32-style) that break
+    those tolerances, so they pass on CPU (true f32) but fail on GPU. Force full
+    f32 matmul for the test session so results are backend-independent. Production
+    keeps the fast `default` precision via the matmul_precision setting.
+    """
+    jax.config.update("jax_default_matmul_precision", "highest")
     config.addinivalue_line(
         "markers", "slow: marks tests as slow (deselected by default, use --full to run)"
     )

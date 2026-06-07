@@ -13,6 +13,12 @@ import pathlib
 import pytest
 from ase.io import read
 from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
+from so3lr.model_registry import resolve_model
+import jax
+
+# Original/legacy SO3LR model, resolved via the registry so the test is
+# decoupled from the on-disk layout (the model now lives under models/so3lr).
+MODEL_DIR = resolve_model('so3lr')[0]
 
 
 # List of available observables
@@ -57,7 +63,7 @@ class TestObservablesExtraction:
 
         # Create calculator with observables output
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -120,7 +126,7 @@ class TestObservablesExtraction:
 
         # Create calculator with observables output
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -171,7 +177,7 @@ class TestPartialChargesExtraction:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -212,7 +218,7 @@ class TestPartialChargesExtraction:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -252,7 +258,7 @@ class TestHirshfeldRatiosExtraction:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -299,7 +305,7 @@ class TestUndampedObservables:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -340,7 +346,7 @@ class TestUndampedObservables:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -393,7 +399,7 @@ class TestMultipleObservablesSimultaneous:
         ]
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -430,7 +436,7 @@ class TestConsistencyBetweenCalculators:
 
         # Calculator without observables
         calc_no_obs = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -439,7 +445,7 @@ class TestConsistencyBetweenCalculators:
 
         # Calculator with observables
         calc_with_obs = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -485,7 +491,7 @@ class TestForceConsistencyWithObservables:
 
         # Calculator without observables
         calc_no_obs = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -494,7 +500,7 @@ class TestForceConsistencyWithObservables:
 
         # Calculator with observables
         calc_with_obs = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -536,7 +542,7 @@ class TestEmbeddingsExtraction:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -571,29 +577,38 @@ class TestEmbeddingsExtraction:
         """Test that 'x' embeddings are identical across two identical forward passes."""
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
-        calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
-            lr_cutoff=12.,
-            dispersion_energy_cutoff_lr_damping=2.,
-            from_file=True,
-            dtype=np.float64,
-            has_aux=True,
-            observables=['x']
-        )
+        # Force float64 for the whole forward pass. JAX's x64 flag is global and
+        # order-dependent (another test may have toggled it), and the calculator
+        # silently truncates to float32 when it's off -- which inflates run-to-run
+        # differences to ~1e-6 and makes this consistency check flaky. enable_x64()
+        # scopes full precision to this test regardless of run order.
+        with jax.enable_x64():
+            calc = AseCalculatorSparse.create_from_workdir(
+                workdir=MODEL_DIR,
+                lr_cutoff=12.,
+                dispersion_energy_cutoff_lr_damping=2.,
+                from_file=True,
+                dtype=np.float64,
+                has_aux=True,
+                observables=['x']
+            )
 
-        atoms.calc = calc
-        atoms.cell = None
-        atoms.pbc = False
+            atoms.calc = calc
+            atoms.cell = None
+            atoms.pbc = False
 
-        _ = atoms.get_potential_energy()
-        x1 = calc.results['aux']['x'].copy()
+            _ = atoms.get_potential_energy()
+            x1 = calc.results['aux']['x'].copy()
 
-        # Reset and run again
-        atoms.calc.reset()
-        _ = atoms.get_potential_energy()
-        x2 = calc.results['aux']['x'].copy()
+            # Reset and run again
+            atoms.calc.reset()
+            _ = atoms.get_potential_energy()
+            x2 = calc.results['aux']['x'].copy()
 
-        npt.assert_array_equal(x1, x2,
+        # At float64 the only run-to-run difference is GPU parallel-reduction
+        # non-determinism at ~machine epsilon (observed max abs diff ~3e-15,
+        # max rel ~4e-12 on MI325X).
+        npt.assert_allclose(x1, x2, rtol=1e-9, atol=1e-12,
             err_msg=f"Embeddings differ between two identical runs for {name}")
 
     @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
@@ -602,7 +617,7 @@ class TestEmbeddingsExtraction:
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
         calc_no_x = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -610,7 +625,7 @@ class TestEmbeddingsExtraction:
         )
 
         calc_with_x = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,

@@ -91,14 +91,18 @@ def set_seeds(seed=0):
     np.random.seed(seed)
 
 
-def print_metrics(epoch, eval_metrics):
-    formatted_output = f"{epoch}: "
-    for key, value in eval_metrics.items():
-        if isinstance(value, np.ndarray) and value.size == 1:
-            formatted_output += f"{key}={value.item():.4f}, "
-        else:
-            formatted_output += f"{key}={', '.join(map('{:.4f}'.format, value))}, " if isinstance(value, np.ndarray) else f"{key}={value:.4f}, "
-    return formatted_output.rstrip(", ")
+def print_metrics_header(eval_metrics):
+    """Print table header row. Call once before training loop."""
+    cols = ['epoch', 'step'] + [k.removeprefix('eval_') for k in eval_metrics]
+    header = ' | '.join(f'{c:>14s}' for c in cols)
+    sep = '-+-'.join('-' * 14 for _ in cols)
+    return f"\n{header}\n{sep}"
+
+
+def print_metrics_row(epoch, step, eval_metrics):
+    """Print one table row for a validation checkpoint."""
+    vals = [f'{epoch:>14d}', f'{step:>14d}'] + [f'{v:>14.4f}' for v in eval_metrics.values()]
+    return ' | '.join(vals)
 
 def graph_mse_loss(
     y, y_label, batch_segments, graph_mask, scale,
@@ -461,6 +465,7 @@ property_to_mae = {
     'forces': node_mae_loss,
     'dipole_vec': graph_mae_loss_per_atom,
     'hirshfeld_ratios': node_mae_loss,
+    'a0_ratios': node_mae_loss,
     'c6_ratios': node_mae_loss,
 }
 
@@ -470,8 +475,15 @@ property_to_loss = {
     'forces': node_mse_loss,
     'dipole_vec': graph_mse_loss_per_atom,
     'hirshfeld_ratios': node_mse_loss,
+    'a0_ratios': node_mse_loss,
     'c6_ratios': node_mse_loss,
 }
+
+# Ratio-head alias: legacy SO3LR emits 'hirshfeld_ratios'; the new so3lr-s/m/l
+# models emit 'a0_ratios' (per-atom static-polarizability ratios). Loaded data
+# is always keyed 'hirshfeld_ratios'. We accept either spelling in loss_weights
+# and remap at the loss-fn entry point so users do not see a KeyError.
+_RATIO_ALIAS = {'hirshfeld_ratios': 'a0_ratios', 'a0_ratios': 'hirshfeld_ratios'}
 
 def make_loss_fn(
     obs_fn: Callable, weights: Dict, scales: Dict = None,
@@ -499,11 +511,34 @@ def make_loss_fn(
     _scales = {k: jnp.ones(1) for k in targets} if scales is None else scales
     target_to_idx = {t: i for i, t in enumerate(targets)}
 
+    # One-time announcement if a ratio target is present; the actual rename
+    # happens at JIT-trace time inside loss_fn below.
+    for _t in targets:
+        if _t in _RATIO_ALIAS:
+            logger.info(
+                f"[loss] ratio target '{_t}' is alias-aware: model output "
+                f"'{_RATIO_ALIAS[_t]}' (if present) will be remapped to '{_t}'."
+            )
+            break
+
     @jax.jit
     def loss_fn(params, batch: Dict[str, jnp.ndarray]):
         inputs = {k: v for k, v in batch.items() if k not in targets}
         outputs_true = {k: v for k, v in batch.items() if k in targets}
         outputs_predict = obs_fn(params, **inputs)
+
+        # Rename ratio-head key if the model emits 'a0_ratios' while the user
+        # weighted 'hirshfeld_ratios' (or vice-versa). Trace-time only: the
+        # dict keys are Python-level so this does not affect the jitted graph.
+        outputs_predict = dict(outputs_predict)
+        for _t in targets:
+            _alias = _RATIO_ALIAS.get(_t)
+            if _alias is None:
+                continue
+            if _t not in outputs_predict and _alias in outputs_predict:
+                outputs_predict[_t] = outputs_predict.pop(_alias)
+            if _t not in outputs_true and _alias in outputs_true:
+                outputs_true[_t] = outputs_true.pop(_alias)
 
         # Extract adaptive robust loss parameters if enabled
         adaptive_alphas = None
@@ -601,6 +636,18 @@ def make_val_fn(
         inputs = {k: v for k, v in batch.items() if k not in targets}
         outputs_true = {k: v for k, v in batch.items() if k in targets}
         outputs_predict = obs_fn(params, **inputs)
+
+        # Mirror the ratio-head alias rename used in make_loss_fn.
+        outputs_predict = dict(outputs_predict)
+        for _t in targets:
+            _alias = _RATIO_ALIAS.get(_t)
+            if _alias is None:
+                continue
+            if _t not in outputs_predict and _alias in outputs_predict:
+                outputs_predict[_t] = outputs_predict.pop(_alias)
+            if _t not in outputs_true and _alias in outputs_true:
+                outputs_true[_t] = outputs_true.pop(_alias)
+
         metrics = {}
 
         # Extract adaptive robust loss parameters if enabled
@@ -769,6 +816,80 @@ def make_validation_step_fn(
 
     return validation_step_fn
 
+def expand_observables_to_theory_levels(params, num_theory_levels: int = 16):
+    """Expand a restored single-theory-level checkpoint to ``num_theory_levels``.
+
+    Tiles the per-atom energy-head parameters (``energy_offset``,
+    ``atomic_scales`` and the ``energy_dense_final`` kernel) of ``observables_0``
+    from one level of theory to ``num_theory_levels`` levels. Parameters that
+    are already multi-level are left unchanged. Mutates and returns ``params``.
+    """
+    if 'params' not in params or 'observables_0' not in params['params']:
+        return params
+    obs0 = params['params']['observables_0']
+
+    if 'energy_offset' in obs0 and jnp.ndim(obs0['energy_offset']) == 1:
+        obs0['energy_offset'] = jnp.tile(obs0['energy_offset'][:, None], (1, num_theory_levels))
+        logger.debug('Tiled energy_offset to %d theory levels.', num_theory_levels)
+
+    if 'atomic_scales' in obs0 and jnp.ndim(obs0['atomic_scales']) == 1:
+        obs0['atomic_scales'] = jnp.tile(obs0['atomic_scales'][:, None], (1, num_theory_levels))
+        logger.debug('Tiled atomic_scales to %d theory levels.', num_theory_levels)
+
+    if 'energy_dense_final' in obs0 and obs0['energy_dense_final']['kernel'].shape[1] == 1:
+        kernel = obs0['energy_dense_final']['kernel']
+        obs0['energy_dense_final']['kernel'] = jnp.tile(kernel, (1, num_theory_levels))
+        logger.debug('Tiled energy_dense_final kernel to %d theory levels.', num_theory_levels)
+
+    return params
+
+
+def _has_plateau_lr_knob(opt_state) -> bool:
+    """True if ``opt_state`` exposes an injectable ``plateau_lr_scale`` knob
+    (i.e. the optimizer was built with ``reduce_lr_on_plateau=True``)."""
+    return optax.tree_utils.tree_get(opt_state, 'plateau_lr_scale') is not None
+
+
+def _reduce_lr_on_plateau_step(
+        opt_state, eval_loss, *, best_loss, wait, cooldown_counter, scale,
+        factor, patience, min_scale, min_delta, cooldown, step):
+    """One Reduce-LR-on-plateau bookkeeping step (Keras-style semantics).
+
+    Tracks the best validation loss seen and the number of consecutive
+    evaluations without improvement; once that reaches ``patience`` the
+    multiplicative ``plateau_lr_scale`` in ``opt_state`` is shrunk by ``factor``
+    (floored at ``min_scale``) out-of-jit via ``optax.tree_utils.tree_set``,
+    then a ``cooldown`` of evaluations is observed before counting again.
+
+    Returns the updated ``(opt_state, best_loss, wait, cooldown_counter, scale)``.
+    """
+    if cooldown_counter > 0:
+        cooldown_counter -= 1
+        wait = 0
+
+    if eval_loss < best_loss - min_delta:
+        best_loss = eval_loss
+        wait = 0
+    elif cooldown_counter == 0:
+        wait += 1
+        if wait >= patience:
+            new_scale = max(scale * factor, min_scale)
+            if new_scale < scale - 1e-12:
+                opt_state = optax.tree_utils.tree_set(opt_state, plateau_lr_scale=new_scale)
+                logger.info(
+                    f"Reduce-LR-on-plateau: validation loss stalled for {patience} "
+                    f"evals at step {step}; scaling LR x{scale:.4g} -> x{new_scale:.4g}.")
+                scale = new_scale
+                cooldown_counter = cooldown
+            else:
+                logger.info(
+                    f"Reduce-LR-on-plateau: LR scale already at floor "
+                    f"(x{min_scale:.4g}); not reducing further at step {step}.")
+            wait = 0
+
+    return opt_state, best_loss, wait, cooldown_counter, scale
+
+
 def fit(
         model,
         optimizer,
@@ -797,7 +918,37 @@ def fit(
         use_adaptive_robust_loss: bool = False,
         adaptive_robust_loss_targets: list = None,
         adaptive_robust_loss_init_alpha: float = 1.5,
-        adaptive_robust_loss_init_scale: float = 1.0
+        adaptive_robust_loss_init_scale: float = 1.0,
+        # Exponential moving average of weights. When enabled, the
+        # raw params keep training while a shadow EMA copy is used for the
+        # validation metrics and saved in the checkpoint -- this is the deployed
+        # ("averaged") model and is usually more stable/accurate.
+        use_ema: bool = False,
+        ema_decay: float = 0.999,
+        # Early stopping: halt training when the validation loss has not improved
+        # by more than ``early_stopping_min_delta`` for ``early_stopping_patience``
+        # consecutive evaluations. ``None`` disables early stopping (default).
+        early_stopping_patience: int = None,
+        early_stopping_min_delta: float = 0.0,
+        # Reduce-LR-on-plateau: when the validation loss has not improved by more
+        # than ``reduce_lr_min_delta`` for ``reduce_lr_patience`` consecutive
+        # evaluations, multiply the learning rate by ``reduce_lr_factor`` (down to
+        # a floor of ``reduce_lr_min_scale`` times the base LR). Requires the
+        # optimizer to have been built with ``reduce_lr_on_plateau=True`` so the
+        # injectable ``plateau_lr_scale`` knob exists in ``opt_state``.
+        reduce_lr_on_plateau: bool = False,
+        reduce_lr_factor: float = 0.5,
+        reduce_lr_patience: int = 10,
+        reduce_lr_min_scale: float = 1e-2,
+        reduce_lr_min_delta: float = 0.0,
+        reduce_lr_cooldown: int = 0,
+        # Two-stage loss reweighting: once ``epoch >= stage_two_start_epoch`` swap
+        # the training (and validation) loss to ``stage_two_loss_fn`` /
+        # ``stage_two_val_fn`` and reset the best-loss / early-stopping / plateau
+        # trackers (the loss scale changes between stages). ``None`` disables.
+        stage_two_start_epoch: int = None,
+        stage_two_loss_fn=None,
+        stage_two_val_fn=None
 ):
     """
     Fit model.
@@ -878,9 +1029,68 @@ def fit(
     processed_graphs = 0
     processed_nodes = 0
     step = 0
+    header_printed = False
 
     opt_state = None
+    # Shadow EMA copy of the parameters. Updated after every
+    # optimizer step; used for validation + checkpoints when ``use_ema`` is set.
+    ema_params = None
+    if use_ema:
+        @jax.jit
+        def _ema_update_fn(ema_p, p):
+            return jax.tree_util.tree_map(
+                lambda e, x: ema_decay * e + (1.0 - ema_decay) * x, ema_p, p
+            )
+        logger.info(f"Using EMA of weights for validation/checkpoints (decay={ema_decay}).")
+
+    # Early-stopping bookkeeping (best validation loss seen + stall counter).
+    best_eval_loss = float('inf')
+    evals_without_improvement = 0
+    stop_training = False
+    if early_stopping_patience is not None:
+        logger.info(f"Early stopping enabled (patience={early_stopping_patience} evals, "
+                    f"min_delta={early_stopping_min_delta}).")
+
+    # Reduce-LR-on-plateau bookkeeping (best loss seen + stall/cooldown counters
+    # + current multiplicative scale). ``_plateau_active`` is finalised once the
+    # optimizer state exists and the injectable knob is confirmed present.
+    plateau_best_loss = float('inf')
+    plateau_wait = 0
+    plateau_cooldown_counter = 0
+    plateau_scale = 1.0
+    _plateau_active = False
+    if reduce_lr_on_plateau:
+        logger.info(f"Reduce-LR-on-plateau enabled (factor={reduce_lr_factor}, "
+                    f"patience={reduce_lr_patience} evals, min_scale={reduce_lr_min_scale}, "
+                    f"min_delta={reduce_lr_min_delta}, cooldown={reduce_lr_cooldown}).")
+
+    # Two-stage loss reweighting bookkeeping; the swap happens at the epoch
+    # boundary >= ``stage_two_start_epoch``.
+    _stage_two_active = False
+    if stage_two_start_epoch is not None and stage_two_loss_fn is not None:
+        logger.info(f"Two-stage loss reweighting enabled (switch at epoch "
+                    f"{stage_two_start_epoch}).")
+
     for epoch in range(num_epochs):
+        # Switch to the stage-two loss at the configured epoch boundary.
+        if (stage_two_start_epoch is not None and stage_two_loss_fn is not None
+                and not _stage_two_active and epoch >= stage_two_start_epoch):
+            logger.info(f"Two-stage loss reweighting: switching to the stage-two "
+                        f"loss at epoch {epoch} (step {step}); resetting best-loss, "
+                        f"early-stopping and plateau trackers.")
+            training_step_fn = make_training_step_fn(
+                optimizer, stage_two_loss_fn, log_gradient_values)
+            validation_step_fn = make_validation_step_fn(
+                stage_two_val_fn if stage_two_val_fn is not None else stage_two_loss_fn)
+            # Loss scale changes between stages -> reset stall/plateau trackers.
+            best_eval_loss = float('inf')
+            evals_without_improvement = 0
+            plateau_best_loss = float('inf')
+            plateau_wait = 0
+            plateau_cooldown_counter = 0
+            header_printed = False
+            _stage_two_active = True
+
         # Shuffle the training data.
         numpy_rng.shuffle(training_data)
         # Create batched graphs from list of (graph, long_range) tuples.
@@ -913,77 +1123,8 @@ def fit(
                         params = checkpoint_utils.load_params_from_checkpoint(
                             ckpt_dir=ckpt_dir
                         )
-                        print(f"Loaded parameters from {ckpt_dir}")
-                        print(f"Params keys: {params.keys()}")
-                        print("\nParameter shapes:")
-                        print("=" * 50)
-                        print_param_shapes(params)
-                        print("=" * 50)
-                        print('This is fit_from_iterator function')
-                        # Modify parameters to handle theory levels
-                        if 'params' in params and 'observables_0' in params['params']:
-                            num_theory_levels = 16
-                            # Modify energy_offset
-                            if 'energy_offset' in params['params']['observables_0']:
-                                print("\nOriginal energy_offset:")
-                                print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-                                print("Values:", params['params']['observables_0']['energy_offset'])
-                                old_energy_offset = params['params']['observables_0']['energy_offset']
-
-                                # Only tile if shape is 1D
-                                if len(old_energy_offset.shape) == 1:
-                                    new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-                                    params['params']['observables_0']['energy_offset'] = new_energy_offset
-                                    print("Applied tiling to energy_offset")
-                                else:
-                                    print("Energy offset already has multiple dimensions, no tiling applied")
-
-                                print("\nNew energy_offset:")
-                                print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-                                print("Values:", params['params']['observables_0']['energy_offset'])
-
-                            # Modify atomic_scales
-                            if 'atomic_scales' in params['params']['observables_0']:
-                                print("\nOriginal atomic_scales:")
-                                print("Shape:", params['params']['observables_0']['atomic_scales'].shape)
-                                print("Values:", params['params']['observables_0']['atomic_scales'])
-                                old_atomic_scales = params['params']['observables_0']['atomic_scales']
-
-                                # Only tile if shape is 1D
-                                if len(old_atomic_scales.shape) == 1:
-                                    new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-                                    params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-                                    print("Applied tiling to atomic_scales")
-                                else:
-                                    print("Atomic scales already has multiple dimensions, no tiling applied")
-
-                                print("\nNew atomic_scales:")
-                                print("Shape:", params['params']['observables_0']['atomic_scales'].shape)
-                                print("Values:", params['params']['observables_0']['atomic_scales'])
-
-                            # Modify energy_dense_final
-                            if 'energy_dense_final' in params['params']['observables_0']:
-                                print("\nOriginal energy_dense_final kernel:")
-                                print("Shape:", params['params']['observables_0']['energy_dense_final']['kernel'].shape)
-                                print("Values:", params['params']['observables_0']['energy_dense_final']['kernel'])
-                                old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-
-                                # Check the shape to determine if tiling is needed
-                                if old_kernel.shape[1] == 1:
-                                    new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-                                    params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-                                    print("Applied tiling to energy_dense_final kernel")
-                                else:
-                                    print("Energy dense final kernel already has correct output dimension, no tiling applied")
-
-                                print("\nNew energy_dense_final kernel:")
-                                print("Shape:", params['params']['observables_0']['energy_dense_final']['kernel'].shape)
-                                print("Values:", params['params']['observables_0']['energy_dense_final']['kernel'])
-
-                            print("\nParameter shapes after modification:")
-                            print("=" * 50)
-                            print_param_shapes(params)
-                            print("=" * 50)
+                        logger.info(f"Loaded parameters from {ckpt_dir} (keys: {list(params.keys())}).")
+                        params = expand_observables_to_theory_levels(params)
                         step += latest_step
 
                         print(f'Re-start training from {latest_step}.')
@@ -1013,12 +1154,29 @@ def fit(
             if opt_state is None:
                 opt_state = optimizer.init(params)
 
+            # Initialize the EMA shadow copy from the first available params.
+            if use_ema and ema_params is None:
+                ema_params = params
+
             # Make sure parameters and opt_state are set.
             assert params is not None
             assert opt_state is not None
 
+            # Confirm (once) that the injectable LR knob exists before relying on it.
+            if reduce_lr_on_plateau and not _plateau_active:
+                if _has_plateau_lr_knob(opt_state):
+                    _plateau_active = True
+                else:
+                    logger.warning(
+                        "reduce_lr_on_plateau=True but the optimizer has no "
+                        "'plateau_lr_scale' knob -- build the optimizer with "
+                        "reduce_lr_on_plateau=True. Disabling plateau LR scaling.")
+                    reduce_lr_on_plateau = False
+
             params, opt_state, train_metrics = training_step_fn(params, opt_state, batch_training)
             step += 1
+            if use_ema:
+                ema_params = _ema_update_fn(ema_params, params)
             train_metrics_np = jax.device_get(train_metrics)
 
             # Log training metrics.
@@ -1038,6 +1196,9 @@ def fit(
                     n_pairs=batch_max_num_pairs,
                 )
 
+                # Use the EMA (deployed) weights for validation when enabled.
+                eval_params = ema_params if use_ema else params
+
                 # Start iteration over validation batches.
                 eval_totals = {}
                 eval_counts = {}
@@ -1046,7 +1207,7 @@ def fit(
                     batch_validation = jax.tree_util.tree_map(jnp.array, batch_validation)
 
                     eval_out = validation_step_fn(
-                        params,
+                        eval_params,
                         batch_validation
                     )
 
@@ -1061,13 +1222,16 @@ def fit(
                     f'eval_{k}': float(v) for k, v in eval_metrics.items()
                 }
 
-                # Print eval_metrics
-                logger.info(print_metrics(f"val_{epoch}_{step}:", eval_metrics))
+                # Print eval_metrics as table
+                if not header_printed:
+                    logger.info(print_metrics_header(eval_metrics))
+                    header_printed = True
+                logger.info(print_metrics_row(epoch, step, eval_metrics))
 
-                # Save checkpoint.
+                # Save checkpoint (the EMA / deployed weights when EMA is on).
                 ckpt_mngr.save(
                     step,
-                    args=ocp.args.Composite(params=ocp.args.StandardSave(params)),
+                    args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
                     metrics={
                         'loss': eval_metrics['eval_loss']
                     }
@@ -1079,7 +1243,40 @@ def fit(
                         eval_metrics,
                         step=step
                     )
+
+                # Early stopping on the validation loss.
+                if early_stopping_patience is not None:
+                    _eval_loss = eval_metrics['eval_loss']
+                    if _eval_loss < best_eval_loss - early_stopping_min_delta:
+                        best_eval_loss = _eval_loss
+                        evals_without_improvement = 0
+                    else:
+                        evals_without_improvement += 1
+                        if evals_without_improvement >= early_stopping_patience:
+                            logger.info(
+                                f"Early stopping at step {step}: validation loss has not "
+                                f"improved by >{early_stopping_min_delta} for "
+                                f"{early_stopping_patience} evaluations "
+                                f"(best={best_eval_loss:.6f}).")
+                            stop_training = True
+
+                # Reduce the learning rate when the validation loss plateaus.
+                if _plateau_active:
+                    (opt_state, plateau_best_loss, plateau_wait,
+                     plateau_cooldown_counter, plateau_scale) = _reduce_lr_on_plateau_step(
+                        opt_state, eval_metrics['eval_loss'],
+                        best_loss=plateau_best_loss, wait=plateau_wait,
+                        cooldown_counter=plateau_cooldown_counter, scale=plateau_scale,
+                        factor=reduce_lr_factor, patience=reduce_lr_patience,
+                        min_scale=reduce_lr_min_scale, min_delta=reduce_lr_min_delta,
+                        cooldown=reduce_lr_cooldown, step=step)
             # Finished validation process.
+
+            if stop_training:
+                break  # exit the batch loop
+
+        if stop_training:
+            break  # exit the epoch loop
 
     # Wait until checkpoint manager completes all save operations.
     ckpt_mngr.wait_until_finished()
@@ -1112,7 +1309,25 @@ def fit_from_iterator(
         use_adaptive_robust_loss: bool = False,
         adaptive_robust_loss_targets: list = None,
         adaptive_robust_loss_init_alpha: float = 1.5,
-        adaptive_robust_loss_init_scale: float = 1.0
+        adaptive_robust_loss_init_scale: float = 1.0,
+        dataset_info: dict = None,
+        # Exponential moving average of weights; see fit().
+        use_ema: bool = False,
+        ema_decay: float = 0.999,
+        # Early stopping; see fit().
+        early_stopping_patience: int = None,
+        early_stopping_min_delta: float = 0.0,
+        # Reduce-LR-on-plateau; see fit().
+        reduce_lr_on_plateau: bool = False,
+        reduce_lr_factor: float = 0.5,
+        reduce_lr_patience: int = 10,
+        reduce_lr_min_scale: float = 1e-2,
+        reduce_lr_min_delta: float = 0.0,
+        reduce_lr_cooldown: int = 0,
+        # Two-stage loss reweighting; see fit().
+        stage_two_start_epoch: int = None,
+        stage_two_loss_fn=None,
+        stage_two_val_fn=None,
 ):
     """
     Fit model.
@@ -1147,6 +1362,8 @@ def fit_from_iterator(
         adaptive_robust_loss_targets (list): List of target names for adaptive robust loss.
         adaptive_robust_loss_init_alpha (float): Initial alpha for adaptive robust loss. Defaults to 1.5.
         adaptive_robust_loss_init_scale (float): Initial scale for adaptive robust loss. Defaults to 1.0.
+        dataset_info (dict): Per-dataset info from dataloader.dataset_info() with keys
+            'names', 'sizes', 'weights'. Used to log effective epochs per dataset.
     Returns:
 
     """
@@ -1186,10 +1403,63 @@ def fit_from_iterator(
     processed_graphs = 0
     processed_nodes = 0
     step = 0
+    header_printed = False
 
     opt_state = None
+    # Shadow EMA copy of the parameters; see fit().
+    ema_params = None
+    if use_ema:
+        @jax.jit
+        def _ema_update_fn(ema_p, p):
+            return jax.tree_util.tree_map(
+                lambda e, x: ema_decay * e + (1.0 - ema_decay) * x, ema_p, p
+            )
+        logger.info(f"Using EMA of weights for validation/checkpoints (decay={ema_decay}).")
+
+    # Early-stopping bookkeeping; see fit().
+    best_eval_loss = float('inf')
+    evals_without_improvement = 0
+    stop_training = False
+    if early_stopping_patience is not None:
+        logger.info(f"Early stopping enabled (patience={early_stopping_patience} evals, "
+                    f"min_delta={early_stopping_min_delta}).")
+
+    # Reduce-LR-on-plateau bookkeeping; see fit().
+    plateau_best_loss = float('inf')
+    plateau_wait = 0
+    plateau_cooldown_counter = 0
+    plateau_scale = 1.0
+    _plateau_active = False
+    if reduce_lr_on_plateau:
+        logger.info(f"Reduce-LR-on-plateau enabled (factor={reduce_lr_factor}, "
+                    f"patience={reduce_lr_patience} evals, min_scale={reduce_lr_min_scale}, "
+                    f"min_delta={reduce_lr_min_delta}, cooldown={reduce_lr_cooldown}).")
+
+    # Two-stage loss reweighting bookkeeping; see fit().
+    _stage_two_active = False
+    if stage_two_start_epoch is not None and stage_two_loss_fn is not None:
+        logger.info(f"Two-stage loss reweighting enabled (switch at epoch "
+                    f"{stage_two_start_epoch}).")
 
     for epoch in range(num_epochs):
+        # Switch to the stage-two loss at the configured epoch boundary.
+        if (stage_two_start_epoch is not None and stage_two_loss_fn is not None
+                and not _stage_two_active and epoch >= stage_two_start_epoch):
+            logger.info(f"Two-stage loss reweighting: switching to the stage-two "
+                        f"loss at epoch {epoch} (step {step}); resetting best-loss, "
+                        f"early-stopping and plateau trackers.")
+            training_step_fn = make_training_step_fn(
+                optimizer, stage_two_loss_fn, log_gradient_values)
+            validation_step_fn = make_validation_step_fn(
+                stage_two_val_fn if stage_two_val_fn is not None else stage_two_loss_fn)
+            best_eval_loss = float('inf')
+            evals_without_improvement = 0
+            plateau_best_loss = float('inf')
+            plateau_wait = 0
+            plateau_cooldown_counter = 0
+            header_printed = False
+            _stage_two_active = True
+
         if use_wandb:
             wandb.log({"epoch": epoch})
         print(f'Epoch {epoch} of {num_epochs}')
@@ -1210,83 +1480,8 @@ def fit_from_iterator(
                         params = checkpoint_utils.load_params_from_checkpoint(
                             ckpt_dir=ckpt_dir
                         )
-                        print(f"Loaded parameters from {ckpt_dir}")
-                        print(f"Params keys: {params.keys()}")
-                        print("\nParameter shapes:")
-                        print("=" * 50)
-                        print_param_shapes(params)
-                        print("=" * 50)
-                        print('This is fit_from_iterator function')
-                        # Modify parameters to handle theory levels
-                        if 'params' in params and 'observables_0' in params['params']:
-                            num_theory_levels = 16
-                            old_energy_offset = params['params']['observables_0']['energy_offset']
-                            print('CHECK THE SHAPE ', old_energy_offset.shape, len(old_energy_offset.shape))
-                            if len(old_energy_offset.shape) == 1:
-                                print('len(old_energy_offset.shape) == 1, so tiling the shape')
-                                # Modify energy_offset
-                                if 'energy_offset' in params['params']['observables_0']:
-                                    print("\nOriginal energy_offset:")
-                                    print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-                                    print("Values:", params['params']['observables_0']['energy_offset'])
-
-                                    # Only tile if shape is 1D
-                                    if len(old_energy_offset.shape) == 1:
-                                        new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-                                        params['params']['observables_0']['energy_offset'] = new_energy_offset
-                                        print("Applied tiling to energy_offset")
-                                    else:
-                                        print("Energy offset already has multiple dimensions, no tiling applied")
-
-                                    print("\nNew energy_offset:")
-                                    print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-                                    print("Values:", params['params']['observables_0']['energy_offset'])
-
-                                # Modify atomic_scales
-                                if 'atomic_scales' in params['params']['observables_0']:
-                                    print("\nOriginal atomic_scales:")
-                                    print("Shape:", params['params']['observables_0']['atomic_scales'].shape)
-                                    print("Values:", params['params']['observables_0']['atomic_scales'])
-                                    old_atomic_scales = params['params']['observables_0']['atomic_scales']
-
-                                    # Only tile if shape is 1D
-                                    if len(old_atomic_scales.shape) == 1:
-                                        new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-                                        params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-                                        print("Applied tiling to atomic_scales")
-                                    else:
-                                        print("Atomic scales already has multiple dimensions, no tiling applied")
-
-                                    print("\nNew atomic_scales:")
-                                    print("Shape:", params['params']['observables_0']['atomic_scales'].shape)
-                                    print("Values:", params['params']['observables_0']['atomic_scales'])
-
-                                # Modify energy_dense_final
-                                if 'energy_dense_final' in params['params']['observables_0']:
-                                    print("\nOriginal energy_dense_final kernel:")
-                                    print("Shape:", params['params']['observables_0']['energy_dense_final']['kernel'].shape)
-                                    print("Values:", params['params']['observables_0']['energy_dense_final']['kernel'])
-                                    old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-
-                                    # Check the shape to determine if tiling is needed
-                                    if old_kernel.shape[1] == 1:
-                                        new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-                                        params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-                                        print("Applied tiling to energy_dense_final kernel")
-                                    else:
-                                        print("Energy dense final kernel already has correct output dimension, no tiling applied")
-
-                                    print("\nNew energy_dense_final kernel:")
-                                    print("Shape:", params['params']['observables_0']['energy_dense_final']['kernel'].shape)
-                                    print("Values:", params['params']['observables_0']['energy_dense_final']['kernel'])
-                            else:
-                                print('NO TILING IS NEEDED, len(old_energy_offset.shape) != 1 ', old_energy_offset.shape, len(old_energy_offset.shape))
-
-                            print("\nParameter shapes after modification:")
-                            print("=" * 50)
-                            print_param_shapes(params)
-                            print("=" * 50)
-
+                        logger.info(f"Loaded parameters from {ckpt_dir} (keys: {list(params.keys())}).")
+                        params = expand_observables_to_theory_levels(params)
                         step += latest_step
                         print(f'Re-start training from {latest_step}.')
                     else:
@@ -1315,23 +1510,49 @@ def fit_from_iterator(
             # If optimizer state is None (in the first step), initialize from the parameter pyTree.
             if opt_state is None:
                 opt_state = optimizer.init(params)
+            # Initialize the EMA shadow copy from the first available params.
+            if use_ema and ema_params is None:
+                ema_params = params
             # Make sure parameters and opt_state are set.
             assert params is not None
             assert opt_state is not None
 
+            # Confirm (once) that the injectable LR knob exists before relying on it.
+            if reduce_lr_on_plateau and not _plateau_active:
+                if _has_plateau_lr_knob(opt_state):
+                    _plateau_active = True
+                else:
+                    logger.warning(
+                        "reduce_lr_on_plateau=True but the optimizer has no "
+                        "'plateau_lr_scale' knob -- build the optimizer with "
+                        "reduce_lr_on_plateau=True. Disabling plateau LR scaling.")
+                    reduce_lr_on_plateau = False
+
             params, opt_state, train_metrics = training_step_fn(params, opt_state, batch_training)
             step += 1
+            if use_ema:
+                ema_params = _ema_update_fn(ema_params, params)
             train_metrics_np = jax.device_get(train_metrics)
 
             # Log training metrics.
             if use_wandb:
-                wandb.log(
-                    {f'train_{k}': v for (k, v) in train_metrics_np.items()},
-                    step=step
-                )
+                log_dict = {f'train_{k}': v for (k, v) in train_metrics_np.items()}
+                log_dict['processed_graphs'] = processed_graphs
+                log_dict['processed_nodes'] = processed_nodes
+                # Log effective epochs per dataset
+                if dataset_info is not None:
+                    for name, size, weight in zip(
+                        dataset_info['names'], dataset_info['sizes'], dataset_info['weights']
+                    ):
+                        if size > 0:
+                            eff_epoch = processed_graphs * weight / size
+                            log_dict[f'effective_epoch/{name}'] = eff_epoch
+                wandb.log(log_dict, step=step)
 
             # Start validation process.
             if step % eval_every_num_steps == 0:
+                # Use the EMA (deployed) weights for validation when enabled.
+                eval_params = ema_params if use_ema else params
                 # Start iteration over validation batches.
                 eval_totals = {}
                 eval_counts = {}
@@ -1341,7 +1562,7 @@ def fit_from_iterator(
                     batch_validation = jax.tree_util.tree_map(jnp.array, batch_validation)
 
                     eval_out = validation_step_fn(
-                        params,
+                        eval_params,
                         batch_validation
                     )
 
@@ -1356,14 +1577,17 @@ def fit_from_iterator(
                     f'eval_{k}': float(v) for k, v in eval_metrics.items()
                 }
 
-                logger.info(print_metrics(f"val_{epoch}_{step}:", eval_metrics))
+                if not header_printed:
+                    logger.info(print_metrics_header(eval_metrics))
+                    header_printed = True
+                logger.info(print_metrics_row(epoch, step, eval_metrics))
                 eval_loss = eval_metrics['eval_loss']
 
-                # Only save if loss is finite
+                # Only save if loss is finite (save the EMA weights when EMA is on).
                 if jnp.isfinite(eval_loss):
                     ckpt_mngr.save(
                         step,
-                        args=ocp.args.Composite(params=ocp.args.StandardSave(params)),
+                        args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
                         metrics={'loss': eval_loss}
                     )
                 else:
@@ -1375,7 +1599,39 @@ def fit_from_iterator(
                         eval_metrics,
                         step=step
                     )
+
+                # Early stopping on the validation loss.
+                if early_stopping_patience is not None:
+                    if eval_loss < best_eval_loss - early_stopping_min_delta:
+                        best_eval_loss = eval_loss
+                        evals_without_improvement = 0
+                    else:
+                        evals_without_improvement += 1
+                        if evals_without_improvement >= early_stopping_patience:
+                            logger.info(
+                                f"Early stopping at step {step}: validation loss has not "
+                                f"improved by >{early_stopping_min_delta} for "
+                                f"{early_stopping_patience} evaluations "
+                                f"(best={best_eval_loss:.6f}).")
+                            stop_training = True
+
+                # Reduce the learning rate when the validation loss plateaus.
+                if _plateau_active:
+                    (opt_state, plateau_best_loss, plateau_wait,
+                     plateau_cooldown_counter, plateau_scale) = _reduce_lr_on_plateau_step(
+                        opt_state, eval_metrics['eval_loss'],
+                        best_loss=plateau_best_loss, wait=plateau_wait,
+                        cooldown_counter=plateau_cooldown_counter, scale=plateau_scale,
+                        factor=reduce_lr_factor, patience=reduce_lr_patience,
+                        min_scale=reduce_lr_min_scale, min_delta=reduce_lr_min_delta,
+                        cooldown=reduce_lr_cooldown, step=step)
             # Finished validation process.
+
+            if stop_training:
+                break  # exit the batch loop
+
+        if stop_training:
+            break  # exit the epoch loop
 
     # Wait until checkpoint manager completes all save operations.
     ckpt_mngr.wait_until_finished()
@@ -1387,7 +1643,8 @@ def make_optimizer(
         learning_rate_schedule_args: Dict = dict(),
         gradient_clipping: str = 'identity',
         gradient_clipping_args: Dict = dict(),
-        num_of_nans_to_ignore: int = 0
+        num_of_nans_to_ignore: int = 0,
+        reduce_lr_on_plateau: bool = False
 ):
     """Make optax optimizer.
 
@@ -1408,6 +1665,12 @@ def make_optimizer(
         num_of_nans_to_ignore (int): Number of times NaNs are ignored during in the gradient step. Defaults to 0.
         gradient_clipping (str): Gradient clipping to apply.
         gradient_clipping_args (dict): Arguments to the gradient clipping to apply.
+        reduce_lr_on_plateau (bool): If True, append an injectable multiplicative
+            learning-rate scale (hyperparameter ``plateau_lr_scale``, initialised
+            to 1.0) to the optimizer chain. ``fit`` mutates this knob between
+            steps to shrink the effective learning rate when the validation loss
+            plateaus. The training step itself stays jitted; only ``opt_state`` is
+            updated out-of-jit via ``optax.tree_utils.tree_set``. Defaults to False.
     Returns:
         optax.GradientTransformation
 
@@ -1444,16 +1707,32 @@ def make_optimizer(
         **gradient_clipping_args
     )
 
-    return optax.chain(
+    transforms = [
         clip_transform,
         optax.zero_nans(),
         opt
-    )
+    ]
+
+    if reduce_lr_on_plateau:
+        # Injectable multiplicative LR scale, driven out-of-jit by ``fit``.
+        # Named via the factory argument so the hyperparameter key is
+        # ``plateau_lr_scale`` (looked up with optax.tree_utils.tree_get/set).
+        def _plateau_scale_factory(plateau_lr_scale):
+            return optax.scale(plateau_lr_scale)
+
+        transforms.append(
+            optax.inject_hyperparams(_plateau_scale_factory)(plateau_lr_scale=1.0)
+        )
+
+    return optax.chain(*transforms)
 
 
-def freeze_parameters(optimizer, trainable_subset_keys):
-    """Freeze parameters by giving keys for trainable subsets. Thus, all parameters that are NOT in
-    `trainable_subset_keys` are frozen.
+def freeze_parameters(optimizer, trainable_subset_keys=None, frozen_subset_keys=None):
+    """Freeze parameters by giving keys for trainable or frozen subsets.
+
+    Exactly one of ``trainable_subset_keys`` (whitelist: only these are trained,
+    everything else frozen) or ``frozen_subset_keys`` (blacklist: only these are
+    frozen, everything else trained) should be provided.
 
     Args:
         optimizer (): optax.GradientTransformation.
@@ -1461,20 +1740,64 @@ def freeze_parameters(optimizer, trainable_subset_keys):
         for a pyTree like {'a': {'b': *, 'c': *}, 'd': *} and trainable_subset_keys = ['a'] one gets the following
         {'a': {'b': 'trainable', 'c': 'trainable'}, 'd': 'frozen'}. If 'c' and 'd' should be trainable one has to
         pass trainable_subset_keys = ['c', 'd'].
+        frozen_subset_keys (Sequence): Keys whose entries are frozen; all other
+        parameters remain trainable (the inverse of ``trainable_subset_keys``).
 
     Returns:
 
     """
+    if frozen_subset_keys is not None:
+        label_fn = make_freeze_annotation_fn(frozen_subset_keys)
+    else:
+        label_fn = make_annotation_fn(trainable_subset_keys)
 
     return optax.multi_transform(
         {'trainable': optimizer, 'frozen': zero_grads()},
-        param_labels=make_annotation_fn(trainable_subset_keys)
+        param_labels=label_fn
     )
+
+
+def _path_matches_key(path, key):
+    """Return True if a parameter ``path`` (tuple of nested module/leaf names)
+    matches a selection ``key``.
+
+    Supported key forms:
+      * Plain component, e.g. ``'observables_0'`` — matches if it equals ANY
+        single component of ``path`` (the historical behaviour).
+      * Hierarchical, e.g. ``'observables_0/energy_dense_final'`` — matches if
+        its '/'-separated parts appear as a CONTIGUOUS subsequence of ``path``.
+        (The previous ``set(keys) & set(path)`` test silently matched nothing
+        for slashed keys, so strategies like ``final_mlp`` froze everything.)
+      * Trailing ``*`` on any component for prefix matching, e.g.
+        ``'observables_0/energy_dense*'`` matches ``energy_dense_regression``,
+        ``energy_dense_hidden_0``, ``energy_dense_final``, ...
+    """
+    def _component_matches(component, pattern):
+        if pattern.endswith('*'):
+            return component.startswith(pattern[:-1])
+        return component == pattern
+
+    parts = key.split('/')
+    n = len(parts)
+    if n == 1:
+        return any(_component_matches(c, parts[0]) for c in path)
+    for i in range(len(path) - n + 1):
+        if all(_component_matches(path[i + j], parts[j]) for j in range(n)):
+            return True
+    return False
 
 
 def make_annotation_fn(keys):
     return lambda params: traverse_util.path_aware_map(
-        lambda path, v: 'trainable' if len(set(keys) & set(path)) > 0 else 'frozen', params
+        lambda path, v: 'trainable' if any(_path_matches_key(path, k) for k in keys) else 'frozen', params
+    )
+
+
+def make_freeze_annotation_fn(keys):
+    """Inverse of make_annotation_fn: parameters whose path matches any of
+    ``keys`` are 'frozen', everything else is 'trainable'."""
+    return lambda params: traverse_util.path_aware_map(
+        lambda path, v: 'frozen' if any(_path_matches_key(path, k) for k in keys) else 'trainable', params
     )
 
 

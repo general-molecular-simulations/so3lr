@@ -40,10 +40,12 @@ def jraph_to_ase_atoms(graph):
     atoms.info['energy_so3lr'] = float(f'{float(graph.globals["energy_so3lr"][0]):.6g}')
     atoms.arrays['forces'] = graph.nodes['forces']
     atoms.arrays['forces_so3lr'] = graph.nodes['forces_so3lr']
-    atoms.arrays['hirshfeld_ratios'] = graph.nodes['hirshfeld_ratios']
-    atoms.arrays['hirshfeld_ratios_so3lr'] = graph.nodes['hirshfeld_ratios_so3lr']
-    atoms.info['dipole_vec'] = np.array([float(f'{x:.6g}') for x in graph.globals['dipole_vec'].flatten()])
-    atoms.info['dipole_vec_so3lr'] = np.array([float(f'{x:.6g}') for x in graph.globals['dipole_vec_so3lr'].flatten()])
+    for key in ['hirshfeld_ratios', 'hirshfeld_ratios_so3lr', 'c6_ratios', 'c6_ratios_so3lr']:
+        if key in graph.nodes and graph.nodes[key] is not None:
+            atoms.arrays[key] = graph.nodes[key]
+    for key in ['dipole_vec', 'dipole_vec_so3lr']:
+        if key in graph.globals and graph.globals[key] is not None:
+            atoms.info[key] = np.array([float(f'{x:.6g}') for x in graph.globals[key].flatten()])
 
     # Write any additional observable quantities that were added to nodes
     _handled_node_keys = {'positions', 'atomic_numbers', 'forces', 'forces_so3lr',

@@ -4,7 +4,7 @@ import numpy as np
 import logging
 
 from collections import namedtuple
-from functools import partial, partialmethod
+from functools import partial
 from typing import Any, Optional, Sequence
 
 from ase.calculators.calculator import Calculator
@@ -32,10 +32,7 @@ SpatialPartitioning = namedtuple(
     )
 )
 
-logging.MLFF = 35
-logging.addLevelName(logging.MLFF, 'MLFF')
-logging.Logger.trace = partialmethod(logging.Logger.log, logging.MLFF)
-logging.mlff = partial(logging.log, logging.MLFF)
+logger = logging.getLogger("SO3LR")
 
 StackNet = Any
 
@@ -88,6 +85,7 @@ class AseCalculatorSparse(Calculator):
             add_energy_shift: bool = False,
             dtype: np.dtype = np.float64,
             model: str = 'so3krates',
+            head_index: int = 5,
             has_aux: bool = False,
             from_file: bool = False,
             observables: Optional[Sequence[str]] = None,
@@ -119,6 +117,7 @@ class AseCalculatorSparse(Calculator):
         )
 
         return cls(potential=mlff_potential,
+                   head_index=head_index,
                    calculate_stress=calculate_stress,
                    calculate_hessian=calculate_hessian,
                    capacity_multiplier=capacity_multiplier,
@@ -146,6 +145,7 @@ class AseCalculatorSparse(Calculator):
             calculate_hessian: bool,
             dtype: np.dtype,
             has_aux: bool,
+            head_index: int = 5,
             observables: Optional[Sequence[str]] = None,
             output_atom_indices: Optional[Sequence[int]] = None,
             hessian_slice: bool = False,
@@ -572,7 +572,7 @@ class AseCalculatorSparse(Calculator):
         # Determine the cutoff for the neighborlist.
         if long_range_bool is False:
             # Corresponds to having a (semi)-local ML potential as constructed by MPNN.
-            logging.mlff(
+            logger.info(
                 f'Running a local model with local cutoff {potential.cutoff}.'
             )
             self.lr_cutoff = -1.
@@ -584,7 +584,7 @@ class AseCalculatorSparse(Calculator):
             # of electrostatics and/or dispersion energy.
 
             if potential.long_range_cutoff is None:
-                logging.mlff(
+                logger.info(
                     f'Running a model with long-range corrections. The local cutoff is {potential.cutoff} Ang and '
                     f'no explicit long-range cutoff.'
                 )
@@ -592,7 +592,7 @@ class AseCalculatorSparse(Calculator):
                 # but is long-ranged. Can only be applied for structures in vacuum.
                 self.lr_cutoff = 1e6
             else:
-                logging.mlff(
+                logger.info(
                     f'Running a model with long-range corrections. The local cutoff is {potential.cutoff} Ang and '
                     f'the long-range cutoff is {potential.long_range_cutoff}.'
                 )
@@ -601,6 +601,7 @@ class AseCalculatorSparse(Calculator):
                 self.lr_cutoff = potential.long_range_cutoff
 
         self.dtype = dtype
+        self.head_index = head_index
         self.kspace_electrostatics = kspace_electrostatics
         self.kspace_smearing = kspace_smearing
         self.kspace_spacing = kspace_spacing
@@ -615,6 +616,15 @@ class AseCalculatorSparse(Calculator):
         super(AseCalculatorSparse, self).calculate(atoms, *args, **kwargs)
 
         system = atoms_to_system(atoms, dtype=self.dtype)
+
+        # Select the inference level-of-theory head. glp's atoms_to_system seeds
+        # theory_mask with a default head that is not necessarily the production
+        # head; pin it explicitly so multi-head models predict the right level.
+        if getattr(system, 'theory_mask', None) is not None:
+            num_theory_levels = system.theory_mask.shape[-1]
+            system = system._replace(
+                theory_mask=jnp.eye(num_theory_levels, dtype=self.dtype)[self.head_index].reshape(1, -1)
+            )
 
         pbc_any = atoms.get_pbc().any()
         has_atoms_k_grid = 'k_grid' in atoms.info
@@ -656,7 +666,7 @@ class AseCalculatorSparse(Calculator):
                 system = system._replace(k_grid=k_grid, k_smearing=k_smearing)
 
         if kspace_source is not None and self._kspace_reported_source != kspace_source:
-            logging.mlff(kspace_message)
+            logger.info(kspace_message)
             self._kspace_reported_source = kspace_source
 
         if pbc_any:
@@ -677,7 +687,7 @@ class AseCalculatorSparse(Calculator):
 
         neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
         if neighbors.overflow:
-            logging.mlff('Re-allocating neighbours. ') 
+            logger.info('Re-allocating neighbours. ') 
             self.neighbors, self.spatial_partitioning = neighbor_list(
                         positions=system.R,
                         cell=cell,

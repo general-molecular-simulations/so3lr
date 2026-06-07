@@ -1,6 +1,26 @@
+# =============================================================================
+# Default config trains a vanilla SO3krates (no long-range physics).
+# To train an SO3LR-flavored model, set the following keys to true and provide
+# a long-range cutoff:
+#   data.neighbors_lr_bool: true        # build long-range neighbor lists
+#   data.neighbors_lr_cutoff: 12.0      # long-range cutoff in Angstrom (example)
+#   model.electrostatic_energy_bool: true
+#   model.dispersion_energy_bool: true
+#   model.zbl_repulsion_bool: true      # already true by default
+# See README "Training from Scratch" for details.
+# =============================================================================
 workdir: first_experiment  # Output directory for checkpoints and hyperparameters.
 data:
   filepath: null  # Path to the training data file. Supports any ASE-readable format (.xyz, .extxyz, .pdb, etc.) or .npz files.
+  # --- Multi-dataset alternative to `filepath` (uncomment to enable) ---
+  # Set `filepath: null` and provide a list of datasets here instead. Each entry mixes a path
+  # with a sampling `weight` (defaults to 1.0) and an optional `num_train` (TFDS dataloader only).
+  # datasets:
+  #   - path: /data/dataset_a.extxyz
+  #     weight: 1.0
+  #     # num_train: 5000  # Optional cap per-dataset; only used by the TFDS dataloader.
+  #   - path: /data/dataset_b.extxyz
+  #     weight: 0.5
   energy_unit: eV  # Unit of energy labels in the data file.
   length_unit: Angstrom  # Unit of position/distance labels in the data file.
   electric_charge_unit: e  # Unit of charge labels in the data file.
@@ -45,6 +65,7 @@ model:
   use_charge_embed: false  # Add an embedding of the total molecular charge to atomic features. Requires charge info in the input data.
   use_spin_embed: false  # Add an embedding of the number of unpaired electrons to atomic features. Requires spin info in the input data.
   energy_regression_dim: 128  # Hidden dimension of the energy readout MLP that maps final features to atomic energies.
+  energy_final_mlp_widths: null  # Optional list of hidden widths for a multi-layer energy readout MLP (e.g. [128, 64]). null = single hidden layer of size energy_regression_dim.
   energy_activation_fn: silu  # Activation function applied in the energy readout MLP before the final linear layer. Options: identity (none), silu, etc.
   energy_learn_atomic_type_scales: true  # Learn a per-element multiplicative scale factor for predicted atomic energies.
   energy_learn_atomic_type_shifts: true  # Learn a per-element additive shift for predicted atomic energies.
@@ -56,8 +77,15 @@ model:
   dispersion_energy_scale: 1.2  # Damping for the dispersion energy contribution.
   zbl_repulsion_bool: true  # Add a Ziegler-Biersack-Littmark (ZBL) short-range repulsion term. Prevents unphysical atom overlap.
   use_final_bias_bool: false  # Include a bias term in the final linear layer of the energy readout MLP.
+  legacy_so3lr_bool: false  # Use the legacy SO3LR-v1 architecture for reproducing the JACS paper. Should stay false for new training runs.
+  kspace_electrostatics: null  # K-space method for electrostatic + dispersion during training. Options: null (disabled), pme, p3m, ewald.
+  kspace_smearing: 2.0  # Smearing parameter (Angstrom) for Ewald splitting. Controls real-space vs k-space partition.
+  kspace_spacing: 1.0  # Mesh spacing (Angstrom) for PME/P3M grid, or wavelength for Ewald. Smaller = finer grid = more accurate.
 optimizer:
   name: muon  # Optimizer name. Any optimizer from optax (adam, adamw, sgd, etc.) or optax.contrib (muon) is supported.
+  # NOTE: optimizer_args below are MUON-specific (ns_steps, beta, nesterov, adaptive). If you change
+  # `name` to a different optimiser (adam, adamw, sgd, ...), you MUST clear these (set to null or
+  # replace with that optimiser's kwargs) -- otherwise optax raises an opaque TypeError at init.
   optimizer_args:  # Additional keyword arguments passed to the optimizer constructor. Set to null for default optimizer settings.
     ns_steps: 5  # Newton-Schulz iterations for orthogonalization
     beta: 0.95   # Momentum decay
@@ -73,7 +101,7 @@ optimizer:
     max_norm: 10
   num_of_nans_to_ignore: 0  # Number of consecutive NaN gradients to skip before raising an error. Useful for handling rare numerical instabilities.
 training:
-  allow_restart: true  # Allow restarting training from the latest checkpoint in workdir. Existing checkpoints will be overwritten.
+  allow_restart: true  # If a checkpoint dir already exists in workdir, RESUME training from it (no checkpoints are overwritten). Set false to refuse and require a fresh workdir. NB: a resumed run silently keeps the old wandb run-id, so iterating on hyperparameters into the same workdir produces a single wandb run with mixed settings.
   num_epochs: 100  # Total number of training epochs (full passes over the training set).
   num_train: 950  # Number of structures to use for training, drawn from the dataset.
   num_valid: 50  # Number of structures to use for validation, drawn from the dataset.
@@ -89,14 +117,26 @@ training:
   loss_weights:
     energy: 0.01  # Loss weight for per-structure energy (MSE normalized by number of atoms).
     forces: 0.99  # Loss weight for per-atom forces (MSE averaged per graph).
-    # dipole_vec: 0.01  # Loss weight for per-structure dipole vector (MSE normalized by number of atoms). Should be defined in train file (e.g. ).
-    # hirshfeld_ratios: 0.01  # Loss weight for per-atom Hirshfeld volume ratios (MSE averaged per graph). Should be defined in train file.
+    # dipole_vec: 0.01  # Loss weight for per-structure dipole vector (MSE normalized by number of atoms). Uncomment if dipole labels are present in the dataset.
+    # hirshfeld_ratios: 0.01  # Loss weight for per-atom Hirshfeld volume ratios (per-atom MSE). Uncomment if Hirshfeld-ratio labels are present in the dataset.
+    # c6_ratios: 0.01  # Loss weight for per-atom C6 coefficient ratios (per-atom MSE). Uncomment if C6-ratio labels are present in the dataset.
   # Loss function: standard L2 (use_adaptive_robust_loss and use_robust_loss false), fixed robust, or adaptive robust. See https://arxiv.org/abs/1701.03077.
   use_adaptive_robust_loss: true  # Use adaptive robust loss where alpha and scale are learned per target. Cannot be combined with use_robust_loss.
   adaptive_robust_loss_init_alpha: 1.0  # Initial alpha for adaptive robust loss. Range [0, 2]: 0=Cauchy (heavy-tailed), 2=L2 (standard MSE). Learned during training.
   adaptive_robust_loss_init_scale: 1.0  # Initial scale for adaptive robust loss. Must be > 0. Controls the transition between quadratic and robust regime. Learned during training.
   use_robust_loss: false  # Use fixed robust loss with the alpha below. Cannot be combined with use_adaptive_robust_loss.
   robust_loss_alpha: 1.0  # Alpha parameter for fixed robust loss. Range [0, 2]: 0=Cauchy (very robust to outliers), 1=Charbonnier, 2=L2 (standard MSE).
+  # --- Optional training enhancements (all disabled by default; uncomment to enable) ---
+  # use_ema: false  # Keep an exponential moving average (EMA) of the weights. The raw weights keep training while the EMA shadow copy is used for validation metrics and saved in the checkpoint -- usually more stable/accurate at deployment.
+  # ema_decay: 0.999  # EMA decay factor; closer to 1.0 means slower, smoother averaging. Only used when use_ema is true.
+  # early_stopping_patience: null  # Stop training once the validation loss has not improved for this many consecutive evaluations (each eval happens every eval_every_num_steps). null disables early stopping.
+  # reduce_lr_on_plateau: false  # Shrink the learning rate when the validation loss plateaus. Multiplies the LR by an injectable factor on top of learning_rate_schedule above.
+  # reduce_lr_factor: 0.75  # Factor the learning rate is multiplied by on each plateau. Only used when reduce_lr_on_plateau is true.
+  # reduce_lr_patience: 1000  # Number of evaluations without improvement before the learning rate is reduced.
+  # stage_two_start_epoch: null  # Epoch at which to switch to a second set of loss weights (two-stage training). The best-loss, early-stopping and plateau trackers reset at the switch. null disables two-stage training.
+  # stage_two_loss_weights:  # Loss weights applied from stage_two_start_epoch onward. Same keys as loss_weights. Only used when stage_two_start_epoch is set.
+  #   energy: 0.1
+  #   forces: 0.9
   model_seed: 42  # Random seed for model parameter initialization.
   training_seed: 42  # Random seed for shuffling training batches each epoch.
   log_gradient_values: false  # Log the L2 norm of gradients for each parameter group to WandB. Useful for debugging training dynamics.

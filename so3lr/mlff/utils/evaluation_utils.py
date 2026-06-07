@@ -85,6 +85,8 @@ def evaluate(
                 msk = graph_mask
             elif t == 'hirshfeld_ratios':
                 msk = node_mask
+            elif t == 'c6_ratios':
+                msk = node_mask
             elif t == 'dispersion_energy':
                 msk = graph_mask
             elif t == 'electrostatic_energy':

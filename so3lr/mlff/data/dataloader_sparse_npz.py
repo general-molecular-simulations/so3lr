@@ -10,12 +10,7 @@ from typing import Optional
 
 import logging
 
-from functools import partial, partialmethod
-
-logging.MLFF = 35
-logging.addLevelName(logging.MLFF, 'MLFF')
-logging.Logger.trace = partialmethod(logging.Logger.log, logging.MLFF)
-logging.mlff = partial(logging.log, logging.MLFF)
+logger = logging.getLogger("SO3LR")
 
 
 @dataclass
@@ -32,9 +27,15 @@ class NpzDataLoaderSparse:
                 )
             input_folder = Path(self.input_folder).expanduser().resolve()
 
-            file_list = [
-                Path(x.path).expanduser().resolve() for x in os.scandir(input_folder) if Path(x.path).suffix == '.npz'
-            ]
+            # Sort by name so the aggregated frame order (and thus the global
+            # index used by load()/pick_idx and counted by cardinality()) is
+            # deterministic across runs and machines, rather than relying on
+            # filesystem-dependent os.scandir ordering.
+            file_list = sorted(
+                (Path(x.path).expanduser().resolve()
+                 for x in os.scandir(input_folder) if Path(x.path).suffix == '.npz'),
+                key=lambda p: p.name,
+            )
         else:
             if self.input_file is None:
                 raise ValueError(
@@ -67,55 +68,60 @@ class NpzDataLoaderSparse:
             def keep(idx: int):
                 return idx in pick_idx
 
-        np_data = np.load(self.input_file)
-
-        keys = list(np_data.keys())
-        data_iterator = zip(*(np_data[k] for k in keys))
+        # Aggregate over every .npz returned by make_file_list(): a single file
+        # in input_file mode, or all .npz in input_folder mode. Previously load()
+        # read self.input_file directly, so input_folder mode (a valid, used
+        # config path) crashed with `self.input_file is None`.
+        file_list = self.make_file_list()
 
         loaded_data = []
         max_num_of_nodes = 0
         max_num_of_edges = 0
         max_num_of_pairs = 0
 
-        logging.mlff(
-            f"Load data from {self.input_file}."
+        logger.info(
+            f"Load data from {file_list}."
         )
-        logging.mlff(
+        logger.info(
             f"Calculate short range neighbors within cutoff={cutoff} Ang."
         )
         if calculate_neighbors_lr:
-            logging.mlff(
+            logger.info(
                 f"Calculate long-range neighbors within cutoff_lr={cutoff_lr} Ang."
             )
+        # `i` is a global index across all files so pick_idx selects across the
+        # whole (possibly multi-file) dataset, matching cardinality().
         i = 0
-        for tup in tqdm(data_iterator):
-            if keep(i):
-                entry = {k: v for (k, v) in zip(keys, tup)}
-                result = entry_to_jraph(
-                    entry,
-                    cutoff=cutoff,
-                    calculate_neighbors_lr=calculate_neighbors_lr,
-                    cutoff_lr=cutoff_lr
-                )
-                graph, lr_data = result
-                num_nodes = len(graph.nodes['atomic_numbers'])
-                num_edges = len(graph.receivers)
-                num_pairs = int(lr_data['n_pairs'][0])
-                max_num_of_nodes = max_num_of_nodes if num_nodes <= max_num_of_nodes else num_nodes
-                max_num_of_edges = max_num_of_edges if num_edges <= max_num_of_edges else num_edges
-                max_num_of_pairs = max_num_of_pairs if num_pairs <= max_num_of_pairs else num_pairs
-                loaded_data.append(result)
-            else:
-                pass
-            i += 1
+        for file_path in file_list:
+            np_data = np.load(file_path)
+            keys = list(np_data.keys())
+            data_iterator = zip(*(np_data[k] for k in keys))
+            for tup in tqdm(data_iterator):
+                if keep(i):
+                    entry = {k: v for (k, v) in zip(keys, tup)}
+                    result = entry_to_jraph(
+                        entry,
+                        cutoff=cutoff,
+                        calculate_neighbors_lr=calculate_neighbors_lr,
+                        cutoff_lr=cutoff_lr
+                    )
+                    graph, lr_data = result
+                    num_nodes = len(graph.nodes['atomic_numbers'])
+                    num_edges = len(graph.receivers)
+                    num_pairs = int(lr_data['n_pairs'][0])
+                    max_num_of_nodes = max_num_of_nodes if num_nodes <= max_num_of_nodes else num_nodes
+                    max_num_of_edges = max_num_of_edges if num_edges <= max_num_of_edges else num_edges
+                    max_num_of_pairs = max_num_of_pairs if num_pairs <= max_num_of_pairs else num_pairs
+                    loaded_data.append(result)
+                i += 1
 
         if pick_idx is not None:
             if max(pick_idx) >= i:
                 raise RuntimeError(
                     f'`max(pick_idx) = {max(pick_idx)} >= cardinality = {i} of the dataset`.'
                 )
-        logging.mlff("... done!")
-        logging.mlff(
+        logger.info("... done!")
+        logger.info(
             f"Data stats: max_num_of_nodes={max_num_of_nodes}, "
             f"max_num_of_edges={max_num_of_edges}, "
             f"max_num_of_pairs={max_num_of_pairs}"
@@ -174,7 +180,7 @@ def entry_to_jraph(
         energy = np.nan
 
     max_num_theory_levels = 16
-    theory_level = np.reshape(0, (1,))
+    theory_level = np.reshape(5, (1,))
     theory_mask = np.eye(max_num_theory_levels)[theory_level] # (1, num_theory_levels)
 
     # Dipoles are NaN when not present.
@@ -255,7 +261,7 @@ def entry_to_jraph(
     global_context = {
         "energy": energy.reshape(-1),
         "theory_level": theory_level.reshape(-1),
-        "theory_mask": theory_mask, #.reshape(1, max_num_theory_levels),
+        "theory_mask": theory_mask, #.reshape(1, max_num_theory_levels), TODO: double check this
         "stress": stress.reshape(1, 6),
         "dipole_vec": dipole.reshape(1, 3),
         "total_charge": total_charge.reshape(-1),

@@ -28,8 +28,25 @@ logger = logging.getLogger("SO3LR")
 OBSERVABLES = {
     'nn_energy', 'partial_charges', 'electrostatic_energy',
     'dispersion_energy', 'zbl_repulsion',
+    'nlh_repulsion',  # clear name for the so3lr-s/m/l repulsion (== zbl_repulsion)
     'electrostatic_energy_undamped', 'dispersion_energy_undamped',
     'x',  # final-layer atom embeddings; saved to _x.npz, not extxyz
+}
+
+# Map common user-facing alias names to the canonical observable/target name.
+# Applied at CLI parse time only (NOT added to OBSERVABLES itself, to avoid
+# the same quantity being counted twice in downstream loops). Keep the table
+# small and unambiguous; map each alias to a single canonical name.
+NORMALIZE_TARGET = {
+    # Hirshfeld / a0 volume-ratio label aliases (canonical name is
+    # chosen later, per-model, based on legacy_so3lr_bool).
+    'hirsh_ratios': 'hirshfeld_ratios',
+    # Charges: extxyz files sometimes store this as 'charges'.
+    'charges': 'partial_charges',
+    # The s/m/l models call their short-range repulsion 'nlh_repulsion';
+    # legacy models call it 'zbl_repulsion'. Both names stay in OBSERVABLES
+    # so a missing-from-prediction key is still handled gracefully; we do
+    # not collapse them here.
 }
 
 
@@ -66,10 +83,18 @@ def process_predictions(
 
     # Add predictions to graph nodes and globals
     main_graph.nodes['forces_so3lr'] = output_prediction['forces']
-    main_graph.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
     main_graph.globals['energy_so3lr'] = output_prediction['energy']
     main_graph.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
-    # main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
+    # The polarizability/volume-ratio head is named 'hirshfeld_ratios' for the
+    # legacy 'so3lr' model and 'a0_ratios' for the new so3lr-s/m/l models.
+    if 'hirshfeld_ratios' in output_prediction:
+        main_graph.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
+    if 'a0_ratios' in output_prediction:
+        main_graph.nodes['a0_ratios_so3lr'] = output_prediction['a0_ratios']
+    # c6_ratios is only emitted by the so3lr-s/m/l models; the legacy 'so3lr'
+    # model has no c6 head, so guard against its absence.
+    if 'c6_ratios' in output_prediction:
+        main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
 
     # Remove non-standard global fields that don't have one row per graph
     # (residue_charge has shape (2,) per graph, residue_segments has shape
@@ -115,13 +140,24 @@ def calculate_metrics(
     metrics = {}
 
     for target in targets:
+        # The polarizability/volume-ratio prediction is named 'a0_ratios' (new
+        # models) or 'hirshfeld_ratios' (legacy); datasets typically store the
+        # label under 'hirshfeld_ratios'. Accept either label key for the ratio.
+        label_target = target
+        if target in ('a0_ratios', 'hirshfeld_ratios'):
+            other = 'hirshfeld_ratios' if target == 'a0_ratios' else 'a0_ratios'
+            if (target not in inputs or inputs.get(target) is None) and inputs.get(other) is not None:
+                label_target = other
+
         # Skip targets that have no ground truth in the dataset (e.g., observables)
-        if target not in inputs:
+        if label_target not in inputs or inputs[label_target] is None:
+            continue
+        if target not in output_prediction:
             continue
 
-        mask = assign_mask(target, inputs=inputs)
+        mask = assign_mask(label_target, inputs=inputs)
+        y_true = inputs[label_target]
         y_pred = output_prediction[target]
-        y_true = inputs[target]
 
         diff = np.asarray(y_pred) - np.asarray(y_true)
 
@@ -159,10 +195,28 @@ def save_to_file(
     
     # Convert the length to Python int to avoid JAX array issues with tqdm
     total = len(predicted_graphs)
-    
+
+    # Label keys that the dataloader fills with NaN when the source extxyz
+    # info{} did not actually carry that ground-truth value. The real model
+    # outputs live in the matching `_so3lr` keys, so writing NaN labels next
+    # to them produces confusing `energy=nan` / `dipole_vec="nan nan nan"`
+    # columns in the saved file. Strip a label key only if its stored value
+    # is fully non-finite (preserves real labels for evaluations on labelled
+    # data).
+    _label_keys_to_check = ('energy', 'dipole_vec')
+
+    def _is_all_nan(v):
+        try:
+            return bool(np.all(~np.isfinite(np.asarray(v, dtype=float))))
+        except (TypeError, ValueError):
+            return False
+
     # Use tqdm for progress reporting
     for predicted_graph in tqdm(predicted_graphs, desc="Saving predictions"):
         atoms = jraph_to_ase_atoms(predicted_graph)
+        for _k in _label_keys_to_check:
+            if _k in atoms.info and _is_all_nan(atoms.info[_k]):
+                del atoms.info[_k]
         write(save_to, images=atoms, append=True)
 
     logger.info(f'Successfully saved predictions for {total} structures')
@@ -178,7 +232,10 @@ def evaluate_so3lr_on(
         model_path: Optional[str] = None,
         precision: str = 'float32',
         targets: str = 'forces,dipole_vec,hirshfeld_ratios',
-        log_file: Optional[str] = None
+        log_file: Optional[str] = None,
+        total_charge: Optional[int] = None,
+        num_unpaired_electrons: Optional[int] = None,
+        overwrite: bool = False,
 ) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset and calculate error metrics.
@@ -211,6 +268,10 @@ def evaluate_so3lr_on(
         hirshfeld_ratios).
     log_file : str or None
         Path to log file. If None, logging only goes to console.
+    overwrite : bool
+        If True and `save_to` already exists, truncate and overwrite it.
+        If False (default) a pre-existing `save_to` raises RuntimeError.
+        Matches the --overwrite policy used by perform_md / perform_min.
 
     Returns:
     --------
@@ -223,8 +284,37 @@ def evaluate_so3lr_on(
 
     total_time_start = time.time()
 
-    # Parse targets into a list
-    target_list = targets.split(',')
+    # Parse targets into a list (whitespace-tolerant, empty entries dropped).
+    # Previously a comma+space ('forces, dipole_vec') silently produced
+    # untrimmed ' dipole_vec' which failed the membership check downstream
+    # and dropped the target. Validate against the known set and warn with
+    # did-you-mean suggestions before any heavy work starts.
+    target_list = [t.strip() for t in targets.split(',') if t.strip()]
+    # Normalize user-typed alias names to canonical names BEFORE the
+    # known-targets membership check, so `--targets charges,hirsh_ratios`
+    # works just like `--targets partial_charges,hirshfeld_ratios`.
+    _aliased = [(t, NORMALIZE_TARGET[t]) for t in target_list if t in NORMALIZE_TARGET]
+    if _aliased:
+        for _orig, _canon in _aliased:
+            logger.warning(f"Target alias '{_orig}' -> '{_canon}' (using canonical name).")
+        target_list = [NORMALIZE_TARGET.get(t, t) for t in target_list]
+    _label_targets = {
+        'forces', 'energy', 'dipole_vec',
+        'hirshfeld_ratios', 'a0_ratios', 'c6_ratios',
+    }
+    _known_targets = _label_targets | OBSERVABLES
+    import difflib as _difflib
+    _unknown = [t for t in target_list if t not in _known_targets]
+    if _unknown:
+        msgs = []
+        for t in _unknown:
+            sugg = _difflib.get_close_matches(t, sorted(_known_targets), n=3, cutoff=0.6)
+            msgs.append(f"  '{t}'" + (f"  (did you mean: {', '.join(sugg)})" if sugg else ''))
+        raise ValueError(
+            "Unknown --targets entries:\n" + "\n".join(msgs) +
+            f"\nKnown labels: {sorted(_label_targets)}; "
+            f"known observables: {sorted(OBSERVABLES)}."
+        )
     logger.info(f"Evaluating targets: {', '.join(target_list)}")
 
     # Determine which targets are observables (need output_intermediate_quantities)
@@ -234,6 +324,11 @@ def evaluate_so3lr_on(
         logger.info(f"Observable targets (no ground truth expected): {', '.join(observable_targets)}")
 
     # Embeddings ('x') are large and saved to a separate compressed NPZ file.
+    # Destination: when --save-to is provided the NPZ lands next to it; when
+    # --save-to is None it lands next to --datafile, which may be a read-only
+    # location (e.g. a shared dataset directory) and fail at write time. The
+    # final path is logged via `Embeddings saved to: ...` when the write
+    # succeeds; pass --save-to under a writable directory to control it.
     save_x_bool = 'x' in target_list
     if save_x_bool:
         base_path = save_to if save_to is not None else datafile
@@ -245,13 +340,17 @@ def evaluate_so3lr_on(
     if not datafile.exists():
         raise FileNotFoundError(f"Data file not found: {datafile}")
 
-    # Validate and process output file
+    # Validate and process output file. Mirrors the --overwrite policy used
+    # by perform_md / perform_min so the CLI and direct-Python entry points
+    # behave the same way: refuse to clobber by default, opt in explicitly.
     save_predictions_bool = save_to is not None
     if save_predictions_bool:
         save_to = Path(save_to).resolve().expanduser()
-        if save_to.exists():
+        if save_to.exists() and not overwrite:
             raise RuntimeError(
-                f'Output file already exists: {save_to}')
+                f"Output file already exists: {save_to}. Refusing to overwrite. "
+                f"Pass --overwrite to overwrite, or choose a different --save-to."
+            )
 
         if save_to.suffix not in ('.xyz', '.extxyz'):
             raise ValueError(
@@ -260,33 +359,64 @@ def evaluate_so3lr_on(
         # Create parent directory if it doesn't exist
         save_to.parent.mkdir(parents=True, exist_ok=True)
 
-    # Initialize the model
-    if model_path is None:
-        logger.info("Using default SO3LR potential")
-        #TODO: add precision handling
-        so3lr_calc = make_so3lr(
-            lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            calculate_forces=True,
-            output_intermediate_quantities=output_intermediate_quantities
-        )
-        cutoff = 4.5 # Default cutoff for SO3LR
+    # Initialize the model. A bundled name (so3lr-s/m/l/so3lr/so3lr-o) or a
+    # custom path; None falls back to the default model.
+    from so3lr.model_registry import resolve_model, available_models, DEFAULT_MODEL
+    workdir_path, _, _ = resolve_model(model_path)
+    # Decide bundled vs. custom by comparing the *resolved* directory against
+    # the registry's bundled paths, not by short-name membership of the raw
+    # input. This way a user who passes an explicit filesystem path that
+    # happens to point at a bundled checkpoint directory is correctly logged
+    # as 'bundled' (the old name-only check mislabelled this as custom).
+    _bundled_paths = {resolve_model(n)[0] for n in available_models()}
+    if workdir_path in _bundled_paths:
+        # Prefer the user-typed short name when it is a registry key. Without
+        # this, legacy 'so3lr' and 'so3lr-o' both log as 'params' because they
+        # share the same on-disk directory (_PKG / 'params').
+        if model_path is not None and model_path in available_models():
+            _name = model_path
+        elif model_path is None:
+            _name = DEFAULT_MODEL
+        else:
+            _name = workdir_path.name
+        logger.info(f"Using bundled SO3LR model: {_name}")
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
-        so3lr_calc = make_so3lr(
-            workdir=model_path,
-            lr_cutoff=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            calculate_forces=True,
-            output_intermediate_quantities=output_intermediate_quantities
-        )
 
-        with open(Path(model_path) / "hyperparameters.json", "r") as fp:
-            cfg = json.load(fp)
-        
-        cutoff = cfg['model']['cutoff']
-    
+    # Configure JAX process-globals (x64, matmul precision). Without this
+    # call, `so3lr eval --precision float64` would silently downcast to
+    # float32 because eval bypasses run() (where MD configures these).
+    from .so3lr_md import setup_jax_globals
+    setup_jax_globals(precision=precision, matmul_precision='highest')
+
+    so3lr_calc = make_so3lr(
+        workdir=workdir_path,
+        lr_cutoff=lr_cutoff,
+        dispersion_energy_cutoff_lr_damping=dispersion_damping,
+        calculate_forces=True,
+        output_intermediate_quantities=output_intermediate_quantities
+    )
+
+    # Read the short-range cutoff from the resolved model's hyperparameters.
+    with open(workdir_path / "hyperparameters.json", "r") as fp:
+        cfg = json.load(fp)
+    cutoff = cfg['model']['cutoff']
+
     logger.info(f"Using cutoff: {cutoff} Å")
+
+    # The ratio head is named 'hirshfeld_ratios' for the legacy model and
+    # 'a0_ratios' for the new so3lr-s/m/l models. Normalize the requested target
+    # to the model's output key so metric names (e.g. a0_ratios_rmse) match.
+    legacy_model = bool(cfg['model'].get('legacy_so3lr_bool', False))
+    ratio_key = 'hirshfeld_ratios' if legacy_model else 'a0_ratios'
+    _other_ratio = 'a0_ratios' if ratio_key == 'hirshfeld_ratios' else 'hirshfeld_ratios'
+    if _other_ratio in target_list:
+        logger.info(
+            f"Target '{_other_ratio}' renamed to '{ratio_key}' to match the "
+            f"{'legacy ' if legacy_model else ''}model's ratio head output key. "
+            f"Dataset labels under either key will still be matched."
+        )
+    target_list = [ratio_key if t in ('hirshfeld_ratios', 'a0_ratios') else t for t in target_list]
 
     # Load the data
     logger.info(f"Loading data from {datafile}")
@@ -305,23 +435,43 @@ def evaluate_so3lr_on(
     except Exception as e:
         raise RuntimeError(f"Error loading data: {str(e)}")
 
-    # Check for allowed atom types
-    allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
-    for i, (graph, _) in enumerate(data):
-        if hasattr(graph, 'nodes') and isinstance(graph.nodes, dict) and 'atomic_numbers' in graph.nodes:
-             atomic_nums = graph.nodes['atomic_numbers']
-        elif isinstance(graph, dict) and 'nodes' in graph and 'atomic_numbers' in graph['nodes']:
-             atomic_nums = graph['nodes']['atomic_numbers']
-        else:
-             # Fallback or skip if structure is unclear, but better to be safe
-             continue
-             
-        current_atomic_numbers = {int(x) for x in atomic_nums}
-        if not current_atomic_numbers.issubset(allowed_atomic_numbers):
-             unsupported = current_atomic_numbers - allowed_atomic_numbers
-             logger.error(f"Structure {i} contains unsupported element(s): {unsupported}. "
-                          f"Supported elements are: H(1), C(6), N(7), O(8), F(9), P(15), S(16), Cl(17).")
-             raise ValueError(f"Unsupported elements in structure {i}: {unsupported}")
+    # Override per-structure total_charge / num_unpaired_electrons globals if
+    # the user passed explicit CLI flags. Without this, the dataloader silently
+    # defaults to neutral singlet (charge=0, multiplicity=1) for inputs whose
+    # extxyz info{} lacks `charge=` / `multiplicity=`, so charged or open-shell
+    # systems would be evaluated as neutral singlets without warning.
+    if total_charge is not None or num_unpaired_electrons is not None:
+        _override = {}
+        if total_charge is not None:
+            _override['total_charge'] = np.array(total_charge, dtype=np.int16).reshape(-1)
+            logger.info(f"Overriding total_charge -> {total_charge} for all structures.")
+        if num_unpaired_electrons is not None:
+            _override['num_unpaired_electrons'] = np.array(num_unpaired_electrons, dtype=np.int16).reshape(-1)
+            logger.info(f"Overriding num_unpaired_electrons -> {num_unpaired_electrons} for all structures.")
+        _new_data = []
+        for _graph, _lr_data in data:
+            _new_globals = dict(_graph.globals)
+            _new_globals.update(_override)
+            _new_data.append((_graph._replace(globals=_new_globals), _lr_data))
+        data = _new_data
+
+#   # Check for allowed atom types
+#   allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
+#   for i, (graph, _) in enumerate(data):
+#       if hasattr(graph, 'nodes') and isinstance(graph.nodes, dict) and 'atomic_numbers' in graph.nodes:
+#            atomic_nums = graph.nodes['atomic_numbers']
+#       elif isinstance(graph, dict) and 'nodes' in graph and 'atomic_numbers' in graph['nodes']:
+#            atomic_nums = graph['nodes']['atomic_numbers']
+#       else:
+#            # Fallback or skip if structure is unclear, but better to be safe
+#            continue
+#            
+#       current_atomic_numbers = {int(x) for x in atomic_nums}
+#       if not current_atomic_numbers.issubset(allowed_atomic_numbers):
+#            unsupported = current_atomic_numbers - allowed_atomic_numbers
+#            logger.error(f"Structure {i} contains unsupported element(s): {unsupported}. "
+#                         f"Supported elements are: H(1), C(6), N(7), O(8), F(9), P(15), S(16), Cl(17).")
+#            raise ValueError(f"Unsupported elements in structure {i}: {unsupported}")
 
     # Determine padding sizes
     n_node = stats['max_num_of_nodes'] * batch_size + 1
@@ -419,10 +569,11 @@ def evaluate_so3lr_on(
 
             # Accumulate (only for targets that had ground truth)
             for t in target_list:
-                if f"{t}_abs_sum" in batch_metrics:
-                    tot_abs[t] += batch_metrics[f"{t}_abs_sum"]
-                    tot_sq[t]  += batch_metrics[f"{t}_sq_sum"]
-                    tot_n[t]   += batch_metrics[f"{t}_count"]
+                if f"{t}_abs_sum" not in batch_metrics:
+                    continue
+                tot_abs[t] += batch_metrics[f"{t}_abs_sum"]
+                tot_sq[t]  += batch_metrics[f"{t}_sq_sum"]
+                tot_n[t]   += batch_metrics[f"{t}_count"]
 
             # Process predictions if saving is enabled
             if save_predictions_bool:
@@ -481,10 +632,43 @@ def evaluate_so3lr_on(
         metrics = jax.tree_util.tree_map(lambda x: float(x), metrics)
         metrics['datafile'] = str(datafile.as_uri())
 
-        # Display results
-        logger.info('Evaluation metrics (units are eV, Angstrom, and seconds):')
-        formatted_metrics = {k: f"{v:.3e}" if isinstance(v, float) else v for k, v in metrics.items()}
-        logger.info(pprint.pformat(formatted_metrics))
+        # Display results: a per-target table (MAE / RMSE / N + unit) is much
+        # easier to read than a flat pprint dict where *_mae / *_mse / *_rmse
+        # keys interleave with timing fields. The returned `metrics` dict is
+        # unchanged so downstream callers keep working.
+        _UNIT_MAP = {
+            'energy': 'eV',
+            'forces': 'eV/Ang',
+            'dipole_vec': 'e*Ang',
+            'stress': 'eV/Ang^3',
+            'hirshfeld_ratios': 'dimensionless',
+            'a0_ratios': 'dimensionless',
+            'c6_ratios': 'dimensionless',
+        }
+        # Targets that actually have ground-truth counts (skip observables
+        # which have no MAE/RMSE because no label is available).
+        _scored_targets = [t for t in target_list if t in tot_n and tot_n[t] > 0]
+        logger.info('Evaluation metrics:')
+        if _scored_targets:
+            _hdr = f"  {'target':<20}  {'MAE':>12}  {'RMSE':>12}  {'N':>10}  unit"
+            logger.info(_hdr)
+            logger.info('  ' + '-' * (len(_hdr) - 2))
+            for t in _scored_targets:
+                mae = metrics.get(f'{t}_mae', float('nan'))
+                rmse = metrics.get(f'{t}_rmse', float('nan'))
+                n = tot_n[t]
+                unit = _UNIT_MAP.get(t, '')
+                logger.info(
+                    f"  {t:<20}  {mae:>12.3e}  {rmse:>12.3e}  {n:>10d}  {unit}"
+                )
+        else:
+            logger.info('  (no labelled targets evaluated)')
+        logger.info(
+            f"  Timing: total={metrics['time_evaluation']:.3f}s, "
+            f"compile={metrics['time_compile']:.3f}s, "
+            f"per-batch={metrics['time_per_batch']:.3f}s, "
+            f"per-structure={metrics['time_per_structure']:.3f}s"
+        )
         logger.info('-' * 50)
 
         # Save predictions if requested
@@ -525,14 +709,12 @@ def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:
         return graph_mask
     elif x == 'forces':
         return node_mask
-    elif x == 'stress':
-        return graph_mask
     elif x == 'dipole_vec':
         return graph_mask
     elif x == 'hirshfeld_ratios':
         return node_mask
-    # elif x == 'c6_ratios':
-    #     return node_mask
+    elif x == 'c6_ratios':
+        return node_mask
     elif x in OBSERVABLES:
         return node_mask
     else:

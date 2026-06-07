@@ -241,6 +241,10 @@ class TestImportGuard:
             'precision': 'float32',
             'seed': 42,
             'save_buffer': 10,
+            # Valid for the nvt-langevin parametrization so the langevin-thermo
+            # input check passes and we reach the method/ensemble gate (the
+            # behaviour under test). Ignored for the npt/nve cases.
+            'langevin_thermo': 1.0,
         }
         with pytest.raises(ValueError, match="only supports the NVT ensemble"):
             md_module.perform_md(settings)
@@ -585,7 +589,9 @@ class TestCreatePysagesInterfaceFns:
         seen_inside_step = []
 
         def capture_step(i, args):
-            inner_state, _nbrs, _box, _k = args
+            # lr=False step_md_fn now sees a 5-tuple
+            # (state, nbrs, box, k_grid, k_grid_disp).
+            inner_state, _nbrs, _box, _k, _k_disp = args
             seen_inside_step.append(np.array(inner_state.position))
             return args
 
@@ -625,7 +631,9 @@ class TestCreatePysagesInterfaceFns:
         seen_inside_step = []
 
         def capture_step(i, args):
-            inner_state, _nbrs, _nbrs_lr, _box, _k = args
+            # lr=True step_md_fn now sees a 6-tuple
+            # (state, nbrs, nbrs_lr, box, k_grid, k_grid_disp).
+            inner_state, _nbrs, _nbrs_lr, _box, _k, _k_disp = args
             seen_inside_step.append(np.array(inner_state.position))
             return args
 
@@ -646,10 +654,10 @@ class TestCreatePysagesInterfaceFns:
         )
 
     def test_step_fn_lr_true_threads_nbrs_lr(self):
-        """The lr=True step_fn must pack/unpack a 5-tuple
-        ``(state, nbrs, nbrs_lr, box, k_grid)`` through step_md_fn and
-        propagate ``nbrs_lr`` in the returned extras dict.
-        If lr=True silently dispatched to the lr=False branch (a 4-tuple),
+        """The lr=True step_fn must pack/unpack a 6-tuple
+        ``(state, nbrs, nbrs_lr, box, k_grid, k_grid_disp)`` through step_md_fn
+        and propagate ``nbrs_lr`` in the returned extras dict.
+        If lr=True silently dispatched to the lr=False branch (a 5-tuple),
         step_md_fn would receive the wrong arity and nbrs_lr would not
         appear in the output extras. Catches that swap.
         """
@@ -674,9 +682,10 @@ class TestCreatePysagesInterfaceFns:
         ctx_state_after_init = ctx.init_fn()
         ctx_state_after_step = ctx.step_fn(ctx_state_after_init)
 
-        assert observed_arity == [5], (
-            f"lr=True step_md_fn should receive a 5-tuple "
-            f"(state, nbrs, nbrs_lr, box, k_grid); got arity {observed_arity}."
+        assert observed_arity == [6], (
+            f"lr=True step_md_fn should receive a 6-tuple "
+            f"(state, nbrs, nbrs_lr, box, k_grid, k_grid_disp); "
+            f"got arity {observed_arity}."
         )
         assert ctx_state_after_step.extras["nbrs_lr"] == nbrs_lr_token
         assert ctx_state_after_step.extras["nbrs"] == nbrs
@@ -1192,7 +1201,7 @@ class TestUpdateAfterPysages:
         k_grid_in = jnp.array([[1.0, 2.0], [3.0, 4.0]])
         nbrs = _RecordingNeighbors()
 
-        _, _, _, _, k_grid_out = update_so3lr_after_pysages(
+        _, _, _, _, k_grid_out, _ = update_so3lr_after_pysages(
             result, lr=False, init_fn=None, rng_key=None,
             md_T=self.MD_T, dt=self.DT, nbrs=nbrs, ensemble='nvt',
             k_grid=k_grid_in,
@@ -1204,7 +1213,7 @@ class TestUpdateAfterPysages:
     def test_k_grid_none_is_passed_through(self):
         from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
         result, *_ = self._make_nvt_inputs()
-        _, _, _, _, k_grid_out = update_so3lr_after_pysages(
+        _, _, _, _, k_grid_out, _ = update_so3lr_after_pysages(
             result, lr=False, init_fn=None, rng_key=None,
             md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
             ensemble='nvt', k_grid=None,
@@ -1218,7 +1227,7 @@ class TestUpdateAfterPysages:
         result, positions, velocities, forces, masses = self._make_nvt_inputs(bias=None)
         nbrs = _RecordingNeighbors()
 
-        state, nbrs_out, nbrs_lr_out, new_box, _ = update_so3lr_after_pysages(
+        state, nbrs_out, nbrs_lr_out, new_box, _, _ = update_so3lr_after_pysages(
             result, lr=False, init_fn=None, rng_key=None,
             md_T=self.MD_T, dt=self.DT, nbrs=nbrs, ensemble='nvt', k_grid=None,
         )
@@ -1286,7 +1295,7 @@ class TestUpdateAfterPysages:
                               jnp.eye(3) * 20.0)
         result = _make_result(snap, bias=None)
 
-        state, _, nbrs_lr_out, new_box, _ = update_so3lr_after_pysages(
+        state, _, nbrs_lr_out, new_box, _, _ = update_so3lr_after_pysages(
             result, lr=False, init_fn=None, rng_key=None,
             md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
             ensemble='nve', k_grid=None,
@@ -1363,7 +1372,7 @@ class TestUpdateAfterPysages:
         nbrs = _RecordingNeighbors()
         nbrs_lr = _RecordingNeighbors()
 
-        state, _, _, new_box, _ = update_so3lr_after_pysages(
+        state, _, _, new_box, _, _ = update_so3lr_after_pysages(
             result, lr=True, init_fn=None, rng_key=None,
             md_T=self.MD_T, dt=self.DT, nbrs=nbrs, ensemble='npt',
             nbrs_lr=nbrs_lr, k_grid=None,
@@ -1404,7 +1413,7 @@ class TestUpdateAfterPysages:
         )
         result = _make_result(snap, bias=None)
 
-        state, _, _, new_box, _ = update_so3lr_after_pysages(
+        state, _, _, new_box, _, _ = update_so3lr_after_pysages(
             result, lr=False, init_fn=None, rng_key=None,
             md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
             ensemble='npt', k_grid=None,

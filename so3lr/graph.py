@@ -17,6 +17,8 @@ _GraphBase = namedtuple(
         "cell",
         "k_grid",
         "k_smearing",
+        "k_grid_disp",
+        "k_smearing_disp",
         "theory_mask",
         "residue_segments",
         "residue_charge",
@@ -25,12 +27,16 @@ _GraphBase = namedtuple(
 
 class Graph(_GraphBase):
     """Graph class with optional fields for theory_mask, residue_segments, and residue_charge."""
-    
-    def __new__(cls, positions, edges, nodes, centers, others, mask, 
-                total_charge, num_unpaired_electrons, edges_lr, idx_i_lr, 
-                idx_j_lr, cell, k_grid=None, k_smearing=None, theory_mask=None, residue_segments=None, 
+
+    def __new__(cls, positions, edges, nodes, centers, others, mask,
+                total_charge, num_unpaired_electrons, edges_lr, idx_i_lr,
+                idx_j_lr, cell, k_grid=None, k_smearing=None,
+                k_grid_disp=None, k_smearing_disp=None,
+                theory_mask=None, residue_segments=None,
                 residue_charge=None):
-        return super().__new__(cls, positions, edges, nodes, centers, others, 
-                             mask, total_charge, num_unpaired_electrons, 
-                             edges_lr, idx_i_lr, idx_j_lr, cell, k_grid, k_smearing, theory_mask, 
+        return super().__new__(cls, positions, edges, nodes, centers, others,
+                             mask, total_charge, num_unpaired_electrons,
+                             edges_lr, idx_i_lr, idx_j_lr, cell, k_grid, k_smearing,
+                             k_grid_disp, k_smearing_disp,
+                             theory_mask,
                              residue_segments, residue_charge)

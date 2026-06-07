@@ -39,7 +39,7 @@ def batch_info_fn(batched_graph: jraph.GraphsTuple):
 
 
 @jax.jit
-def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict):
+def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict, kspace_constants: dict = None):
     batch = dict(
         positions=graph.nodes.get('positions'),
         atomic_numbers=graph.nodes.get('atomic_numbers'),
@@ -54,6 +54,7 @@ def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict):
         total_charge=graph.globals.get('total_charge'),
         dipole_vec=graph.globals.get('dipole_vec'),
         hirshfeld_ratios=graph.nodes.get('hirshfeld_ratios'),
+        c6_ratios=graph.nodes.get('c6_ratios'),
         idx_i_lr=lr_batch['idx_i_lr'],
         idx_j_lr=lr_batch['idx_j_lr'],
         cell_offset_lr=lr_batch.get('cell_offsets_lr'),
@@ -62,6 +63,11 @@ def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict):
         residue_charge=graph.globals.get('residue_charge'),
         residue_segments=graph.globals.get('residue_segments'),
     )
+    if kspace_constants is not None:
+        batch['k_grid'] = kspace_constants['k_grid']
+        batch['k_smearing'] = kspace_constants['k_smearing']
+        batch['k_grid_disp'] = kspace_constants['k_grid_disp']
+        batch['k_smearing_disp'] = kspace_constants['k_smearing_disp']
     batch_info = batch_info_fn(graph)
     batch.update(batch_info)
     return batch

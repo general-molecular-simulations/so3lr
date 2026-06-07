@@ -15,6 +15,11 @@ import pathlib
 import pytest
 from ase.io import read
 from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
+from so3lr.model_registry import resolve_model
+
+# Original/legacy SO3LR model, resolved via the registry so the test is
+# decoupled from the on-disk layout (the model now lives under models/so3lr).
+MODEL_DIR = resolve_model('so3lr')[0]
 
 
 def get_package_dir():
@@ -44,7 +49,7 @@ class TestObservableGradients:
         output_atom_indices = list(range(min(3, n_atoms)))
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -97,7 +102,7 @@ class TestObservableGradients:
         output_atom_indices = list(range(min(3, n_atoms)))
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -138,7 +143,7 @@ class TestObservableGradients:
         output_atom_indices = list(range(min(3, n_atoms)))
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -181,7 +186,7 @@ class TestObservableGradients:
         output_atom_indices = list(range(min(3, n_atoms)))
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -240,7 +245,7 @@ class TestOutputAtomIndices:
         output_atom_indices = [single_atom_idx]
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -287,7 +292,7 @@ class TestOutputAtomIndices:
             pytest.skip(f"Not enough atoms in {name} for non-contiguous test")
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -329,7 +334,7 @@ class TestOutputAtomIndices:
         output_atom_indices = list(range(min(2, n_atoms)))
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -374,7 +379,7 @@ class TestOutputAtomIndices:
         output_atom_indices = list(range(min(3, n_atoms)))
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -476,7 +481,7 @@ class TestObservableGradientsNumerical:
 
         # Calculator for analytical gradient
         calc_with_grad = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -488,7 +493,7 @@ class TestObservableGradientsNumerical:
 
         # Calculator for numerical gradient (reused)
         calc_numerical = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -539,7 +544,7 @@ class TestObservableGradientsNumerical:
 
         # Calculator for analytical gradient
         calc_with_grad = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -551,7 +556,7 @@ class TestObservableGradientsNumerical:
 
         # Calculator for numerical gradient (reused)
         calc_numerical = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -599,7 +604,7 @@ class TestObservableGradientsNumerical:
 
         # Calculator for analytical gradient
         calc_with_grad = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -611,7 +616,7 @@ class TestObservableGradientsNumerical:
 
         # Calculator for numerical gradient (reused)
         calc_numerical = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -659,7 +664,7 @@ class TestObservableGradientsNumerical:
         output_atom_indices = list(range(min(3, n_atoms)))
 
         calc = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -680,7 +685,7 @@ class TestObservableGradientsNumerical:
 
         # Calculator for numerical gradient (reused across all atoms)
         calc_numerical = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -772,7 +777,7 @@ class TestObservableJacobiansNumerical:
 
         # Calculator for analytical Jacobian
         calc_with_jac = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -784,7 +789,7 @@ class TestObservableJacobiansNumerical:
 
         # Calculator for numerical Jacobian (reused)
         calc_numerical = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -833,7 +838,7 @@ class TestObservableJacobiansNumerical:
 
         # Calculator for analytical Jacobian
         calc_with_jac = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
@@ -845,7 +850,7 @@ class TestObservableJacobiansNumerical:
 
         # Calculator for numerical Jacobian (reused)
         calc_numerical = AseCalculatorSparse.create_from_workdir(
-            workdir=package_dir / 'so3lr' / 'params',
+            workdir=MODEL_DIR,
             lr_cutoff=12.,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,

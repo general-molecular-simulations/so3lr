@@ -1,10 +1,11 @@
 import jraph
 import logging
 import numpy as np
+from ase import Atoms
+from ase.neighborlist import neighbor_list
 from so3lr.mlff.utils.jraph_utils import dynamically_batch_with_lr
 
 from dataclasses import dataclass
-from functools import partial, partialmethod
 from typing import Optional
 import queue
 import wandb
@@ -25,34 +26,39 @@ except ModuleNotFoundError:
     )
 
 
-logging.MLFF = 35
-logging.addLevelName(logging.MLFF, 'MLFF')
-logging.Logger.trace = partialmethod(logging.Logger.log, logging.MLFF)
-logging.mlff = partial(logging.log, logging.MLFF)
+logger = logging.getLogger("SO3LR")
 
 
-def compute_edges_tf(
-    positions,
-    cutoff: float
-):
-    """Compute edges between atoms based on distance cutoff.
-    
+def compute_edges_np(positions, atomic_numbers, cell, pbc, cutoff):
+    """Compute edges using ASE neighbor_list, handling both PBC and non-PBC.
+
     Args:
-        positions: Atom positions tensor
-        cutoff: Distance cutoff for edge creation
-        
+        positions: Atom positions as numpy array (N, 3).
+        atomic_numbers: Atomic numbers as numpy array (N,).
+        cell: Unit cell as numpy array (3, 3). Ignored when pbc is all False.
+        pbc: Periodic boundary conditions as numpy array (3,) of bool.
+        cutoff: Distance cutoff for edge creation.
+
     Returns:
-        centers: Indices of center atoms
-        others: Indices of neighbor atoms
+        receivers: Center atom indices (int32).
+        senders: Neighbor atom indices (int32).
+        cell_offsets: Cell offset vectors (N_edges, 3) int32, empty (0, 3) if non-PBC.
     """
-    num_atoms = tf.shape(positions)[0]
-    displacements = positions[None, :, :] - positions[:, None, :]
-    distances = tf.norm(displacements, axis=-1)
-    mask = ~tf.eye(num_atoms, dtype=tf.bool)  # Get rid of self-connections.
-    keep_edges = tf.where((distances < cutoff) & mask)
-    centers = tf.cast(keep_edges[:, 0], dtype=tf.int32)  # center indices
-    others = tf.cast(keep_edges[:, 1], dtype=tf.int32)  # neighbor indices
-    return centers, others
+    mol = Atoms(positions=positions, numbers=atomic_numbers, cell=cell, pbc=pbc)
+    if mol.get_pbc().any():
+        i, j, S = neighbor_list('ijS', mol, cutoff, self_interaction=False)
+        return (
+            np.array(i, dtype=np.int32),
+            np.array(j, dtype=np.int32),
+            np.array(S, dtype=np.int32),
+        )
+    else:
+        i, j = neighbor_list('ij', mol, cutoff, self_interaction=False)
+        return (
+            np.array(i, dtype=np.int32),
+            np.array(j, dtype=np.int32),
+            np.zeros((len(i), 3), dtype=np.int32),  # dummy offsets for uniform output shape
+        )
 
 def standardize_dataset_fields(dataset, expected_fields=None):
     """Standardize dataset fields to ensure all datasets have the same structure.
@@ -78,6 +84,8 @@ def standardize_dataset_fields(dataset, expected_fields=None):
             'positions': {'dtype': tf.float32, 'shape': (None, 3)},
             'stress': {'dtype': tf.float32, 'shape': (6,)},
             'theory_level': {'dtype': tf.int32, 'shape': (1,)},
+            'cell': {'dtype': tf.float32, 'shape': (3, 3)},
+            'pbc': {'dtype': tf.bool, 'shape': (3,)},
         }
 
     def add_missing_fields(sample):
@@ -87,6 +95,19 @@ def standardize_dataset_fields(dataset, expected_fields=None):
         # Copy existing fields
         for key, value in sample.items():
             standardized_sample[key] = value
+
+        # Add missing cell (zeros = no cell)
+        if 'cell' not in sample:
+            standardized_sample['cell'] = tf.zeros((3, 3), dtype=tf.float32)
+        # Add missing pbc: infer from cell if present, otherwise default to non-periodic
+        if 'pbc' not in sample:
+            cell = standardized_sample.get('cell', sample.get('cell'))
+            has_cell = tf.reduce_any(tf.not_equal(cell, 0.0))
+            standardized_sample['pbc'] = tf.where(
+                has_cell,
+                tf.constant([True, True, True], dtype=tf.bool),
+                tf.constant([False, False, False], dtype=tf.bool),
+            )
 
         # Add missing hirshfeld_ratios field only
         if 'hirshfeld_ratios' not in sample:
@@ -134,9 +155,12 @@ def create_graph_tuple_tf(
     if 'theory_level' in properties:
         theory_level = tf.reshape(element['theory_level'], (1,))
 
-        theory_level0 = theory_level #real levels
-        theory_level0 = tf.where(tf.equal(theory_level0, 1), 0, theory_level0) #merge PBE0+MBD and PBE0+MBD-NL heads, for the final head only
-        theory_level0 = tf.reshape(5, (1,)) #for final head level = 5 or 6
+        # theory level 0 - PBE0+MBD-NL, 1 - PBE+MBD, 4 - OMol level
+        # use real levels for training
+        # theory_level0 = theory_level #real levels
+        # theory_level0 = tf.where(tf.equal(theory_level0, 1), 0, theory_level0) #merge PBE0+MBD and PBE0+MBD-NL heads, for the final head only
+        # use final fine-tuned head for inference
+        theory_level0 = tf.reshape(5, (1,))
 
         globals_dict['theory_level'] = theory_level0
         theory_mask = tf.one_hot(theory_level0, depth=max_num_theory_levels)  # (1, num_theory_levels)
@@ -161,7 +185,7 @@ def create_graph_tuple_tf(
         )
         nodes_dict['c6_ratios'] = c6_ratios
 
-    if 'energy' in properties and theory_level[0] != 4:
+    if 'energy' in properties and theory_level[0] != 4: #do not use omol energies
     #if 'energy' in properties:
         en = tf.reshape(element['energy'], (1,))
         globals_dict['energy'] = en
@@ -188,23 +212,47 @@ def create_graph_tuple_tf(
         dipole_vec[:] = np.nan
         globals_dict['dipole_vec'] = tf.convert_to_tensor(dipole_vec, dtype=tf.float32)
 
-    centers, others = compute_edges_tf(
-        positions=positions,
-        cutoff=cutoff
+    # Read cell and pbc from the element
+    cell = element['cell']
+    pbc = element['pbc']
+
+    # Use tf.py_function to call numpy-based ASE neighbor_list
+    centers, others, cell_offsets = tf.py_function(
+        func=lambda pos, Z, c, p: compute_edges_np(
+            pos.numpy(), Z.numpy(), c.numpy(), p.numpy(), cutoff
+        ),
+        inp=[positions, atomic_numbers, cell, pbc],
+        Tout=[tf.int32, tf.int32, tf.int32],
     )
+    centers.set_shape([None])
+    others.set_shape([None])
+    cell_offsets.set_shape([None, 3])
+
+    # Always include cell_offset and cell so the output structure is uniform
+    # across all elements (required by tf.data.Dataset.map).
+    # Non-PBC entries will have zeros; _numpy_tuple_iterator strips them later.
+    edges_dict = {'cell_offset': cell_offsets}
+    globals_dict['cell'] = tf.reshape(cell, (1, 3, 3))
 
     if calculate_neighbors_lr is True:
         if cutoff_lr is None:
             raise ValueError(
                 f'cutoff_lr must be specified for {calculate_neighbors_lr=}. Received {cutoff_lr=}.'
             )
-        centers_lr, others_lr = compute_edges_tf(
-            positions=positions,
-            cutoff=cutoff_lr
+        centers_lr, others_lr, cell_offsets_lr = tf.py_function(
+            func=lambda pos, Z, c, p: compute_edges_np(
+                pos.numpy(), Z.numpy(), c.numpy(), p.numpy(), cutoff_lr
+            ),
+            inp=[positions, atomic_numbers, cell, pbc],
+            Tout=[tf.int32, tf.int32, tf.int32],
         )
+        centers_lr.set_shape([None])
+        others_lr.set_shape([None])
+        cell_offsets_lr.set_shape([None, 3])
     else:
-        centers_lr = tf.constant([], dtype=tf.int64)
-        others_lr = tf.constant([], dtype=tf.int64)
+        centers_lr = tf.constant([], dtype=tf.int32)
+        others_lr = tf.constant([], dtype=tf.int32)
+        cell_offsets_lr = tf.zeros((0, 3), dtype=tf.int32)
 
     num_edges_lr = tf.shape(centers_lr)[0]
     num_nodes = tf.shape(atomic_numbers)[0]
@@ -218,8 +266,7 @@ def create_graph_tuple_tf(
         senders=others,
         nodes=nodes_dict,
         globals=globals_dict,
-        edges=dict(),  # Don't set to None, since otherwise tf.data.Dataset.to_numpy_generator() does not work due to
-        # call to None.numpy().
+        edges=edges_dict,
     )
     # Return long-range data as a plain dict of TF tensors so it's compatible with
     # tf.data.Dataset.map(). Converted to LongRangeNeighborList when consuming the
@@ -227,6 +274,7 @@ def create_graph_tuple_tf(
     lr_dict = {
         'idx_i_lr': centers_lr,
         'idx_j_lr': others_lr,
+        'cell_offsets_lr': cell_offsets_lr,
         'n_pairs': tf.reshape(num_edges_lr, (1,)),
     }
     return graph, lr_dict
@@ -359,6 +407,42 @@ class QCMLDataLoaderSparseParallel:
         self._cardinality = total_examples
         return total_examples
 
+    def dataset_info(self):
+        """Return per-dataset training sizes and normalized weights for epoch tracking.
+
+        Returns:
+            dict with keys:
+                'names': list of dataset folder basenames
+                'sizes': list of per-dataset training set sizes
+                'weights': normalized sampling weights (sum to 1.0)
+        """
+        from pathlib import Path
+        names = [Path(f).name for f in self.input_folders]
+        sizes = []
+        for i, folder in enumerate(self.input_folders):
+            builder = tfds.builder_from_directory(folder)
+            if i < len(self.num_train) and self.num_train[i] is not None:
+                split_str = f'train[:{self.num_train[i]}]'
+            else:
+                split_str = 'train'
+            try:
+                dataset = builder.as_dataset(split=split_str)
+                count = tf.data.experimental.cardinality(dataset).numpy()
+                sizes.append(int(count))
+            except Exception:
+                sizes.append(0)
+
+        # Normalize weights
+        raw_weights = self.dataset_weights if self.dataset_weights is not None else [1.0] * len(self.input_folders)
+        total_weight = sum(raw_weights)
+        normalized_weights = [w / total_weight for w in raw_weights]
+
+        return {
+            'names': names,
+            'sizes': sizes,
+            'weights': normalized_weights,
+        }
+
     @staticmethod
     def _preprocess(dataset,
                     batch_max_num_nodes,
@@ -421,16 +505,29 @@ class QCMLDataLoaderSparseParallel:
         def _numpy_tuple_iterator(ds):
             """Convert TF dataset of (graph, lr_dict) tuples to numpy iterator."""
             for graph, lr_dict in ds.as_numpy_iterator():
-                lr_np = jraph.GraphsTuple(
-                    nodes=None,
-                    edges=None,
-                    senders=np.asarray(lr_dict['idx_j_lr']),
-                    receivers=np.asarray(lr_dict['idx_i_lr']),
-                    n_node=np.asarray(graph.n_node),
-                    n_edge=np.asarray(lr_dict['n_pairs']),
-                    globals=None,
-                )
-                yield graph, lr_np
+                # Check if this structure has PBC (non-zero cell)
+                cell = graph.globals.get('cell')
+                has_pbc = cell is not None and np.any(cell != 0.0)
+
+                # Strip PBC fields for non-periodic systems to match ASE/NPZ behavior
+                if not has_pbc:
+                    # Remove cell from globals
+                    globals_new = {k: v for k, v in graph.globals.items() if k != 'cell'}
+                    # Remove cell_offset from edges
+                    edges_new = {k: v for k, v in graph.edges.items() if k != 'cell_offset'}
+                    graph = graph._replace(globals=globals_new, edges=edges_new)
+
+                # Determine cell_offsets_lr
+                offsets = np.asarray(lr_dict['cell_offsets_lr'])
+                cell_offsets_lr = offsets if has_pbc and offsets.shape[0] > 0 else None
+
+                lr_data = {
+                    'idx_i_lr': np.asarray(lr_dict['idx_i_lr']),
+                    'idx_j_lr': np.asarray(lr_dict['idx_j_lr']),
+                    'cell_offsets_lr': cell_offsets_lr,
+                    'n_pairs': np.asarray(lr_dict['n_pairs']),
+                }
+                yield graph, lr_data
 
         return dynamically_batch_with_lr(
             _numpy_tuple_iterator(dataset),

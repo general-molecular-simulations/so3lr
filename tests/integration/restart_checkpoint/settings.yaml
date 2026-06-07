@@ -19,7 +19,7 @@ buffer_size_multiplier_lr: 1.25
 # MD settings
 ensemble: nvt
 md_T: 300.0
-md_dt: 0.0005
+md_dt: 0.5
 md_cycles: 2
 md_steps: 2
 relax_before_run: false
