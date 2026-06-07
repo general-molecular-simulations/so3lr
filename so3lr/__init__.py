@@ -1,4 +1,4 @@
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Lazy public API (PEP 562): importing `so3lr` (or `from so3lr import __version__`)
 # must stay cheap and NOT pull in jax/flax/jax-md/glp — otherwise `so3lr --help`

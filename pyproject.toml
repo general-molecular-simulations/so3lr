@@ -1,18 +1,12 @@
 [tool.poetry]
 name = "so3lr"
-version = "0.1.0"
+version = "0.2.0"
 description = "SO3krates Universal Pairwise Force Field with Long Range Interactions (SO3LR) for Molecular Simulation"
 authors = ["Adil Kabylda, Thorben Frank"]
 license = "MIT"
-# Ship bundled model checkpoints (orbax dirs + params.pkl + hyperparameters) as
-# package data so they are present in built wheels/sdists, not just editable installs.
+
 include = [
     { path = "so3lr/models/**/*", format = ["sdist", "wheel"] },
-    # Non-.py runtime data files that live inside packages. poetry-core does
-    # not auto-bundle these, so without explicit entries `import
-    # so3lr.mlff.sph_ops` crashes on a pip-installed wheel (contract.py eager-
-    # loads u_matrix.pickle at import time) and the robust-loss partition
-    # spline goes missing.
     { path = "so3lr/mlff/sph_ops/*.pickle", format = ["sdist", "wheel"] },
     { path = "so3lr/mlff/sph_ops/*.npz", format = ["sdist", "wheel"] },
     { path = "so3lr/mlff/utils/robust_loss_jax/data/*.npz", format = ["sdist", "wheel"] },
