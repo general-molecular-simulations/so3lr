@@ -415,6 +415,15 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
             indices=arguments['indices'],
             box=box,
         )
+    elif name_lower == 'meanofdistances':
+        return pysages.colvars.MeanOfDistances(indices=arguments['indices'])
+    elif name_lower == 'meanofdistances_pbc':
+        if box is None:
+            raise ValueError("meanofdistances_pbc requires the simulation box.")
+        return pysages.colvars.MeanOfDistancesPBC(
+            indices=arguments['indices'],
+            box=box,
+        )
     elif name_lower == 'angle':
         return pysages.colvars.Angle(indices=arguments['indices'])
     elif name_lower == 'dihedral':
@@ -445,6 +454,10 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
             cn_exponents=arguments.get('cn_exps'),
             indices_nn=arguments.get('indices_nn'),
         )
+    elif name_lower == 'ringphase':
+        return pysages.colvars.angles.RingPhaseAngle(indices=arguments['indices'])
+    elif name_lower == 'ringamplitude':
+        return pysages.colvars.angles.RingAmplitude(indices=arguments['indices'])
     else:
         raise ValueError(f"Unknown collective variable type: '{name}'")
 
@@ -485,11 +498,19 @@ def get_pysages_method(settings_dict, nbrs=None, species=None, box=None):
 
     method_name = settings_dict['method'].lower()
     if method_name == 'abf':
-        N=settings_dict['method_args'].get('N', 500) if 'method_args' in settings_dict else 500
+        method_args = settings_dict.get('method_args', {})
+        N=method_args.get('N', 500) if 'method_args' in settings_dict else 500
+        use_pinv = method_args.get('use_pinv', False)
         logger.info(f'N(ABF): {N}')
-        return pysages.methods.ABF(cvs, grid, restraints=restraints, N=N)
+        logger.info(f'use_pinv(ABF): {use_pinv}')
+        return pysages.methods.ABF(cvs, grid, restraints=restraints, N=N, use_pinv=use_pinv)
     elif method_name == 'spectralabf':
-        return pysages.methods.SpectralABF(cvs, grid, restraints=restraints)
+        method_args = settings_dict.get('method_args', {})
+        N=method_args.get('N', 500) if 'method_args' in settings_dict else 500
+        use_pinv = method_args.get('use_pinv', False)
+        logger.info(f'N(SpectralABF): {N}')
+        logger.info(f'use_pinv(SpectralABF): {use_pinv}')
+        return pysages.methods.SpectralABF(cvs, grid, restraints=restraints, N=N, use_pinv=use_pinv)
     elif method_name == 'metad':
         args = settings_dict['method_args']
         return pysages.methods.Metadynamics(
