@@ -389,6 +389,49 @@ def parse_pysages_input(input_path):
     return settings_dict
 
 
+def _expand_indices(spec):
+    """Expand a YAML index specification into a flat list of ints.
+
+    Supported forms:
+      - int:                       5             -> [5]
+      - list / tuple (any mix):    [0, 1, 2]     -> [0, 1, 2]
+                                   [0, "3-5"]    -> [0, 3, 4, 5]
+      - inclusive range string:    "0-19"        -> [0, 1, ..., 19]
+      - multi-token string:        "0-2, 5, 8-9" -> [0, 1, 2, 5, 8, 9]
+        (tokens separated by commas and/or whitespace; each token is a single
+        index or an inclusive "a-b" range with a <= b)
+
+    Ranges "a-b" include BOTH endpoints. Negative indices are not supported.
+    """
+    def expand_token(tok):
+        if isinstance(tok, bool):
+            raise ValueError(f"Invalid index: {tok!r}")
+        if isinstance(tok, int):
+            return [int(tok)]
+        if isinstance(tok, str):
+            out = []
+            for piece in tok.replace(',', ' ').split():
+                if '-' in piece:
+                    a, b = piece.split('-')
+                    a, b = int(a), int(b)
+                    if b < a:
+                        raise ValueError(
+                            f"Invalid index range '{piece}': end < start."
+                        )
+                    out.extend(range(a, b + 1))
+                else:
+                    out.append(int(piece))
+            return out
+        raise ValueError(f"Unsupported index token: {tok!r}")
+
+    if isinstance(spec, (list, tuple)):
+        result = []
+        for item in spec:
+            result.extend(expand_token(item))
+        return result
+    return expand_token(spec)
+
+
 def process_cv(cv_dict, nbrs=None, species=None, box=None):
     """Create a PySAGES collective variable from a settings dictionary."""
     name = cv_dict['type']
@@ -439,6 +482,42 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
         # axis=2 gives the z-coordinate of the solute centroid (interfacial transfer CV).
         return pysages.colvars.Component(
             indices=arguments['indices'], axis=arguments['axis']
+        )
+    elif name_lower == 'relativecomponent':
+        # Cartesian component (axis 0/1/2 = x/y/z) of the barycenter of grp1
+        # relative to the barycenter of grp2: xi = bary(grp1)[axis] - bary(grp2)[axis].
+        # Translation-invariant -> a bias on it injects no net COM force (no drift).
+        # grp1 = solute, grp2 = reference (e.g. the solvent range); axis=2 -> z.
+        # Both groups are explicit index specs (range string / list); see
+        # _expand_indices. For zero self-coupling (slope exactly 1) make grp2 the
+        # solvent only (exclude the solute atoms in grp1).
+        if arguments.get('grp1') is None or arguments.get('grp2') is None:
+            raise ValueError(
+                "relativecomponent requires explicit 'grp1' and 'grp2' index "
+                "specs (range string or list)."
+            )
+        return pysages.colvars.RelativeComponent(
+            indices=[tuple(_expand_indices(arguments['grp1'])),
+                     tuple(_expand_indices(arguments['grp2']))],
+            axis=arguments['axis'],
+        )
+    elif name_lower == 'relativecomponent_pbc':
+        # PBC-robust RelativeComponent: grp1 made whole (anchor min-image),
+        # grp2 plain mean (box-spanning reference), separation wrapped to
+        # (-L/2, L/2]. Correct even if the solute reaches the periodic seam.
+        # Both groups are explicit index specs (range string / list).
+        if box is None:
+            raise ValueError("relativecomponent_pbc requires the simulation box.")
+        if arguments.get('grp1') is None or arguments.get('grp2') is None:
+            raise ValueError(
+                "relativecomponent_pbc requires explicit 'grp1' and 'grp2' index "
+                "specs (range string or list)."
+            )
+        return pysages.colvars.RelativeComponentPBC(
+            indices=[tuple(_expand_indices(arguments['grp1'])),
+                     tuple(_expand_indices(arguments['grp2']))],
+            axis=arguments['axis'],
+            box=box,
         )
     elif name_lower == 'asphericity':
         return pysages.colvars.Asphericity(indices=arguments['indices'])
