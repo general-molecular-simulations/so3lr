@@ -434,6 +434,12 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
         return pysages.colvars.PrincipalMoment(
             indices=arguments['indices'], axis=arguments['axis']
         )
+    elif name_lower == 'component':
+        # Cartesian component (axis 0/1/2 = x/y/z) of the barycenter of a group.
+        # axis=2 gives the z-coordinate of the solute centroid (interfacial transfer CV).
+        return pysages.colvars.Component(
+            indices=arguments['indices'], axis=arguments['axis']
+        )
     elif name_lower == 'asphericity':
         return pysages.colvars.Asphericity(indices=arguments['indices'])
     elif name_lower == 'acylindricity':
