@@ -306,7 +306,12 @@ class EnergySparse(BaseSubModule):
                 name='energy_dense_final'
             )(x) # (num_nodes, num_levels_of_theory)
 
-        atomic_energy = atomic_energy * atomic_scales
+        atomic_energy = atomic_energy * atomic_scales  # learned, env-dependent
+
+        # Short-range OOD gate: fade the learned NN energy to its per-element
+        # reference (``energy_offset``) at clash distances.
+        atomic_energy = atomic_energy * short_range_gate(inputs)[:, None]
+
         atomic_energy += energy_offset  # (num_nodes, num_levels_of_theory)
 
         atomic_energy = jnp.where(
@@ -489,6 +494,9 @@ class HirshfeldSparse(BaseSubModule):
             qk = (q * k / jnp.sqrt(k.shape[-1])).sum(axis=-1)
             v_eff = v_shift + qk  # (n)
             hirshfeld_ratios = safe_scale(jnp.abs(v_eff), node_mask)
+            # Short-range OOD gate: fade to the free-atom ratio (1.0) at clashes.
+            g = short_range_gate(inputs)
+            hirshfeld_ratios = g * hirshfeld_ratios + (1.0 - g)
             return dict(hirshfeld_ratios=hirshfeld_ratios)
 
         q = nn.Embed(num_embeddings=100, features=1)(atomic_numbers).squeeze(axis=-1)
@@ -513,6 +521,9 @@ class HirshfeldSparse(BaseSubModule):
             )(x).squeeze(axis=-1)  # (num_nodes)
 
         a0_ratios = safe_scale(jnp.abs(x_ + q), node_mask)
+        # Short-range OOD gate: fade to the free-atom ratio (1.0) at clashes.
+        g = short_range_gate(inputs)
+        a0_ratios = g * a0_ratios + (1.0 - g)
 
         # New models predict static-polarizability (alpha_0) ratios; surface them
         # under 'a0_ratios'. The legacy branch (above) keeps 'hirshfeld_ratios'.
@@ -589,6 +600,9 @@ class C6RatiosSparse(BaseSubModule):
 
         # return dict(c6_ratios=c6_ratios)
         c6_ratios = safe_scale(jnp.abs(x_ + q), node_mask)
+        # Short-range OOD gate: fade to the free-atom ratio (1.0) at clashes.
+        g = short_range_gate(inputs)
+        c6_ratios = g * c6_ratios + (1.0 - g)
 
         return dict(c6_ratios=c6_ratios)
 
@@ -671,6 +685,12 @@ class PartialChargesSparse(BaseSubModule):
             )(x).squeeze(axis=-1)  # (num_nodes)
 
         x_q = safe_scale(partial_charges + q_, node_mask)
+
+        # Short-range OOD gate, applied BEFORE charge conservation (gating after
+        # would break the total-charge constraint sum(q)=Q). Removes the clash
+        # atom's spurious charge; the standard conservation below still enforces
+        # the total charge, leaving the gated atom with only a negligible share.
+        x_q = x_q * short_range_gate(inputs)
 
         # If residue_charge/segments is provided, use it for charge conservation per residue/monomer
         residue_charge = inputs.get('residue_charge')
@@ -762,6 +782,33 @@ def sigma(x):
 def switching_fn(x, x_on, x_off):
     c = (x - x_on) / (x_off - x_on)
     return sigma(1 - c) / (sigma(1 - c) + sigma(c))
+
+
+# Short-range out-of-distribution gate. Below the trained interatomic range
+# (steric clashes) the learned per-atom heads extrapolate and blow up — a 0.13 A
+# clash makes the charge head predict ~1e8 e, so the Coulomb energy hits ~1e16
+# eV. We fade those quantities to a physical constant there, so the repulsion
+# module (which correctly diverges at contact) carries the short-range energy.
+# SR_GATE_ON (0.8 A) sits below the shortest real bond (O-H ~0.96 A), so normal
+# chemistry is left untouched.
+SR_GATE_ON = 0.8    # [A] neighbour distance >= this -> gate 1 (trust the model)
+SR_GATE_OFF = 0.4   # [A] neighbour distance <= this -> gate 0 (constant fallback)
+
+
+def short_range_gate(inputs):
+    """Per-atom gate in [0, 1] from the short-range graph: 1.0 in the trained
+    regime, ->0 when an atom has a neighbour at a clash distance. Reuses
+    ``switching_fn``; returns ones when no short-range graph is present."""
+    d_ij, idx_i = inputs.get('d_ij'), inputs.get('idx_i')
+    n = len(inputs['node_mask'])
+    if d_ij is None or idx_i is None:
+        return jnp.ones((n,), dtype=jnp.float32)
+    # switching_fn(d, OFF, ON): 1 at a clash (d<=OFF), 0 in the trained range
+    # (d>=ON). Sum the per-edge clash amount per atom (padding edges d==0 excluded).
+    clash = segment_sum(
+        jnp.where(d_ij > 0, switching_fn(d_ij, SR_GATE_OFF, SR_GATE_ON), 0.0),
+        idx_i, num_segments=n)
+    return jnp.clip(1.0 - clash, 0.0, 1.0)
 
 
 @partial(jax.jit, static_argnames=('neighborlist_format',))
