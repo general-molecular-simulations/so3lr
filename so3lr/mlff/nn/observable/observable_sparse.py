@@ -686,11 +686,19 @@ class PartialChargesSparse(BaseSubModule):
 
         x_q = safe_scale(partial_charges + q_, node_mask)
 
-        # Short-range OOD gate, applied BEFORE charge conservation (gating after
-        # would break the total-charge constraint sum(q)=Q). Removes the clash
-        # atom's spurious charge; the standard conservation below still enforces
-        # the total charge, leaving the gated atom with only a negligible share.
-        x_q = x_q * short_range_gate(inputs)
+        # Short-range OOD gate. Fade clashed atoms toward SR_GATE_FALLBACK (the
+        # pre-equilibration per-atom charge mean ~ -7.18 e), NOT toward 0. The raw
+        # per-atom charge carries that large arbitrary offset, which the charge
+        # conservation below removes via a uniform shift; gating to 0 strips the
+        # offset from the clashed atom, so conservation then dumps its full
+        # correction onto it -> the spurious ~+7 e partial-charge artifact (and the
+        # downstream electrostatic/force blow-ups) at any sub-SR_GATE_ON contact.
+        # Fading to the mean keeps the gated atom transparent to conservation
+        # (-> ~total_charge/N ~ 0) and keeps a blown-up raw value out of the
+        # conservation sum. Identity for non-clash atoms (g=1); small residual
+        # (~0.07 e) on gated atoms from the constant vs the true per-system mean.
+        g = short_range_gate(inputs)
+        x_q = safe_scale(SR_GATE_FALLBACK + g * (x_q - SR_GATE_FALLBACK), node_mask)
 
         # If residue_charge/segments is provided, use it for charge conservation per residue/monomer
         residue_charge = inputs.get('residue_charge')
@@ -793,6 +801,14 @@ def switching_fn(x, x_on, x_off):
 # chemistry is left untouched.
 SR_GATE_ON = 0.8    # [A] neighbour distance >= this -> gate 1 (trust the model)
 SR_GATE_OFF = 0.4   # [A] neighbour distance <= this -> gate 0 (constant fallback)
+# Charge a fully-gated atom is faded to (pre-equilibration). The raw per-atom
+# charge has a large arbitrary offset that charge conservation removes by
+# subtracting the per-atom mean; fading a clashed atom to that mean (~ -7.18 e)
+# keeps it transparent to conservation so it lands at ~total_charge/N (~0).
+# Calibrated 2026-06-14 across water / organics / proteins (stable to +/-0.07).
+# RE-CALIBRATE if the charge head is retrained: a stale value shifts gated-atom
+# charges 1:1 with the drift in the pre-eq mean.
+SR_GATE_FALLBACK = -7.18  # [e] pre-equilibration per-atom charge mean
 
 
 def short_range_gate(inputs):
