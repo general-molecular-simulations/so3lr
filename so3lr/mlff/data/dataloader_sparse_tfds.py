@@ -53,11 +53,22 @@ def compute_edges_np(positions, atomic_numbers, cell, pbc, cutoff):
             np.array(S, dtype=np.int32),
         )
     else:
-        i, j = neighbor_list('ij', mol, cutoff, self_interaction=False)
+        # Non-PBC: use a fast vectorized all-pairs distance test (matches the old
+        # loader's TF-native compute_edges_tf). ase.neighbor_list's binning can
+        # stall/explode for some gas-phase structures and was the cause of the
+        # dataloader-worker hang.
+        pos = np.asarray(positions, dtype=np.float64)
+        n = pos.shape[0]
+        if n < 2:
+            return (np.zeros(0, np.int32), np.zeros(0, np.int32), np.zeros((0, 3), np.int32))
+        d = pos[None, :, :] - pos[:, None, :]
+        dist = np.sqrt(np.einsum('ijk,ijk->ij', d, d))
+        keep = (dist < cutoff) & ~np.eye(n, dtype=bool)
+        i, j = np.where(keep)
         return (
-            np.array(i, dtype=np.int32),
-            np.array(j, dtype=np.int32),
-            np.zeros((len(i), 3), dtype=np.int32),  # dummy offsets for uniform output shape
+            i.astype(np.int32),
+            j.astype(np.int32),
+            np.zeros((i.shape[0], 3), dtype=np.int32),  # dummy offsets for uniform output shape
         )
 
 def standardize_dataset_fields(dataset, expected_fields=None):
