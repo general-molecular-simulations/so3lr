@@ -351,6 +351,10 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T, dt,
     # the integrator saw at the end of the PySAGES run.
     last_bias = raw_result.states[0].bias
     if last_bias is not None:
+        # PySAGES computes the bias in float64 (it forces jax_enable_x64 on); cast it
+        # down to the integrator dtype so a float32 run is not promoted to float64 here
+        # and carried into the next MD cycle (no-op for a float64 run).
+        last_bias = last_bias.astype(new_state.force.dtype)
         new_state = new_state.set(force=new_state.force + last_bias)
 
         # The pysages jax-md backend patch unconditionally adds 0.5*dt*bias to
