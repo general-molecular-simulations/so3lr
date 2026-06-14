@@ -258,7 +258,15 @@ def ASE_to_jraph(
         hirshfeld_ratios[:] = np.nan
     else:
         hirshfeld_ratios = np.array(hirshfeld_ratios).reshape(num_atoms, )
-    
+
+    # C6 ratios (MBD-NL); set to NaN when not present.
+    c6_ratios = mol.arrays.get('c6_ratios') if 'c6_ratios' in mol.arrays else None
+    if c6_ratios is None:
+        c6_ratios = np.empty((num_atoms, ))
+        c6_ratios[:] = np.nan
+    else:
+        c6_ratios = np.array(c6_ratios).reshape(num_atoms, )
+
     # Initialize monomer-specific information for dimer binding energy calculations,
     # as described in the Methods section of SO3LR paper.
     residue_charge = None
@@ -355,7 +363,8 @@ def ASE_to_jraph(
             "positions": positions.reshape(num_atoms, 3),
             "atomic_numbers": atomic_numbers.reshape(num_atoms),
             "forces": forces.reshape(num_atoms, 3),
-            "hirshfeld_ratios": hirshfeld_ratios.reshape(num_atoms)
+            "hirshfeld_ratios": hirshfeld_ratios.reshape(num_atoms),
+            "c6_ratios": c6_ratios.reshape(num_atoms)
             }
 
     graph = jraph.GraphsTuple(
