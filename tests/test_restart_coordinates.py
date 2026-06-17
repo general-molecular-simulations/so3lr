@@ -112,7 +112,7 @@ def _make_npt_state(position, momentum, force, mass, box):
         box_mass=jnp.array([1.0, 1.0, 1.0]),
         thermostat=_make_nose_hoover_chain(n_atoms),
         barostat=_make_nose_hoover_chain(n_atoms),
-        stress=jnp.zeros((3, 3)),
+        dUdV=jnp.zeros((3, 3)),
     )
 
 
