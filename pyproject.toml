@@ -31,7 +31,7 @@ pyyaml = "*"
 ml_collections = "*"
 click = "*"
 jraph = { git = "https://github.com/google-deepmind/jraph.git", branch = "master", optional = false }
-jax-md = { git = "https://github.com/kabylda/jax-md.git", branch = "npt-anisotropic", optional = false }
+jax-md = { git = "https://github.com/kabylda/jax-md.git", branch = "npt-anisotropic-1", optional = false }
 glp = { git = "https://github.com/fbruenig/glp.git", branch = "electrostatics_neighbourlist", optional = false }
 jax-pme = { git = "https://github.com/fbruenig/jax-pme", branch = "main" , optional = false }
 pysages = { git = "https://github.com/em819/PySAGES.git", branch = "nve_npt_ensembles", optional = true }
