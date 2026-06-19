@@ -154,6 +154,17 @@ def _batched_kspace_dispersion(kspace_module, inputs):
         c6_ratios = inputs.get('c6_ratios')
         if c6_ratios is None:
             c6_ratios = kspace_module.c6_ratios(inputs)['c6_ratios']
+        else:
+            # `c6_ratios` supplied via the dataloader is a training *label*; the
+            # ASE loader pads it with NaN when the input file has no c6_ratios
+            # column. Those NaNs must not leak into the dispersion forward
+            # (C6 -> NaN -> NaN energy/forces), so fall back to the model's own
+            # predicted c6_ratios wherever the provided value is non-finite.
+            c6_ratios = jnp.where(
+                jnp.isnan(c6_ratios),
+                kspace_module.c6_ratios(inputs)['c6_ratios'],
+                c6_ratios,
+            )
 
     return _vmap_kspace_per_graph(
         _solve_single, inputs,
@@ -1917,6 +1928,15 @@ class DispersionEnergyKspace(BaseSubModule):
             c6_ratios = inputs.get('c6_ratios')
             if c6_ratios is None:
                 c6_ratios = self.c6_ratios(inputs)['c6_ratios']
+            else:
+                # NaN-padded `c6_ratios` labels (ASE loader, file without a
+                # c6_ratios column) must not poison the dispersion forward;
+                # fall back to the model's own c6_ratios for non-finite entries.
+                c6_ratios = jnp.where(
+                    jnp.isnan(c6_ratios),
+                    self.c6_ratios(inputs)['c6_ratios'],
+                    c6_ratios,
+                )
 
         # Dispersion charges: q_i = sqrt(C6_free[Z_i] * c6_ratio_i)
         # C6_coef is indexed from 0, atomic_numbers from 1
@@ -2024,6 +2044,15 @@ class DispersionEnergySparse(nn.Module):
             c6_ratios = inputs.get('c6_ratios')
             if c6_ratios is None:
                 c6_ratios = self.c6_ratios(inputs)['c6_ratios']
+            else:
+                # NaN-padded `c6_ratios` labels (ASE loader, file without a
+                # c6_ratios column) must not poison the dispersion forward;
+                # fall back to the model's own c6_ratios for non-finite entries.
+                c6_ratios = jnp.where(
+                    jnp.isnan(c6_ratios),
+                    self.c6_ratios(inputs)['c6_ratios'],
+                    c6_ratios,
+                )
 
         # Get atomic numbers (needed to link to the free-atom reference values)
         atomic_numbers = inputs['atomic_numbers']  # (num_nodes)
