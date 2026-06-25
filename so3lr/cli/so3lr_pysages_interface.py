@@ -227,10 +227,13 @@ def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
         box_mass=box_mass_val,
         barostat=barostat,
         thermostat=thermostat,
-        # dUdV (the cached box-strain derivative dE/deps) is a required field on
-        # jax-md's NPTNoseHooverState. PySAGES snapshots do not carry it, so seed
-        # with zeros — the field is recomputed on the first integrator half-step.
-        dUdV=jnp.zeros((3, 3)),
+        # dUdV is the cached box-strain derivative dE/deps, a required field on
+        # jax-md's isotropic NPTNoseHooverState. For npt_nose_hoover it is a SCALAR
+        # (gradient w.r.t. the scalar perturbation eps), not a (3,3) tensor — that
+        # shape belongs to the flex/anisotropic state's stress_tensor. PySAGES
+        # snapshots do not carry dUdV, so seed it scalar-zero; the integrator
+        # consumes it on the first half-step (box_force) before recomputing it.
+        dUdV=jnp.zeros(()),
     )
     new_state = jax_md.simulate.canonicalize_mass(new_state)
     new_state = new_state.set(momentum=new_state.mass * velocities)
