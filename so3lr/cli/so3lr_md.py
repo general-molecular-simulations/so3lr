@@ -3624,7 +3624,7 @@ def save_state(
         if is_flex:
             state_dict['stress_tensor'] = state.stress_tensor
         else:
-            state_dict['stress'] = state.stress
+            state_dict['dUdV'] = state.dUdV
 
     if ensemble.lower() == 'nvt-langevin':
         # The BAOAB Langevin state (NVTLangevinState) carries only an RNG key
@@ -3794,7 +3794,7 @@ def load_state(
                     box_mass=loaded_state['box_mass'],
                     barostat=nhc_barostat,
                     thermostat=nhc_thermostat,
-                    stress=loaded_state.get('stress', np.float32(0.0)),
+                    dUdV=loaded_state.get('dUdV', np.float32(0.0)),
                 )
         except KeyError as _ke:
             raise RestartSchemaMismatchError(
@@ -3867,14 +3867,14 @@ def load_state(
     # `load_state` otherwise returns raw numpy arrays straight from the npz:
     #   * `position` stays numpy -> numpy gather raises IndexError on the sentinel
     #     neighbor index in the pre-loop forward passes.
-    #   * `stress`/`stress_tensor` come back *strongly* typed float64, whereas a
-    #     fresh run carries `stress` as a *weakly* typed float64 scalar. A strong
-    #     float64 stress promotes the float32 box -> float64 inside the integrator,
+    #   * `dUdV`/`stress_tensor` come back *strongly* typed float64, whereas a
+    #     fresh run carries `dUdV` as a *weakly* typed float64 scalar. A strong
+    #     float64 dUdV promotes the float32 box -> float64 inside the integrator,
     #     so the loop carry input (float32) != output (float64) and jax.lax.scan
-    #     rejects it. Rebuilding stress weak (a Python float for the scalar case)
+    #     rejects it. Rebuilding dUdV weak (a Python float for the scalar case)
     #     restores the fresh-run behaviour; everything else -> run precision jnp.
     import dataclasses
-    _weak_fields = {'stress', 'stress_tensor'}
+    _weak_fields = {'dUdV', 'stress_tensor'}
 
     def _to_precision(x):
         a = jnp.asarray(x)
