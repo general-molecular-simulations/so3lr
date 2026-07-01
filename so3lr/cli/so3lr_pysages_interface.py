@@ -227,10 +227,13 @@ def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
         box_mass=box_mass_val,
         barostat=barostat,
         thermostat=thermostat,
-        # dUdV (the cached box-strain derivative dE/deps) is a required field on
-        # jax-md's NPTNoseHooverState. PySAGES snapshots do not carry it, so seed
-        # with zeros — the field is recomputed on the first integrator half-step.
-        dUdV=jnp.zeros((3, 3)),
+        # dUdV is the cached box-strain derivative dE/deps, a required field on
+        # jax-md's isotropic NPTNoseHooverState. For npt_nose_hoover it is a SCALAR
+        # (gradient w.r.t. the scalar perturbation eps), not a (3,3) tensor — that
+        # shape belongs to the flex/anisotropic state's stress_tensor. PySAGES
+        # snapshots do not carry dUdV, so seed it scalar-zero; the integrator
+        # consumes it on the first half-step (box_force) before recomputing it.
+        dUdV=jnp.zeros(()),
     )
     new_state = jax_md.simulate.canonicalize_mass(new_state)
     new_state = new_state.set(momentum=new_state.mass * velocities)
@@ -350,6 +353,10 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T, dt,
     # the integrator saw at the end of the PySAGES run.
     last_bias = raw_result.states[0].bias
     if last_bias is not None:
+        # PySAGES computes the bias in float64 (it forces jax_enable_x64 on); cast it
+        # down to the integrator dtype so a float32 run is not promoted to float64 here
+        # and carried into the next MD cycle (no-op for a float64 run).
+        last_bias = last_bias.astype(new_state.force.dtype)
         new_state = new_state.set(force=new_state.force + last_bias)
 
         # The pysages jax-md backend patch unconditionally adds 0.5*dt*bias to
@@ -388,6 +395,49 @@ def parse_pysages_input(input_path):
     return settings_dict
 
 
+def _expand_indices(spec):
+    """Expand a YAML index specification into a flat list of ints.
+
+    Supported forms:
+      - int:                       5             -> [5]
+      - list / tuple (any mix):    [0, 1, 2]     -> [0, 1, 2]
+                                   [0, "3-5"]    -> [0, 3, 4, 5]
+      - inclusive range string:    "0-19"        -> [0, 1, ..., 19]
+      - multi-token string:        "0-2, 5, 8-9" -> [0, 1, 2, 5, 8, 9]
+        (tokens separated by commas and/or whitespace; each token is a single
+        index or an inclusive "a-b" range with a <= b)
+
+    Ranges "a-b" include BOTH endpoints. Negative indices are not supported.
+    """
+    def expand_token(tok):
+        if isinstance(tok, bool):
+            raise ValueError(f"Invalid index: {tok!r}")
+        if isinstance(tok, int):
+            return [int(tok)]
+        if isinstance(tok, str):
+            out = []
+            for piece in tok.replace(',', ' ').split():
+                if '-' in piece:
+                    a, b = piece.split('-')
+                    a, b = int(a), int(b)
+                    if b < a:
+                        raise ValueError(
+                            f"Invalid index range '{piece}': end < start."
+                        )
+                    out.extend(range(a, b + 1))
+                else:
+                    out.append(int(piece))
+            return out
+        raise ValueError(f"Unsupported index token: {tok!r}")
+
+    if isinstance(spec, (list, tuple)):
+        result = []
+        for item in spec:
+            result.extend(expand_token(item))
+        return result
+    return expand_token(spec)
+
+
 def process_cv(cv_dict, nbrs=None, species=None, box=None):
     """Create a PySAGES collective variable from a settings dictionary."""
     name = cv_dict['type']
@@ -414,6 +464,15 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
             indices=arguments['indices'],
             box=box,
         )
+    elif name_lower == 'meanofdistances':
+        return pysages.colvars.MeanOfDistances(indices=arguments['indices'])
+    elif name_lower == 'meanofdistances_pbc':
+        if box is None:
+            raise ValueError("meanofdistances_pbc requires the simulation box.")
+        return pysages.colvars.MeanOfDistancesPBC(
+            indices=arguments['indices'],
+            box=box,
+        )
     elif name_lower == 'angle':
         return pysages.colvars.Angle(indices=arguments['indices'])
     elif name_lower == 'dihedral':
@@ -423,6 +482,48 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
     elif name_lower == 'princmom':
         return pysages.colvars.PrincipalMoment(
             indices=arguments['indices'], axis=arguments['axis']
+        )
+    elif name_lower == 'component':
+        # Cartesian component (axis 0/1/2 = x/y/z) of the barycenter of a group.
+        # axis=2 gives the z-coordinate of the solute centroid (interfacial transfer CV).
+        return pysages.colvars.Component(
+            indices=arguments['indices'], axis=arguments['axis']
+        )
+    elif name_lower == 'relativecomponent':
+        # Cartesian component (axis 0/1/2 = x/y/z) of the barycenter of grp1
+        # relative to the barycenter of grp2: xi = bary(grp1)[axis] - bary(grp2)[axis].
+        # Translation-invariant -> a bias on it injects no net COM force (no drift).
+        # grp1 = solute, grp2 = reference (e.g. the solvent range); axis=2 -> z.
+        # Both groups are explicit index specs (range string / list); see
+        # _expand_indices. For zero self-coupling (slope exactly 1) make grp2 the
+        # solvent only (exclude the solute atoms in grp1).
+        if arguments.get('grp1') is None or arguments.get('grp2') is None:
+            raise ValueError(
+                "relativecomponent requires explicit 'grp1' and 'grp2' index "
+                "specs (range string or list)."
+            )
+        return pysages.colvars.RelativeComponent(
+            indices=[tuple(_expand_indices(arguments['grp1'])),
+                     tuple(_expand_indices(arguments['grp2']))],
+            axis=arguments['axis'],
+        )
+    elif name_lower == 'relativecomponent_pbc':
+        # PBC-robust RelativeComponent: grp1 made whole (anchor min-image),
+        # grp2 plain mean (box-spanning reference), separation wrapped to
+        # (-L/2, L/2]. Correct even if the solute reaches the periodic seam.
+        # Both groups are explicit index specs (range string / list).
+        if box is None:
+            raise ValueError("relativecomponent_pbc requires the simulation box.")
+        if arguments.get('grp1') is None or arguments.get('grp2') is None:
+            raise ValueError(
+                "relativecomponent_pbc requires explicit 'grp1' and 'grp2' index "
+                "specs (range string or list)."
+            )
+        return pysages.colvars.RelativeComponentPBC(
+            indices=[tuple(_expand_indices(arguments['grp1'])),
+                     tuple(_expand_indices(arguments['grp2']))],
+            axis=arguments['axis'],
+            box=box,
         )
     elif name_lower == 'asphericity':
         return pysages.colvars.Asphericity(indices=arguments['indices'])
@@ -444,6 +545,10 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
             cn_exponents=arguments.get('cn_exps'),
             indices_nn=arguments.get('indices_nn'),
         )
+    elif name_lower == 'ringphase':
+        return pysages.colvars.angles.RingPhaseAngle(indices=arguments['indices'])
+    elif name_lower == 'ringamplitude':
+        return pysages.colvars.angles.RingAmplitude(indices=arguments['indices'])
     else:
         raise ValueError(f"Unknown collective variable type: '{name}'")
 
@@ -484,11 +589,19 @@ def get_pysages_method(settings_dict, nbrs=None, species=None, box=None):
 
     method_name = settings_dict['method'].lower()
     if method_name == 'abf':
-        N=settings_dict['method_args'].get('N', 500) if 'method_args' in settings_dict else 500
+        method_args = settings_dict.get('method_args', {})
+        N=method_args.get('N', 500) if 'method_args' in settings_dict else 500
+        use_pinv = method_args.get('use_pinv', False)
         logger.info(f'N(ABF): {N}')
-        return pysages.methods.ABF(cvs, grid, restraints=restraints, N=N)
+        logger.info(f'use_pinv(ABF): {use_pinv}')
+        return pysages.methods.ABF(cvs, grid, restraints=restraints, N=N, use_pinv=use_pinv)
     elif method_name == 'spectralabf':
-        return pysages.methods.SpectralABF(cvs, grid, restraints=restraints)
+        method_args = settings_dict.get('method_args', {})
+        N=method_args.get('N', 500) if 'method_args' in settings_dict else 500
+        use_pinv = method_args.get('use_pinv', False)
+        logger.info(f'N(SpectralABF): {N}')
+        logger.info(f'use_pinv(SpectralABF): {use_pinv}')
+        return pysages.methods.SpectralABF(cvs, grid, restraints=restraints, N=N, use_pinv=use_pinv)
     elif method_name == 'metad':
         args = settings_dict['method_args']
         return pysages.methods.Metadynamics(

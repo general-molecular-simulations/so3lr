@@ -2461,10 +2461,28 @@ def perform_md(
             #   loop_carry[...].chain_data['tau']: float32 vs float64
             #
             # The PySAGES Result is a plain class (not a registered pytree), so
-            # we normalize its pytree-valued attributes (`snapshots` and
-            # `states`, which are lists of registered NamedTuples/dataclasses)
-            # rather than the Result itself -- a tree_map over the Result would
-            # treat it as a single opaque leaf and do nothing.
+            # we normalize its pytree-valued `snapshots` attribute (a list of
+            # registered NamedTuples) rather than the Result itself -- a
+            # tree_map over the Result would treat it as a single opaque leaf
+            # and do nothing.
+            #
+            # IMPORTANT: only `snapshots` is normalized, NOT `states`. The
+            # method `states` (e.g. ABFState: Fsum/Wp/force/bias) are the
+            # sampler's internal accumulators, which are *not* part of the
+            # integrator carry that `_match_float_dtypes` pins to the run
+            # precision. PySAGES always computes them at its float64 working
+            # precision (the method view promotes the snapshot to float64 via
+            # `_as_default_float`), and a fresh run carries them at float64
+            # regardless of the integrator dtype. Casting them down to float32
+            # here both (a) silently degrades the accumulated mean force to
+            # float32 for the continued run, and (b) breaks ABF's out-of-bounds
+            # `cond` in `estimate_force`: the `average_force` branch derives its
+            # dtype from `Fsum` (now float32) while the `restraints_force`
+            # branch stays at the float64 of the restraint bounds baked into
+            # `method`, so `lax.cond` rejects the mismatched branches with
+            #   "true_fun output float64[1] vs false_fun output float32[1]".
+            # Leaving `states` at their pickled (float64) dtype matches exactly
+            # what a fresh run produces.
             def _to_run_precision(x):
                 if hasattr(x, 'dtype') and jnp.issubdtype(
                     jnp.asarray(x).dtype, jnp.floating
@@ -2472,14 +2490,10 @@ def perform_md(
                     return jnp.asarray(x).astype(dtype)
                 return x
 
-            for _attr in ('snapshots', 'states'):
-                _val = getattr(restart_data_pysages, _attr, None)
-                if _val is not None:
-                    setattr(
-                        restart_data_pysages,
-                        _attr,
-                        jax.tree_util.tree_map(_to_run_precision, _val),
-                    )
+            if restart_data_pysages.snapshots is not None:
+                restart_data_pysages.snapshots = jax.tree_util.tree_map(
+                    _to_run_precision, restart_data_pysages.snapshots
+                )
 
     patched_potential_kwargs={}
     if "partial_charges" in observables:

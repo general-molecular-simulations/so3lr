@@ -1590,6 +1590,75 @@ class TestStateReconstruction:
         expected_mom = state.mass * vel
         np.testing.assert_allclose(state.momentum, expected_mom, atol=1e-10)
 
+        # The isotropic npt_nose_hoover integrator caches dUdV (dE/deps w.r.t. a
+        # scalar perturbation) and consumes it on the first half-step, so the seed
+        # MUST be a scalar. A (3, 3) seed broadcasts box_momentum to (3, 3) and
+        # crashes the first NPT step after a PySAGES re-init. Pin the shape here as
+        # a cheap guard; see test_npt_reinit_state_drives_real_integrator for the
+        # behavioral check.
+        assert jnp.shape(state.dUdV) == ()
+
+    def test_npt_reinit_state_drives_real_integrator(self):
+        """A state rebuilt by re_init_so3lr_state_npt must integrate without error.
+
+        Regression guard for the dUdV seed shape. The npt-anisotropic-1 jax-md
+        branch caches dUdV in NPTNoseHooverState and consumes it on the first
+        integrator half-step (box_force), before recomputing it. For the isotropic
+        npt_nose_hoover, dUdV is a SCALAR; seeding (3, 3) broadcasts box_momentum
+        to (3, 3) and raises a shape error on the first step after a PySAGES cycle.
+
+        Unlike test_step_fn_npt_*, which mock step_md_fn, this drives a REAL
+        jax_md.simulate.npt_nose_hoover apply_fn on a re-init'd state, so it
+        actually exercises the path that crashed. Robust to future jax-md changes
+        because it only asserts the integrator runs and the carry stays stable.
+        """
+        from so3lr.cli.so3lr_pysages_interface import re_init_so3lr_state_npt
+        from jax_md import space, simulate, quantity
+
+        n_atoms = 12
+        box = jnp.eye(3) * 12.0
+        key = jax.random.PRNGKey(1)
+        R = jax.random.uniform(key, (n_atoms, 3)) * 12.0
+        disp, shift = space.periodic_general(box, fractional_coordinates=False)
+
+        # Toy soft-repulsion energy; must accept box + perturbation like jax-md's NPT.
+        def energy_fn(R, box=box, perturbation=None, **kw):
+            d = space.map_product(disp)
+            dr = space.distance(d(R, R))
+            r = dr + jnp.eye(n_atoms) * 1e3
+            return jnp.sum(jnp.where(r < 6.0, (6.0 - r) ** 2, 0.0)) * 0.5
+
+        init_fn, apply_fn = simulate.npt_nose_hoover(
+            energy_fn, shift, dt=1e-3, pressure=1.0, kT=1.0
+        )
+
+        # A real state (correct scalar dUdV), advanced so chains/box are populated.
+        st = init_fn(key, R, box=box)
+        for _ in range(5):
+            st = apply_fn(st)
+
+        # Round-trip through the interface exactly as update_so3lr_after_pysages does.
+        th, ba = st.thermostat, st.barostat
+        reinit = re_init_so3lr_state_npt(
+            th.position, th.momentum, th.mass, th.tau, th.kinetic_energy,
+            int(quantity.count_dof(st.position)),
+            ba.position, ba.momentum, ba.mass, ba.tau, ba.kinetic_energy, 1,
+            st.reference_box, st.box_position, st.box_momentum, st.box_mass,
+            st.position, st.velocity, st.force, st.mass,
+        )
+        assert jnp.shape(reinit.dUdV) == ()
+
+        # Drive the re-init'd state through real integrator steps (this used to crash).
+        s = reinit
+        for _ in range(10):
+            s = apply_fn(s)
+
+        assert jnp.shape(s.box_momentum) == ()
+        assert jnp.shape(s.dUdV) == ()
+        assert bool(jnp.all(jnp.isfinite(s.position)))
+        assert bool(jnp.isfinite(jnp.asarray(s.box_momentum)))
+        assert bool(jnp.isfinite(jnp.asarray(s.box_position)))
+
     def test_nvt_state_reconstruction_unchanged(self):
         """re_init_so3lr_state (NVT) should still work as before."""
         from so3lr.cli.so3lr_pysages_interface import re_init_so3lr_state
