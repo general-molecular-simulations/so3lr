@@ -2023,6 +2023,145 @@ def cartesian_to_positions(cartesian_position, box, fractional_coordinates: bool
     raise ValueError(f'Box must be scalar, vector, or matrix. Found {box}.')
 
 
+def parse_cylinder_settings(all_settings):
+    """Extract and validate the scalar cylindrical-restraint settings.
+
+    Returns ``None`` when the restraint is disabled, otherwise a dict of validated
+    parameters: ``atom_indices`` (raw, range-checked later against n_atoms),
+    ``axis`` (np.ndarray shape (3,), non-zero, un-normalized), ``origin`` (np.ndarray
+    (3,) or None -> box center), ``radius`` (float>0), ``k_r`` (float>=0),
+    ``axial_min``/``axial_max`` (float or None), ``k_z`` (float>=0, defaults to k_r).
+
+    Raises ``ValueError`` on any invalid combination so mistakes fail fast at setup
+    rather than producing a silently wrong ensemble.
+    """
+    if not bool(all_settings.get('cylinder_restraint_enabled', False)):
+        return None
+
+    indices = all_settings.get('cylinder_restraint_atom_indices')
+    if not indices:
+        raise ValueError(
+            'cylinder_restraint_enabled=true requires cylinder_restraint_atom_indices '
+            '(0-based indices of the guest atoms defining the COM).'
+        )
+    radius = all_settings.get('cylinder_restraint_radius')
+    if radius is None:
+        raise ValueError('cylinder_restraint_enabled=true requires cylinder_restraint_radius (Å).')
+    radius = float(radius)
+    if radius <= 0.0:
+        raise ValueError(f'cylinder_restraint_radius must be > 0, got {radius}.')
+
+    k_r = float(all_settings.get('cylinder_restraint_force_constant', 5.0))
+    if k_r < 0.0:
+        raise ValueError(f'cylinder_restraint_force_constant must be >= 0, got {k_r}.')
+
+    axis = np.asarray(all_settings.get('cylinder_restraint_axis', [0.0, 0.0, 1.0]), dtype=float).reshape(-1)
+    if axis.shape != (3,) or not np.any(axis):
+        raise ValueError(
+            f"cylinder_restraint_axis must be a non-zero length-3 vector, "
+            f"got {all_settings.get('cylinder_restraint_axis')!r}."
+        )
+
+    origin_setting = all_settings.get('cylinder_restraint_axis_origin')
+    if origin_setting is not None:
+        origin = np.asarray(origin_setting, dtype=float).reshape(-1)
+        if origin.shape != (3,):
+            raise ValueError(
+                f'cylinder_restraint_axis_origin must be a length-3 vector, got {origin_setting!r}.'
+            )
+    else:
+        origin = None
+
+    zmin = all_settings.get('cylinder_restraint_axial_min')
+    zmax = all_settings.get('cylinder_restraint_axial_max')
+    zmin = None if zmin is None else float(zmin)
+    zmax = None if zmax is None else float(zmax)
+    if zmin is not None and zmax is not None and zmin > zmax:
+        raise ValueError(
+            f'cylinder_restraint_axial_min ({zmin}) must not exceed '
+            f'cylinder_restraint_axial_max ({zmax}).'
+        )
+
+    kz_setting = all_settings.get('cylinder_restraint_axial_force_constant')
+    k_z = k_r if kz_setting is None else float(kz_setting)
+    if k_z < 0.0:
+        raise ValueError(f'cylinder_restraint_axial_force_constant must be >= 0, got {k_z}.')
+
+    return {
+        'atom_indices': indices,
+        'axis': axis,
+        'origin': origin,
+        'radius': radius,
+        'k_r': k_r,
+        'axial_min': zmin,
+        'axial_max': zmax,
+        'k_z': k_z,
+    }
+
+
+def cylindrical_restraint_energy(
+    cartesian_position,
+    idx,
+    weights,
+    axis_hat,
+    origin,
+    radius,
+    k_r,
+    axial_min=None,
+    axial_max=None,
+    k_z=None,
+    box=None,
+    periodic: bool = False,
+):
+    """Flat-bottom cylindrical (funnel) restraint on a mass-weighted center of mass.
+
+    Confines the COM of the atoms ``idx`` to a cylinder of ``radius`` about the line
+    through ``origin`` with direction ``axis_hat`` (assumed unit-length), with optional
+    flat-bottom axial bounds turning it into a one-sided funnel:
+
+        E = 0.5*k_r*relu(r_perp - radius)^2
+          + 0.5*k_z*relu(axial_min - s)^2  (if axial_min given)
+          + 0.5*k_z*relu(s - axial_max)^2  (if axial_max given)
+
+    where ``s`` is the signed coordinate along the axis and ``r_perp`` the perpendicular
+    distance to it. Zero energy/force inside the cylinder and within the axial band.
+
+    Parameters
+    ----------
+    cartesian_position : (n_atoms, 3) array in Cartesian Å.
+    idx : integer index array selecting the restrained atoms.
+    weights : (len(idx), 1) array; mass fractions summing to 1 (mass-weighted COM).
+    axis_hat : (3,) unit vector along the cylinder axis.
+    origin : (3,) point on the axis, Cartesian Å.
+    radius : scalar R_cyl in Å.
+    k_r : radial force constant (eV/Å²).
+    axial_min, axial_max : optional flat-bottom axial bounds (Å along the axis from origin).
+    k_z : axial force constant; falls back to ``k_r`` if None.
+    box : current (possibly NPT-scaled) box for the minimum-image convention.
+    periodic : if True and ``box`` given, apply an orthorhombic minimum image to the
+        origin->COM displacement so the result is independent of the periodic image.
+    """
+    com = jnp.sum(weights * cartesian_position[idx], axis=0)
+    p = com - origin
+    if periodic and box is not None:
+        diag = jnp.diag(box) if jnp.ndim(box) == 2 else box
+        p = p - diag * jnp.round(p / diag)
+    s = jnp.dot(p, axis_hat)
+    perp = p - s * axis_hat
+    # Safe norm: jnp.linalg.norm has a NaN gradient at the axis (perp == 0), which is
+    # exactly where a confined guest sits most of the time. The double-`where` gives
+    # r_perp == 0 there with a well-defined zero gradient.
+    sq = jnp.sum(perp ** 2)
+    r_perp = jnp.where(sq > 0.0, jnp.sqrt(jnp.where(sq > 0.0, sq, 1.0)), 0.0)
+    kz = k_r if k_z is None else k_z
+    E = 0.5 * k_r * jnp.maximum(r_perp - radius, 0.0) ** 2
+    if axial_min is not None:
+        E = E + 0.5 * kz * jnp.maximum(axial_min - s, 0.0) ** 2
+    if axial_max is not None:
+        E = E + 0.5 * kz * jnp.maximum(s - axial_max, 0.0) ** 2
+    return E
+
+
 def apply_atom_constraints_to_state(
     state,
     mobile_mask: Optional[jnp.ndarray],
@@ -2249,6 +2388,23 @@ def perform_md(
             f"are the only supported modes."
         )
 
+    # Cylindrical / funnel restraint (optional). Confines the mass-weighted COM of
+    # the listed atoms to a flat-bottom cylinder (radius) with optional axial bounds.
+    # Scalar settings are validated here; baked constants (mass weights, normalized
+    # axis, origin) are built later, once the box/coordinate system and atom count are
+    # known (see load_atom_masks below).
+    cyl_settings = parse_cylinder_settings(all_settings)
+    cyl_enabled = cyl_settings is not None
+    if cyl_enabled:
+        cyl_indices_setting = cyl_settings['atom_indices']
+        cyl_axis_np = cyl_settings['axis']
+        cyl_origin_setting = cyl_settings['origin']
+        cyl_radius = cyl_settings['radius']
+        cyl_kr = cyl_settings['k_r']
+        cyl_zmin = cyl_settings['axial_min']
+        cyl_zmax = cyl_settings['axial_max']
+        cyl_kz = cyl_settings['k_z']
+
     # Enhanced sampling (PySAGES)
     do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
     pysages_input_path = all_settings.get('pysages_input', './pysages_input.yaml')
@@ -2366,6 +2522,51 @@ def perform_md(
         logger.info(
             f'Fixed atoms: {len(fixed_atom_indices)}; mobile atoms: {len(mobile_atom_indices)}; '
             f'constraint={fixed_atom_constraint}'
+        )
+
+    # Build baked constants for the cylindrical / funnel restraint now that the box,
+    # coordinate system, and atom count are known. Kept as jnp constants / Python
+    # floats so the energy-fn wrapper closure stays pure and JIT-friendly.
+    if cyl_enabled:
+        cyl_idx_np = np.asarray(cyl_indices_setting, dtype=int)
+        if np.any(cyl_idx_np < 0) or np.any(cyl_idx_np >= position.shape[0]):
+            raise ValueError('cylinder_restraint_atom_indices contains out-of-range indices')
+        _cyl_masses = np.asarray(initial_geometry_dict['masses'])[cyl_idx_np]
+        if not np.all(_cyl_masses > 0):
+            raise ValueError('cylinder_restraint_atom_indices includes atoms with non-positive mass')
+        cyl_w = jnp.asarray((_cyl_masses / _cyl_masses.sum())[:, None], dtype=dtype)
+        cyl_idx_j = jnp.asarray(cyl_idx_np)
+        _cyl_ax = cyl_axis_np / np.linalg.norm(cyl_axis_np)
+        cyl_axis_hat = jnp.asarray(_cyl_ax, dtype=dtype)
+        # Static periodicity flag: a real periodic box is a vector/matrix with
+        # non-zero entries (free BC passes a scalar/zero box).
+        _cyl_box_np = np.asarray(box)
+        cyl_periodic = _cyl_box_np.ndim >= 1 and bool(np.any(_cyl_box_np))
+        if cyl_origin_setting is not None:
+            _cyl_origin = np.asarray(cyl_origin_setting, dtype=float).reshape(-1)
+            if _cyl_origin.shape != (3,):
+                raise ValueError(
+                    f'cylinder_restraint_axis_origin must be a length-3 vector, '
+                    f'got {cyl_origin_setting!r}.'
+                )
+        elif _cyl_box_np.shape == (3, 3):
+            _cyl_origin = 0.5 * _cyl_box_np.sum(axis=0)  # half the sum of lattice vectors
+        elif _cyl_box_np.shape == (3,):
+            _cyl_origin = 0.5 * _cyl_box_np
+        else:
+            # free BC or a scalar/degenerate box: no meaningful center. Require an
+            # explicit origin rather than guessing a wrong-shaped default.
+            raise ValueError(
+                'cylinder_restraint_axis_origin must be given explicitly for this '
+                'boundary condition (no periodic box to derive a center from).'
+            )
+        cyl_o = jnp.asarray(_cyl_origin, dtype=dtype)
+        logger.info(
+            f'Cylindrical restraint: {len(cyl_idx_np)} guest atoms, '
+            f'R_cyl={cyl_radius} Å, k_r={cyl_kr} eV/Å²'
+            + ('' if (cyl_zmin is None and cyl_zmax is None)
+               else f', axial=[{cyl_zmin}, {cyl_zmax}] Å, k_z={cyl_kz} eV/Å²')
+            + f', axis={_cyl_ax.tolist()}, origin={_cyl_origin.tolist()}'
         )
 
     save_buffer = min(md_cycles, save_buffer)
@@ -2644,6 +2845,34 @@ def perform_md(
             return E
         energy_fn = jax.jit(energy_fn_with_tail)
         logger.info('Dispersion tail correction enabled for NPT.')
+
+    # --- Cylindrical / funnel restraint ---
+    # Flat-bottom potential on the mass-weighted COM of the restrained atoms:
+    #   E_cyl = 0.5*k_r*relu(r_perp - R_cyl)^2  (+ optional axial-band terms)
+    # Wraps energy_fn exactly like the dispersion tail correction above so the force,
+    # virial, and NPT box-derivative all come from autodiff. Composes with every
+    # ensemble and every PySAGES method (the restraint lives in the potential; a
+    # method only ever adds its own bias force on top).
+    if cyl_enabled:
+        _cyl_base_energy_fn = energy_fn
+
+        def energy_fn_with_cylinder(R, **kwargs):
+            E = _cyl_base_energy_fn(R, **kwargs)
+            box_kw = kwargs.get('box', None)
+            pert = kwargs.get('perturbation', None)
+            if box_kw is not None and pert is not None:  # NPT box scaling (mirror tail corr)
+                box_kw = box_kw * pert
+            # Convert to Cartesian if the integrator carries fractional coordinates.
+            R_cart = positions_to_cartesian(R, box_kw, fractional_coordinates)
+            E_cyl = cylindrical_restraint_energy(
+                R_cart, cyl_idx_j, cyl_w, cyl_axis_hat, cyl_o, cyl_radius, cyl_kr,
+                axial_min=cyl_zmin, axial_max=cyl_zmax, k_z=cyl_kz,
+                box=box_kw, periodic=cyl_periodic,
+            )
+            return E + E_cyl
+
+        energy_fn = jax.jit(energy_fn_with_cylinder)
+        logger.info('Cylindrical / funnel restraint enabled.')
 
     # Apply units
     # Unit boundary: handle_units takes (dt in ps, T in K, P in bar) and returns
