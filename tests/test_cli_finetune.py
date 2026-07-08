@@ -108,6 +108,26 @@ def test_cli_finetune(workdir, test_config):
 
     _assert_finetuning_succeeded(result, workdir, max_loss=0.1)
 
+def test_cli_finetune_last_layer(workdir, test_config):
+    """Run `so3lr finetune --strategy last_layer` and verify it completes."""
+    result = subprocess.run(
+        [
+            'so3lr', 'finetune',
+            '--datafile', str(DATAFILE),
+            '--workdir', str(workdir),
+            '--num-train', '20',
+            '--num-valid', '5',
+            '--config', str(test_config),
+            '--strategy', 'last_layer',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=so3lr_subprocess_env(),
+    )
+
+    _assert_finetuning_succeeded(result, workdir, max_loss=0.1)
+
 @pytest.mark.slow
 def test_cli_finetune_water_pbc(workdir, test_config_water):
     """Run `so3lr finetune` on periodic water box with 13 train / 2 valid and verify it completes."""
