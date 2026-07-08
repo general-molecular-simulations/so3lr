@@ -770,7 +770,7 @@ def run_fine_tuning(
     elif strategy == 'll_fmlp':
         # Last MP layer + the full energy readout MLP (incl. deeper head layers).
         trainable_subset_keys = [
-            f'layers_{config.model.num_layers - 1}',
+            f'layers_{config_start_from_workdir.model.num_layers - 1}',
             'observables_0/atomic_scales',
             'observables_0/energy_dense*',
             'observables_0/energy_offset'
@@ -792,20 +792,20 @@ def run_fine_tuning(
         trainable_subset_keys = ['observables_3']
     elif strategy == 'last_layer':
         # Only the last MP layer is refined.
-        trainable_subset_keys = [f'layers_{config.model.num_layers - 1}']
+        trainable_subset_keys = [f'layers_{config_start_from_workdir.model.num_layers - 1}']
     elif strategy == 'last_layer_and_final_mlp':
         # Only the last layer and the final MLP are refined.
-        trainable_subset_keys = [f'layers_{config.model.num_layers - 1}', 'observables_0']
+        trainable_subset_keys = [f'layers_{config_start_from_workdir.model.num_layers - 1}', 'observables_0']
     #elif strategy == 'last_layer_and_final_mlp023':
     elif strategy == 'll_obs_023':
         # Only the last layer and the final MLP are refined.
-        trainable_subset_keys = [f'layers_{config.model.num_layers - 1}', 'observables_0', 'observables_2', 'observables_3']
+        trainable_subset_keys = [f'layers_{config_start_from_workdir.model.num_layers - 1}', 'observables_0', 'observables_2', 'observables_3']
     elif strategy == 'first_layer':
         # Only the first layer is refined.
         trainable_subset_keys = ['layers_0']
     elif strategy == 'first_layer_and_last_layer':
         # Only the first and layer MP layer are refined.
-        trainable_subset_keys = ['layers_0', f'layers_{config.model.num_layers - 1}']
+        trainable_subset_keys = ['layers_0', f'layers_{config_start_from_workdir.model.num_layers - 1}']
     else:
         raise ValueError(
             f'--strategy {strategy} is unknown. Select one of '
