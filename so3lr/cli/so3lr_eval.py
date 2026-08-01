@@ -359,16 +359,20 @@ def evaluate_so3lr_on(
         # Create parent directory if it doesn't exist
         save_to.parent.mkdir(parents=True, exist_ok=True)
 
-    # Initialize the model. A bundled name (so3lr-s/m/l/so3lr/so3lr-o) or a
-    # custom path; None falls back to the default model.
-    from so3lr.model_registry import resolve_model, available_models, DEFAULT_MODEL
-    workdir_path, _, _ = resolve_model(model_path)
+    # Initialize the model. A registered name (see model_registry) or a custom
+    # path; None falls back to the default model.
+    from so3lr.model_registry import (
+        resolve_model, available_models, canonical_models, DEFAULT_MODEL
+    )
+    workdir_path = resolve_model(model_path).dir
     # Decide bundled vs. custom by comparing the *resolved* directory against
     # the registry's bundled paths, not by short-name membership of the raw
     # input. This way a user who passes an explicit filesystem path that
     # happens to point at a bundled checkpoint directory is correctly logged
     # as 'bundled' (the old name-only check mislabelled this as custom).
-    _bundled_paths = {resolve_model(n)[0] for n in available_models()}
+    # Iterate canonical names only: they cover every bundled directory, and
+    # resolving the floating aliases here would log a redirect line for each.
+    _bundled_paths = {resolve_model(n).dir for n in canonical_models()}
     if workdir_path in _bundled_paths:
         # Prefer the user-typed short name when it is a registry key. Without
         # this, legacy 'so3lr' and 'so3lr-o' both log as 'params' because they

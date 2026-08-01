@@ -13,7 +13,7 @@ from so3lr.model_registry import resolve_model
 
 # Original/legacy SO3LR model, resolved via the registry so the test is
 # decoupled from the on-disk layout (the model now lives under models/so3lr).
-MODEL_DIR = resolve_model('so3lr')[0]
+MODEL_DIR = resolve_model('so3lr').dir
 
 lr_cutoff = 12.0
 lr_cutoff_damp = 2.0
@@ -264,7 +264,7 @@ def test_water():
 
 @pytest.mark.parametrize('name', ['dha'])
 def test_with_solar_potential_so3lr_s(name: str):
-    """jax-md energy/forces for the bundled so3lr-s model against saved references."""
+    """jax-md energy/forces for bundled so3lr-protos-s-2602 against saved references."""
     from so3lr import So3lrPotential
 
     jax.config.update('jax_enable_x64', True)
@@ -285,7 +285,7 @@ def test_with_solar_potential_so3lr_s(name: str):
 
     neighbor_fn, neighbor_fn_lr, energy_fn = jaxmd_utils.to_jax_md(
         potential=So3lrPotential(
-            model="so3lr-s",
+            model="so3lr-protos-s-2602",
             dtype=np.float64
         ),
         displacement_or_metric=displacement,

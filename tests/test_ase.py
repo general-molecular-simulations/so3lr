@@ -8,7 +8,7 @@ from so3lr.model_registry import resolve_model
 
 # Original/legacy SO3LR model, resolved via the registry so the test is
 # decoupled from the on-disk layout (the model now lives under models/so3lr).
-MODEL_DIR = resolve_model('so3lr')[0]
+MODEL_DIR = resolve_model('so3lr').dir
 
 
 @pytest.mark.parametrize('name', ['dha'])
@@ -109,7 +109,7 @@ def test_so3lr_ase_calculator(name: str):
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
     # Reference predictions were generated with the legacy (v1) model, so pin to
-    # it explicitly; the no-arg default is now so3lr-m (see test_default_model_*).
+    # it explicitly; the no-arg default is so3lr-protos-m-2606 (see test_default_model_*).
     calc = So3lrCalculator(
         model="so3lr",
         dtype=np.float64
@@ -182,7 +182,11 @@ def test_so3lr_ase_calculator_stress(calculate_stress: bool):
 
 
 def test_so3lr_s_water():
-    """Regression check for so3lr-s on a periodic water box (PBC / long-range)."""
+    """Regression check for so3lr-protos-s-2602 on a periodic water box.
+
+    Pins the exact release the saved references were generated from -- a
+    floating alias here would break whenever a new release is registered.
+    """
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
@@ -194,7 +198,7 @@ def test_so3lr_s_water():
     ) * [2, 2, 2]
 
     calc = So3lrCalculator(
-        model="so3lr-s",
+        model="so3lr-protos-s-2602",
         dtype=np.float64
     )
 
@@ -223,8 +227,8 @@ def test_so3lr_s_water():
 
 
 @pytest.mark.parametrize('name', ['dha'])
-def test_default_model_is_so3lr_m(name: str):
-    """The no-arg default must equal model='so3lr-m' and differ from legacy 'so3lr'."""
+def test_default_model_is_current_m(name: str):
+    """The no-arg default must equal the current M model and differ from legacy."""
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
@@ -245,18 +249,18 @@ def test_default_model_is_so3lr_m(name: str):
     assert np.isfinite(default_energy)
     assert np.all(np.isfinite(default_forces))
 
-    # The bare default must be exactly so3lr-m.
+    # The bare default must be exactly the current M release.
     npt.assert_allclose(default_energy, m_energy, rtol=1e-10, atol=1e-10)
     npt.assert_allclose(default_forces, m_forces, rtol=1e-10, atol=1e-10)
 
-    # so3lr-m must be a genuinely different model from the legacy v1 model.
+    # It must be a genuinely different model from the legacy v1 model.
     with npt.assert_raises(AssertionError):
         npt.assert_allclose(m_energy, legacy_energy, atol=1e-4)
 
 
 @pytest.mark.parametrize('name', ['dha'])
 def test_so3lr_s_ase_calculator(name: str):
-    """Regression check for the bundled so3lr-s model against saved references."""
+    """Regression check for bundled so3lr-protos-s-2602 against saved references."""
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
@@ -266,7 +270,7 @@ def test_so3lr_s_ase_calculator(name: str):
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
     calc = So3lrCalculator(
-        model="so3lr-s",
+        model="so3lr-protos-s-2602",
         dtype=np.float64
     )
 
@@ -295,7 +299,7 @@ def test_so3lr_s_ase_calculator(name: str):
     # c6_ratios is a dedicated head of the new models; check it against the
     # saved reference via the aux observable output.
     calc_obs = So3lrCalculator(
-        model="so3lr-s",
+        model="so3lr-protos-s-2602",
         dtype=np.float64,
         has_aux=True,
         observables=['c6_ratios']

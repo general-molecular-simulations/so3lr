@@ -876,10 +876,11 @@ def load_model(
     """
     logger.info(f'Loading model from {model_path}')
 
-    # Resolve a bundled model name (so3lr-s/m/l/so3lr) or a filesystem path.
+    # Resolve a registered model name (see model_registry) or a filesystem path.
     # Raises FileNotFoundError if it is neither a known name nor an existing path.
     from so3lr.model_registry import resolve_model
-    model_dir, from_file, _ = resolve_model(model_path)
+    spec = resolve_model(model_path)
+    model_dir, from_file = spec.dir, spec.from_file
     params_pkl = model_dir / 'params.pkl'
 
     # The legacy v1 model used real-space cutoff electrostatics; k-space
