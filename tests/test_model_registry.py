@@ -54,12 +54,7 @@ def test_resolve_canonical(name):
     assert (spec.dir / "params.pkl").exists()
     assert spec.from_file is True
     assert spec.head_index == 5
-
-
-@pytest.mark.parametrize("name", CANONICAL)
-def test_canonical_family(name):
-    expected = "vanilla" if name == "so3lr" else "protos"
-    assert mr.resolve_model(name).family == expected
+    assert spec.family == ("vanilla" if name == "so3lr" else "protos")
 
 
 @pytest.mark.parametrize("alias,target", sorted(mr.model_aliases().items()))
@@ -97,23 +92,26 @@ def test_default_resolves_to_the_new_m_model():
     assert mr.resolve_model(None) == mr.resolve_model("so3lr-m")
 
 
-def test_floating_alias_logs_its_target(caplog):
-    mr._LOGGED_ALIASES.discard("so3lr-m")
-    with caplog.at_level(logging.INFO, logger=mr.__name__):
-        mr.resolve_model("so3lr-m")
-    assert "so3lr-protos-m-2606" in caplog.text
+def test_registry_logs_on_the_package_logger():
+    """The alias line must go to the logger the CLI attaches handlers to.
+
+    ``getLogger(__name__)`` would make this a sibling of "SO3LR" rather than a
+    child, so the redirect would be silently dropped on every CLI run while
+    still passing a caplog-based test (caplog installs a root handler).
+    """
+    assert mr.logger.name == "SO3LR" or mr.logger.name.startswith("SO3LR.")
 
 
-def test_floating_alias_logs_only_once(caplog):
+def test_floating_alias_logs_its_target_once(caplog):
     mr._LOGGED_ALIASES.discard("so3lr-l")
-    with caplog.at_level(logging.INFO, logger=mr.__name__):
+    with caplog.at_level(logging.INFO, logger="SO3LR"):
         mr.resolve_model("so3lr-l")
         mr.resolve_model("so3lr-l")
     assert caplog.text.count("so3lr-protos-l-2606") == 1
 
 
 def test_canonical_name_does_not_log(caplog):
-    with caplog.at_level(logging.INFO, logger=mr.__name__):
+    with caplog.at_level(logging.INFO, logger="SO3LR"):
         mr.resolve_model("so3lr-protos-m-2606")
     assert caplog.text == ""
 

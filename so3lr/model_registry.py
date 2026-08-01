@@ -5,20 +5,15 @@ filesystem path to a custom/finetuned model directory.
 
 Names follow ``so3lr-<family>-<size>[-<release>]`` and come in three tiers:
 
-=======================  =======================================  ==============
-Name                     Means                                    Stability
-=======================  =======================================  ==============
-``so3lr-m``              current recommended M, whichever family  moves *across*
-                                                                  families
-``so3lr-protos-m``       current M within the Protos family       moves *within*
-                                                                  the family
-``so3lr-protos-m-2606``  one exact release                        immutable
-=======================  =======================================  ==============
+* ``so3lr-protos-m-2606`` -- one exact release; immutable.
+* ``so3lr-protos-m`` -- current M within the Protos family; moves within it.
+* ``so3lr-m`` -- current recommended M; moves across families too.
 
 ``<family>`` names an architecture lineage (all Protos models share the same
 base network; a future family may not). ``<size>`` is family-relative: sizes are
 comparable within a family but not necessarily across families. ``<release>`` is
-the ``YYMM`` of the release.
+the ``YYMM`` of the release. See the README section "Model names and versions"
+for the user-facing version of this.
 
 Only canonical names correspond 1:1 to a directory under ``models/``; the other
 tiers are aliases. Cite the canonical name in papers and benchmark tables --
@@ -32,15 +27,25 @@ import dataclasses
 import logging
 import pathlib
 
-logger = logging.getLogger(__name__)
+# The package-wide logger the CLI attaches its console/file handlers to (see
+# ``setup_logger`` in so3lr/cli/so3lr_md.py). Using ``__name__`` here would make
+# this a sibling of "SO3LR" rather than a child, so the alias-redirect line below
+# would be dropped on every CLI run.
+logger = logging.getLogger("SO3LR")
 
 # .../so3lr/
 _PKG = pathlib.Path(__file__).parent.resolve()
 _MODELS = _PKG / "models"
 
-# Theory-level head used at inference by every model shipped so far. Kept as a
-# module constant for backwards compatibility, but the authoritative value is
-# per-model (``ModelSpec.head_index``) so a future family can differ.
+# Theory-level head used at inference by every model shipped so far.
+#
+# ``ModelSpec.head_index`` carries this per-model so a future family can differ,
+# but only the ASE path (so3lr/ase_utils.py) currently threads it through:
+# make_so3lr / make_potential_fn / the jax-md path still assume head 5 (see the
+# hardcoded ``jnp.eye(16)[5]`` in so3lr/jaxmd_utils.py and the head_index=5
+# defaults in so3lr/mlff/calculators/ase_calculator.py). A family that needs a
+# different head must plumb spec.head_index through those entry points first --
+# they would otherwise read the wrong head and return plausible wrong energies.
 DEFAULT_HEAD_INDEX = 5
 
 
