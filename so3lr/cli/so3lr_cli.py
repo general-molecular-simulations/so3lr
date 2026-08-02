@@ -567,7 +567,7 @@ def _validate_model_choice(ctx, param, value):
     """
     if value is None:
         return value
-    # model_registry is intentionally JAX-free (only imports pathlib), so this
+    # model_registry is intentionally JAX-free (stdlib imports only), so this
     # import is safe to do during Click parsing without forcing a slow init.
     from ..model_registry import available_models, resolve_model
     try:

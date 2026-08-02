@@ -16,18 +16,16 @@ def make_ase_calculator(
     # ``workdir`` (legacy kwarg) takes precedence over ``model``; either may be a
     # bundled model name or a filesystem path. None -> DEFAULT_MODEL.
     workdir = kwargs.pop('workdir', None)
-    workdir_path, from_file, head_index = resolve_model(
-        workdir if workdir is not None else model
-    )
+    spec = resolve_model(workdir if workdir is not None else model)
 
     calc = AseCalculatorSparse.create_from_workdir(
-        workdir=workdir_path,
+        workdir=spec.dir,
         lr_cutoff=lr_cutoff,
         dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
-        from_file=kwargs.pop('from_file', from_file),
+        from_file=kwargs.pop('from_file', spec.from_file),
         calculate_stress=calculate_stress,
         dtype=dtype,
-        head_index=head_index,
+        head_index=spec.head_index,
         **kwargs
     )
 

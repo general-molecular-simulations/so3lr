@@ -46,7 +46,7 @@ The base install is JAX-only and lightweight. Two extras are available:
 
 ## Models
 
-SO3LR ships in three sizes. All are bundled inside the package, so you select one **by short name** — no download or path needed. They trade off speed against accuracy:
+SO3LR ships in three sizes. All are bundled inside the package, so you select one **by name** — no download or path needed. They trade off speed against accuracy:
 
 | Model | Layers | Features | Heads | Cutoff (Å) | Best for |
 |-------|--------|----------|-------|-----------|----------|
@@ -56,6 +56,35 @@ SO3LR ships in three sizes. All are bundled inside the package, so you select on
 | `so3lr-o` | 3 | 128 | 4 | 4.5 | Original SO3LR v1 — for reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558) |
 
 If you do not specify a model, **`so3lr-m`** is used. `so3lr-o` (also reachable as `so3lr`) is the original v1 model kept for backward compatibility.
+
+### Model names and versions
+
+Names follow `so3lr-<family>-<size>[-<release>]` and come in three tiers:
+
+| Name | Means | Stability |
+|------|-------|-----------|
+| `so3lr-m` | current recommended M, whichever family | moves *across* families |
+| `so3lr-protos-m` | current M within the Protos family | moves *within* the family |
+| `so3lr-protos-m-2606` | one exact release | immutable |
+
+`<family>` names an architecture lineage — all Protos models share the same base
+network, and a future family may not. `<size>` is family-relative: sizes are
+comparable within a family, not necessarily across families. `<release>` is the
+`YYMM` of the release.
+
+The short names above (`so3lr-s`/`-m`/`-l`) are convenience aliases for the
+current release. **Cite the full name in papers and benchmark tables** — the
+aliases are repointed when a new release lands, and resolving one logs which
+target it picked. Currently bundled:
+
+| Release | Canonical names |
+|---------|-----------------|
+| Protos 2606 *(current, default)* | `so3lr-protos-{s,m,l}-2606` |
+| Protos 2602 | `so3lr-protos-{s,m,l}-2602` |
+| Original v1 | `so3lr` (alias `so3lr-o`) |
+
+`so3lr.model_registry.canonical_models()` lists the canonical names and
+`model_aliases()` the alias → target mapping.
 
 ### Selecting a model
 
@@ -228,7 +257,7 @@ Evaluate the SO3LR model on a dataset:
 so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 100 --save-to predictions.extxyz
 ```
 
-Add `--model so3lr-s` (or `so3lr-l`) to evaluate a different bundled model; without it, `so3lr-m` is used.
+Add `--model so3lr-s` (or `so3lr-l`, or a canonical name such as `so3lr-protos-s-2602`) to evaluate a different bundled model; without it, `so3lr-m` is used.
 
 The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread).
 
