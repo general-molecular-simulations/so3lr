@@ -109,7 +109,7 @@ def test_so3lr_ase_calculator(name: str):
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
     # Reference predictions were generated with the legacy (v1) model, so pin to
-    # it explicitly; the no-arg default is so3lr-protos-m-2606 (see test_default_model_*).
+    # it explicitly; the no-arg default is so3lr-m-2606 (see test_default_model_*).
     calc = So3lrCalculator(
         model="so3lr",
         dtype=np.float64
@@ -182,7 +182,7 @@ def test_so3lr_ase_calculator_stress(calculate_stress: bool):
 
 
 def test_so3lr_s_water():
-    """Regression check for so3lr-protos-s-2602 on a periodic water box.
+    """Regression check for so3lr-s-2602 on a periodic water box.
 
     Pins the exact release the saved references were generated from -- a
     floating alias here would break whenever a new release is registered.
@@ -198,7 +198,7 @@ def test_so3lr_s_water():
     ) * [2, 2, 2]
 
     calc = So3lrCalculator(
-        model="so3lr-protos-s-2602",
+        model="so3lr-s-2602",
         dtype=np.float64
     )
 
@@ -260,7 +260,7 @@ def test_default_model_is_current_m(name: str):
 
 @pytest.mark.parametrize('name', ['dha'])
 def test_so3lr_s_ase_calculator(name: str):
-    """Regression check for bundled so3lr-protos-s-2602 against saved references."""
+    """Regression check for bundled so3lr-s-2602 against saved references."""
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
@@ -270,7 +270,7 @@ def test_so3lr_s_ase_calculator(name: str):
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
     calc = So3lrCalculator(
-        model="so3lr-protos-s-2602",
+        model="so3lr-s-2602",
         dtype=np.float64
     )
 
@@ -299,7 +299,7 @@ def test_so3lr_s_ase_calculator(name: str):
     # c6_ratios is a dedicated head of the new models; check it against the
     # saved reference via the aux observable output.
     calc_obs = So3lrCalculator(
-        model="so3lr-protos-s-2602",
+        model="so3lr-s-2602",
         dtype=np.float64,
         has_aux=True,
         observables=['c6_ratios']
