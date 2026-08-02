@@ -98,10 +98,19 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
 
       - name: Test with pytest
+        # TEST_MODE / HEAD_COMMIT_MESSAGE are passed through the environment
+        # rather than interpolated into the script body: a commit message
+        # containing a double quote used to be spliced in raw and broke the
+        # `if` into invalid bash (all jobs exited 2 before collecting a single
+        # test). head_commit is absent on pull_request events, so the variable
+        # is empty there and the [full tests] check is simply false.
+        env:
+          TEST_MODE: ${{ github.event.inputs.test_mode }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           pip install ".${{ matrix.install_extras }}"
           pip install pytest
-          if [ "${{ github.event.inputs.test_mode }}" = "full" ] || [[ "${{ github.event.head_commit.message }}" == *"[full tests]"* ]]; then
+          if [ "$TEST_MODE" = "full" ] || [[ "$HEAD_COMMIT_MESSAGE" == *"[full tests]"* ]]; then
             echo "Running FULL test suite"
             ${{ matrix.run_full }}
           else
