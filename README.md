@@ -48,14 +48,14 @@ The base install is JAX-only and lightweight. Two extras are available:
 
 SO3LR ships in three sizes. All are bundled inside the package, so you select one **by name** — no download or path needed. They trade off speed against accuracy:
 
-| Model | Layers | Features | Heads | Cutoff (Å) | Best for |
-|-------|--------|----------|-------|-----------|----------|
-| `so3lr-s` | 2 | 128 | 4 | 4.5 | Fastest — quick tests and very large systems |
-| `so3lr-m` *(default)* | 3 | 128 | 4 | 4.5 | Balanced — general-purpose use |
-| `so3lr-l` | 3 | 256 | 8 | 5.0 | Most accurate — highest fidelity, largest model |
-| `so3lr-o` | 3 | 128 | 4 | 4.5 | Original SO3LR v1 — for reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558) |
+| Model | Layers | Features | Heads | Cutoff (Å) |
+|-------|--------|----------|-------|-----------|
+| `so3lr-s` | 2 | 128 | 4 | 4.5 |
+| `so3lr-m` *(default)* | 3 | 128 | 4 | 4.5 |
+| `so3lr-l` | 3 | 256 | 8 | 5.0 |
+| `so3lr-o` | 3 | 128 | 4 | 4.5 |
 
-If you do not specify a model, **`so3lr-m`** is used. `so3lr-o` (also reachable as `so3lr`) is the original v1 model kept for backward compatibility.
+If you do not specify a model, **`so3lr-m`** is used. `so3lr-o` (also reachable as `so3lr`) is the original SO3LR v1, kept for backward compatibility and for reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558).
 
 ### Model names and versions
 
@@ -90,17 +90,17 @@ The same names work across every interface:
 ```python
 # Python / ASE
 from so3lr import So3lrCalculator
-calc = So3lrCalculator(model="so3lr-l")          # also "so3lr-s" / "so3lr-m"
+calc = So3lrCalculator(model="so3lr-m")          # also "so3lr-s" / "so3lr-l"
 ```
 
 ```shell script
 # CLI (works with opt / nvt / npt / nve / eval)
-so3lr nvt --input geometry.xyz --model so3lr-l
+so3lr nvt --input geometry.xyz --model so3lr-m
 ```
 
 ```yaml
 # In an MD settings YAML (model: is an alias of model_path:)
-model: so3lr-l
+model: so3lr-m
 ```
 
 Custom and fine-tuned models still work — just pass a path instead of a name:
