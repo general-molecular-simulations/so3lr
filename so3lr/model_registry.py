@@ -3,20 +3,17 @@
 A "model" can be referred to either by a registered name or by an arbitrary
 filesystem path to a custom/finetuned model directory.
 
-Names follow ``so3lr-<family>-<size>[-<release>]`` and come in three tiers:
+Names follow ``so3lr-<size>[-<release>]`` and come in two tiers:
 
-* ``so3lr-protos-m-2606`` -- one exact release; immutable.
-* ``so3lr-protos-m`` -- current M within the Protos family; moves within it.
-* ``so3lr-m`` -- current recommended M; moves across families too.
+* ``so3lr-m-2606`` -- one exact release; immutable.
+* ``so3lr-m`` -- current recommended M; moves when a new release lands.
 
-``<family>`` names an architecture lineage (all Protos models share the same
-base network; a future family may not). ``<size>`` is family-relative: sizes are
-comparable within a family but not necessarily across families. ``<release>`` is
-the ``YYMM`` of the release. See the README section "Model names and versions"
-for the user-facing version of this.
+``<size>`` is one of ``s``/``m``/``l``; ``<release>`` is the ``YYMM`` of the
+release. See the README section "Model names and versions" for the user-facing
+version of this.
 
-Only canonical names correspond 1:1 to a directory under ``models/``; the other
-tiers are aliases. Cite the canonical name in papers and benchmark tables --
+Only canonical names correspond 1:1 to a directory under ``models/``; the bare
+sizes are aliases. Cite the canonical name in papers and benchmark tables --
 floating aliases are resolved at load time and log which target they picked.
 
 This is the single source of truth used by the Python API (``make_so3lr``,
@@ -39,7 +36,7 @@ _MODELS = _PKG / "models"
 
 # Theory-level head used at inference by every model shipped so far.
 #
-# ``ModelSpec.head_index`` carries this per-model so a future family can differ,
+# ``ModelSpec.head_index`` carries this per-model so a future lineage can differ,
 # but only the ASE path (so3lr/ase_utils.py) currently threads it through:
 # make_so3lr / make_potential_fn / the jax-md path still assume head 5 (see the
 # hardcoded ``jnp.eye(16)[5]`` in so3lr/jaxmd_utils.py and the head_index=5
@@ -55,8 +52,9 @@ class ModelSpec:
 
     Attributes:
         dir: Directory holding ``params.pkl`` and/or a ``checkpoints/`` folder.
-        family: Architecture lineage (``"protos"``, ``"vanilla"``, or
-            ``"custom"`` for user-supplied paths).
+        family: Architecture lineage -- ``"v2"`` for the current bundled models,
+            ``"vanilla"`` for the original v1 SO3LR, ``"custom"`` for
+            user-supplied paths. Not part of the model name.
         head_index: Theory-level head index to read the prediction from.
     """
 
@@ -88,26 +86,22 @@ class ModelSpec:
 
 # Canonical names -- exactly one per directory under models/.
 _CANONICAL = {
-    "so3lr-protos-s-2602": ModelSpec(_MODELS / "so3lr-protos-s-2602", family="protos"),
-    "so3lr-protos-m-2602": ModelSpec(_MODELS / "so3lr-protos-m-2602", family="protos"),
-    "so3lr-protos-l-2602": ModelSpec(_MODELS / "so3lr-protos-l-2602", family="protos"),
-    "so3lr-protos-s-2606": ModelSpec(_MODELS / "so3lr-protos-s-2606", family="protos"),
-    "so3lr-protos-m-2606": ModelSpec(_MODELS / "so3lr-protos-m-2606", family="protos"),
-    "so3lr-protos-l-2606": ModelSpec(_MODELS / "so3lr-protos-l-2606", family="protos"),
-    # Original vanilla SO3LR, predating the family scheme. Kept reachable by
-    # name for reproducibility.
+    "so3lr-s-2602": ModelSpec(_MODELS / "so3lr-s-2602", family="v2"),
+    "so3lr-m-2602": ModelSpec(_MODELS / "so3lr-m-2602", family="v2"),
+    "so3lr-l-2602": ModelSpec(_MODELS / "so3lr-l-2602", family="v2"),
+    "so3lr-s-2606": ModelSpec(_MODELS / "so3lr-s-2606", family="v2"),
+    "so3lr-m-2606": ModelSpec(_MODELS / "so3lr-m-2606", family="v2"),
+    "so3lr-l-2606": ModelSpec(_MODELS / "so3lr-l-2606", family="v2"),
+    # Original vanilla SO3LR (v1). Kept reachable by name for reproducibility.
     "so3lr": ModelSpec(_MODELS / "so3lr", family="vanilla"),
 }
 
 # Moving pointers. What these resolve to changes when a new release lands, so
 # resolving one emits a log line naming the canonical target it picked.
 _FLOATING_ALIASES = {
-    "so3lr-s": "so3lr-protos-s-2606",
-    "so3lr-m": "so3lr-protos-m-2606",
-    "so3lr-l": "so3lr-protos-l-2606",
-    "so3lr-protos-s": "so3lr-protos-s-2606",
-    "so3lr-protos-m": "so3lr-protos-m-2606",
-    "so3lr-protos-l": "so3lr-protos-l-2606",
+    "so3lr-s": "so3lr-s-2606",
+    "so3lr-m": "so3lr-m-2606",
+    "so3lr-l": "so3lr-l-2606",
 }
 
 # Fixed synonyms: another spelling of one canonical name, never repointed.
@@ -118,7 +112,7 @@ _SYNONYMS = {
 # Model used when nothing is specified (bare calculator / CLI without --model /
 # YAML without a model key). Pinned to a canonical name so the default can never
 # drift silently when a new release lands.
-DEFAULT_MODEL = "so3lr-protos-m-2606"
+DEFAULT_MODEL = "so3lr-m-2606"
 
 # Aliases already logged, so resolving inside a loop does not spam the log.
 _LOGGED_ALIASES = set()

@@ -25,7 +25,7 @@ from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr.model_registry import resolve_model
 
 PACKAGE_DIR = pathlib.Path(__file__).parent.parent.resolve()
-# 'sv2j_b128_l3nnn_2_nano_lr_full_2' was the dev name for the Protos M lineage.
+# 'sv2j_b128_l3nnn_2_nano_lr_full_2' was the dev name for the current v2 M lineage.
 # Resolve via the registry so the test is runnable from a clean checkout/install.
 _SPEC = resolve_model('so3lr-m')
 MODEL_DIR, MODEL_FROM_FILE = _SPEC.dir, _SPEC.from_file

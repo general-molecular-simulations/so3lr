@@ -15,18 +15,18 @@ from so3lr import model_registry as mr
 PKG = pathlib.Path(mr.__file__).parent.resolve()
 
 CANONICAL = (
-    "so3lr-protos-s-2602",
-    "so3lr-protos-m-2602",
-    "so3lr-protos-l-2602",
-    "so3lr-protos-s-2606",
-    "so3lr-protos-m-2606",
-    "so3lr-protos-l-2606",
+    "so3lr-s-2602",
+    "so3lr-m-2602",
+    "so3lr-l-2602",
+    "so3lr-s-2606",
+    "so3lr-m-2606",
+    "so3lr-l-2606",
     "so3lr",
 )
 
 
 def test_defaults():
-    assert mr.DEFAULT_MODEL == "so3lr-protos-m-2606"
+    assert mr.DEFAULT_MODEL == "so3lr-m-2606"
     assert mr.DEFAULT_HEAD_INDEX == 5
     # The default must be a canonical name, never a floating alias, so that the
     # no-argument default cannot drift when a new release is registered.
@@ -54,7 +54,7 @@ def test_resolve_canonical(name):
     assert (spec.dir / "params.pkl").exists()
     assert spec.from_file is True
     assert spec.head_index == 5
-    assert spec.family == ("vanilla" if name == "so3lr" else "protos")
+    assert spec.family == ("vanilla" if name == "so3lr" else "v2")
 
 
 @pytest.mark.parametrize("alias,target", sorted(mr.model_aliases().items()))
@@ -65,15 +65,14 @@ def test_aliases_resolve_to_their_canonical_target(alias, target):
 
 def test_size_aliases_point_at_the_current_release():
     for size in ("s", "m", "l"):
-        current = f"so3lr-protos-{size}-2606"
+        current = f"so3lr-{size}-2606"
         assert mr.resolve_model(f"so3lr-{size}").dir.name == current
-        assert mr.resolve_model(f"so3lr-protos-{size}").dir.name == current
 
 
 def test_dated_names_are_pinned():
     """The 2602 pins must keep resolving to the older release."""
     for size in ("s", "m", "l"):
-        name = f"so3lr-protos-{size}-2602"
+        name = f"so3lr-{size}-2602"
         assert mr.resolve_model(name).dir.name == name
 
 
@@ -88,7 +87,7 @@ def test_legacy_vanilla_model():
 
 
 def test_default_resolves_to_the_new_m_model():
-    assert mr.resolve_model(None) == mr.resolve_model("so3lr-protos-m-2606")
+    assert mr.resolve_model(None) == mr.resolve_model("so3lr-m-2606")
     assert mr.resolve_model(None) == mr.resolve_model("so3lr-m")
 
 
@@ -107,12 +106,12 @@ def test_floating_alias_logs_its_target_once(caplog):
     with caplog.at_level(logging.INFO, logger="SO3LR"):
         mr.resolve_model("so3lr-l")
         mr.resolve_model("so3lr-l")
-    assert caplog.text.count("so3lr-protos-l-2606") == 1
+    assert caplog.text.count("so3lr-l-2606") == 1
 
 
 def test_canonical_name_does_not_log(caplog):
     with caplog.at_level(logging.INFO, logger="SO3LR"):
-        mr.resolve_model("so3lr-protos-m-2606")
+        mr.resolve_model("so3lr-m-2606")
     assert caplog.text == ""
 
 
@@ -131,7 +130,7 @@ def test_existing_path_is_accepted(tmp_path):
 
 def test_spec_unpacks_as_legacy_triple():
     """Old ``dir, from_file, head_index`` call sites keep working."""
-    spec = mr.resolve_model("so3lr-protos-m-2606")
+    spec = mr.resolve_model("so3lr-m-2606")
     workdir, from_file, head_index = spec
     assert (workdir, from_file, head_index) == (
         spec.dir, spec.from_file, spec.head_index

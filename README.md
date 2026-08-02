@@ -59,28 +59,25 @@ If you do not specify a model, **`so3lr-m`** is used. `so3lr-o` (also reachable 
 
 ### Model names and versions
 
-Names follow `so3lr-<family>-<size>[-<release>]` and come in three tiers:
+Names follow `so3lr-<size>[-<release>]` and come in two tiers:
 
 | Name | Means | Stability |
 |------|-------|-----------|
-| `so3lr-m` | current recommended M, whichever family | moves *across* families |
-| `so3lr-protos-m` | current M within the Protos family | moves *within* the family |
-| `so3lr-protos-m-2606` | one exact release | immutable |
+| `so3lr-m` | current recommended M | moves when a new release lands |
+| `so3lr-m-2606` | one exact release | immutable |
 
-`<family>` names an architecture lineage — all Protos models share the same base
-network, and a future family may not. `<size>` is family-relative: sizes are
-comparable within a family, not necessarily across families. `<release>` is the
-`YYMM` of the release.
+`<size>` is `s`, `m` or `l`; `<release>` is the `YYMM` of the release.
 
-The short names above (`so3lr-s`/`-m`/`-l`) are convenience aliases for the
-current release. **Cite the full name in papers and benchmark tables** — the
-aliases are repointed when a new release lands, and resolving one logs which
-target it picked. Currently bundled:
+The short names (`so3lr-s`/`-m`/`-l`) are convenience aliases for the current
+release. **Cite the dated name in papers and benchmark tables** — the aliases are
+repointed when a new release lands, so a script saying `so3lr-m` keeps running
+but returns different numbers. Resolving an alias logs which target it picked.
+Currently bundled:
 
 | Release | Canonical names |
 |---------|-----------------|
-| Protos 2606 *(current, default)* | `so3lr-protos-{s,m,l}-2606` |
-| Protos 2602 | `so3lr-protos-{s,m,l}-2602` |
+| 2606 *(current, default)* | `so3lr-{s,m,l}-2606` |
+| 2602 | `so3lr-{s,m,l}-2602` |
 | Original v1 | `so3lr` (alias `so3lr-o`) |
 
 `so3lr.model_registry.canonical_models()` lists the canonical names and
@@ -257,7 +254,7 @@ Evaluate the SO3LR model on a dataset:
 so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 100 --save-to predictions.extxyz
 ```
 
-Add `--model so3lr-s` (or `so3lr-l`, or a canonical name such as `so3lr-protos-s-2602`) to evaluate a different bundled model; without it, `so3lr-m` is used.
+Add `--model so3lr-s` (or `so3lr-l`, or a canonical name such as `so3lr-s-2602`) to evaluate a different bundled model; without it, `so3lr-m` is used.
 
 The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread).
 
