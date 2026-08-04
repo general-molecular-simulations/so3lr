@@ -101,15 +101,31 @@ class AseCalculatorSparse(Calculator):
         else:
             output_intermediate_quantities = None
 
+        long_range_kwargs = dict(
+            cutoff_lr=lr_cutoff,
+            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
+            neighborlist_format_lr='sparse',  # ASECalculator has sparse format.
+            **kwargs
+        )
+
+        # ``kspace_electrostatics`` selects the k-space method for BOTH the grid
+        # built in ``calculate`` and the solver inside the model. Only the grid
+        # read it before: the solver is configured from
+        # ``long_range_kwargs['coulomb_kspace_method']`` (see
+        # load_model_from_workdir), which defaults to 'pme'. Asking for 'ewald'
+        # therefore built an Ewald k-point set and fed it to the PME solver --
+        # silently wrong energies rather than an error. The CLI never had this
+        # problem because it sets coulomb_kspace_method itself (so3lr_md.py).
+        #
+        # An explicit coulomb_kspace_method (passed through **kwargs) still wins,
+        # so the lower-level spelling keeps working unchanged.
+        if kspace_electrostatics is not None:
+            long_range_kwargs.setdefault('coulomb_kspace_method', kspace_electrostatics)
+
         mlff_potential = PotentialSparse.create_from_workdir(
             workdir=workdir,
             add_shift=add_energy_shift,
-            long_range_kwargs=dict(
-                cutoff_lr=lr_cutoff,
-                dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
-                neighborlist_format_lr='sparse',  # ASECalculator has sparse format.
-                **kwargs
-            ),
+            long_range_kwargs=long_range_kwargs,
             dtype=dtype,
             model=model,
             from_file=from_file,
