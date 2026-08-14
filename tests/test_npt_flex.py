@@ -15,9 +15,10 @@ from so3lr.model_registry import resolve_model
 jax.config.update('jax_enable_x64', True)
 
 PACKAGE_DIR = pathlib.Path(__file__).parent.parent.resolve()
-# 'sv2j_b128_l3nnn_2_nano_lr_full_2' was the dev name for the bundled so3lr-m model.
+# 'sv2j_b128_l3nnn_2_nano_lr_full_2' was the dev name for the current v2 M lineage.
 # Resolve via the registry so the test is runnable from a clean checkout/install.
-MODEL_DIR, MODEL_FROM_FILE, _ = resolve_model('so3lr-m')
+_SPEC = resolve_model('so3lr-m')
+MODEL_DIR, MODEL_FROM_FILE = _SPEC.dir, _SPEC.from_file
 
 
 def _setup_system():

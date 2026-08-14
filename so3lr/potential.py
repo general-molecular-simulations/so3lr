@@ -18,9 +18,8 @@ def make_potential_fn(
     # ``workdir`` (legacy kwarg) takes precedence over ``model``; either may be a
     # bundled model name or a filesystem path. None -> DEFAULT_MODEL.
     workdir = kwargs.pop('workdir', None)
-    workdir_path, from_file, _ = resolve_model(
-        workdir if workdir is not None else model
-    )
+    spec = resolve_model(workdir if workdir is not None else model)
+    workdir_path, from_file = spec.dir, spec.from_file
 
     long_range_kw = dict(
         cutoff_lr=lr_cutoff,

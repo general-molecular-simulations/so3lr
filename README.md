@@ -46,16 +46,42 @@ The base install is JAX-only and lightweight. Two extras are available:
 
 ## Models
 
-SO3LR ships in three sizes. All are bundled inside the package, so you select one **by short name** — no download or path needed. They trade off speed against accuracy:
+SO3LR ships in three sizes. All are bundled inside the package, so you select one **by name** — no download or path needed. They trade off speed against accuracy:
 
-| Model | Layers | Features | Heads | Cutoff (Å) | Best for |
-|-------|--------|----------|-------|-----------|----------|
-| `so3lr-s` | 2 | 128 | 4 | 4.5 | Fastest — quick tests and very large systems |
-| `so3lr-m` *(default)* | 3 | 128 | 4 | 4.5 | Balanced — general-purpose use |
-| `so3lr-l` | 3 | 256 | 8 | 5.0 | Most accurate — highest fidelity, largest model |
-| `so3lr-o` | 3 | 128 | 4 | 4.5 | Original SO3LR v1 — for reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558) |
+| Model | Layers | Features | Heads | Cutoff (Å) |
+|-------|--------|----------|-------|-----------|
+| `so3lr-s` | 2 | 128 | 4 | 4.5 |
+| `so3lr-m` *(default)* | 3 | 128 | 4 | 4.5 |
+| `so3lr-l` | 3 | 256 | 8 | 5.0 |
+| `so3lr-o` | 3 | 128 | 4 | 4.5 |
 
-If you do not specify a model, **`so3lr-m`** is used. `so3lr-o` (also reachable as `so3lr`) is the original v1 model kept for backward compatibility.
+If you do not specify a model, **`so3lr-m`** is used. `so3lr-o` (also reachable as `so3lr`) is the original SO3LR v1, kept for backward compatibility and for reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558).
+
+### Model names and versions
+
+Names follow `so3lr-<size>[-<release>]` and come in two tiers:
+
+| Name | Means | Stability |
+|------|-------|-----------|
+| `so3lr-m` | current recommended M | moves when a new release lands |
+| `so3lr-m-2606` | one exact release | immutable |
+
+`<size>` is `s`, `m` or `l`; `<release>` is the `YYMM` of the release.
+
+The short names (`so3lr-s`/`-m`/`-l`) are convenience aliases for the current
+release. **Cite the dated name in papers and benchmark tables** — the aliases are
+repointed when a new release lands, so a script saying `so3lr-m` keeps running
+but returns different numbers. Resolving an alias logs which target it picked.
+Currently bundled:
+
+| Release | Canonical names |
+|---------|-----------------|
+| 2606 *(current, default)* | `so3lr-{s,m,l}-2606` |
+| 2602 | `so3lr-{s,m,l}-2602` |
+| Original v1 | `so3lr` (alias `so3lr-o`) |
+
+`so3lr.model_registry.canonical_models()` lists the canonical names and
+`model_aliases()` the alias → target mapping.
 
 ### Selecting a model
 
@@ -64,17 +90,17 @@ The same names work across every interface:
 ```python
 # Python / ASE
 from so3lr import So3lrCalculator
-calc = So3lrCalculator(model="so3lr-l")          # also "so3lr-s" / "so3lr-m"
+calc = So3lrCalculator(model="so3lr-m")          # also "so3lr-s" / "so3lr-l"
 ```
 
 ```shell script
 # CLI (works with opt / nvt / npt / nve / eval)
-so3lr nvt --input geometry.xyz --model so3lr-l
+so3lr nvt --input geometry.xyz --model so3lr-m
 ```
 
 ```yaml
 # In an MD settings YAML (model: is an alias of model_path:)
-model: so3lr-l
+model: so3lr-m
 ```
 
 Custom and fine-tuned models still work — just pass a path instead of a name:
@@ -228,7 +254,7 @@ Evaluate the SO3LR model on a dataset:
 so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 100 --save-to predictions.extxyz
 ```
 
-Add `--model so3lr-s` (or `so3lr-l`) to evaluate a different bundled model; without it, `so3lr-m` is used.
+Add `--model so3lr-s` (or `so3lr-l`, or a canonical name such as `so3lr-s-2602`) to evaluate a different bundled model; without it, `so3lr-m` is used.
 
 The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread).
 

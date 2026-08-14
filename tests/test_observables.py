@@ -18,7 +18,7 @@ import jax
 
 # Original/legacy SO3LR model, resolved via the registry so the test is
 # decoupled from the on-disk layout (the model now lives under models/so3lr).
-MODEL_DIR = resolve_model('so3lr')[0]
+MODEL_DIR = resolve_model('so3lr').dir
 
 
 # List of available observables

@@ -45,12 +45,12 @@ def finetune_so3lr(
     setup_logger(log_file)
 
     # Initialize the model. Route through the central model registry so the
-    # default matches the documented SO3LR model (so3lr-m), instead of silently
-    # falling back to the legacy `params/` checkpoint that lived next to this
-    # file. A user-supplied path is also resolved through the registry so that
-    # bundled names (so3lr-s/m/l) and filesystem paths both work.
+    # default matches the documented SO3LR model (DEFAULT_MODEL), instead of
+    # silently falling back to the legacy `params/` checkpoint that lived next to
+    # this file. A user-supplied path is also resolved through the registry so
+    # that registered names and filesystem paths both work.
     from so3lr.model_registry import resolve_model, available_models
-    workdir_path, _, _ = resolve_model(model_path)
+    workdir_path = resolve_model(model_path).dir
     if model_path is None or model_path in available_models():
         logger.info(f"Using bundled SO3LR model: {workdir_path.name}")
     else:

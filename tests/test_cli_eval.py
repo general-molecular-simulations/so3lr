@@ -43,7 +43,7 @@ def test_cli_eval(eval_dir):
         [
             'so3lr', 'eval',
             # EXPECTED_RMSE was produced with the legacy (v1) model; pin to it.
-            # The no-arg default is now so3lr-m (see test_cli_eval_default_model).
+            # The no-arg default is so3lr-m-2606 (see test_cli_eval_default_model).
             '--model', 'so3lr',
             '--datafile', str(datafile),
             '--lr-cutoff', '100.0',
@@ -78,7 +78,7 @@ def test_cli_eval(eval_dir):
 
 
 def test_cli_eval_default_model(eval_dir):
-    """Run `so3lr eval` with no --model (default so3lr-m); RMSEs must be finite."""
+    """Run `so3lr eval` with no --model (default so3lr-m-2606)."""
     project_root = pathlib.Path(__file__).resolve().parent.parent
     datafile = project_root / 'tests' / 'test_data' / 'ac.xyz'
     eval_xyz = eval_dir / 'ac_eval_default.xyz'
@@ -86,7 +86,7 @@ def test_cli_eval_default_model(eval_dir):
 
     result = subprocess.run(
         [
-            'so3lr', 'eval',  # no --model -> default so3lr-m
+            'so3lr', 'eval',  # no --model -> default so3lr-m-2606
             '--datafile', str(datafile),
             '--lr-cutoff', '100.0',
             '--save-to', str(eval_xyz),
@@ -109,7 +109,7 @@ def test_cli_eval_default_model(eval_dir):
 
     log_content = eval_log.read_text()
 
-    # The default model is so3lr-m (a new model): metrics differ from the legacy
+    # The default is a v2 model: metrics differ from the legacy
     # ones and the ratio head is reported as 'a0_ratios'. Assert each RMSE key is
     # present and parses to a finite, positive float (version-robust).
     for target in ('dipole_vec', 'forces', 'a0_ratios'):
@@ -121,7 +121,7 @@ def test_cli_eval_default_model(eval_dir):
 
 
 def test_cli_eval_so3lr_s(eval_dir):
-    """Run `so3lr eval --model so3lr-s` on ac.xyz and verify so3lr-s RMSE metrics."""
+    """Run `so3lr eval --model so3lr-s-2602` and verify its RMSE metrics."""
     project_root = pathlib.Path(__file__).resolve().parent.parent
     datafile = project_root / 'tests' / 'test_data' / 'ac.xyz'
     eval_xyz = eval_dir / 'ac_eval_so3lr_s.xyz'
@@ -130,7 +130,7 @@ def test_cli_eval_so3lr_s(eval_dir):
     result = subprocess.run(
         [
             'so3lr', 'eval',
-            '--model', 'so3lr-s',
+            '--model', 'so3lr-s-2602',
             '--datafile', str(datafile),
             '--lr-cutoff', '100.0',
             '--save-to', str(eval_xyz),

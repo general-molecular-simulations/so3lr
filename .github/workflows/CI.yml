@@ -36,17 +36,33 @@ jobs:
             install_extras: ""
             run_short: "pytest tests/test_cli_eval.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_cli.py -v --tb=short"
             run_full: "pytest tests/test_cli_eval.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_cli.py -v --tb=short --full"
+          # tests/test_integration.py ran ~31-41 min as a single job -- the
+          # critical path for the whole workflow, and long enough that runners
+          # were twice reclaimed mid-run (SIGTERM, exit 143, no test failure).
+          # --shard splits it into duration-balanced thirds using the timings in
+          # tests/conftest.py, so a newly added test case is distributed
+          # automatically rather than needing to be named here.
           - group: 3
-            name: "integration"
+            name: "integration-1"
             install_extras: ""
-            run_short: "pytest tests/test_integration.py -v --tb=short"
-            run_full: "pytest tests/test_integration.py -v --tb=short --full"
+            run_short: "pytest tests/test_integration.py --shard 1/3 -v --tb=short"
+            run_full: "pytest tests/test_integration.py --shard 1/3 -v --tb=short --full"
           - group: 4
+            name: "integration-2"
+            install_extras: ""
+            run_short: "pytest tests/test_integration.py --shard 2/3 -v --tb=short"
+            run_full: "pytest tests/test_integration.py --shard 2/3 -v --tb=short --full"
+          - group: 5
+            name: "integration-3"
+            install_extras: ""
+            run_short: "pytest tests/test_integration.py --shard 3/3 -v --tb=short"
+            run_full: "pytest tests/test_integration.py --shard 3/3 -v --tb=short --full"
+          - group: 6
             name: "so3lr-other"
             install_extras: ""
             run_short: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py -v --tb=short"
             run_full: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_hessian.py -v --tb=short --full"
-          - group: 5
+          - group: 7
             name: "pysages"
             install_extras: "[pysages]"
             # All pysages-touching interface tests must run on every PR
@@ -82,10 +98,19 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
 
       - name: Test with pytest
+        # TEST_MODE / HEAD_COMMIT_MESSAGE are passed through the environment
+        # rather than interpolated into the script body: a commit message
+        # containing a double quote used to be spliced in raw and broke the
+        # `if` into invalid bash (all jobs exited 2 before collecting a single
+        # test). head_commit is absent on pull_request events, so the variable
+        # is empty there and the [full tests] check is simply false.
+        env:
+          TEST_MODE: ${{ github.event.inputs.test_mode }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           pip install ".${{ matrix.install_extras }}"
           pip install pytest
-          if [ "${{ github.event.inputs.test_mode }}" = "full" ] || [[ "${{ github.event.head_commit.message }}" == *"[full tests]"* ]]; then
+          if [ "$TEST_MODE" = "full" ] || [[ "$HEAD_COMMIT_MESSAGE" == *"[full tests]"* ]]; then
             echo "Running FULL test suite"
             ${{ matrix.run_full }}
           else

@@ -1,13 +1,13 @@
 # Settings for generating the initial restart file
 # Run: so3lr --settings setup_settings.yaml
 
-input_file: input.gro
+input_file: input.xyz
 output_file: setup_trajectory.hdf5
 log_file: setup.log
 
 # Model settings
 precision: float64
-lr_cutoff: 12.0
+lr_cutoff: 10.0
 dispersion_damping: 2.0
 buffer_size_multiplier_sr: 1.25
 buffer_size_multiplier_lr: 1.25

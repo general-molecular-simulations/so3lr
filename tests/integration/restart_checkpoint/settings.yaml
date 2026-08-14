@@ -5,13 +5,20 @@
 #
 # NOTE: This test requires running setup_restart.py first to generate the restart file
 
-input_file: input.gro
+input_file: input.xyz
 output_file: trajectory.hdf5
 log_file: so3lr.log
 
 # Model settings
+# 512-molecule periodic water box (tests/test_data/water_64.xyz tiled 2x2x2).
+# This case validates restart-file round-tripping, not numerics: restart.npz
+# stores only positions/momenta/forces/masses, the box, the step counter and the
+# thermostat chain -- nothing that scales in kind with system size. The box must
+# still be periodic (box is one of the round-tripped fields) and at least twice
+# lr_cutoff for minimum image, and check_cell() rejects lr_cutoff < 10 A, which
+# together put the floor at ~20 A / ~800 atoms.
 precision: float64
-lr_cutoff: 12.0
+lr_cutoff: 10.0
 dispersion_damping: 2.0
 buffer_size_multiplier_sr: 1.25
 buffer_size_multiplier_lr: 1.25

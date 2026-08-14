@@ -15,14 +15,12 @@ def make_so3lr(
 ):
     # ``workdir`` (legacy arg) takes precedence over ``model``; either may be a
     # bundled model name or a filesystem path. None -> DEFAULT_MODEL.
-    workdir_path, from_file, _ = resolve_model(
-        workdir if workdir is not None else model
-    )
+    spec = resolve_model(workdir if workdir is not None else model)
 
     model, params = load_model_from_workdir(
-        workdir_path,
+        spec.dir,
         model='so3krates', # or 'itp_net'
-        from_file=from_file,
+        from_file=spec.from_file,
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
