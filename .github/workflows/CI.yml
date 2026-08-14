@@ -73,8 +73,19 @@ jobs:
             # test_pysages_doublewell.py is intentionally NOT listed here: it
             # validates PySAGES' own jax-md backend (not the so3lr interface)
             # and is opt-in only via explicit invocation.
-            run_short: "pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py -v --tb=short --full"
-            run_full: "pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py -v --tb=short --full"
+            #
+            # The two cylindrical-restraint files live here rather than in
+            # "so3lr-other" because both need --full, which only this group
+            # passes in short mode:
+            #   * test_pysages_cylinder.py drives the restraint through a live
+            #     PySAGES ABF run, so it guards the same interface as the rest
+            #     of this group; it is @slow and would otherwise never run.
+            #   * test_cylinder_restraint.py is the unit-level companion. Its
+            #     Boltzmann tests are @slow, and they are the only tests that
+            #     validate the restraint thermodynamically.
+            # Together they add ~1 min, negligible against this job's timeout.
+            run_short: "pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_cylinder_restraint.py tests/test_pysages_cylinder.py -v --tb=short --full"
+            run_full: "pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_cylinder_restraint.py tests/test_pysages_cylinder.py -v --tb=short --full"
     runs-on: ubuntu-latest
     name: "${{ matrix.name }}"
     timeout-minutes: ${{ (github.event.inputs.test_mode == 'full' || contains(github.event.head_commit.message, '[full tests]')) && 90 || 60 }}

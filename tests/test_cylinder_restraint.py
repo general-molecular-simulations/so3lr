@@ -131,6 +131,81 @@ class TestFlatBottom:
         npt.assert_array_equal(g, np.zeros_like(g))
 
 
+class TestOnAxisSafeNorm:
+    """Pin the double-``where`` safe norm at r_perp == 0 exactly.
+
+    ``jnp.linalg.norm`` has a NaN gradient at the origin, and the guest sits on the
+    axis for most of a host-guest run, so the implementation guards it. Nothing else
+    in the fast suite pins that guard: ``TestFlatBottom`` looks like it covers the
+    on-axis case, but subtracting the COM in floating point leaves a residual
+    r_perp ~ 2.2e-16, so the ``jnp.where`` branch is never taken there and a naive
+    ``jnp.linalg.norm`` passes it. Only the two ``slow`` Boltzmann/ABF tests caught
+    such a regression before this class existed.
+
+    Each case below places the COM *exactly* on the axis (a single guest atom whose
+    perpendicular components are exact zeros), so the guarded branch is the one that
+    runs. NaN would propagate to every component via the chain rule -- including the
+    axial one -- so asserting finiteness of the whole gradient is the sharp check.
+    """
+
+    IDX = np.array([0])
+
+    def _grad(self, R, **kw):
+        w = jnp.ones((1, 1))
+        g = jax.grad(lambda Rj: cylindrical_restraint_energy(
+            Rj, jnp.asarray(self.IDX), w, **kw))(jnp.asarray(R))
+        return np.asarray(g)
+
+    def test_gradient_finite_and_zero_inside_on_axis(self):
+        # On the axis and inside the flat bottom: force is identically zero.
+        g = self._grad([[0.0, 0.0, 0.0]], axis_hat=jnp.asarray(AXIS),
+                       origin=jnp.asarray(ORIGIN), radius=RADIUS, k_r=KR)
+        assert np.all(np.isfinite(g)), f"non-finite gradient on axis: {g}"
+        npt.assert_array_equal(g, np.zeros_like(g))
+
+    def test_gradient_finite_on_axis_with_zero_radius(self):
+        # radius=0 puts the wall *at* the axis, so r_perp == 0 is the wall itself:
+        # the radial term is active yet the force must still be finite (zero by
+        # symmetry). This is the regime the PySAGES ABF test runs in.
+        g = self._grad([[0.0, 0.0, 0.0]], axis_hat=jnp.asarray(AXIS),
+                       origin=jnp.asarray(ORIGIN), radius=0.0, k_r=KR)
+        assert np.all(np.isfinite(g)), f"non-finite gradient at r_perp=0 wall: {g}"
+        npt.assert_array_equal(g, np.zeros_like(g))
+
+    def test_gradient_finite_on_axis_with_axial_term_active(self):
+        # Exactly on the axis but outside the axial band: E > 0 and the axial force
+        # is non-zero, while the radial term is inactive. A NaN from the norm would
+        # contaminate the axial component too, so this catches leakage through the
+        # chain rule rather than just a masked-out radial term.
+        s = 9.0
+        zmax, k_z = 4.0, 2.0
+        kw = dict(axis_hat=jnp.asarray(AXIS), origin=jnp.asarray(ORIGIN),
+                  radius=RADIUS, k_r=KR, axial_min=-4.0, axial_max=zmax, k_z=k_z)
+        R = [[0.0, 0.0, s]]
+        e = float(cylindrical_restraint_energy(
+            jnp.asarray(R), jnp.asarray(self.IDX), jnp.ones((1, 1)), **kw))
+        npt.assert_allclose(e, 0.5 * k_z * (s - zmax) ** 2, rtol=1e-12)
+
+        g = self._grad(R, **kw)
+        assert np.all(np.isfinite(g)), f"non-finite gradient on axis: {g}"
+        # transverse components exactly zero, axial component the analytic force
+        npt.assert_array_equal(g[:, :2], np.zeros((1, 2)))
+        npt.assert_allclose(g[0, 2], k_z * (s - zmax), rtol=1e-12)
+
+    def test_multi_atom_com_exactly_on_axis(self):
+        # Same guard, reached through a genuine mass-weighted COM: two atoms placed
+        # symmetrically about the axis cancel exactly in x and y.
+        idx = jnp.array([0, 1])
+        w = jnp.full((2, 1), 0.5)
+        R = jnp.asarray([[1.5, -2.5, 0.0], [-1.5, 2.5, 0.0]])
+        kw = dict(axis_hat=jnp.asarray(AXIS), origin=jnp.asarray(ORIGIN),
+                  radius=RADIUS, k_r=KR)
+        g = np.asarray(jax.grad(
+            lambda Rj: cylindrical_restraint_energy(Rj, idx, w, **kw))(R))
+        assert np.all(np.isfinite(g)), f"non-finite gradient for on-axis COM: {g}"
+        npt.assert_array_equal(g, np.zeros_like(g))
+
+
 class TestContinuityAtWall:
     def test_force_vanishes_approaching_wall(self):
         # single atom guest on the x-axis; move radially through the wall
