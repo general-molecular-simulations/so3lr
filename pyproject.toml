@@ -22,7 +22,14 @@ jax = "*"
 jaxlib = "*"
 orbax-checkpoint = "*"
 e3x = "*"
-flax = "*"
+# flax is floored at 0.12.9 because 0.12.8 cannot be used with current jax.
+# jax 0.11.1 removed jax.experimental.hijax.MutableHiType, which flax 0.12.8
+# subclasses in flax/nnx/variablelib.py. With flax unpinned, a fresh CI install
+# resolved that pair and every job importing jax_md or pysages died at
+# `from flax import nnx`, before any so3lr code ran. flax 0.12.9 dropped the
+# use of that attribute, so this floor is all that is needed and jax itself
+# stays unpinned.
+flax = ">=0.12.9"
 optax = "*"
 tqdm = "*"
 wandb = "*"
