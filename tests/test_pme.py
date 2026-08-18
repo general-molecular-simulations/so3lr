@@ -617,5 +617,145 @@ class TestKspaceMethodPropagation:
         assert 'coulomb_kspace_method' not in lrk
 
 
+
+# --- End-to-end guard on the high-level ASE k-space entry point -------------
+#
+# Absolute tolerance, eV, for "the two ASE entry points must agree". They build
+# the same grid from the same spacing and hand it to the same solver, so the
+# energies come out bitwise identical in practice; 1e-8 leaves room for XLA
+# reassociation across backends while staying ~100x tighter than the smallest
+# divergence the PR #22 bug produced (1.2e-6 eV for p3m, 8e-3 eV for ewald).
+KSPACE_PATH_AGREEMENT_EV = 1e-8
+
+# Absolute tolerance, eV, for "ewald, pme and p3m describe the same physics".
+# Measured spread at the spacings below is ~1.2e-6 eV; the bug put ewald 8e-3 eV
+# away from the other two, so 1e-4 catches it with margin on both sides.
+KSPACE_METHOD_AGREEMENT_EV = 1e-4
+
+# 12.4 A cubic box, so the long-range cutoff must stay under L/2 = 6.2 A or glp
+# warns that the cutoff does not fit and the energies are meaningless.
+KSPACE_LR_CUTOFF = 6.0
+KSPACE_SMEARING = 2.0
+
+# Converged spacing per method: a real-space wavelength for ewald, a mesh
+# spacing for the two mesh methods, following the convention used above.
+KSPACE_SPACING = {
+    'ewald': KSPACE_SMEARING / 2,
+    'pme': KSPACE_SMEARING / 8,
+    'p3m': KSPACE_SMEARING / 8,
+}
+
+# Each energy costs a calculator build plus a JIT trace, and the two tests below
+# ask for overlapping ones. Compute each (path, method) pair at most once.
+_KSPACE_ENERGY_CACHE = {}
+
+
+def _kspace_water_box(package_dir):
+    """Periodic water box sized for KSPACE_LR_CUTOFF."""
+    return read(package_dir / 'tests/test_data/water_64.xyz')
+
+
+def _kspace_energy(package_dir, method, path):
+    """Energy of the water box with `method`, requested via `path`.
+
+    path='high' goes through the ASE calculator's own kspace_electrostatics /
+    kspace_smearing / kspace_spacing kwargs, letting `calculate` build the grid.
+    path='low' pre-builds the grid into atoms.info and names the solver with the
+    lower-level coulomb_kspace_method. Both must describe the same calculation.
+    """
+    key = (method, path)
+    if key in _KSPACE_ENERGY_CACHE:
+        return _KSPACE_ENERGY_CACHE[key]
+
+    atoms = _kspace_water_box(package_dir)
+    calc_kwargs = dict(
+        workdir=MODEL_DIR,
+        lr_cutoff=KSPACE_LR_CUTOFF,
+        dispersion_energy_cutoff_lr_damping=2.,
+        from_file=True,
+        dtype=np.float64,
+    )
+
+    if path == 'high':
+        calc_kwargs.update(
+            kspace_electrostatics=method,
+            kspace_smearing=KSPACE_SMEARING,
+            kspace_spacing=KSPACE_SPACING[method],
+        )
+    else:
+        import jaxpme
+
+        # Match calculate()'s cell convention (column vectors) so the grid is
+        # the same object the high-level path would have built.
+        cell = jnp.array(np.array(atoms.get_cell()), dtype=DTYPE).T
+        spacing = jnp.array([KSPACE_SPACING[method]])
+        if method == 'ewald':
+            k_grid = jaxpme.kspace.get_kgrid_ewald(cell, lr_wavelength=spacing)
+        else:
+            k_grid = jaxpme.kspace.get_kgrid_mesh(cell, mesh_spacing=spacing)
+        atoms.info['k_grid'] = np.array(k_grid)
+        atoms.info['k_smearing'] = np.array([KSPACE_SMEARING], dtype=DTYPE)
+        calc_kwargs['coulomb_kspace_method'] = method
+
+    atoms.calc = AseCalculatorSparse.create_from_workdir(**calc_kwargs)
+    energy = float(atoms.get_potential_energy())
+    assert np.isfinite(energy), f"{method} via '{path}' gave a non-finite energy"
+
+    _KSPACE_ENERGY_CACHE[key] = energy
+    return energy
+
+
+class TestKspaceHighLevelPathEnergies:
+    """The high-level ASE k-space kwargs must produce correct energies.
+
+    Regression test for PR #22, at the level the bug actually mattered. Every
+    other k-space test in this file names the solver with the lower-level
+    ``coulomb_kspace_method`` and pre-builds the grid into ``atoms.info``, so
+    all of them bypassed the broken path: ``kspace_electrostatics`` chose the
+    grid but never reached the solver, which silently stayed on its 'pme'
+    default. TestKspaceMethodPropagation pins the kwarg plumbing against a stub;
+    these two tests pin the numbers with a real model, and so also catch a grid
+    and solver that disagree for some future reason other than that one kwarg.
+    """
+
+    @pytest.mark.parametrize('method', ['ewald', 'pme', 'p3m'])
+    def test_high_level_matches_low_level(self, method, package_dir):
+        """Both ASE entry points must agree for the same requested method."""
+        high = _kspace_energy(package_dir, method, 'high')
+        low = _kspace_energy(package_dir, method, 'low')
+
+        assert abs(high - low) < KSPACE_PATH_AGREEMENT_EV, (
+            f"kspace_electrostatics='{method}' gave {high!r} eV but "
+            f"coulomb_kspace_method='{method}' with the same grid gave {low!r} eV "
+            f"(difference {abs(high - low):.3e} eV). The high-level kwarg is not "
+            f"reaching the solver, so the grid and the solver disagree."
+        )
+
+    def test_methods_agree_through_high_level_path(self, package_dir):
+        """ewald, pme and p3m are three algorithms for one physical energy.
+
+        Requested through the high-level kwargs they must land on the same
+        number. This is the assertion the PR #22 bug failed outright: 'ewald'
+        was 8e-3 eV away from the other two, and 'p3m' was *bitwise identical*
+        to 'pme' because both were running the PME solver.
+        """
+        energies = {
+            method: _kspace_energy(package_dir, method, 'high')
+            for method in ('ewald', 'pme', 'p3m')
+        }
+
+        for a, b in (('ewald', 'pme'), ('ewald', 'p3m'), ('pme', 'p3m')):
+            assert abs(energies[a] - energies[b]) < KSPACE_METHOD_AGREEMENT_EV, (
+                f"{a} gave {energies[a]!r} eV and {b} gave {energies[b]!r} eV "
+                f"(difference {abs(energies[a] - energies[b]):.3e} eV); these are "
+                f"different algorithms for the same quantity and must agree."
+            )
+
+        assert energies['pme'] != energies['p3m'], (
+            "pme and p3m returned bitwise identical energies, which means both "
+            "ran the same solver -- exactly the PR #22 failure mode."
+        )
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
