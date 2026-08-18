@@ -553,5 +553,69 @@ class TestPMEJaxMD:
         assert np.isfinite(energy), "Energy is not finite"
 
 
+class TestKspaceMethodPropagation:
+    """`kspace_electrostatics` must configure the solver, not just the grid.
+
+    Regression test. ``AseCalculatorSparse.create_from_workdir`` used to accept
+    ``kspace_electrostatics`` and use it only when building the k-grid in
+    ``calculate``; the solver inside the model is configured from
+    ``long_range_kwargs['coulomb_kspace_method']``, which defaults to 'pme'.
+    Requesting 'ewald' therefore produced an Ewald k-point set evaluated by the
+    PME solver -- wrong energies, no error. The CLI was unaffected because it
+    populates ``coulomb_kspace_method`` itself.
+    """
+
+    @staticmethod
+    def _captured_long_range_kwargs(monkeypatch, **calc_kwargs):
+        """Build a calculator, capturing long_range_kwargs without loading a model."""
+        captured = {}
+
+        class _Stub:
+            @staticmethod
+            def create_from_workdir(*args, **kwargs):
+                captured.update(kwargs.get('long_range_kwargs', {}))
+                return object()
+
+        monkeypatch.setattr(
+            'so3lr.mlff.calculators.ase_calculator.PotentialSparse', _Stub
+        )
+        # __init__ inspects the potential; bypass it, we only want the kwargs.
+        monkeypatch.setattr(
+            AseCalculatorSparse, '__init__', lambda self, **kw: None
+        )
+        AseCalculatorSparse.create_from_workdir(workdir=MODEL_DIR, **calc_kwargs)
+        return captured
+
+    @pytest.mark.parametrize('method', ['ewald', 'pme', 'p3m'])
+    def test_method_reaches_the_solver(self, monkeypatch, method):
+        lrk = self._captured_long_range_kwargs(
+            monkeypatch,
+            kspace_electrostatics=method,
+            kspace_smearing=4.0,
+            kspace_spacing=0.5,
+        )
+        assert lrk['coulomb_kspace_method'] == method, (
+            f"kspace_electrostatics='{method}' must select the '{method}' solver; "
+            f"got '{lrk.get('coulomb_kspace_method')}'. The grid and the solver "
+            f"would disagree."
+        )
+
+    def test_explicit_low_level_spelling_still_wins(self, monkeypatch):
+        """An explicit coulomb_kspace_method overrides the high-level name."""
+        lrk = self._captured_long_range_kwargs(
+            monkeypatch,
+            kspace_electrostatics='ewald',
+            kspace_smearing=4.0,
+            kspace_spacing=0.5,
+            coulomb_kspace_method='p3m',
+        )
+        assert lrk['coulomb_kspace_method'] == 'p3m'
+
+    def test_absent_when_kspace_disabled(self, monkeypatch):
+        """No k-space requested -> the key is not injected, preserving the default."""
+        lrk = self._captured_long_range_kwargs(monkeypatch)
+        assert 'coulomb_kspace_method' not in lrk
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
