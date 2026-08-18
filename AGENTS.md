@@ -1,0 +1,118 @@
+# Notes for coding agents
+
+Guidance for an AI assistant asked to **modify this repository**. If you are
+instead helping someone *use* SO3LR — writing settings files, choosing cutoffs,
+calling the API — read
+<https://so3lr.github.io/advanced/llm-agents/> instead; the traps are different.
+
+Human contributors: see `DEVELOPERS.md` and
+<https://so3lr.github.io/contributing/>.
+
+## Setup
+
+Python **3.12+** is mandatory (`pyproject.toml` pins `python = ">=3.12"`); older
+interpreters fail at install with a resolver error. Install JAX first, then the
+package:
+
+```sh
+pip install jax          # or "jax[cuda12]" on a GPU box
+pip install -e .
+pip install pytest
+```
+
+Installing pulls four git forks (`jraph`, `jax-md`, `glp`, `jax-pme`), so it
+needs network access to GitHub and is not fast. Do not assume a working
+environment — check `python -c "import so3lr, jax"` before concluding that a
+failure is a code bug.
+
+## Tests
+
+```sh
+pytest tests/                                # short suite (the default)
+pytest tests/ --full                         # everything, incl. slow tests
+pytest tests/test_potential.py -v            # one file
+pytest tests/test_integration.py --shard 1/3 # how CI splits the slow ones
+```
+
+By default, tests marked `@pytest.mark.slow` are skipped and the parametrised
+molecule tests (`atat`, `dha`, `bb`) run only `dha`. Full runs take tens of
+minutes; prefer targeting the file that covers your change.
+
+| Area | Tests |
+|---|---|
+| Model name resolution | `tests/test_model_registry.py` |
+| ASE calculator, observables | `tests/test_ase.py`, `tests/test_observables.py` |
+| k-space electrostatics | `tests/test_pme.py` |
+| CLI surface | `tests/test_cli*.py` |
+| End-to-end MD | `tests/test_integration.py` |
+| Docs examples | `tests/test_readme.py` |
+
+## Invariants worth knowing before you edit
+
+**`so3lr/model_registry.py` is the single source of truth for model names.** The
+CLI, the ASE calculator and the Python API all resolve through it. `_CANONICAL`
+maps one name to one directory; `_FLOATING_ALIASES` are pointers that move
+between releases. `DEFAULT_MODEL` is deliberately pinned to a *canonical* name
+so the no-argument default cannot drift when an alias is repointed. Repointing
+an alias silently changes everyone's results — say so in the changelog.
+
+**`so3lr/__init__.py` must stay import-cheap.** It uses PEP 562 lazy attributes
+so that `import so3lr` does not pull in JAX, Flax or JAX-MD; `so3lr --help`
+depends on this. Adding a module-level import of a heavy dependency is a
+regression even though nothing will fail.
+
+**The CLI and ASE paths are separate and have drifted before.** `so3lr/cli/`
+builds its own `long_range_kwargs`, and `so3lr/mlff/calculators/ase_calculator.py`
+builds another. A fix applied to one is not automatically in the other — this
+exact split produced a bug where `kspace_electrostatics` selected the k-space
+grid but not the solver on the ASE side only (PR #22). When you change how a
+model is configured, check both.
+
+**Training and fine-tuning are separate loops.** `run_training` and
+`run_fine_tuning` in `so3lr/mlff/config/from_config.py` do not share a code
+path, and they read different `training:` keys — fine-tuning ignores `use_ema`,
+`early_stopping_patience` and `stage_two_*` entirely. A feature added to one
+does not appear in the other, and nothing warns about it.
+
+**Two model generations produce different output keys.** `so3lr-s/m/l` emit
+`a0_ratios`, `c6_ratios` and NLH repulsion; the legacy `so3lr` emits
+`hirshfeld_ratios` and ZBL. Code touching observables must handle both — see
+the `legacy` branches in `so3lr/mlff/nn/observable/observable_sparse.py`.
+
+**`head_index` is not fully plumbed.** `ModelSpec.head_index` exists, but the
+`make_so3lr` / `make_potential_fn` / jax-md paths still assume head 5 (there is
+a hardcoded `jnp.eye(16)[5]` in `so3lr/jaxmd_utils.py`). A model family needing
+a different head requires threading it through those entry points first.
+
+**Failures should exit non-zero.** The CLI is used in shell chains and SLURM
+dependencies; keep `sys.exit(1)` on error paths.
+
+**Unknown settings-YAML keys warn rather than raise**, on purpose — one typo
+should not abort a queued multi-hour job. Preserve that, and keep new keys
+listed in `YAML_DEFAULTS` or `KNOWN_YAML_KEYS_EXTRA` in `so3lr/cli/so3lr_cli.py`
+so the did-you-mean validator does not flag them as typos.
+
+## Conventions
+
+- Match the surrounding style; the codebase is not uniformly formatted, so
+  follow the file you are in rather than reformatting it.
+- Explain *why* in comments when behaviour is surprising. Several non-obvious
+  decisions here are load-bearing and already carry such comments — do not strip
+  them.
+- Add or update tests with any behaviour change.
+- User-facing changes need a docs update at <https://so3lr.github.io/>. The
+  reference tables that mirror code are listed in that site's README; a stale
+  row there is worse than a missing one.
+- Do not commit model checkpoints or datasets beyond what `so3lr/models/`
+  already ships.
+
+## Things that are not bugs
+
+- The CLI refuses to overwrite an existing trajectory. This is deliberate;
+  `--overwrite` opts in.
+- Geometry relaxation runs before MD by default, and its frames are written to
+  the same trajectory file.
+- `nvt-langevin` is not bit-reproducible across a restart: the PRNG stream is
+  reseeded from `--seed`, by design.
+- SO3LR is single-device. There is no `pmap`/sharding, and adding one is a
+  substantial change rather than a fix.
