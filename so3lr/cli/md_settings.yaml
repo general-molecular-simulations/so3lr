@@ -78,7 +78,8 @@ kspace_spacing: 2.0                       # Grid spacing for k-space summation i
 kspace_interp_nodes: 4                    # Number of interpolation nodes for PME/P3M [Default: 4]
 
 # Charge embedding
-charge_embed_total_charge: null            # Total charge seen by the charge EMBEDDING only: null = follow total_charge, 0.0 = neutral embedding. Equilibration always uses total_charge. [Default: null]
+charge_embed_total_charge: null            # Total charge seen by the charge EMBEDDING: null = follow total_charge, 0.0 = neutral embedding. [Default: null]  (CLI: --charge-embed-total-charge)
+charge_equilibration_total_charge: null    # Total charge that charge EQUILIBRATION conserves to: null = follow total_charge. Independent of the line above. [Default: null]  (CLI: --charge-equilibration-total-charge)
 kspace_npt_cycles: null                   # Frequency (in MD cycles) to re-tune k-space grid in NPT [Default: null]
 
 ## K-space Dispersion (optional, for periodic systems — separate from electrostatics)

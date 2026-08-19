@@ -44,9 +44,13 @@ def init_so3krates_sparse(
         layers_behave_like_identity_fn_at_init: bool = False,
         output_is_zero_at_init: bool = True,
         use_charge_embed: bool = False,
-        # Override the total charge seen by the charge embedding only, leaving
-        # charge equilibration on the true total_charge. None -> no override.
+        # Override the total charge seen by the charge embedding. None -> follow
+        # the graph's total_charge.
         charge_embed_total_charge: Optional[float] = None,
+        # Override the total charge that charge equilibration conserves to.
+        # None -> follow the graph's total_charge. Independent of the above, so
+        # either path can be redirected without touching the other.
+        charge_equilibration_total_charge: Optional[float] = None,
         use_spin_embed: bool = False,
         energy_regression_dim: int = 128,
         energy_final_mlp_widths: Optional[Sequence[int]] = None,
@@ -109,6 +113,7 @@ def init_so3krates_sparse(
         prop_keys=None,
         output_is_zero_at_init=output_is_zero_at_init,
         regression_dim=energy_regression_dim,
+        total_charge_override=charge_equilibration_total_charge,
         activation_fn=getattr(
             nn.activation, energy_activation_fn
         ) if energy_activation_fn != 'identity' else lambda u: u,

@@ -12,6 +12,7 @@ def make_ase_calculator(
         dtype=np.float32,
         model=None,
         charge_embed_total_charge=None,
+        charge_equilibration_total_charge=None,
         **kwargs
 ):
     # ``workdir`` (legacy kwarg) takes precedence over ``model``; either may be a
@@ -28,6 +29,7 @@ def make_ase_calculator(
         dtype=dtype,
         head_index=spec.head_index,
         charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge,
         **kwargs
     )
 

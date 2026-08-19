@@ -34,7 +34,8 @@ def load_model_from_workdir(
         long_range_kwargs: Dict[str, Any] = None,
         from_file: bool = False,
         output_intermediate_quantities: Optional[Sequence[str]] = None,
-        charge_embed_total_charge: Optional[float] = None
+        charge_embed_total_charge: Optional[float] = None,
+        charge_equilibration_total_charge: Optional[float] = None
 ):
     """Load model and parameters from workdir with advanced features support."""
     cfg = load_hyperparameters(workdir)
@@ -45,6 +46,7 @@ def load_model_from_workdir(
     # from_config.make_so3krates_sparse_from_config. Kept off ``cfg.model`` so it
     # cannot be mistaken for a trained architecture choice.
     cfg.charge_embed_total_charge = charge_embed_total_charge
+    cfg.charge_equilibration_total_charge = charge_equilibration_total_charge
 
     dispersion_energy_bool = cfg.model.dispersion_energy_bool
     electrostatic_energy_bool = cfg.model.electrostatic_energy_bool
@@ -235,7 +237,8 @@ class PotentialSparse(MachineLearningPotential):
             dtype=jnp.float32,
             model: str = 'so3krates',
             output_intermediate_quantities: Optional[Sequence[str]] = None,
-            charge_embed_total_charge: Optional[float] = None
+            charge_embed_total_charge: Optional[float] = None,
+            charge_equilibration_total_charge: Optional[float] = None
     ):
         """
         Create potential from workdir with full feature support.
@@ -249,8 +252,10 @@ class PotentialSparse(MachineLearningPotential):
             model: Model type ('so3krates')
             output_intermediate_quantities: Optional sequence of intermediate quantities to output
             charge_embed_total_charge: Override the total charge seen by the charge
-                embedding only (None -> use the system's total charge). Charge
-                equilibration is unaffected.
+                embedding (None -> use the system's total charge).
+            charge_equilibration_total_charge: Override the total charge that charge
+                equilibration conserves to (None -> use the system's total charge).
+                Independent of the embedding override.
 
         Returns:
             PotentialSparse instance
@@ -272,7 +277,8 @@ class PotentialSparse(MachineLearningPotential):
             model=model,
             long_range_kwargs=long_range_kwargs,
             output_intermediate_quantities=output_intermediate_quantities,
-            charge_embed_total_charge=charge_embed_total_charge
+            charge_embed_total_charge=charge_embed_total_charge,
+            charge_equilibration_total_charge=charge_equilibration_total_charge
         )
 
         # Handle multi-theory level support

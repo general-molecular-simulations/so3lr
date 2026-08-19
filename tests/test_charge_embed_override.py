@@ -56,7 +56,8 @@ def _charged_fragment():
     return atoms
 
 
-def _energy(total_charge, charge_embed_total_charge):
+def _energy(total_charge, charge_embed_total_charge,
+            charge_equilibration_total_charge=None):
     from so3lr import So3lrCalculator
 
     atoms = _charged_fragment()
@@ -67,6 +68,7 @@ def _energy(total_charge, charge_embed_total_charge):
         model=MODEL,
         lr_cutoff=LR_CUTOFF,
         charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge,
     )
     return float(atoms.get_potential_energy())
 
@@ -188,6 +190,77 @@ class TestChargeEmbedOverrideEntryPoints:
         )
 
 
+class TestChargeEquilibrationOverride:
+    """`charge_equilibration_total_charge`: the symmetric knob.
+
+    The two paths are configured independently, so all four combinations of
+    (embedded charge, conserved charge) are reachable. Before this existed only
+    three were: `embed Q / equil 0` had no expression.
+
+    Note the asymmetry in meaning, which is why the defaults stay at None: the
+    embedding is a feature input, whereas equilibration *enforces* sum(q) = Q.
+    Overriding the latter deliberately conserves to a charge the system does not
+    have.
+    """
+
+    @pytest.fixture(scope='class')
+    def four(self):
+        """The four (embed, equilibrate) combinations on a Q = -1 fragment."""
+        return {
+            'A': _energy(-1, None, None),   # embed Q, equil Q -- the default
+            'B': _energy(-1, 0.0, None),    # embed 0, equil Q
+            'C': _energy(-1, 0.0, 0.0),     # embed 0, equil 0
+            'D': _energy(-1, None, 0.0),    # embed Q, equil 0 -- new
+        }
+
+    def test_passthrough_is_exact(self):
+        """equilibration override == true charge is a bitwise no-op."""
+        assert _energy(-1, None, -1.0) == _energy(-1, None, None)
+
+    def test_override_changes_the_energy(self, four):
+        assert four['D'] != four['A'], (
+            'charge_equilibration_total_charge=0.0 did not change the energy, so it '
+            'never reached PartialChargesSparse'
+        )
+
+    def test_all_four_combinations_are_distinct(self, four):
+        """The two knobs are independent, not two names for one switch."""
+        assert len(set(four.values())) == 4, (
+            f'expected four distinct energies, got {four}. The two overrides are not '
+            f'acting independently.'
+        )
+
+    def test_equals_declaring_the_system_neutral(self, four):
+        """Overriding both is exactly equivalent to a neutral system.
+
+        Strong cross-check on the equilibration path: conserving to 0 while
+        embedding 0 must reproduce `total_charge = 0` outright.
+        """
+        neutral = _energy(0, None, None)
+        assert abs(four['C'] - neutral) < 1e-10, (
+            f"embed 0 / equil 0 gave {four['C']!r} but a genuinely neutral system "
+            f"gave {neutral!r}; the equilibration override is not equivalent to "
+            f"setting the total charge."
+        )
+
+    def test_reaches_every_entry_point(self):
+        from so3lr import So3lr, So3lrPotential
+
+        assert So3lrPotential(
+            model=MODEL, lr_cutoff=LR_CUTOFF, charge_equilibration_total_charge=0.0
+        ) is not None
+        assert So3lr(
+            model=MODEL, lr_cutoff=LR_CUTOFF, charge_equilibration_total_charge=0.0
+        ) is not None
+
+    def test_yaml_key_is_known(self):
+        from so3lr.cli.so3lr_cli import KNOWN_YAML_KEYS_EXTRA, YAML_DEFAULTS
+
+        assert 'charge_equilibration_total_charge' in (
+            KNOWN_YAML_KEYS_EXTRA | set(YAML_DEFAULTS)
+        )
+
+
 class TestChargeEmbedOverrideCLI:
     """End to end through the CLI, both routes.
 
@@ -246,6 +319,9 @@ class TestChargeEmbedOverrideCLI:
         null = self._run_nvt(tmp_path / 'b', 'null', 'charge_embed_total_charge: null')
         minus = self._run_nvt(tmp_path / 'c', 'minus', 'charge_embed_total_charge: -1.0')
         zero = self._run_nvt(tmp_path / 'd', 'zero', 'charge_embed_total_charge: 0.0')
+        equil = self._run_nvt(
+            tmp_path / 'e', 'equil', 'charge_equilibration_total_charge: 0.0',
+        )
 
         # Absent, explicit null, and the true charge all mean the same thing.
         assert np.array_equal(absent, null), 'null must behave as if the key were absent'
@@ -256,6 +332,14 @@ class TestChargeEmbedOverrideCLI:
         assert not np.array_equal(absent, zero), (
             'charge_embed_total_charge: 0.0 did not change the trajectory, so it '
             'never reached the model through the settings file'
+        )
+        # The equilibration key works through the same route, and is a distinct
+        # knob -- overriding it must not coincide with overriding the embedding.
+        assert not np.array_equal(absent, equil), (
+            'charge_equilibration_total_charge: 0.0 did not change the trajectory'
+        )
+        assert not np.array_equal(zero, equil), (
+            'the two keys produced the same trajectory, so they are not independent'
         )
 
     @staticmethod

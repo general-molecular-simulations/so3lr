@@ -12,7 +12,8 @@ def make_so3lr(
     model=None,
     workdir=None,
     output_intermediate_quantities=None,
-    charge_embed_total_charge=None
+    charge_embed_total_charge=None,
+    charge_equilibration_total_charge=None
 ):
     # ``workdir`` (legacy arg) takes precedence over ``model``; either may be a
     # bundled model name or a filesystem path. None -> DEFAULT_MODEL.
@@ -28,7 +29,8 @@ def make_so3lr(
             neighborlist_format_lr='sparse'
         ),
         output_intermediate_quantities=output_intermediate_quantities,
-        charge_embed_total_charge=charge_embed_total_charge
+        charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge
     )
 
     # Change shapes to allow for multiple theory levels, only needed for https://github.com/kabylda/mlff/tree/v1.0-tfds-pme version

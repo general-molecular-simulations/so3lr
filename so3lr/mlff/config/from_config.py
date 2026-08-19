@@ -147,6 +147,7 @@ def make_so3krates_sparse_from_config(
         input_convention=model_config.input_convention,
         use_charge_embed=model_config.use_charge_embed,
         charge_embed_total_charge=getattr(config, 'charge_embed_total_charge', None),
+        charge_equilibration_total_charge=getattr(config, 'charge_equilibration_total_charge', None),
         use_spin_embed=model_config.use_spin_embed,
         energy_regression_dim=model_config.energy_regression_dim,
         energy_final_mlp_widths=model_config.get('energy_final_mlp_widths', None),

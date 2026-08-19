@@ -589,6 +589,19 @@ class PartialChargesSparse(BaseSubModule):
     regression_dim: int = None
     activation_fn: Callable[[Any], Any] = lambda u: u
     output_is_zero_at_init: bool = True
+    # Inference-time override for the charge that equilibration conserves to.
+    # None -> use the graph's ``total_charge`` (the default; behaviour
+    # unchanged). A float -> conserve to that value instead.
+    #
+    # Note this is a stronger statement than the embedding's counterpart: the
+    # embedding is a feature input, whereas this term *enforces* sum(q) = Q. An
+    # override here deliberately conserves to a charge the system does not have,
+    # which is a research knob rather than a correction. Left at None, nothing
+    # changes.
+    #
+    # Does not apply to the ``residue_charge`` path: when per-residue charges are
+    # supplied they keep taking precedence, as before.
+    total_charge_override: Optional[float] = None
     module_name: str = 'partial_charges_sparse'
 
     def setup(self):
@@ -631,6 +644,11 @@ class PartialChargesSparse(BaseSubModule):
         node_mask = inputs['node_mask']  # (num_nodes)
         graph_mask = inputs['graph_mask']  # (num_graphs)
         total_charge = inputs['total_charge']  # (num_graphs)
+
+        if self.total_charge_override is not None:
+            # Applied before the residue rebinding below, so residue_charge
+            # still wins when it is provided.
+            total_charge = jnp.full_like(total_charge, self.total_charge_override)
 
         num_graphs = len(graph_mask)
         num_nodes = len(node_mask)
