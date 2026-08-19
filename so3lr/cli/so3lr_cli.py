@@ -781,6 +781,8 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     # K-space electrostatics
     'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing',
     'kspace_interp_nodes', 'kspace_npt_cycles',
+    # Charge embedding override (default None -> follow total_charge)
+    'charge_embed_total_charge',
     # K-space dispersion
     'kspace_dispersion', 'kspace_dispersion_smearing',
     'kspace_dispersion_spacing', 'kspace_dispersion_interp_nodes',

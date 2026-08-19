@@ -857,6 +857,7 @@ def load_model(
     kspace_interp_nodes: int = 4,
     kspace_dispersion: str = None,
     kspace_dispersion_interp_nodes: int = 4,
+    charge_embed_total_charge: float = None,
     **kwargs
 ) -> PotentialSparse:
     """
@@ -870,6 +871,10 @@ def load_model(
                                 energy damping in Å. Defaults to 2.0.
         kspace_dispersion (str, optional): Method for dispersion PME ('ewald', 'pme', or None).
         kspace_dispersion_interp_nodes (int, optional): Interpolation nodes for dispersion PME.
+        charge_embed_total_charge (float, optional): Override the total charge seen by
+                                the charge embedding only. None (default) uses the
+                                system's total charge. Charge equilibration always
+                                uses the true total charge.
 
     Returns:
         PotentialSparse: The loaded MLFF model.
@@ -910,6 +915,7 @@ def load_model(
             from_file=from_file_flag,
             long_range_kwargs=long_range_kw,
             dtype=precision,
+            charge_embed_total_charge=charge_embed_total_charge,
             **kwargs
         )
 
@@ -2168,6 +2174,7 @@ def perform_md(
     kspace_smearing = all_settings.get('kspace_smearing', 4.0)
     kspace_spacing = all_settings.get('kspace_spacing', 2.0)
     kspace_interp_nodes = all_settings.get('kspace_interp_nodes', 4)
+    charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
     kspace_npt_cycles = all_settings.get('kspace_npt_cycles', 100)
 
     # Dispersion PME settings
@@ -2517,6 +2524,7 @@ def perform_md(
         kspace_interp_nodes=kspace_interp_nodes,
         kspace_dispersion=kspace_dispersion,
         kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
+        charge_embed_total_charge=charge_embed_total_charge,
         **patched_potential_kwargs
     )
 
@@ -3322,6 +3330,7 @@ def perform_min(
     kspace_smearing = all_settings.get('kspace_smearing', 4.0)
     kspace_spacing = all_settings.get('kspace_spacing', 2.0)
     kspace_interp_nodes = all_settings.get('kspace_interp_nodes', 4)
+    charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
 
     # Settings for the minimization
     min_cycles = all_settings.get('min_cycles')
@@ -3395,6 +3404,7 @@ def perform_min(
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics,
         kspace_interp_nodes=kspace_interp_nodes,
+        charge_embed_total_charge=charge_embed_total_charge,
     )
 
     # Setting up the model

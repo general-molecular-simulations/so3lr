@@ -76,6 +76,9 @@ kspace_electrostatics: null               # K-space method: null / "ewald" / "pm
 kspace_smearing: 4.0                      # Smearing width for k-space summation in Å [Default: 4.0]
 kspace_spacing: 2.0                       # Grid spacing for k-space summation in Å [Default: 2.0]
 kspace_interp_nodes: 4                    # Number of interpolation nodes for PME/P3M [Default: 4]
+
+# Charge embedding
+charge_embed_total_charge: null            # Total charge seen by the charge EMBEDDING only: null = follow total_charge, 0.0 = neutral embedding. Equilibration always uses total_charge. [Default: null]
 kspace_npt_cycles: null                   # Frequency (in MD cycles) to re-tune k-space grid in NPT [Default: null]
 
 ## K-space Dispersion (optional, for periodic systems — separate from electrostatics)

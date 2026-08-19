@@ -13,6 +13,7 @@ def make_potential_fn(
         dispersion_kspace_method=None,  # None, 'ewald', or 'pme'
         dispersion_kspace_interp_nodes=4,
         model=None,
+        charge_embed_total_charge=None,
         **kwargs
 ):
     # ``workdir`` (legacy kwarg) takes precedence over ``model``; either may be a
@@ -39,5 +40,6 @@ def make_potential_fn(
         from_file=kwargs.pop('from_file', from_file),
         long_range_kwargs=long_range_kw,
         dtype=dtype,
+        charge_embed_total_charge=charge_embed_total_charge,
         **kwargs
     )

@@ -11,6 +11,7 @@ def make_ase_calculator(
         calculate_hessian=False,
         dtype=np.float32,
         model=None,
+        charge_embed_total_charge=None,
         **kwargs
 ):
     # ``workdir`` (legacy kwarg) takes precedence over ``model``; either may be a
@@ -26,6 +27,7 @@ def make_ase_calculator(
         calculate_stress=calculate_stress,
         dtype=dtype,
         head_index=spec.head_index,
+        charge_embed_total_charge=charge_embed_total_charge,
         **kwargs
     )
 

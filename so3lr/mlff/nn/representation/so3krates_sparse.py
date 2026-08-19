@@ -44,6 +44,9 @@ def init_so3krates_sparse(
         layers_behave_like_identity_fn_at_init: bool = False,
         output_is_zero_at_init: bool = True,
         use_charge_embed: bool = False,
+        # Override the total charge seen by the charge embedding only, leaving
+        # charge equilibration on the true total_charge. None -> no override.
+        charge_embed_total_charge: Optional[float] = None,
         use_spin_embed: bool = False,
         energy_regression_dim: int = 128,
         energy_final_mlp_widths: Optional[Sequence[int]] = None,
@@ -70,7 +73,8 @@ def init_so3krates_sparse(
     embedding_modules = make_embedding_modules(
         num_features=num_features,
         use_spin_embed=use_spin_embed,
-        use_charge_embed=use_charge_embed
+        use_charge_embed=use_charge_embed,
+        charge_embed_total_charge=charge_embed_total_charge
     )
 
     geometry_embed = GeometryEmbedSparse(
