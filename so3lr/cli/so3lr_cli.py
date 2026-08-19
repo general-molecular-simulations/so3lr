@@ -622,6 +622,12 @@ def common_model_options(f: Callable) -> Callable:
                      help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')(f)
     f = click.option('--total-charge', default=DEFAULT_TOTAL_CHARGE, type=int,
                      help=f'Total charge of the system. [default: {DEFAULT_TOTAL_CHARGE}]')(f)
+    f = click.option('--charge-embed-total-charge', 'charge_embed_total_charge',
+                     default=None, type=float,
+                     help='Total charge seen by the charge EMBEDDING only. Unset '
+                          '(default) follows --total-charge; 0 embeds a neutral '
+                          'system. Charge equilibration always uses the true total '
+                          'charge. [default: follow --total-charge]')(f)
     f = click.option('--spin', 'num_unpaired_electrons', default=DEFAULT_SPIN, type=int,
                      help=f'Spin: number of unpaired electrons (multiplicity - 1; equivalently, multiplicity = spin + 1). [default: {DEFAULT_SPIN}]')(f)
     return f
@@ -1155,6 +1161,10 @@ def run_md_simulation(
     kspace_spacing: float = DEFAULT_KSPACE_SPACING,
     kspace_interp_nodes: int = DEFAULT_KSPACE_INTERP_NODES,
     kspace_npt_cycles: Optional[int] = None,
+    # Charge embedding: overrides only what the embedding sees, never
+    # equilibration. Must be declared here -- nvt_md(**kwargs) forwards every
+    # common_model_options flag straight into this explicit signature.
+    charge_embed_total_charge: Optional[float] = None,
 ) -> None:
     """Shared runner for NVT, NVT-Langevin, NPT, and NVE MD simulations."""
     if not input_file or help:
@@ -1213,6 +1223,7 @@ def run_md_simulation(
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
+        'charge_embed_total_charge': charge_embed_total_charge,
     }
 
     # Only insert kspace_npt_cycles when the user explicitly passed
@@ -1300,6 +1311,7 @@ def fire_optimization(
     kspace_spacing: float,
     kspace_interp_nodes: int,
     kspace_npt_cycles: Optional[int],
+    charge_embed_total_charge: Optional[float],
     help: bool,
     overwrite: bool = False,
 ) -> None:
@@ -1401,6 +1413,7 @@ def fire_optimization(
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
+        'charge_embed_total_charge': charge_embed_total_charge,
         'overwrite': overwrite,
     }
 
@@ -1543,6 +1556,10 @@ def nve_md(**kwargs) -> None:
                    '[default: forces,dipole_vec,hirshfeld_ratios]')
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
               help='Use JIT compilation for speed. [default: enabled]')
+@click.option('--charge-embed-total-charge', 'charge_embed_total_charge', default=None, type=float,
+              help='Total charge seen by the charge EMBEDDING only. Unset (default) '
+                   'follows --total-charge; 0 embeds a neutral system. Charge '
+                   'equilibration always uses the true total charge.')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def eval_model(
@@ -1557,6 +1574,7 @@ def eval_model(
     dispersion_damping: float,
     total_charge: Optional[int],
     num_unpaired_electrons: Optional[int],
+    charge_embed_total_charge: Optional[float],
     # Evaluation settings
     batch_size: int,
     targets: str,
@@ -1665,6 +1683,7 @@ def eval_model(
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
         overwrite=overwrite,
+        charge_embed_total_charge=charge_embed_total_charge,
     )
     logger.info("=" * 60)
     logger.info("Evaluation completed successfully!")
@@ -1866,6 +1885,9 @@ def tune_ewald(
     kspace_spacing: float,
     kspace_interp_nodes: int,
     kspace_npt_cycles: Optional[int],
+    # Accepted because common_model_options supplies it; k-space tuning does
+    # not apply it, since what is being tuned is grid convergence.
+    charge_embed_total_charge: Optional[float],
     # Help option
     help: bool
 ) -> None:

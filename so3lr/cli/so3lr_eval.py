@@ -236,6 +236,7 @@ def evaluate_so3lr_on(
         total_charge: Optional[int] = None,
         num_unpaired_electrons: Optional[int] = None,
         overwrite: bool = False,
+        charge_embed_total_charge: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset and calculate error metrics.
@@ -398,7 +399,8 @@ def evaluate_so3lr_on(
         lr_cutoff=lr_cutoff,
         dispersion_energy_cutoff_lr_damping=dispersion_damping,
         calculate_forces=True,
-        output_intermediate_quantities=output_intermediate_quantities
+        output_intermediate_quantities=output_intermediate_quantities,
+        charge_embed_total_charge=charge_embed_total_charge
     )
 
     # Read the short-range cutoff from the resolved model's hyperparameters.

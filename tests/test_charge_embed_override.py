@@ -16,6 +16,8 @@ parameter tree and a released checkpoint stops loading. Overriding the input kee
 every trained weight in place -- which `test_released_checkpoint_still_loads`
 pins directly.
 """
+import pathlib
+
 import numpy as np
 import pytest
 
@@ -28,6 +30,14 @@ MODEL = 'so3lr-s'
 # Finite cluster: the long-range cutoff must be large or the electrostatics are
 # truncated nonsense (see the lr_cutoff note in the PR description).
 LR_CUTOFF = 1000.0
+
+# Same fragment as _charged_fragment(), for the CLI subprocess runs.
+_CLI_INPUT_XYZ = (
+    "7\nacetate fragment, net charge -1\n"
+    "C   0.00  0.00  0.00\nH   1.09  0.00  0.00\nH  -0.36  1.03  0.00\n"
+    "H  -0.36 -0.51  0.89\nC  -0.70 -0.80 -1.20\nO  -0.20 -1.90 -1.40\n"
+    "O  -1.80 -0.50 -1.90\n"
+)
 
 
 def _charged_fragment():
@@ -130,6 +140,25 @@ class TestChargeEmbedOverride:
         """Not a boolean: any charge can be embedded, 0.0 is just the useful case."""
         assert np.isfinite(_energy(-1, value))
 
+    def test_forces_change_too(self):
+        """Forces, not just energy -- the measured effect is a force MAE change."""
+        from so3lr import So3lrCalculator
+
+        def forces(override):
+            atoms = _charged_fragment()
+            atoms.info['charge'] = -1
+            atoms.calc = So3lrCalculator(
+                model=MODEL, lr_cutoff=LR_CUTOFF,
+                charge_embed_total_charge=override,
+            )
+            return atoms.get_forces()
+
+        f_default, f_zero = forces(None), forces(0.0)
+        assert np.all(np.isfinite(f_default)) and np.all(np.isfinite(f_zero))
+        assert not np.array_equal(f_default, f_zero), (
+            "forces are identical with and without the override"
+        )
+
 
 class TestChargeEmbedOverrideEntryPoints:
     """The flag has to be reachable from each documented entry point."""
@@ -150,19 +179,144 @@ class TestChargeEmbedOverrideEntryPoints:
             model=MODEL, lr_cutoff=LR_CUTOFF, charge_embed_total_charge=0.0
         ) is not None
 
-    def test_cli_load_model_accepts_it(self):
-        """The MD CLI's loader takes it, so md_settings.yaml can set it."""
-        import inspect
-        from so3lr.cli.so3lr_md import load_model
-
-        assert 'charge_embed_total_charge' in inspect.signature(load_model).parameters
-
     def test_yaml_key_is_known(self):
         """The did-you-mean validator must not flag it as a typo."""
         from so3lr.cli.so3lr_cli import KNOWN_YAML_KEYS_EXTRA, YAML_DEFAULTS
 
         assert 'charge_embed_total_charge' in (
             KNOWN_YAML_KEYS_EXTRA | set(YAML_DEFAULTS)
+        )
+
+
+class TestChargeEmbedOverrideCLI:
+    """End to end through the CLI, both routes.
+
+    A signature check is not enough here: the option has to survive click ->
+    run_md_simulation's explicit signature -> the settings dict -> perform_md ->
+    load_model, and a break anywhere in that chain is invisible to an
+    introspection test. So run the real binary and compare trajectories.
+    """
+
+    @staticmethod
+    def _run_nvt(tmp_path, tag, extra_yaml='', extra_argv=()):
+        import subprocess
+        import sys
+
+        sys.path.insert(0, str(pathlib.Path(__file__).parent))
+        from subprocess_env import so3lr_subprocess_env
+
+        # One directory per run: the CLI deliberately refuses to overwrite an
+        # existing trajectory, so runs must not share a working directory.
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / 'input.xyz').write_text(_CLI_INPUT_XYZ)
+        (tmp_path / f'{tag}.yaml').write_text(
+            f"input_file: input.xyz\n"
+            f"output_file: {tag}.hdf5\n"
+            f"log_file: {tag}.log\n"
+            f"model: {MODEL}\n"
+            f"precision: float64\n"
+            f"lr_cutoff: {LR_CUTOFF}\n"
+            f"total_charge: -1\n"
+            f"ensemble: nvt\n"
+            f"md_dt: 0.5\nmd_cycles: 1\nmd_steps: 1\nmd_T: 300.0\n"
+            f"relax_before_run: false\nsave_buffer: 1\nseed: 42\n"
+            f"{extra_yaml}\n"
+        )
+        result = subprocess.run(
+            ['so3lr', '--settings', f'{tag}.yaml', *extra_argv],
+            cwd=tmp_path, capture_output=True, text=True,
+            env=so3lr_subprocess_env(),
+        )
+        assert result.returncode == 0, (
+            f"so3lr --settings {tag}.yaml failed ({result.returncode})\n"
+            f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        )
+        # A key the validator does not recognise is only a warning, so assert.
+        assert 'did you mean' not in (result.stdout + result.stderr).lower(), (
+            "the settings validator flagged charge_embed_total_charge as a typo"
+        )
+        import h5py
+
+        with h5py.File(tmp_path / f'{tag}.hdf5', 'r') as f:
+            return np.array(f['momenta'])
+
+    def test_settings_yaml_route(self, tmp_path):
+        """`charge_embed_total_charge:` in the settings YAML reaches the model."""
+        absent = self._run_nvt(tmp_path / 'a', 'absent', '# key absent')
+        null = self._run_nvt(tmp_path / 'b', 'null', 'charge_embed_total_charge: null')
+        minus = self._run_nvt(tmp_path / 'c', 'minus', 'charge_embed_total_charge: -1.0')
+        zero = self._run_nvt(tmp_path / 'd', 'zero', 'charge_embed_total_charge: 0.0')
+
+        # Absent, explicit null, and the true charge all mean the same thing.
+        assert np.array_equal(absent, null), 'null must behave as if the key were absent'
+        assert np.array_equal(absent, minus), (
+            'charge_embed_total_charge equal to total_charge must be a no-op'
+        )
+        # 0.0 must actually change the dynamics.
+        assert not np.array_equal(absent, zero), (
+            'charge_embed_total_charge: 0.0 did not change the trajectory, so it '
+            'never reached the model through the settings file'
+        )
+
+    @staticmethod
+    def _run_nvt_argv(tmp_path, out, extra_argv):
+        """Same run via the `so3lr nvt` subcommand instead of a settings file.
+
+        `--charge-embed-total-charge` is a subcommand option, so it is not
+        available on the top-level `so3lr --settings` form; that is how every
+        other model flag behaves here too.
+        """
+        import subprocess
+        import sys
+
+        sys.path.insert(0, str(pathlib.Path(__file__).parent))
+        from subprocess_env import so3lr_subprocess_env
+        import h5py
+
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / 'input.xyz').write_text(_CLI_INPUT_XYZ)
+        result = subprocess.run(
+            [
+                'so3lr', 'nvt',
+                '--input', 'input.xyz', '--output', out,
+                '--model', MODEL, '--precision', 'float64',
+                '--lr-cutoff', str(LR_CUTOFF), '--total-charge', '-1',
+                '--dt', '0.5', '--md-cycles', '1', '--md-steps', '1',
+                '--temperature', '300.0', '--no-relax', '--seed', '42',
+                '--save-buffer', '1', *extra_argv,
+            ],
+            cwd=tmp_path, capture_output=True, text=True,
+            env=so3lr_subprocess_env(),
+        )
+        assert result.returncode == 0, (
+            f"so3lr nvt failed ({result.returncode})\n"
+            f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        )
+        with h5py.File(tmp_path / out, 'r') as f:
+            return np.array(f['momenta'])
+
+    def test_command_line_flag_matches_settings_yaml(self, tmp_path):
+        """--charge-embed-total-charge and the YAML key must agree exactly.
+
+        Two independent routes into the same setting; if they disagree, one of
+        them is not reaching the model.
+        """
+        via_yaml = self._run_nvt(tmp_path / 'y', 'zero', 'charge_embed_total_charge: 0.0')
+        via_flag = self._run_nvt_argv(
+            tmp_path / 'f', 'flag.hdf5', ('--charge-embed-total-charge', '0'),
+        )
+        assert np.array_equal(via_yaml, via_flag), (
+            'the CLI flag and the settings-file key produced different trajectories'
+        )
+
+    def test_command_line_flag_changes_the_run(self, tmp_path):
+        """Omitting the flag must differ from passing 0."""
+        default = self._run_nvt_argv(tmp_path / 'd', 'def.hdf5', ())
+        zero = self._run_nvt_argv(
+            tmp_path / 'z', 'zero.hdf5', ('--charge-embed-total-charge', '0'),
+        )
+        assert not np.array_equal(default, zero), (
+            '--charge-embed-total-charge 0 did not change the trajectory'
         )
 
 
