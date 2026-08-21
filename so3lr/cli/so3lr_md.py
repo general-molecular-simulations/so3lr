@@ -60,6 +60,21 @@ except ImportError:
 import h5py
 from collections import namedtuple
 
+from ..md_observables import is_per_atom_observable
+
+
+def intermediate_quantity_kwargs(observables) -> Dict[str, Any]:
+    """Extra kwargs asking the model to emit the requested observables.
+
+    Must fire for ANY requested observable. This used to be gated on
+    ``'partial_charges' in observables``, so every other ``--observable`` choice
+    was never produced by the model and the run died with ``KeyError`` at the
+    end of the first MD cycle.
+    """
+    if len(observables) > 0:
+        return {'output_intermediate_quantities': observables}
+    return {}
+
 # HDF5 wrapper to replace mlff.mdx.hdfdict
 DataSetEntry = namedtuple('DataSetEntry', ('chunk_length', 'shape', 'dtype'))
 
@@ -498,13 +513,13 @@ def init_hdf5_store(
                 shape=(batch_size, 1, 3),
                 dtype=np.float32
             )
-        elif o in   ['partial_charges',
-                    'hirshfeld_ratios',
-                    'c6_ratios',
-                    'electrostatic_energy_kspace',
-                    'electrostatic_energy',
-                    'dispersion_energy',
-                    'zbl_repulsion']:
+        elif is_per_atom_observable(o) or o in ('hirshfeld_ratios', 'c6_ratios',
+                                               'electrostatic_energy_kspace'):
+            # Every one-scalar-per-atom observable gets a dataset. This list used
+            # to be a fourth hand-maintained copy that omitted five selectable
+            # observables (nn_energy, nlh_repulsion, the two *_undamped ones),
+            # so requesting them failed at write time with
+            # "object '<name>' doesn't exist" even after the model produced them.
             dataset[o] = DataSetEntry(
                 chunk_length=1,
                 shape=(batch_size, num_atoms,),
@@ -512,7 +527,8 @@ def init_hdf5_store(
             )
         else:
             logger.warning(
-                f"Observable '{o}' is not recognized or not supported for HDF5 storage."
+                f"Observable '{o}' has a model-dependent width and cannot be "
+                f"stored in HDF5; use --output-format extxyz to record it."
             )
 
     store = HDF5Store(save_path, datasets=dataset, mode='w')
@@ -1828,7 +1844,11 @@ def create_obs_fn(
     else:
         @jax.jit
         def obs_fn(state):
-            state, nbrs, box, k_grid, k_grid_disp = state
+            # The caller always passes the 6-element carry, long-range or not.
+            # Unpacking only five names here raised "too many values to unpack"
+            # at the end of the first MD cycle for any short-range-only model.
+            # nbrs_lr is unused on this branch.
+            state, nbrs, _nbrs_lr, box, k_grid, k_grid_disp = state
             return  energy_or_obs_fn(
                         state.position,
                         neighbor=nbrs.idx,
@@ -2496,9 +2516,7 @@ def perform_md(
                     _to_run_precision, restart_data_pysages.snapshots
                 )
 
-    patched_potential_kwargs={}
-    if "partial_charges" in observables:
-            patched_potential_kwargs.update(output_intermediate_quantities=observables)
+    patched_potential_kwargs = intermediate_quantity_kwargs(observables)
 
     # Loading the model. A bundled name (so3lr-s/m/l/so3lr) or a custom path; None
     # falls back to the default model. load_model resolves names and paths alike.
@@ -3104,6 +3122,14 @@ def perform_md(
                 for key in obs_dict.keys():
                     obs_dict[key].append(obs_data[1][key])
 
+            # This only fires on exact save_buffer multiples, so frames
+            # accumulated after the last full buffer are still pending when the
+            # loop ends and are LOST (see the warning after the loop). They
+            # cannot simply be flushed here: the HDF5 datasets are shaped
+            # (n_batches, save_buffer, ...), so a partial final batch gets
+            # broadcast up to save_buffer frames -- silently duplicating the
+            # last frame, which is worse than dropping it. Storing the tail
+            # needs a flat per-frame layout; until then, warn loudly.
             if ((len(positions) % save_buffer == 0 and len(positions) > 0) or (len(positions) == md_cycles)):
                 # Saving the output
                 if output_format == 'hdf5':
@@ -3139,6 +3165,15 @@ def perform_md(
                 # Saving PySAGES state for restart
                 if do_enhanced_sampling and restart_pysages_save_path is not None:
                     save_pysages_state(pysages_result, restart_pysages_save_path)
+
+    if len(positions) > 0:
+        logger.warning(
+            f'{len(positions)} trajectory frame(s) from the final partial buffer '
+            f'were NOT written: md_cycles ({md_cycles}) is not a multiple of '
+            f'--save-buffer ({save_buffer}), and the {output_format} writer can '
+            f'only emit whole buffers. Choose a --save-buffer that divides '
+            f'md_cycles to keep every frame.'
+        )
 
     logger.info('Results saved to: ' + output_file)
     # The first cycle is excluded from timing (it includes JIT compilation /

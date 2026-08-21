@@ -1146,8 +1146,12 @@ def tune(
             f"Failed to read geometry file {input_file_path}: {e}")
 
     cell = initial_geometry.get_cell().T
+    # `not np.all(cell != 0)` was inverted: it PASSED for an all-zero (missing)
+    # cell and RAISED for a fully dense triclinic cell. Only orthorhombic cells,
+    # whose off-diagonal zeros make `np.all(cell != 0)` False, behaved correctly
+    # -- which is why it went unnoticed. The test is "the cell is not all zeros".
     assert cell is not None and not np.all(
-        cell != 0.0), "Cell must be provided in the input geometry."
+        cell == 0.0), "Cell must be provided in the input geometry."
 
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
 

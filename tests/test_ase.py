@@ -332,3 +332,24 @@ def test_so3lr_s_ase_calculator(name: str):
             target_predictions['forces'],
             np.zeros_like(forces)
         )
+
+
+def test_calculate_hessian_is_forwarded_by_make_ase_calculator():
+    """make_ase_calculator accepted calculate_hessian but never forwarded it, so
+    the public So3lrCalculator(calculate_hessian=True) silently produced no
+    hessian. The existing hessian tests call AseCalculatorSparse.create_from_workdir
+    directly, which is why this path was never covered.
+    """
+    from ase import Atoms
+    from so3lr.ase_utils import make_ase_calculator
+
+    water = Atoms('OHH',
+                  positions=[[0., 0., 0.], [0.96, 0., 0.], [-0.24, 0.93, 0.]],
+                  pbc=False)
+    water.calc = make_ase_calculator(calculate_hessian=True, dtype=np.float64)
+    _ = water.get_potential_energy()
+
+    assert 'hessian' in water.calc.results, (
+        'calculate_hessian=True produced no hessian'
+    )
+    assert water.calc.results['hessian'].shape == (3, 3, 3, 3)

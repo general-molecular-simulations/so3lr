@@ -93,8 +93,12 @@ class AseDataLoaderSparse:
             def keep(idx: int):
                 return True
         else:
+            # Build the lookup once. `idx in pick_idx` on an ndarray is a full
+            # vectorised scan per structure, i.e. O(N*M) over the dataset.
+            pick_idx_set = set(np.asarray(pick_idx).tolist())
+
             def keep(idx: int):
-                return idx in pick_idx
+                return idx in pick_idx_set
 
         loaded_data = []
         max_num_of_nodes = 0

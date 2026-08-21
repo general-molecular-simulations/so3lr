@@ -45,8 +45,14 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
 
     # Get a cell from the first periodic structure in training data.
     if tf_record_present:
-        # For TFDS, peek at the first batch to get the cell.
-        first_iter = training_data.next_epoch(split='train', mode='train')
+        # For TFDS, peek at the first batch to get the cell. `parallel=False`
+        # is required: this loop breaks after one batch, and the parallel
+        # pipeline's workers would then block forever on a full queue, holding
+        # every slot of the shared ProcessPoolExecutor so the real training
+        # epoch never starts (training hangs at 0 steps with no error).
+        first_iter = training_data.next_epoch(
+            split='train', mode='train', parallel=False
+        )
         for graph_batch, _ in first_iter:
             cell = graph_batch.globals.get('cell')
             if cell is not None:
@@ -60,9 +66,13 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
                     continue
                 break
         else:
+            first_iter.close()
             raise ValueError(
                 "kspace_electrostatics is enabled but no periodic cell found in training data."
             )
+        # Release the synchronous generator (and its TFDS iterator) now that the
+        # cell is known; we deliberately consume only one batch.
+        first_iter.close()
     else:
         # For ASE/Npz data, training_data is a list of (graph, lr_data) tuples.
         cell_3x3 = None
@@ -666,7 +676,15 @@ def run_evaluation(
     return evaluation_utils.evaluate(
         model=net,
         params=params,
-        graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
+        # Bind the k-space constants exactly as run_training/run_fine_tuning do.
+        # Using the bare graph_to_batch_fn left 'k_smearing'/'k_grid' out of the
+        # batch, and EnergySparse silently skips its reciprocal-space branch when
+        # they are absent -- so evaluating a model trained with
+        # kspace_electrostatics reported metrics for a different Hamiltonian than
+        # the one that was trained, with no warning.
+        graph_to_batch_fn=_make_graph_to_batch_fn(
+            config, testing_data, tf_record_present
+        ),
         testing_data=testing_data,
         testing_targets=targets,
         batch_max_num_nodes=config.training.batch_max_num_nodes,

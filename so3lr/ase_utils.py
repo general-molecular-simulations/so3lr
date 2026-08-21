@@ -24,6 +24,10 @@ def make_ase_calculator(
         dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
         from_file=kwargs.pop('from_file', spec.from_file),
         calculate_stress=calculate_stress,
+        # Was silently dropped: accepted here but never forwarded, so
+        # So3lrCalculator(calculate_hessian=True) built a calculator that could
+        # not produce a hessian even though 'hessian' is in implemented_properties.
+        calculate_hessian=calculate_hessian,
         dtype=dtype,
         head_index=spec.head_index,
         **kwargs

@@ -18,6 +18,7 @@ from .. import __version__
 # choices from this table at import time, and run_fine_tuning resolves the
 # same table into parameter keys, so the two cannot drift apart.
 from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
+from ..md_observables import MD_OBSERVABLES
 
 # NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
 # submodules, which pull in jax/flax/jax-md/glp/orbax) are deferred so that
@@ -654,13 +655,7 @@ def common_md_options(f: Callable) -> Callable:
     f = click.option('--seed', default=DEFAULT_SEED, type=int,
                      help=f'Random seed for MD. [default: {DEFAULT_SEED}]')(f)
     f = click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
-                     type=click.Choice([
-                         'nn_energy', 'partial_charges', 'electrostatic_energy',
-                         'dispersion_energy', 'zbl_repulsion',
-                         'nlh_repulsion',
-                         'electrostatic_energy_undamped', 'dispersion_energy_undamped',
-                         'x',
-                     ]),
+                     type=click.Choice(list(MD_OBSERVABLES)),
                      help='Observable to compute and save during MD. Repeatable. '
                           'Allowed: nn_energy, partial_charges, electrostatic_energy, '
                           'dispersion_energy, zbl_repulsion (legacy name) / nlh_repulsion '
@@ -806,6 +801,17 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     # Trajectory-overwrite policy: refuse pre-existing output by default;
     # set true (CLI flag --overwrite) to permit truncation.
     'overwrite',
+    # `so3lr tune-ewald --settings` search ranges (read by cli/tune_ewald.py).
+    # These are honoured but were absent here, so the did-you-mean validator
+    # reported every legitimate tuning knob as an unknown key -- training users
+    # to ignore the typo warnings entirely.
+    'accuracy',
+    'cutoff_lo', 'cutoff_it', 'cutoff_hi',
+    'smear_lo', 'smear_hi', 'smear_it',
+    'ns_lo', 'ns_hi',
+    'nodes_lo', 'nodes_hi',
+    'mesh_lo', 'mesh_hi',
+    'dispersion_damping_lo', 'dispersion_damping_hi', 'dispersion_damping_it',
 }
 
 
