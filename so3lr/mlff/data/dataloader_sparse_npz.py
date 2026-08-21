@@ -5,6 +5,8 @@ import jraph
 import numpy as np
 import os
 from pathlib import Path
+
+from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
 from tqdm import tqdm
 from typing import Optional
 
@@ -179,7 +181,7 @@ def entry_to_jraph(
         # Energy from ASE is only a scalar.
         energy = np.nan
 
-    max_num_theory_levels = 16
+    max_num_theory_levels = MAX_NUM_THEORY_LEVELS
     theory_level = np.reshape(5, (1,))
     theory_mask = np.eye(max_num_theory_levels)[theory_level] # (1, num_theory_levels)
 

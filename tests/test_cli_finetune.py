@@ -60,6 +60,21 @@ def test_config_water(tmp_path):
     return config_path
 
 
+def _parse_param_counts(result):
+    """Pull (total, trainable) out of the parameter summary the trainer prints.
+
+    Exit code and final loss alone cannot tell a real fine-tune from a run in
+    which every parameter was frozen: a no-op run completes normally and reports
+    the pretrained loss. These counts can.
+    """
+    text = result.stdout + result.stderr
+    total = re.search(r'Total number of parameters:\s*([\d,]+)', text)
+    trainable = re.search(r'Trainable parameters:\s*([\d,]+)', text)
+    if total is None or trainable is None:
+        return None, None
+    return int(total.group(1).replace(',', '')), int(trainable.group(1).replace(',', ''))
+
+
 def _assert_finetuning_succeeded(result, workdir, max_loss=0.1):
     """Assert that fine-tuning completed and produced expected outputs."""
     assert result.returncode == 0, (
@@ -88,8 +103,9 @@ def _assert_finetuning_succeeded(result, workdir, max_loss=0.1):
     )
 
 
-def test_cli_finetune(workdir, test_config):
-    """Run `so3lr finetune` on ac.xyz with 90 train / 10 valid and verify it completes."""
+@pytest.mark.parametrize('strategy', ['full', 'last_layer'])
+def test_cli_finetune(workdir, test_config, strategy):
+    """Run `so3lr finetune` on ac.xyz with 20 train / 5 valid and verify it completes."""
     result = subprocess.run(
         [
             'so3lr', 'finetune',
@@ -98,7 +114,7 @@ def test_cli_finetune(workdir, test_config):
             '--num-train', '20',
             '--num-valid', '5',
             '--config', str(test_config),
-            '--strategy', 'full',
+            '--strategy', strategy,
         ],
         capture_output=True,
         text=True,
@@ -108,25 +124,20 @@ def test_cli_finetune(workdir, test_config):
 
     _assert_finetuning_succeeded(result, workdir, max_loss=0.1)
 
-def test_cli_finetune_last_layer(workdir, test_config):
-    """Run `so3lr finetune --strategy last_layer` and verify it completes."""
-    result = subprocess.run(
-        [
-            'so3lr', 'finetune',
-            '--datafile', str(DATAFILE),
-            '--workdir', str(workdir),
-            '--num-train', '20',
-            '--num-valid', '5',
-            '--config', str(test_config),
-            '--strategy', 'last_layer',
-        ],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        env=so3lr_subprocess_env(),
+    # Pin what the strategy actually selected. Asserting only on exit code and
+    # loss would pass even if `last_layer` resolved to a `layers_N` that does
+    # not exist: every parameter would be frozen, two epochs of zero updates
+    # would complete, and the pretrained loss would sit well under the bound.
+    total, trainable = _parse_param_counts(result)
+    assert total is not None, (
+        f"No parameter summary in output.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-
-    _assert_finetuning_succeeded(result, workdir, max_loss=0.1)
+    if strategy == 'full':
+        assert trainable == total
+    else:
+        assert 0 < trainable < total, (
+            f"strategy={strategy} trained {trainable}/{total} parameters"
+        )
 
 @pytest.mark.slow
 def test_cli_finetune_water_pbc(workdir, test_config_water):
