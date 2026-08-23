@@ -89,11 +89,22 @@ def ensure_adaptive_robust_loss_params(
     Existing entries are reused only when their length still matches
     ``targets``; otherwise they are re-initialized, because the per-target index
     is positional and a different target list makes the old values meaningless.
+    The checkpoint stores no target *names*, so a same-length but different (or
+    reordered) target list is indistinguishable from a genuine continuation and
+    is reused as-is -- the log line below states the assumption so such a run is
+    at least diagnosable.
 
     Returns a new dict; ``params`` is not mutated.
     """
     existing = params.get('adaptive_robust_loss')
     if existing is not None and existing['alpha_raw'].shape[0] == len(targets):
+        logger.info(
+            'Reusing the checkpoint\'s %d adaptive robust loss parameter(s), '
+            'assuming they correspond positionally to the targets %s. If the '
+            'run that wrote the checkpoint trained a different target list of '
+            'the same length, each target inherits the wrong alpha/scale.',
+            len(targets), targets
+        )
         return params
 
     if existing is not None:
@@ -1823,15 +1834,9 @@ def freeze_parameters(optimizer, trainable_subset_keys=None, frozen_subset_keys=
     )
 
 
-# Kept as a module-level alias: the implementation lives in param_utils so
-# that parameter counting and this label function cannot disagree about what
-# a fine-tuning strategy selects.
-_path_matches_key = path_matches_key
-
-
 def make_annotation_fn(keys):
     return lambda params: traverse_util.path_aware_map(
-        lambda path, v: 'trainable' if any(_path_matches_key(path, k) for k in keys) else 'frozen', params
+        lambda path, v: 'trainable' if any(path_matches_key(path, k) for k in keys) else 'frozen', params
     )
 
 
@@ -1839,7 +1844,7 @@ def make_freeze_annotation_fn(keys):
     """Inverse of make_annotation_fn: parameters whose path matches any of
     ``keys`` are 'frozen', everything else is 'trainable'."""
     return lambda params: traverse_util.path_aware_map(
-        lambda path, v: 'frozen' if any(_path_matches_key(path, k) for k in keys) else 'trainable', params
+        lambda path, v: 'frozen' if any(path_matches_key(path, k) for k in keys) else 'trainable', params
     )
 
 

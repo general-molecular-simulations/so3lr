@@ -19,7 +19,6 @@ import jax.numpy as jnp
 
 from ..utils import checkpoint_utils
 from ..utils.param_utils import (
-    MAX_NUM_THEORY_LEVELS,
     count_params,
     count_trainable_params,
     print_param_shapes,
@@ -642,9 +641,7 @@ def run_evaluation(
 
     # Expand a single-theory-level checkpoint to the multi-head energy readout.
     # Shared with fit()/fit_from_iterator() so the three call sites cannot drift.
-    params = training_utils.expand_observables_to_theory_levels(
-        params, num_theory_levels=MAX_NUM_THEORY_LEVELS
-    )
+    params = training_utils.expand_observables_to_theory_levels(params)
 
     print("=" * 50)
     print_param_shapes(params)
@@ -839,9 +836,7 @@ def run_fine_tuning(
 
     # Expand a single-theory-level checkpoint to the multi-head energy readout.
     # Shared with fit()/fit_from_iterator() so the three call sites cannot drift.
-    params = training_utils.expand_observables_to_theory_levels(
-        params, num_theory_levels=MAX_NUM_THEORY_LEVELS
-    )
+    params = training_utils.expand_observables_to_theory_levels(params)
 
     # A selection key that matches nothing is never intentional. As a whitelist
     # it contributes no trainable parameters -- and if NO key matches, every
