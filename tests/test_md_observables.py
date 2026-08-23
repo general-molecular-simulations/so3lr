@@ -107,15 +107,18 @@ def test_intermediate_quantities_requested_for_any_observable(observables):
 
 @pytest.mark.parametrize('cell,should_raise', [
     (np.zeros((3, 3)), True),                                        # no cell
+    (None, True),                                                    # no cell at all
     (np.array([[10., 1., 2.], [1., 11., 3.], [2., 3., 12.]]), False),  # triclinic
     (np.diag([10., 11., 12.]), False),                                # orthorhombic
 ])
 def test_tune_ewald_cell_guard(cell, should_raise):
     """`not np.all(cell != 0)` was inverted: it accepted an all-zero cell and
     rejected a fully dense triclinic one. Only orthorhombic cells, whose
-    off-diagonal zeros make the test False, behaved correctly."""
-    guard_passes = not np.all(cell == 0.0)
-    assert guard_passes == (not should_raise)
+    off-diagonal zeros make the test False, behaved correctly. This calls the
+    real predicate `tune_ewald.cell_is_present`, not a re-typed expression."""
+    from so3lr.cli.tune_ewald import cell_is_present
+
+    assert cell_is_present(cell) == (not should_raise)
 
 
 def test_tune_ewald_settings_keys_are_known_to_the_validator():

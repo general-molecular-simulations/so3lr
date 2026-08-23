@@ -13,7 +13,6 @@ from typing import Any, Callable, Type, Dict, Sequence, Optional
 from glp.graph import Graph
 
 from ..utils import calculator_utils
-from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
 from ..utils.training_utils import expand_observables_to_theory_levels
 from .base_calculator import make_base_calculator
 from ..nn.stacknet.observable_function_sparse import get_observable_fn_sparse
@@ -119,9 +118,7 @@ def load_model_from_workdir(
     # Expand a single-theory-level checkpoint to the multi-head energy readout.
     # Canonical implementation; the inference and training paths share it so they
     # cannot drift (they had: the copies disagreed about the optional final bias).
-    params = expand_observables_to_theory_levels(
-        params, num_theory_levels=MAX_NUM_THEORY_LEVELS
-    )
+    params = expand_observables_to_theory_levels(params)
 
     # # Initialize missing C6RatiosSparse params (observables_3) if not in checkpoint.
     # # C6RatiosSparse was added after the model was trained. With embedding=1.0 and

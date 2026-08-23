@@ -66,7 +66,8 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
                     continue
                 break
         else:
-            first_iter.close()
+            # (No close() needed here: the for/else runs only once the
+            # generator is exhausted, which already closed it.)
             raise ValueError(
                 "kspace_electrostatics is enabled but no periodic cell found in training data."
             )

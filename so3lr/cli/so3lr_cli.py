@@ -657,11 +657,9 @@ def common_md_options(f: Callable) -> Callable:
     f = click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
                      type=click.Choice(list(MD_OBSERVABLES)),
                      help='Observable to compute and save during MD. Repeatable. '
-                          'Allowed: nn_energy, partial_charges, electrostatic_energy, '
-                          'dispersion_energy, zbl_repulsion (legacy name) / nlh_repulsion '
-                          '(canonical for so3lr-s/m/l; same quantity, different model output key), '
-                          'electrostatic_energy_undamped, dispersion_energy_undamped, x. '
-                          '[default: none]')(f)
+                          'Note zbl_repulsion (legacy so3lr) and nlh_repulsion '
+                          '(so3lr-s/m/l) are the same quantity under the two '
+                          'model generations\' output keys. [default: none]')(f)
     f = click.option('--help', '-h', is_flag=True, help='Show brief command overview.')(f)
     return f
 

@@ -1597,7 +1597,6 @@ class NLHRepulsionSparse(BaseSubModule):
         zj = jnp.maximum(z_i, z_j)                       # (E,)
 
         # Get NLH coefficients
-        # First gather along Z_i (axis 0), then along Z_j (axis 1)
         # Two-index lookup straight into the (92, 92, 3) tables. Gathering along
         # axis 0 first materialised an (E, 92, 3) intermediate per table only to
         # keep one row of it -- ~550 MB per table for a 5e5-edge system, twice

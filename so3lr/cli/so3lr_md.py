@@ -72,7 +72,6 @@ def _model_num_features(model_path) -> Optional[int]:
     model itself is loaded.
     """
     try:
-        import json
         from ..model_registry import resolve_model
         workdir = resolve_model(model_path).dir
         with open(pathlib.Path(workdir) / 'hyperparameters.json') as fp:
