@@ -98,3 +98,36 @@ def test_empty_and_array_inputs_are_accepted():
     check_atomic_numbers_supported([], max_supported_atomic_number())
     check_atomic_numbers_supported(np.array([1, 6, 8], dtype=np.int32),
                                    max_supported_atomic_number())
+
+
+@pytest.mark.parametrize('model_name, expected_max_z, bad_z, bad_match', [
+    # Non-legacy: the refitted alpha_0/C6 tables bind at 86, so Pu (94) is out.
+    ('so3lr-m-2606', 86, 94, r'Pu \(Z=94\)'),
+    # Legacy: v1 references reach Fm (102) -- Pu is fine, Z=104 is not (and has
+    # no symbol in the 102-row species table, so it is reported numerically).
+    ('so3lr', 102, 104, r'Z=104'),
+])
+def test_end_to_end_wiring_rejects_unsupported_elements(
+        model_name, expected_max_z, bad_z, bad_match):
+    """The limit must survive the whole chain: checkpoint cfg ->
+    PotentialSparse.create_from_workdir -> AseCalculatorSparse.calculate.
+    The helpers above are unit-tested; this pins the wiring."""
+    from ase import Atoms
+
+    from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
+    from so3lr.model_registry import resolve_model
+
+    spec = resolve_model(model_name)
+    calc = AseCalculatorSparse.create_from_workdir(
+        workdir=spec.dir,
+        from_file=spec.from_file,
+        head_index=spec.head_index,
+        dtype=np.float32,
+    )
+    assert calc.max_atomic_number == expected_max_z
+
+    # The check fires before any graph construction or jit tracing, so this is
+    # cheap: no model forward happens for the rejected structure.
+    bad_atoms = Atoms(numbers=[bad_z], positions=[[0.0, 0.0, 0.0]])
+    with pytest.raises(ValueError, match=bad_match):
+        calc.calculate(bad_atoms)

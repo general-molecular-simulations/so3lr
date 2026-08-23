@@ -77,6 +77,12 @@ def test_data_load_no_pbc(calculate_neighbors_lr: bool):
         hirshfeld_ratios_expected[:] = np.nan
         npt.assert_equal(hirshfeld_ratios, hirshfeld_ratios_expected)
 
+        # c6_ratios mirrors the hirshfeld_ratios handling: NaN-filled when the
+        # file has no c6_ratios column. Before it was read at all, training a
+        # c6_ratios loss term from a single .extxyz raised KeyError.
+        c6_ratios = graph.nodes['c6_ratios']
+        npt.assert_equal(c6_ratios, hirshfeld_ratios_expected)
+
         dipole_vec_expected = np.empty((1, 3))
         dipole_vec_expected[:] = np.nan
         npt.assert_equal(dipole_vec, dipole_vec_expected)

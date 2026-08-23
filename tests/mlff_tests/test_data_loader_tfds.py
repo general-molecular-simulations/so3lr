@@ -230,3 +230,53 @@ def test_numpy_tuple_iterator_keeps_pbc():
         assert 'cell_offset' in np_graph.edges
         assert cell_offsets_lr is not None
         assert cell_offsets_lr.shape[1] == 3
+
+
+def test_non_pbc_edges_match_ase_neighbor_list():
+    """The numpy all-pairs rewrite must reproduce ase.neighbor_list exactly.
+
+    The property assertions above cannot catch a systematically wrong edge
+    list (e.g. one direction of each pair dropped), so compare pair sets
+    directly on random gas-phase geometries, including a pair close to the
+    cutoff boundary.
+    """
+    from ase import Atoms
+    from ase.neighborlist import neighbor_list
+
+    cutoff = 5.0
+    rng = np.random.RandomState(0)
+    geometries = [rng.uniform(0.0, 8.0, (n, 3)) for n in (2, 5, 16)]
+    # A pair near the cutoff boundary (exact ties are float-representation
+    # dependent in ase's binning, so probe just inside and just outside).
+    geometries.append(np.array([[0.0, 0.0, 0.0], [cutoff - 1e-6, 0.0, 0.0]]))
+    geometries.append(np.array([[0.0, 0.0, 0.0], [cutoff + 1e-6, 0.0, 0.0]]))
+
+    for positions in geometries:
+        # Both sides must see bit-identical coordinates, or a pair within
+        # float32 rounding of the cutoff would make the comparison flaky.
+        positions = positions.astype(np.float32)
+        n = len(positions)
+        i, j, offsets = compute_edges_np(
+            positions,
+            np.full(n, 6, dtype=np.int32),
+            np.zeros((3, 3), dtype=np.float32),
+            np.array([False, False, False]),
+            cutoff,
+        )
+        mol = Atoms(numbers=[6] * n, positions=positions)
+        i_ref, j_ref = neighbor_list('ij', mol, cutoff, self_interaction=False)
+        assert set(zip(i.tolist(), j.tolist())) == set(zip(i_ref.tolist(), j_ref.tolist()))
+        np.testing.assert_array_equal(offsets, np.zeros((len(i), 3), dtype=np.int32))
+
+    # n = 0 and n = 1 return empty edge lists with the right shapes/dtypes.
+    for n in (0, 1):
+        i, j, offsets = compute_edges_np(
+            np.zeros((n, 3), dtype=np.float32),
+            np.full(n, 6, dtype=np.int32),
+            np.zeros((3, 3), dtype=np.float32),
+            np.array([False, False, False]),
+            cutoff,
+        )
+        assert i.shape == (0,) and i.dtype == np.int32
+        assert j.shape == (0,) and j.dtype == np.int32
+        assert offsets.shape == (0, 3) and offsets.dtype == np.int32
