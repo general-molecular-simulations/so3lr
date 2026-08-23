@@ -97,10 +97,18 @@ def test_unmatched_param_keys(params):
 
 
 def test_max_num_theory_levels_is_shared():
-    """The dataloaders' one-hot width and the tiled energy head must agree."""
-    from so3lr.mlff.data import dataloader_sparse_ase
+    """The dataloaders' one-hot width and the tiled energy head must agree:
+    the loader emits a theory_mask of MAX_NUM_THEORY_LEVELS and the energy-head
+    parameters are tiled to the same width, or the model indexes past the end."""
+    from ase import Atoms
+
+    from so3lr.mlff.data.dataloader_sparse_ase import ASE_to_jraph
     from so3lr.mlff.utils import training_utils
 
     assert MAX_NUM_THEORY_LEVELS == 16
     assert (training_utils.expand_observables_to_theory_levels.__defaults__[0]
             == MAX_NUM_THEORY_LEVELS)
+
+    water = Atoms('OHH', positions=[[0., 0., 0.], [0.96, 0., 0.], [-0.24, 0.93, 0.]])
+    graph, _ = ASE_to_jraph(water, cutoff=5.0, calculate_neighbors_lr=False)
+    assert graph.globals['theory_mask'].shape[-1] == MAX_NUM_THEORY_LEVELS

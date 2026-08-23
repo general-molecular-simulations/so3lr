@@ -103,7 +103,11 @@ def _assert_finetuning_succeeded(result, workdir, max_loss=0.1):
     )
 
 
-@pytest.mark.parametrize('strategy', ['full', 'last_layer'])
+# 'final_mlp' and 'forces_only' pin this PR's fixes end to end: on the old code
+# final_mlp counted 0 trainable parameters (hierarchical keys never matched) and
+# forces_only reported everything trainable (frozen_keys were ignored), so the
+# count assertions below fail on the base branch for exactly those two.
+@pytest.mark.parametrize('strategy', ['full', 'last_layer', 'final_mlp', 'forces_only'])
 def test_cli_finetune(workdir, test_config, strategy):
     """Run `so3lr finetune` on ac.xyz with 20 train / 5 valid and verify it completes."""
     result = subprocess.run(
@@ -138,6 +142,35 @@ def test_cli_finetune(workdir, test_config, strategy):
         assert 0 < trainable < total, (
             f"strategy={strategy} trained {trainable}/{total} parameters"
         )
+
+
+def test_cli_finetune_refuses_a_strategy_that_freezes_everything(workdir, test_config):
+    """The headline fail-loudly behavior: a whitelist strategy matching nothing
+    must raise before any data is loaded, not run a full training job of zero
+    updates and exit 0. The legacy `so3lr` checkpoint has no `observables_3`,
+    so `--strategy obs_3` selects nothing there."""
+    result = subprocess.run(
+        [
+            'so3lr', 'finetune',
+            '--datafile', str(DATAFILE),
+            '--workdir', str(workdir),
+            '--num-train', '20',
+            '--num-valid', '5',
+            '--config', str(test_config),
+            '--model', 'so3lr',
+            '--strategy', 'obs_3',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=so3lr_subprocess_env(),
+    )
+    assert result.returncode != 0, (
+        f"obs_3 on the legacy checkpoint must fail, not run a no-op training.\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert 'would freeze every parameter' in (result.stdout + result.stderr)
+
 
 @pytest.mark.slow
 def test_cli_finetune_water_pbc(workdir, test_config_water):
