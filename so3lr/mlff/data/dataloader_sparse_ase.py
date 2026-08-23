@@ -260,7 +260,7 @@ def ASE_to_jraph(
         hirshfeld_ratios = np.array(hirshfeld_ratios).reshape(num_atoms, )
 
     # C6 ratios (MBD-NL); set to NaN when not present.
-    c6_ratios = mol.arrays.get('c6_ratios') if 'c6_ratios' in mol.arrays else None
+    c6_ratios = mol.arrays.get('c6_ratios')
     if c6_ratios is None:
         c6_ratios = np.empty((num_atoms, ))
         c6_ratios[:] = np.nan

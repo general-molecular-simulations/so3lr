@@ -107,6 +107,21 @@ def _batched_kspace_electrostatic(kspace_module, inputs):
     )
 
 
+def _c6_ratios_from_labels_or_head(c6_head, inputs):
+    """Per-atom C6 ratios: prefer the dataloader's labels, else the model's head.
+
+    ``c6_ratios`` supplied via ``inputs`` is a training *label*; the loaders pad
+    it with NaN when the input file has no c6_ratios column. Those NaNs must not
+    leak into the dispersion forward (C6 -> NaN -> NaN energy/forces), so fall
+    back to the model's own predicted c6_ratios wherever the provided value is
+    non-finite.
+    """
+    provided = inputs.get('c6_ratios')
+    if provided is None:
+        return c6_head(inputs)['c6_ratios']
+    return jnp.where(jnp.isnan(provided), c6_head(inputs)['c6_ratios'], provided)
+
+
 def _batched_kspace_dispersion(kspace_module, inputs):
     """Run dispersion kspace per-graph using vmap on the solver, then scatter back."""
     k_grid_disp = inputs['k_grid_disp']
@@ -151,20 +166,7 @@ def _batched_kspace_dispersion(kspace_module, inputs):
             hirshfeld_ratios = kspace_module.hirshfeld_ratios(inputs)['hirshfeld_ratios']
         c6_ratios = hirshfeld_ratios ** 2
     else:
-        c6_ratios = inputs.get('c6_ratios')
-        if c6_ratios is None:
-            c6_ratios = kspace_module.c6_ratios(inputs)['c6_ratios']
-        else:
-            # `c6_ratios` supplied via the dataloader is a training *label*; the
-            # ASE loader pads it with NaN when the input file has no c6_ratios
-            # column. Those NaNs must not leak into the dispersion forward
-            # (C6 -> NaN -> NaN energy/forces), so fall back to the model's own
-            # predicted c6_ratios wherever the provided value is non-finite.
-            c6_ratios = jnp.where(
-                jnp.isnan(c6_ratios),
-                kspace_module.c6_ratios(inputs)['c6_ratios'],
-                c6_ratios,
-            )
+        c6_ratios = _c6_ratios_from_labels_or_head(kspace_module.c6_ratios, inputs)
 
     return _vmap_kspace_per_graph(
         _solve_single, inputs,
@@ -494,9 +496,7 @@ class HirshfeldSparse(BaseSubModule):
             qk = (q * k / jnp.sqrt(k.shape[-1])).sum(axis=-1)
             v_eff = v_shift + qk  # (n)
             hirshfeld_ratios = safe_scale(jnp.abs(v_eff), node_mask)
-            # Short-range OOD gate: fade to the free-atom ratio (1.0) at clashes.
-            g = short_range_gate(inputs)
-            hirshfeld_ratios = g * hirshfeld_ratios + (1.0 - g)
+            hirshfeld_ratios = _fade_to_free_atom_ratio(hirshfeld_ratios, inputs)
             return dict(hirshfeld_ratios=hirshfeld_ratios)
 
         q = nn.Embed(num_embeddings=100, features=1)(atomic_numbers).squeeze(axis=-1)
@@ -521,9 +521,7 @@ class HirshfeldSparse(BaseSubModule):
             )(x).squeeze(axis=-1)  # (num_nodes)
 
         a0_ratios = safe_scale(jnp.abs(x_ + q), node_mask)
-        # Short-range OOD gate: fade to the free-atom ratio (1.0) at clashes.
-        g = short_range_gate(inputs)
-        a0_ratios = g * a0_ratios + (1.0 - g)
+        a0_ratios = _fade_to_free_atom_ratio(a0_ratios, inputs)
 
         # New models predict static-polarizability (alpha_0) ratios; surface them
         # under 'a0_ratios'. The legacy branch (above) keeps 'hirshfeld_ratios'.
@@ -600,9 +598,7 @@ class C6RatiosSparse(BaseSubModule):
 
         # return dict(c6_ratios=c6_ratios)
         c6_ratios = safe_scale(jnp.abs(x_ + q), node_mask)
-        # Short-range OOD gate: fade to the free-atom ratio (1.0) at clashes.
-        g = short_range_gate(inputs)
-        c6_ratios = g * c6_ratios + (1.0 - g)
+        c6_ratios = _fade_to_free_atom_ratio(c6_ratios, inputs)
 
         return dict(c6_ratios=c6_ratios)
 
@@ -825,6 +821,13 @@ def short_range_gate(inputs):
         jnp.where(d_ij > 0, switching_fn(d_ij, SR_GATE_OFF, SR_GATE_ON), 0.0),
         idx_i, num_segments=n)
     return jnp.clip(1.0 - clash, 0.0, 1.0)
+
+
+def _fade_to_free_atom_ratio(ratios, inputs):
+    """Short-range OOD gate for the ratio heads: fade a predicted per-atom
+    ratio to the free-atom value (1.0) at clash distances."""
+    g = short_range_gate(inputs)
+    return g * ratios + (1.0 - g)
 
 
 @partial(jax.jit, static_argnames=('neighborlist_format',))
@@ -1672,11 +1675,11 @@ class NLHRepulsionSparse(BaseSubModule):
 
         # Get NLH coefficients
         # First gather along Z_i (axis 0), then along Z_j (axis 1)
-        a = jnp.asarray(jnp.take(NLH_AA, zi, axis=0), dtype=dtype)   # (E, 92, 3)
+        a = jnp.asarray(jnp.take(NLH_AA, zi, axis=0), dtype=dtype)   # (E, 93, 3)
         a = jnp.take_along_axis(a, zj[:, None, None], axis=1)     # (E, 1, 3)
         a = a.squeeze(1)                                           # (E, 3)
 
-        b = jnp.asarray(jnp.take(NLH_BB, zi, axis=0), dtype=dtype)   # (E, 92, 3)
+        b = jnp.asarray(jnp.take(NLH_BB, zi, axis=0), dtype=dtype)   # (E, 93, 3)
         b = jnp.take_along_axis(b, zj[:, None, None], axis=1)     # (E, 1, 3)
         b = b.squeeze(1)                                           # (E, 3)
 
@@ -1988,18 +1991,7 @@ class DispersionEnergyKspace(BaseSubModule):
                 hirshfeld_ratios = self.hirshfeld_ratios(inputs)['hirshfeld_ratios']
             c6_ratios = hirshfeld_ratios ** 2
         else:
-            c6_ratios = inputs.get('c6_ratios')
-            if c6_ratios is None:
-                c6_ratios = self.c6_ratios(inputs)['c6_ratios']
-            else:
-                # NaN-padded `c6_ratios` labels (ASE loader, file without a
-                # c6_ratios column) must not poison the dispersion forward;
-                # fall back to the model's own c6_ratios for non-finite entries.
-                c6_ratios = jnp.where(
-                    jnp.isnan(c6_ratios),
-                    self.c6_ratios(inputs)['c6_ratios'],
-                    c6_ratios,
-                )
+            c6_ratios = _c6_ratios_from_labels_or_head(self.c6_ratios, inputs)
 
         # Dispersion charges: q_i = sqrt(C6_free[Z_i] * c6_ratio_i)
         # C6_coef is indexed from 0, atomic_numbers from 1
@@ -2104,18 +2096,7 @@ class DispersionEnergySparse(nn.Module):
             # mixing rule reproduces the original C6 = C6_free * h^2 exactly.
             c6_ratios = hirshfeld_ratios ** 2
         else:
-            c6_ratios = inputs.get('c6_ratios')
-            if c6_ratios is None:
-                c6_ratios = self.c6_ratios(inputs)['c6_ratios']
-            else:
-                # NaN-padded `c6_ratios` labels (ASE loader, file without a
-                # c6_ratios column) must not poison the dispersion forward;
-                # fall back to the model's own c6_ratios for non-finite entries.
-                c6_ratios = jnp.where(
-                    jnp.isnan(c6_ratios),
-                    self.c6_ratios(inputs)['c6_ratios'],
-                    c6_ratios,
-                )
+            c6_ratios = _c6_ratios_from_labels_or_head(self.c6_ratios, inputs)
 
         # Get atomic numbers (needed to link to the free-atom reference values)
         atomic_numbers = inputs['atomic_numbers']  # (num_nodes)

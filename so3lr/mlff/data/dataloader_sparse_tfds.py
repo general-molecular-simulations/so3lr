@@ -59,8 +59,6 @@ def compute_edges_np(positions, atomic_numbers, cell, pbc, cutoff):
         # dataloader-worker hang.
         pos = np.asarray(positions, dtype=np.float64)
         n = pos.shape[0]
-        if n < 2:
-            return (np.zeros(0, np.int32), np.zeros(0, np.int32), np.zeros((0, 3), np.int32))
         d = pos[None, :, :] - pos[:, None, :]
         dist = np.sqrt(np.einsum('ijk,ijk->ij', d, d))
         keep = (dist < cutoff) & ~np.eye(n, dtype=bool)
