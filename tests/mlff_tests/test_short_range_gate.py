@@ -4,9 +4,10 @@ The gate is the one change in the LES-port PR that alters model predictions
 (below SR_GATE_ON only), so its safety claims are pinned here: normal chemistry
 is untouched (gate exactly 1 at trained distances), clashes fade the learned
 heads to constants, padding edges are ignored, and inputs without a short-range
-graph disable it. The charge head's fade target (SR_GATE_FALLBACK, not 0) is
-pinned end to end: gating charges to 0 made charge conservation dump its full
-correction onto the clashed atom (~+7 e) and blew up the electrostatics.
+graph disable it. The charge head's fade target is pinned end to end: gating
+charges to 0 made charge conservation dump its full correction onto the clashed
+atom (~+7 e) and blew up the electrostatics, so the head is faded to its own
+zero-environment prediction instead.
 """
 import jax.numpy as jnp
 import numpy as np
@@ -14,7 +15,6 @@ import numpy.testing as npt
 import pytest
 
 from so3lr.mlff.nn.observable.observable_sparse import (
-    SR_GATE_FALLBACK,
     SR_GATE_OFF,
     SR_GATE_ON,
     _c6_ratios_from_labels_or_head,
@@ -24,10 +24,17 @@ from so3lr.mlff.nn.observable.observable_sparse import (
 )
 
 
-def _inputs(d_ij, idx_i, n_atoms):
+def _inputs(d_ij, idx_i, n_atoms, idx_j=None):
+    d_ij = jnp.asarray(d_ij)
+    idx_i = jnp.asarray(idx_i)
+    if idx_j is None:
+        # Any partner that is not the sender: these tests only care about d_ij,
+        # and idx_i != idx_j is what marks an edge as real.
+        idx_j = (idx_i + 1) % max(n_atoms, 2)
     return {
-        'd_ij': jnp.asarray(d_ij),
-        'idx_i': jnp.asarray(idx_i),
+        'd_ij': d_ij,
+        'idx_i': idx_i,
+        'idx_j': jnp.asarray(idx_j),
         'node_mask': jnp.ones((n_atoms,), dtype=bool),
     }
 
@@ -54,9 +61,32 @@ def test_gate_is_smooth_between_off_and_on():
 
 
 def test_padding_edges_do_not_close_the_gate():
-    """Padded edges carry d_ij == 0; they must not count as clashes."""
-    gate = short_range_gate(_inputs([0.96, 0.0, 0.0], [0, 0, 0], 1))
+    """Padding edges are marked by idx_i == idx_j; they must not count as
+    clashes even though their d_ij is 0."""
+    gate = short_range_gate(_inputs([0.96, 0.0, 0.0], [0, 0, 0], 1,
+                                    idx_j=[1, 0, 0]))
     npt.assert_array_equal(np.asarray(gate), np.ones(1))
+
+
+def test_coincident_atoms_close_the_gate():
+    """Two atoms at EXACTLY the same position (d_ij == 0) are the worst possible
+    out-of-distribution case, so the gate must shut -- it must not be mistaken
+    for padding, which is identified by idx_i == idx_j instead."""
+    gate = short_range_gate(_inputs([0.0, 0.0], [0, 1], 2, idx_j=[1, 0]))
+    npt.assert_array_equal(np.asarray(gate), np.zeros(2))
+
+
+def test_gate_gradient_is_finite_at_zero_distance():
+    import jax
+
+    def total_gate(d):
+        return short_range_gate({
+            'd_ij': d, 'idx_i': jnp.asarray([0, 1]), 'idx_j': jnp.asarray([1, 0]),
+            'node_mask': jnp.ones((2,), dtype=bool),
+        }).sum()
+
+    grad = jax.grad(total_gate)(jnp.asarray([0.0, 0.0]))
+    assert np.isfinite(np.asarray(grad)).all()
 
 
 def test_gate_defaults_to_open_without_a_short_range_graph():
@@ -79,11 +109,14 @@ def test_fade_to_free_atom_ratio():
     npt.assert_allclose(float(faded[1]), 0.8)   # trained range -> untouched
 
 
-def test_charge_fallback_is_the_calibrated_constant():
-    """The charge head fades to SR_GATE_FALLBACK (the pre-equilibration per-atom
-    mean), not 0: fading to 0 strips the offset charge conservation cancels and
-    re-creates the spurious ~+7 e artifact."""
-    assert SR_GATE_FALLBACK == pytest.approx(-7.18)
+def test_no_calibrated_charge_constant_remains():
+    """The charge fade target is derived from the checkpoint (the head's
+    zero-environment prediction), not a hand-calibrated constant: the true value
+    differs by several e between model families, so no literal can serve them
+    all. Guards against the constant being reintroduced."""
+    import so3lr.mlff.nn.observable.observable_sparse as obs
+
+    assert not hasattr(obs, 'SR_GATE_FALLBACK')
 
 
 class TestC6RatiosLabelFallback:
