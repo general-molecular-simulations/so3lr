@@ -15,6 +15,7 @@ from glp.graph import Graph
 from ..utils import calculator_utils
 from .base_calculator import make_base_calculator
 from ..nn.stacknet.observable_function_sparse import get_observable_fn_sparse
+from ..nn.observable.dispersion_ref_data import max_supported_atomic_number
 from ml_collections import config_dict
 from ..config import from_config
 from orbax import checkpoint
@@ -186,6 +187,11 @@ class PotentialSparse(MachineLearningPotential):
 
     potential_fn: Callable[[Graph, bool], jnp.ndarray] = struct.field(pytree_node=False)
     dtype: Type = struct.field(pytree_node=False)
+    # Largest atomic number this model's reference tables cover, so callers can
+    # reject unsupported elements before they reach the jitted gathers. Optional
+    # (default None = unknown, no check) so externally-constructed instances keep
+    # working unchanged.
+    max_atomic_number: Optional[int] = struct.field(pytree_node=False, default=None)
 
     @classmethod
     def create_from_ckpt_dir(
@@ -285,6 +291,14 @@ class PotentialSparse(MachineLearningPotential):
 
         long_range_bool = (cfg.model.electrostatic_energy_bool is True) or (cfg.model.dispersion_energy_bool is True)
 
+        # Which free-atom reference tables this model indexes, hence the largest Z
+        # it can represent: the refitted alpha_0/C6 tables stop at Rn (86) and the
+        # NLH repulsion table at U (92), while the legacy v1 references run to 102.
+        max_atomic_number = max_supported_atomic_number(
+            legacy=cfg.model.get('legacy_so3lr_bool', False) is True,
+            dispersion=cfg.model.dispersion_energy_bool is True,
+        )
+
         cutoff = cfg.model.cutoff
         steps = cfg.model.num_layers
 
@@ -351,7 +365,8 @@ class PotentialSparse(MachineLearningPotential):
             long_range_bool=long_range_bool,
             long_range_cutoff=long_range_kwargs['cutoff_lr'] if long_range_bool is True else None,
             potential_fn=potential_fn,
-            dtype=dtype
+            dtype=dtype,
+            max_atomic_number=max_atomic_number
         )
 
     def __call__(

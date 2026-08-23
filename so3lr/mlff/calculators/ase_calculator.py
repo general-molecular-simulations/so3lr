@@ -11,6 +11,7 @@ from ase.calculators.calculator import Calculator
 
 from so3lr.mlff.utils.structures import Graph
 from so3lr.mlff.calculators.potential import PotentialSparse
+from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
 
 try:
     from glp.calculators.utils import strain_graph, get_strain, strain_system
@@ -581,6 +582,9 @@ class AseCalculatorSparse(Calculator):
         self.skin = skin
         self.cutoff = potential.cutoff  # cutoff for the local neighbor list
         self.hessian_slice = hessian_slice
+        # Largest Z the model's reference tables cover (None if the potential was
+        # built without that information); checked per structure in ``calculate``.
+        self.max_atomic_number = getattr(potential, 'max_atomic_number', None)
 
         # Check if the ML potential has long-range components
         long_range_bool = potential.long_range_bool
@@ -630,6 +634,17 @@ class AseCalculatorSparse(Calculator):
 
     def calculate(self, atoms=None, hessian_slice_index=None, *args, **kwargs):
         super(AseCalculatorSparse, self).calculate(atoms, *args, **kwargs)
+
+        # Reject elements the free-atom reference tables do not cover, here where
+        # the structure is still eager and nameable. Past this point the lookups are
+        # jnp.take under jit, which resolves an out-of-range Z by JAX's
+        # out-of-bounds policy instead of raising -- a plausible number taken from
+        # the wrong element, with nothing to indicate it happened.
+        if self.max_atomic_number is not None:
+            check_atomic_numbers_supported(
+                atoms.get_atomic_numbers(), self.max_atomic_number,
+                context=f'{type(self).__name__}.calculate',
+            )
 
         system = atoms_to_system(atoms, dtype=self.dtype)
 

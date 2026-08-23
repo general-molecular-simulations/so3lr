@@ -17222,3 +17222,81 @@ NLH_BB = np.array([[[9.5565800e+00, 8.8908600e+00, 0.0000000e+00],
   [4.4306880e+01, 9.4375700e+00, 3.3488900e+00],
   [6.5707760e+01, 1.1937510e+01, 4.1907200e+00],
   [6.1033830e+01, 1.2474110e+01, 4.2989500e+00]]])#, dtype=float)
+
+
+# ---------------------------------------------------------------------------
+# Supported atomic-number ranges
+# ---------------------------------------------------------------------------
+# Every table above is indexed with ``Z - 1``, so a table with ``n`` rows covers
+# Z = 1..n. The bounds are derived from the arrays themselves rather than written
+# out, so they cannot drift if a table is refitted at a different length.
+#
+# They are NOT all the same length, and the smallest one binds:
+#   NLH_AA / NLH_BB   (92)  -- NLH repulsion, used by so3lr-s/m/l
+#   alphas / C6_coef  (86)  -- refitted alpha_0 / C6 free-atom references
+#   *_legacy          (102) -- v1 SO3LR references (legacy models use ZBL
+#                              repulsion, which is analytic and has no table)
+#
+# Out-of-range Z is not a clean failure without a check: the gathers in
+# ``mixing_rules`` / ``NLHRepulsionSparse`` are ``jnp.take`` under jit, so an
+# index past the end is resolved by JAX's out-of-bounds policy instead of
+# raising -- a plausible-looking number from the wrong element, or a NaN, with
+# no indication which. ``check_atomic_numbers_supported`` turns that into an
+# error naming the offending elements, at the eager boundary where the input
+# still has a filename and an atom index attached to it.
+MAX_Z_NLH = int(NLH_AA.shape[0])                     # 92 (H..U)
+MAX_Z_DISPERSION = int(np.asarray(alphas).shape[0])   # 86 (H..Rn)
+MAX_Z_DISPERSION_LEGACY = int(np.asarray(alphas_legacy).shape[0])  # 102 (H..Fm)
+
+
+def max_supported_atomic_number(legacy: bool = False, dispersion: bool = True) -> int:
+    """Largest atomic number the reference tables cover for a model.
+
+    Args:
+        legacy: ``True`` for v1 SO3LR (``legacy_so3lr_bool``), which uses the
+            legacy dispersion references and analytic ZBL repulsion.
+        dispersion: Whether the dispersion term is active. When it is off, only
+            the repulsion table binds.
+
+    Returns:
+        The inclusive upper bound on Z. Elements above it have no reference data.
+    """
+    if legacy:
+        return MAX_Z_DISPERSION_LEGACY if dispersion else 118
+    return min(MAX_Z_NLH, MAX_Z_DISPERSION) if dispersion else MAX_Z_NLH
+
+
+def check_atomic_numbers_supported(atomic_numbers, max_z, *, context=None):
+    """Raise ``ValueError`` if any atomic number is outside ``[1, max_z]``.
+
+    Call this at eager (non-jit) boundaries -- reading a structure, building a
+    graph -- where a useful message can still be produced. Padding atoms (Z=0)
+    must be excluded by the caller; here they are reported as invalid, since at
+    these boundaries the input is real atoms only.
+
+    Args:
+        atomic_numbers: Array-like of integer atomic numbers.
+        max_z: Inclusive upper bound, from :func:`max_supported_atomic_number`.
+        context: Optional string (e.g. a filename) prefixed to the message.
+
+    Raises:
+        ValueError: If any atomic number is < 1 or > ``max_z``.
+    """
+    z = np.asarray(atomic_numbers).reshape(-1)
+    if z.size == 0:
+        return
+    bad = np.unique(z[(z < 1) | (z > max_z)])
+    if bad.size == 0:
+        return
+    named = ', '.join(
+        f'{species[int(b) - 1]} (Z={int(b)})' if 1 <= int(b) <= len(species) else f'Z={int(b)}'
+        for b in bad
+    )
+    where = f'{context}: ' if context else ''
+    raise ValueError(
+        f'{where}unsupported element(s) for this model: {named}. The reference '
+        f'tables cover Z = 1..{max_z}; elements outside that range have no '
+        f'free-atom parameters, and the model would silently return values '
+        f'gathered from the wrong element rather than fail. Remove those atoms '
+        f'or use a model whose references cover them.'
+    )

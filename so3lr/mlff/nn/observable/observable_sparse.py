@@ -1672,11 +1672,11 @@ class NLHRepulsionSparse(BaseSubModule):
 
         # Get NLH coefficients
         # First gather along Z_i (axis 0), then along Z_j (axis 1)
-        a = jnp.asarray(jnp.take(NLH_AA, zi, axis=0), dtype=dtype)   # (E, 93, 3)
+        a = jnp.asarray(jnp.take(NLH_AA, zi, axis=0), dtype=dtype)   # (E, 92, 3)
         a = jnp.take_along_axis(a, zj[:, None, None], axis=1)     # (E, 1, 3)
         a = a.squeeze(1)                                           # (E, 3)
 
-        b = jnp.asarray(jnp.take(NLH_BB, zi, axis=0), dtype=dtype)   # (E, 93, 3)
+        b = jnp.asarray(jnp.take(NLH_BB, zi, axis=0), dtype=dtype)   # (E, 92, 3)
         b = jnp.take_along_axis(b, zj[:, None, None], axis=1)     # (E, 1, 3)
         b = b.squeeze(1)                                           # (E, 3)
 
