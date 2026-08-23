@@ -47,15 +47,42 @@ def test_every_per_atom_observable_gets_an_hdf5_dataset(tmp_path):
             assert f[o].shape[1:] == (2, 5), f'{o} has shape {f[o].shape}'
 
 
-def test_non_per_atom_observable_is_reported_not_silently_wrong(tmp_path, caplog):
-    """'x' is (num_atoms, num_features); it cannot be sized up front."""
+def test_embeddings_get_a_dataset_when_the_feature_width_is_known(tmp_path):
+    """'x' is (num_atoms, num_features), not one scalar per atom, so its dataset
+    needs the model's feature width. Without it the store silently had no 'x'
+    dataset and the run died at write time with "object 'x' doesn't exist"."""
+    import h5py
     from so3lr.cli.so3lr_md import init_hdf5_store
 
     assert not is_per_atom_observable('x')
+    out = tmp_path / 'traj.hdf5'
     init_hdf5_store(
-        save_to=tmp_path / 'traj.hdf5', batch_size=2, num_atoms=5,
-        num_box_entries=3, exist_ok=True, observables=['x'],
+        save_to=out, batch_size=2, num_atoms=5, num_box_entries=3,
+        exist_ok=True, observables=['x'], num_features=128,
     )
+    with h5py.File(out, 'r') as f:
+        assert f['x'].shape[1:] == (2, 5, 128)
+
+
+def test_embeddings_are_reported_when_the_width_is_unknown(tmp_path):
+    """No width -> no dataset, but say so rather than failing later."""
+    import h5py
+    from so3lr.cli.so3lr_md import init_hdf5_store
+
+    out = tmp_path / 'traj.hdf5'
+    init_hdf5_store(
+        save_to=out, batch_size=2, num_atoms=5, num_box_entries=3,
+        exist_ok=True, observables=['x'], num_features=None,
+    )
+    with h5py.File(out, 'r') as f:
+        assert 'x' not in f
+
+
+def test_model_feature_width_is_readable_for_bundled_models():
+    from so3lr.cli.so3lr_md import _model_num_features
+
+    assert _model_num_features('so3lr-m-2606') == 128
+    assert _model_num_features(None) is not None  # default model
 
 
 @pytest.mark.parametrize('observables', [

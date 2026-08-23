@@ -63,6 +63,25 @@ from collections import namedtuple
 from ..md_observables import is_per_atom_observable
 
 
+def _model_num_features(model_path) -> Optional[int]:
+    """Per-atom feature width of the model, or None if it cannot be read.
+
+    Needed to size the 'x' (embeddings) HDF5 dataset, which -- unlike every
+    other observable -- is not one scalar per atom. Read straight from the
+    checkpoint's hyperparameters.json: the store is initialized before the
+    model itself is loaded.
+    """
+    try:
+        import json
+        from ..model_registry import resolve_model
+        workdir = resolve_model(model_path).dir
+        with open(pathlib.Path(workdir) / 'hyperparameters.json') as fp:
+            return int(json.load(fp)['model']['num_features'])
+    except Exception as e:  # pragma: no cover - informational fallback
+        logger.warning(f"Could not determine the model's feature width: {e}")
+        return None
+
+
 def intermediate_quantity_kwargs(observables) -> Dict[str, Any]:
     """Extra kwargs asking the model to emit the requested observables.
 
@@ -440,6 +459,7 @@ def init_hdf5_store(
     num_box_entries: int,
     exist_ok: bool = False,
     observables: Optional[Sequence[str]] = [],
+    num_features: Optional[int] = None,
     so3lr_version: Optional[str] = None,
     ensemble: Optional[str] = None,
     md_dt_fs: Optional[float] = None,
@@ -459,6 +479,9 @@ def init_hdf5_store(
         num_box_entries: Number of entries in the box vector (typically 3).
         exist_ok: Whether to overwrite the file if it exists.
         observables: Observable names that get their own dataset.
+        num_features: Per-atom feature width, needed to size the 'x' dataset.
+            Read from the model's hyperparameters by the caller; when None,
+            'x' cannot be stored and is reported.
         so3lr_version: SO3LR package version recorded as a root attribute.
         ensemble: Ensemble label (nve/nvt/nvt-langevin/npt) recorded as a root attribute.
         md_dt_fs: MD timestep in femtoseconds recorded as a root attribute.
@@ -511,6 +534,22 @@ def init_hdf5_store(
             dataset['dipole_vec'] = DataSetEntry(
                 chunk_length=1,
                 shape=(batch_size, 1, 3),
+                dtype=np.float32
+            )
+        elif o == 'x':
+            # Per-atom embeddings: (num_atoms, num_features). Unlike every other
+            # observable this is not one scalar per atom, so the dataset can only
+            # be sized once the model's feature width is known.
+            if num_features is None:
+                logger.warning(
+                    "Observable 'x' needs the model's feature width to size its "
+                    "HDF5 dataset and it could not be determined; use "
+                    "--output-format extxyz to record it."
+                )
+                continue
+            dataset['x'] = DataSetEntry(
+                chunk_length=1,
+                shape=(batch_size, num_atoms, num_features),
                 dtype=np.float32
             )
         elif is_per_atom_observable(o) or o in ('hirshfeld_ratios', 'c6_ratios',
@@ -2413,6 +2452,7 @@ def perform_md(
         # Record the user-facing femtosecond value as the root attr.
         _md_dt_fs = float(md_dt) * 1000.0 if md_dt is not None else None
         from .. import __version__ as _so3lr_version
+        _num_features = _model_num_features(model_path) if 'x' in observables else None
         hdf5_store = init_hdf5_store(
             save_to=output_file,
             batch_size=save_buffer,
@@ -2420,6 +2460,7 @@ def perform_md(
             num_box_entries=box.shape[0],
             exist_ok=True,
             observables = observables,
+            num_features=_num_features,
             so3lr_version=_so3lr_version,
             ensemble=ensemble,
             md_dt_fs=_md_dt_fs,
