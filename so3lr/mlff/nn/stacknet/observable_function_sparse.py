@@ -325,12 +325,7 @@ def get_energy_and_force_fn_sparse(model: StackNetSparse):
             hirshfeld_ratios = model_output['hirshfeld_ratios']  # (num_graphs)
             hirshfeld_ratios = safe_scale(hirshfeld_ratios, node_mask)  # (num_graphs)
             result['hirshfeld_ratios'] = hirshfeld_ratios
-
-        if 'a0_ratios' in model_output:
-            a0_ratios = model_output['a0_ratios']  # (num_graphs)
-            a0_ratios = safe_scale(a0_ratios, node_mask)  # (num_graphs)
-            result['a0_ratios'] = a0_ratios
-
+        
         if 'c6_ratios' in model_output:
             c6_ratios = model_output['c6_ratios']  # (num_graphs)
             c6_ratios = safe_scale(c6_ratios, node_mask)  # (num_graphs)
