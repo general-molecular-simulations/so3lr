@@ -1568,8 +1568,8 @@ def nve_md(**kwargs) -> None:
               help='Use JIT compilation for speed. [default: enabled]')
 @click.option('--charge-embed-total-charge', 'charge_embed_total_charge', default=None, type=float,
               help='Total charge seen by the charge EMBEDDING only. Unset (default) '
-                   'follows --total-charge; 0 embeds a neutral system. Charge '
-                   'equilibration always uses the true total charge.')
+                   'follows --total-charge; 0 embeds a neutral system. Independent '
+                   'of --charge-equilibration-total-charge.')
 @click.option('--charge-equilibration-total-charge', 'charge_equilibration_total_charge', default=None, type=float,
               help='Total charge that charge EQUILIBRATION conserves to. Unset (default) '
                    'follows --total-charge; 0 conserves to neutral. Independent of '
