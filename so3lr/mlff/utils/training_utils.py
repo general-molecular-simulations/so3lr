@@ -832,8 +832,15 @@ def make_training_step_fn(
             batch
         )
 
+        # Per-leaf gradient norms go under their own key: writing them to
+        # 'grad_norm' meant the unconditional global-norm assignment below
+        # overwrote them every step, making log_gradient_values a no-op.
         if log_gradient_values:
-            metrics['grad_norm'] = unfreeze(jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x.reshape(-1), axis=0), grads))
+            metrics['grad_norm_per_leaf'] = unfreeze(
+                jax.tree_util.tree_map(
+                    lambda x: jnp.linalg.norm(x.reshape(-1), axis=0), grads
+                )
+            )
 
         updates, opt_state = optimizer.update(
             grads,
@@ -1314,13 +1321,22 @@ def fit(
                 logger.info(print_metrics_row(epoch, step, eval_metrics))
 
                 # Save checkpoint (the EMA / deployed weights when EMA is on).
-                ckpt_mngr.save(
-                    step,
-                    args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
-                    metrics={
-                        'loss': eval_metrics['eval_loss']
-                    }
-                )
+                # Only when the loss is finite: orbax ranks checkpoints with
+                # best_fn/best_mode='min', and a NaN comparison can leave the
+                # diverged step sitting in the max_to_keep window as 'best',
+                # evicting the genuinely best weights. fit_from_iterator has
+                # always guarded this; fit() did not.
+                eval_loss = eval_metrics['eval_loss']
+                if jnp.isfinite(eval_loss):
+                    ckpt_mngr.save(
+                        step,
+                        args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
+                        metrics={'loss': eval_loss}
+                    )
+                else:
+                    logger.warning(
+                        f"Skipping checkpoint at step {step} because eval_loss={eval_loss}"
+                    )
 
                 # Log to weights and bias.
                 if use_wandb:

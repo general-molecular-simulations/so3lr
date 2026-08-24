@@ -13,7 +13,7 @@ from typing import Any, Callable, Type, Dict, Sequence, Optional
 from glp.graph import Graph
 
 from ..utils import calculator_utils
-from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
+from ..utils.training_utils import expand_observables_to_theory_levels
 from .base_calculator import make_base_calculator
 from ..nn.stacknet.observable_function_sparse import get_observable_fn_sparse
 from ..nn.observable.dispersion_ref_data import supported_atomic_numbers
@@ -126,28 +126,10 @@ def load_model_from_workdir(
             f'{model=} is not a valid model.'
         )
 
-    if 'energy_offset' in params['params']['observables_0']:
-        # Change shapes to allow for multiple theory levels
-        num_theory_levels = MAX_NUM_THEORY_LEVELS
-        old_energy_offset = params['params']['observables_0']['energy_offset']
-        if len(old_energy_offset.shape) == 1:
-            new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-            params['params']['observables_0']['energy_offset'] = new_energy_offset
-
-            old_atomic_scales = params['params']['observables_0']['atomic_scales']
-            new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-            params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-
-            old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-            new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-            params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-
-            # Tile the optional final bias (legacy models with use_final_bias_bool).
-            old_bias = params['params']['observables_0']['energy_dense_final'].get('bias')
-            if old_bias is not None and old_bias.shape[-1] == 1:
-                params['params']['observables_0']['energy_dense_final']['bias'] = jnp.tile(
-                    old_bias, (num_theory_levels,)
-                )
+    # Expand a single-theory-level checkpoint to the multi-head energy readout.
+    # Canonical implementation; the inference and training paths share it so they
+    # cannot drift (they had: the copies disagreed about the optional final bias).
+    params = expand_observables_to_theory_levels(params)
 
     # # Initialize missing C6RatiosSparse params (observables_3) if not in checkpoint.
     # # C6RatiosSparse was added after the model was trained. With embedding=1.0 and
@@ -289,22 +271,9 @@ class PotentialSparse(MachineLearningPotential):
             charge_equilibration_total_charge=charge_equilibration_total_charge
         )
 
-        # Handle multi-theory level support
-        if 'energy_offset' in params['params']['observables_0']:
-            num_theory_levels = MAX_NUM_THEORY_LEVELS
-            old_energy_offset = params['params']['observables_0']['energy_offset']
-            if len(old_energy_offset.shape) == 1:
-                new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-                params['params']['observables_0']['energy_offset'] = new_energy_offset
-
-                old_atomic_scales = params['params']['observables_0']['atomic_scales']
-                new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-                params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-
-                old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-                new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-                params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-
+        # (No theory-level expansion here: load_model_from_workdir above has
+        # already done it. This used to carry a third copy of the tiling that
+        # could never fire -- and which omitted the final-bias case.)
         cfg = load_hyperparameters(workdir=workdir)
 
         net.reset_input_convention('displacements')

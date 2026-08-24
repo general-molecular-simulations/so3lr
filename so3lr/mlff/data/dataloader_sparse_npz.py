@@ -67,8 +67,12 @@ class NpzDataLoaderSparse:
             def keep(idx: int):
                 return True
         else:
+            # Build the lookup once. `idx in pick_idx` on an ndarray is a full
+            # vectorised scan per structure, i.e. O(N*M) over the dataset.
+            pick_idx_set = set(np.asarray(pick_idx).tolist())
+
             def keep(idx: int):
-                return idx in pick_idx
+                return idx in pick_idx_set
 
         # Aggregate over every .npz returned by make_file_list(): a single file
         # in input_file mode, or all .npz in input_folder mode. Previously load()
