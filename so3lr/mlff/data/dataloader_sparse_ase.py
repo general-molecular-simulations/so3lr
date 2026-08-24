@@ -232,7 +232,13 @@ def ASE_to_jraph(
 
     # Read additional properties from .info and .arrays in Atoms object.
     total_charge = mol.info.get('charge')
+    # Spin multiplicity (2S+1). OMol25/OPoly26 extxyz store it under `spin=`,
+    # other datasets use `multiplicity=`. Prefer the canonical `multiplicity`,
+    # falling back to `spin` so open-shell structures are not silently read as
+    # closed-shell singlets (num_unpaired_electrons = multiplicity - 1).
     multiplicity = mol.info.get('multiplicity')
+    if multiplicity is None:
+        multiplicity = mol.info.get('spin')
     # The polarizability/volume-ratio label has been stored under several keys
     # over time. Accept any of them and pick the first that exists, so users
     # don't silently get NaN labels when their extxyz uses the canonical
