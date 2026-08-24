@@ -136,6 +136,31 @@ class GeometryEmbedE3x(BaseSubModule):
                 }
 
 
+# Closest approach the v2 checkpoints were trained on: their hyperparameters
+# record ``data.filter.min_distance = 0.5``, so no training structure contains a
+# pair below this. Distances handed to the radial basis are floored here.
+DESCRIPTOR_MIN_DISTANCE = 0.5   # [A] floor for the descriptor's radial basis
+DESCRIPTOR_FLOOR_OFF = 0.7      # [A] at or above this the floor is exactly inert
+
+
+def floor_descriptor_distance(
+        d_ij,
+        rmin: float = DESCRIPTOR_MIN_DISTANCE,
+        d_off: float = DESCRIPTOR_FLOOR_OFF
+):
+    """Smoothly floor ``d_ij`` at ``rmin`` for use in the radial basis.
+
+    Exactly the identity for ``d_ij >= d_off`` (so every real bond -- the
+    shortest is H-H at 0.74 A -- is bit-for-bit untouched), C1 at the handover,
+    monotone, and bounded below by ``rmin``. Apply to the descriptor only; the
+    repulsion and electrostatics must keep the true distance.
+    """
+    u = (d_off - d_ij) / (d_off - rmin)
+    return jnp.where(d_ij >= d_off,
+                     d_ij,
+                     d_off - (d_off - rmin) * jnp.tanh(u))
+
+
 class GeometryEmbedSparse(BaseSubModule):
     prop_keys: Dict
     degrees: Sequence[int]
@@ -244,8 +269,19 @@ class GeometryEmbedSparse(BaseSubModule):
         else:
             d_ij_lr = None
 
+        # Never ask the radial basis to extrapolate below the closest approach the
+        # model was trained on. Only the DESCRIPTOR is floored: the angular part
+        # comes from ``unit_r_ij`` (untouched, so equivariance is unaffected) and
+        # ``cut``/``d_ij`` below stay on the true geometry, so the NLH/ZBL
+        # repulsion and the electrostatics still see the real contact and still
+        # diverge there. Without this the learned heads extrapolate wildly at a
+        # steric clash -- on so3lr-m a 0.2 A contact puts >100 e on atoms a bond
+        # away, and the resulting Coulomb term buries the repulsion (2.5e4 eV of
+        # electrostatics against 200 eV of repulsion).
+        d_ij_basis = floor_descriptor_distance(d_ij)
+
         # Gaussian basis expansion of distances.
-        rbf_ij = self.rbf_fn(jnp.expand_dims(d_ij, axis=-1))  # shape: (num_pairs, num_radial_basis_fn)
+        rbf_ij = self.rbf_fn(jnp.expand_dims(d_ij_basis, axis=-1))  # shape: (num_pairs, num_radial_basis_fn)
 
         # Radial cutoff function.
         cut = self.cut_fn(d_ij)  # shape: (num_pairs)
