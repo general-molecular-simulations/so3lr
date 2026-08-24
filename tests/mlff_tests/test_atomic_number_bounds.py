@@ -1,15 +1,18 @@
-"""Bounds on the free-atom reference tables, and the check that enforces them.
+"""Which elements the model may be asked about, and the check that enforces it.
 
-The tables in ``dispersion_ref_data`` are indexed with ``Z - 1`` inside jitted
-code, so an out-of-range element is resolved by JAX's out-of-bounds policy rather
-than raising. These tests pin the table lengths (they are not all equal, and the
-smallest one binds) and the eager check that turns a bad Z into an error.
+Two separate limits. The reference tables in ``dispersion_ref_data`` are indexed
+with ``Z - 1`` inside jitted code, so an element past the end of a table is
+resolved by JAX's out-of-bounds policy rather than raising -- a plausible number
+belonging to some other element. And the models were TRAINED only on Z = 1..85,
+which is stricter than any table (86, 92, 102): holding parameters for an element
+does not mean the network ever saw it. Training coverage is what binds.
 """
 import numpy as np
 import pytest
 
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     MAX_Z_DISPERSION,
+    MAX_Z_TRAINED,
     MAX_Z_DISPERSION_LEGACY,
     MAX_Z_NLH,
     alphas,
@@ -37,15 +40,23 @@ def test_nlh_table_is_square_in_z():
 
 
 @pytest.mark.parametrize(
-    'legacy, dispersion, expected',
-    [
-        (False, True, 86),    # so3lr-s/m/l: the refitted alpha_0/C6 tables bind
-        (False, False, 92),   # dispersion off: only NLH repulsion binds
-        (True, True, 102),    # v1 SO3LR: legacy references
-    ],
+    'legacy, dispersion',
+    [(False, True), (False, False), (True, True), (True, False)],
 )
-def test_max_supported_atomic_number(legacy, dispersion, expected):
-    assert max_supported_atomic_number(legacy=legacy, dispersion=dispersion) == expected
+def test_training_coverage_binds_before_any_table(legacy, dispersion):
+    """The models were trained on Z = 1..85. Every reference table reaches
+    further (86 for the refitted alpha_0/C6, 92 for NLH, 102 for the legacy
+    references), so having parameters for an element says nothing about whether
+    the network ever saw it -- training coverage is what must bind."""
+    assert max_supported_atomic_number(legacy=legacy, dispersion=dispersion) == MAX_Z_TRAINED
+    assert MAX_Z_TRAINED == 85
+
+
+def test_tables_all_reach_at_least_the_trained_range():
+    """If a table were ever refitted shorter than the trained range, the limit
+    must fall back to the table rather than promising coverage that is absent."""
+    assert min(MAX_Z_NLH, MAX_Z_DISPERSION) >= MAX_Z_TRAINED
+    assert MAX_Z_DISPERSION_LEGACY >= MAX_Z_TRAINED
 
 
 def test_accepts_the_trained_elements():
@@ -56,7 +67,7 @@ def test_accepts_the_trained_elements():
 def test_accepts_the_boundary_and_rejects_one_past_it():
     max_z = max_supported_atomic_number()
     check_atomic_numbers_supported([max_z], max_z)
-    with pytest.raises(ValueError, match=r'Z = 1\.\.86'):
+    with pytest.raises(ValueError, match=r'Z = 1\.\.85'):
         check_atomic_numbers_supported([max_z + 1], max_z)
 
 
@@ -87,11 +98,16 @@ def test_context_is_prefixed():
                                        context='my_structure.xyz')
 
 
-def test_legacy_model_accepts_what_the_new_tables_cannot():
-    # Ra (88) is outside the refitted tables but inside the legacy ones.
-    with pytest.raises(ValueError):
-        check_atomic_numbers_supported([88], max_supported_atomic_number())
-    check_atomic_numbers_supported([88], max_supported_atomic_number(legacy=True))
+def test_untrained_elements_are_rejected_even_where_tables_cover_them():
+    """Ra (88) has legacy reference data and Rn (86) has refitted data, but
+    neither was in the training set, so both must be refused."""
+    for z in (86, 88):
+        for legacy in (False, True):
+            with pytest.raises(ValueError):
+                check_atomic_numbers_supported(
+                    [z], max_supported_atomic_number(legacy=legacy))
+    # At (85) is the heaviest trained element and must still pass
+    check_atomic_numbers_supported([85], max_supported_atomic_number())
 
 
 def test_empty_and_array_inputs_are_accepted():
@@ -100,15 +116,15 @@ def test_empty_and_array_inputs_are_accepted():
                                    max_supported_atomic_number())
 
 
-@pytest.mark.parametrize('model_name, expected_max_z, bad_z, bad_match', [
-    # Non-legacy: the refitted alpha_0/C6 tables bind at 86, so Pu (94) is out.
-    ('so3lr-m-2606', 86, 94, r'Pu \(Z=94\)'),
-    # Legacy: v1 references reach Fm (102) -- Pu is fine, Z=104 is not (and has
-    # no symbol in the 102-row species table, so it is reported numerically).
-    ('so3lr', 102, 104, r'Z=104'),
+@pytest.mark.parametrize('model_name, bad_z, bad_match', [
+    # Rn (86) has refitted reference data and Ra (88) has legacy data, but the
+    # training set stops at At (85), so both must be refused by both families.
+    ('so3lr-m-2606', 86, r'Rn \(Z=86\)'),
+    ('so3lr-m-2606', 94, r'Pu \(Z=94\)'),
+    ('so3lr', 88, r'Ra \(Z=88\)'),
 ])
 def test_end_to_end_wiring_rejects_unsupported_elements(
-        model_name, expected_max_z, bad_z, bad_match):
+        model_name, bad_z, bad_match):
     """The limit must survive the whole chain: checkpoint cfg ->
     PotentialSparse.create_from_workdir -> AseCalculatorSparse.calculate.
     The helpers above are unit-tested; this pins the wiring."""
@@ -124,7 +140,7 @@ def test_end_to_end_wiring_rejects_unsupported_elements(
         head_index=spec.head_index,
         dtype=np.float32,
     )
-    assert calc.max_atomic_number == expected_max_z
+    assert calc.max_atomic_number == MAX_Z_TRAINED
 
     # The check fires before any graph construction or jit tracing, so this is
     # cheap: no model forward happens for the rejected structure.

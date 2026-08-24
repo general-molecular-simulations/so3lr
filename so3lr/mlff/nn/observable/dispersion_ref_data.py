@@ -17248,6 +17248,12 @@ MAX_Z_NLH = int(NLH_AA.shape[0])                     # 92 (H..U)
 MAX_Z_DISPERSION = int(np.asarray(alphas).shape[0])   # 86 (H..Rn)
 MAX_Z_DISPERSION_LEGACY = int(np.asarray(alphas_legacy).shape[0])  # 102 (H..Fm)
 
+# What the models were actually TRAINED on. This binds before any table does:
+# a table can hold parameters for an element the network never saw, and the
+# network will happily return a confident number for it. Reference data present
+# is necessary but not sufficient.
+MAX_Z_TRAINED = 85                                    # H..At
+
 
 def max_supported_atomic_number(legacy: bool = False, dispersion: bool = True) -> int:
     """Largest atomic number the reference tables cover for a model.
@@ -17259,11 +17265,16 @@ def max_supported_atomic_number(legacy: bool = False, dispersion: bool = True) -
             the repulsion table binds.
 
     Returns:
-        The inclusive upper bound on Z. Elements above it have no reference data.
+        The inclusive upper bound on Z: the smaller of what the reference tables
+        cover and what the models were trained on (``MAX_Z_TRAINED``). Training
+        coverage is the binding constraint for every current model -- the tables
+        reach Z = 86-102, but nothing above Z = 85 was ever seen during training.
     """
     if legacy:
-        return MAX_Z_DISPERSION_LEGACY if dispersion else 118
-    return min(MAX_Z_NLH, MAX_Z_DISPERSION) if dispersion else MAX_Z_NLH
+        table_limit = MAX_Z_DISPERSION_LEGACY if dispersion else 118
+    else:
+        table_limit = min(MAX_Z_NLH, MAX_Z_DISPERSION) if dispersion else MAX_Z_NLH
+    return min(MAX_Z_TRAINED, table_limit)
 
 
 def check_atomic_numbers_supported(atomic_numbers, max_z, *, context=None):
