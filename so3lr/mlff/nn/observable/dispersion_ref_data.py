@@ -17222,3 +17222,101 @@ NLH_BB = np.array([[[9.5565800e+00, 8.8908600e+00, 0.0000000e+00],
   [4.4306880e+01, 9.4375700e+00, 3.3488900e+00],
   [6.5707760e+01, 1.1937510e+01, 4.1907200e+00],
   [6.1033830e+01, 1.2474110e+01, 4.2989500e+00]]])#, dtype=float)
+
+
+# ---------------------------------------------------------------------------
+# Which elements each model may be asked about
+# ---------------------------------------------------------------------------
+# Two independent limits, and the stricter one wins.
+#
+# 1. Reference-table coverage. Every table above is indexed with ``Z - 1``, so a
+#    table with ``n`` rows covers Z = 1..n. The tables are NOT all the same
+#    length and the smallest binds:
+#      NLH_AA / NLH_BB   (92)  -- NLH repulsion, used by so3lr-s/m/l
+#      alphas / C6_coef  (86)  -- refitted alpha_0 / C6 free-atom references
+#      *_legacy          (102) -- v1 SO3LR references
+#
+# 2. What the network was actually TRAINED on, which is stricter than any table
+#    and is what really matters: a table can hold parameters for an element the
+#    network never saw, and the network will still return a confident number.
+#    v1 SO3LR covers only the eight biomolecular elements; the v2 models were
+#    trained across Z = 1..85.
+#
+# Out-of-range Z is not a clean failure without a check: the gathers in
+# ``mixing_rules`` / ``NLHRepulsionSparse`` are ``jnp.take`` under jit, so an
+# index past the end is resolved by JAX's out-of-bounds policy instead of
+# raising -- a plausible-looking number belonging to some other element.
+MAX_Z_NLH = int(NLH_AA.shape[0])                     # 92 (H..U)
+MAX_Z_DISPERSION = int(np.asarray(alphas).shape[0])   # 86 (H..Rn)
+MAX_Z_DISPERSION_LEGACY = int(np.asarray(alphas_legacy).shape[0])  # 102 (H..Fm)
+
+# v1 SO3LR was trained on biomolecular chemistry only. This is a SET, not a
+# range: Z <= 17 would wrongly admit Ne, Na, Mg, Al and Si.
+SO3LR_V1_ELEMENTS = frozenset({1, 6, 7, 8, 9, 15, 16, 17})  # H C N O F P S Cl
+MAX_Z_TRAINED = 85                                          # v2 models: H..At
+
+
+def supported_atomic_numbers(legacy: bool = False, dispersion: bool = True):
+    """The set of atomic numbers a model may be asked about.
+
+    Args:
+        legacy: ``True`` for v1 SO3LR (``legacy_so3lr_bool``), which was trained
+            on the eight biomolecular elements only. Its training set is well
+            inside every table, so ``dispersion`` does not affect it.
+        dispersion: Whether the dispersion term is active. When it is off, only
+            the repulsion table binds.
+
+    Returns:
+        ``frozenset`` of permitted Z, the intersection of what the reference
+        tables cover with what the model was trained on.
+    """
+    if legacy:
+        return SO3LR_V1_ELEMENTS
+    table_limit = min(MAX_Z_NLH, MAX_Z_DISPERSION) if dispersion else MAX_Z_NLH
+    return frozenset(range(1, min(MAX_Z_TRAINED, table_limit) + 1))
+
+
+def check_atomic_numbers_supported(atomic_numbers, supported, *, context=None):
+    """Raise ``ValueError`` if any atomic number is outside ``supported``.
+
+    Call this at eager (non-jit) boundaries -- reading a structure, building a
+    graph -- where a useful message can still be produced. Padding atoms (Z=0)
+    must be excluded by the caller; here they are reported as invalid, since at
+    these boundaries the input is real atoms only.
+
+    Args:
+        atomic_numbers: Array-like of integer atomic numbers.
+        supported: Container of permitted Z, from :func:`supported_atomic_numbers`.
+            ``None`` means the caller could not determine the model's coverage
+            (e.g. a potential built by an older code path); the check is then
+            skipped rather than failing on every structure.
+        context: Optional string (e.g. a filename) prefixed to the message.
+
+    Raises:
+        ValueError: If any atomic number is not in ``supported``.
+    """
+    if supported is None:
+        return
+    z = np.asarray(atomic_numbers).reshape(-1)
+    if z.size == 0:
+        return
+    allowed = sorted(int(x) for x in supported)
+    bad = np.unique(z[~np.isin(z, allowed)])
+    if bad.size == 0:
+        return
+    named = ', '.join(
+        f'{species[int(b) - 1]} (Z={int(b)})' if 1 <= int(b) <= len(species) else f'Z={int(b)}'
+        for b in bad
+    )
+    if allowed == list(range(1, allowed[-1] + 1)):
+        allowed_txt = f'Z = 1..{allowed[-1]}'
+    else:
+        allowed_txt = 'only ' + ', '.join(
+            f'{species[z0 - 1]}' for z0 in allowed if 1 <= z0 <= len(species))
+    where = f'{context}: ' if context else ''
+    raise ValueError(
+        f'{where}unsupported element(s) for this model: {named}. This model '
+        f'supports {allowed_txt}; outside that the network was never trained '
+        f'and would silently return values gathered from the wrong element '
+        f'rather than fail. Remove those atoms or use a model that covers them.'
+    )

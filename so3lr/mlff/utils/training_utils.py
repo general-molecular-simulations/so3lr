@@ -154,9 +154,16 @@ def set_seeds(seed=0):
     np.random.seed(seed)
 
 
+def _display_metric_keys(eval_metrics):
+    """Metric keys shown in the printed table. Hide the adaptive-robust-loss
+    internal params (``*_robust_alpha`` / ``*_robust_scale``) -- they are still
+    computed and logged to wandb, just not printed in the per-eval table."""
+    return [k for k in eval_metrics if 'robust' not in k]
+
+
 def print_metrics_header(eval_metrics):
     """Print table header row. Call once before training loop."""
-    cols = ['epoch', 'step'] + [k.removeprefix('eval_') for k in eval_metrics]
+    cols = ['epoch', 'step'] + [k.removeprefix('eval_') for k in _display_metric_keys(eval_metrics)]
     header = ' | '.join(f'{c:>14s}' for c in cols)
     sep = '-+-'.join('-' * 14 for _ in cols)
     return f"\n{header}\n{sep}"
@@ -164,7 +171,8 @@ def print_metrics_header(eval_metrics):
 
 def print_metrics_row(epoch, step, eval_metrics):
     """Print one table row for a validation checkpoint."""
-    vals = [f'{epoch:>14d}', f'{step:>14d}'] + [f'{v:>14.4f}' for v in eval_metrics.values()]
+    vals = [f'{epoch:>14d}', f'{step:>14d}'] + [
+        f'{eval_metrics[k]:>14.4f}' for k in _display_metric_keys(eval_metrics)]
     return ' | '.join(vals)
 
 def graph_mse_loss(

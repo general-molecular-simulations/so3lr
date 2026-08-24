@@ -18,6 +18,10 @@ from collections import defaultdict
 
 from ..jraph_utils import jraph_to_ase_atoms
 from ..base_calculator import make_so3lr
+from ..mlff.nn.observable.dispersion_ref_data import (
+    check_atomic_numbers_supported,
+    supported_atomic_numbers,
+)
 from .so3lr_md import load_model, setup_logger
 
 # Get logger
@@ -416,6 +420,10 @@ def evaluate_so3lr_on(
     # 'a0_ratios' for the new so3lr-s/m/l models. Normalize the requested target
     # to the model's output key so metric names (e.g. a0_ratios_rmse) match.
     legacy_model = bool(cfg['model'].get('legacy_so3lr_bool', False))
+    supported_z = supported_atomic_numbers(
+        legacy=legacy_model,
+        dispersion=bool(cfg['model'].get('dispersion_energy_bool', True)),
+    )
     ratio_key = 'hirshfeld_ratios' if legacy_model else 'a0_ratios'
     _other_ratio = 'a0_ratios' if ratio_key == 'hirshfeld_ratios' else 'hirshfeld_ratios'
     if _other_ratio in target_list:
@@ -463,23 +471,18 @@ def evaluate_so3lr_on(
             _new_data.append((_graph._replace(globals=_new_globals), _lr_data))
         data = _new_data
 
-#   # Check for allowed atom types
-#   allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
-#   for i, (graph, _) in enumerate(data):
-#       if hasattr(graph, 'nodes') and isinstance(graph.nodes, dict) and 'atomic_numbers' in graph.nodes:
-#            atomic_nums = graph.nodes['atomic_numbers']
-#       elif isinstance(graph, dict) and 'nodes' in graph and 'atomic_numbers' in graph['nodes']:
-#            atomic_nums = graph['nodes']['atomic_numbers']
-#       else:
-#            # Fallback or skip if structure is unclear, but better to be safe
-#            continue
-#            
-#       current_atomic_numbers = {int(x) for x in atomic_nums}
-#       if not current_atomic_numbers.issubset(allowed_atomic_numbers):
-#            unsupported = current_atomic_numbers - allowed_atomic_numbers
-#            logger.error(f"Structure {i} contains unsupported element(s): {unsupported}. "
-#                         f"Supported elements are: H(1), C(6), N(7), O(8), F(9), P(15), S(16), Cl(17).")
-#            raise ValueError(f"Unsupported elements in structure {i}: {unsupported}")
+    # Refuse elements this model was never trained on, before any forward pass.
+    # The set is model-dependent: legacy v1 saw only the eight biomolecular
+    # elements, the v2 models Z = 1..85. Past that the reference tables are
+    # indexed out of bounds inside jit and JAX silently returns a value
+    # belonging to some other element rather than raising.
+    for i, (graph, _) in enumerate(data):
+        nodes = graph['nodes'] if isinstance(graph, dict) else graph.nodes
+        atomic_nums = nodes.get('atomic_numbers') if isinstance(nodes, dict) else None
+        if atomic_nums is None:
+            continue
+        check_atomic_numbers_supported(atomic_nums, supported_z,
+                                       context=f'{datafile} structure {i}')
 
     # Determine padding sizes
     n_node = stats['max_num_of_nodes'] * batch_size + 1

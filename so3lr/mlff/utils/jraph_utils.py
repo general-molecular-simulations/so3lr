@@ -175,7 +175,7 @@ def _finalize_batch(items, n_node, n_edge, n_graph, n_pairs):
     lr_datas = [lr for _, lr in items]
 
     # Batch main graph (single batch + pad)
-    batched_graph = jraph.batch(graphs)
+    batched_graph = jraph.batch_np(graphs)  # numpy batch: jraph.batch uses jnp -> slow per-op under jax 0.10 in CPU worker
     batched_graph = jraph.pad_with_graphs(batched_graph, n_node, n_edge, n_graph)
 
     # Manually concatenate + offset LR indices
