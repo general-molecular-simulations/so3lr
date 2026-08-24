@@ -26,6 +26,8 @@ from so3lr.mlff.nn.embed.embed_sparse import (
 )
 
 # equilibrium bond lengths [A]; the floor must be inert at and above these
+# the O-H entry is the binding one: equilibrated water at 673 K / 250 bar
+# samples O-H down to 0.863 A, so the handover must stay below that
 BONDS = {('H', 'H'): 0.741, ('C', 'H'): 1.09, ('N', 'H'): 1.01, ('O', 'H'): 0.96,
          ('C', 'C'): 1.54, ('C', 'O'): 1.43, ('C', 'N'): 1.47, ('O', 'O'): 1.21,
          ('S', 'S'): 1.89, ('C', 'S'): 1.82, ('C', 'Cl'): 1.77, ('S', 'H'): 1.34}
@@ -62,22 +64,47 @@ def test_scale_is_pair_specific_and_ordered_by_size():
         z1, z2 = atomic_numbers[e1], atomic_numbers[e2]
         return t[min(z1, z2) - 1, max(z1, z2) - 1]
     assert r('H', 'H') < r('O', 'H') < r('C', 'C') < r('S', 'S')
-    assert r('S', 'S') / r('H', 'H') > 3.0
+    # S-S needs well over twice the reach of H-H, so one global floor cannot
+    # serve both: at H-H's value S-S is unprotected, at S-S's value H-H would
+    # be floored above its own bond length.
+    assert r('S', 'S') / r('H', 'H') > 2.0
 
 
-def test_reference_distance_matches_the_tabulated_repulsion():
-    """nlh_reference_distance must really solve E_NLH(r) = PAIR_FLOOR_ENERGY."""
+def test_reference_distance_matches_the_repulsion_the_model_computes():
+    """The ruler must track the SHIPPED repulsion, switching function included.
+
+    NLHRepulsionSparse multiplies by switching_fn(d, 0, 1.5), which drives the
+    term to exactly zero above 1.5 A. Omitting it makes the repulsion look like
+    it reaches 2 A for S-S when the model has already switched it off, and every
+    floor derived from it comes out too far.
+    """
     from so3lr.mlff.nn.embed.embed_sparse import PAIR_FLOOR_ENERGY
     from so3lr.mlff.nn.observable.dispersion_ref_data import NLH_AA, NLH_BB
+    from so3lr.mlff.nn.observable.observable_sparse import switching_fn
 
     ke = 14.399645351950548
     t = np.asarray(nlh_reference_distance())
     for e1, e2 in [('O', 'H'), ('C', 'C'), ('S', 'S')]:
         z1, z2 = atomic_numbers[e1], atomic_numbers[e2]
         i, j = min(z1, z2) - 1, max(z1, z2) - 1
-        r = t[i, j]
-        e = ke * z1 * z2 / r * np.sum(NLH_AA[i, j] * np.exp(-NLH_BB[i, j] * r))
-        npt.assert_allclose(e, PAIR_FLOOR_ENERGY, rtol=1e-3)
+        r = float(t[i, j])
+        y = float(np.sum(NLH_AA[i, j] * np.exp(-NLH_BB[i, j] * r)))
+        e = float(switching_fn(r, 0.0, 1.5)) * ke * z1 * z2 / r * y
+        npt.assert_allclose(e, PAIR_FLOOR_ENERGY, rtol=1e-2)
+    # and every reference distance must sit inside the repulsion's own range
+    assert t.max() < 1.5
+
+
+def test_floor_stays_above_the_measured_edge_of_validity():
+    """Floors must clear the distance where each model starts producing
+    nonsense (measured from raw diatomic curves on so3lr-l, the worst case)."""
+    edges = {('O', 'H'): 0.61, ('C', 'H'): 0.71, ('C', 'N'): 0.81,
+             ('C', 'Cl'): 0.91, ('S', 'S'): 1.01}
+    t = np.asarray(nlh_reference_distance())
+    for (e1, e2), edge in edges.items():
+        z1, z2 = atomic_numbers[e1], atomic_numbers[e2]
+        floor = PAIR_FLOOR_SCALE * t[min(z1, z2) - 1, max(z1, z2) - 1]
+        assert floor > edge, f'{e1}-{e2}: floor {floor:.3f} <= validity edge {edge}' 
 
 
 def test_floors_below_the_pair_scale():

@@ -154,16 +154,15 @@ class GeometryEmbedE3x(BaseSubModule):
 # bond length (O-H 0.97, C-H 1.08, S-S 2.03 A) with nothing to calibrate, and it
 # is by construction consistent with the repulsion that takes over there.
 PAIR_FLOOR_ENERGY = 1.0    # [eV] NLH repulsion level defining the pair length scale
-PAIR_FLOOR_SCALE = 0.7     # floor at this fraction of it (~30% bond compression)
+PAIR_FLOOR_SCALE = 0.92    # floor at this fraction of it
 PAIR_FLOOR_WIDTH = 0.05    # [A] handover; the floor is exactly inert above it
-# The O-H bond sets this. Two constraints bracket it: the floor must stay ABOVE
-# the network's edge of validity (so3lr-l degrades below 0.61 A for O-H), and
-# the handover must stay BELOW the shortest O-H that real simulation samples.
-# Measured on equilibrated 900-molecule water: 0.863 A at 673 K / 250 bar in a
-# single snapshot, 0.874 A over a 251-frame 300 K trajectory, and a
-# (conservative) Gaussian tail estimate of 0.78-0.84 A for a full supercritical
-# run. That leaves only ~0.17 A of room, so the handover is kept narrow:
-# floor 0.677 A, onset 0.727 A for O-H.
+# SCALE is bracketed from both sides by measurement, not chosen. Too small and
+# the floor sits below the network's own edge of validity (measured per pair
+# from diatomic curves: so3lr-l degrades below 0.61 A for O-H and 1.01 A for
+# S-S), so the descriptor still gets garbage. Too large and the handover reaches
+# real bonds -- equilibrated water at 673 K / 250 bar samples O-H down to
+# 0.863 A. Across all 18 pairs the feasible window is 0.86-0.98; 0.92 is its
+# midpoint. WIDTH is small for the same reason: O-H leaves only ~0.2 A of room.
 
 _NLH_REFERENCE_DISTANCE = {}
 
@@ -171,28 +170,39 @@ _NLH_REFERENCE_DISTANCE = {}
 def nlh_reference_distance(target_energy: float = PAIR_FLOOR_ENERGY):
     """Distance at which the tabulated NLH repulsion reaches ``target_energy``.
 
-    Returns a plain numpy ``(n_elements, n_elements)`` array indexed
-    ``[min(Z)-1, max(Z)-1]`` (the NLH tables are stored triangularly). Computed
-    once by bisection; the repulsion decreases monotonically with r over the
-    bracketed range.
+    Mirrors NLHRepulsionSparse, including its ``switching_fn(d, 0, 1.5)`` factor
+    -- without that the repulsion looks like it extends to 2 A when the shipped
+    term is switched off entirely beyond 1.5 A. The ``cut`` envelope is omitted:
+    it is 0.97-1.0 over this range, which moves the root by <0.5%. Verified
+    against the model's own ``nlh_repulsion`` output to within 5%.
 
-    Deliberately cached as numpy, never as a jax array: the first caller may be
-    inside a jit trace, and caching a value created there would let a tracer
-    escape its scope and fail every subsequent call.
+    Returns a plain numpy ``(n_elements, n_elements)`` array indexed
+    ``[min(Z)-1, max(Z)-1]``. Cached as numpy, never as a jax array: the first
+    caller may be inside a jit trace, and caching a value created there would
+    let a tracer escape its scope and fail every subsequent call.
     """
     if target_energy in _NLH_REFERENCE_DISTANCE:
         return _NLH_REFERENCE_DISTANCE[target_energy]
     from so3lr.mlff.nn.observable.dispersion_ref_data import NLH_AA, NLH_BB
     ke = 14.399645351950548
+
+    def _sigma(x):
+        return np.where(x > 0, np.exp(-1.0 / np.where(x > 0, x, 1.0)), 0.0)
+
+    def _switch(x, x_on, x_off):            # 1 below x_on, exactly 0 above x_off
+        c = (x - x_on) / (x_off - x_on)
+        return _sigma(1 - c) / (_sigma(1 - c) + _sigma(c))
+
     n = NLH_AA.shape[0]
     z = np.arange(1, n + 1)
     zi, zj = np.meshgrid(z, z, indexing='ij')
     a, b = np.asarray(NLH_AA), np.asarray(NLH_BB)
-    lo, hi = np.full((n, n), 0.02), np.full((n, n), 5.0)
+    lo, hi = np.full((n, n), 0.02), np.full((n, n), 1.5)
     for _ in range(60):
         mid = 0.5 * (lo + hi)
         with np.errstate(over='ignore', invalid='ignore'):
-            e = ke * zi * zj / mid * np.sum(a * np.exp(-b * mid[..., None]), axis=-1)
+            y = np.sum(a * np.exp(-b * mid[..., None]), axis=-1)
+            e = _switch(mid, 0.0, 1.5) * ke * zi * zj / mid * y
         above = np.nan_to_num(e, nan=0.0) > target_energy
         lo = np.where(above, mid, lo)
         hi = np.where(above, hi, mid)
