@@ -308,12 +308,7 @@ class EnergySparse(BaseSubModule):
                 name='energy_dense_final'
             )(x) # (num_nodes, num_levels_of_theory)
 
-        atomic_energy = atomic_energy * atomic_scales  # learned, env-dependent
-
-        # Short-range OOD gate: fade the learned NN energy to its per-element
-        # reference (``energy_offset``) at clash distances.
-        atomic_energy = atomic_energy * short_range_gate(inputs)[:, None]
-
+        atomic_energy = atomic_energy * atomic_scales
         atomic_energy += energy_offset  # (num_nodes, num_levels_of_theory)
 
         atomic_energy = jnp.where(
@@ -496,7 +491,6 @@ class HirshfeldSparse(BaseSubModule):
             qk = (q * k / jnp.sqrt(k.shape[-1])).sum(axis=-1)
             v_eff = v_shift + qk  # (n)
             hirshfeld_ratios = safe_scale(jnp.abs(v_eff), node_mask)
-            hirshfeld_ratios = _fade_to_free_atom_ratio(hirshfeld_ratios, inputs)
             return dict(hirshfeld_ratios=hirshfeld_ratios)
 
         q = nn.Embed(num_embeddings=100, features=1)(atomic_numbers).squeeze(axis=-1)
@@ -521,7 +515,6 @@ class HirshfeldSparse(BaseSubModule):
             )(x).squeeze(axis=-1)  # (num_nodes)
 
         a0_ratios = safe_scale(jnp.abs(x_ + q), node_mask)
-        a0_ratios = _fade_to_free_atom_ratio(a0_ratios, inputs)
 
         # New models predict static-polarizability (alpha_0) ratios; surface them
         # under 'a0_ratios'. The legacy branch (above) keeps 'hirshfeld_ratios'.
@@ -598,7 +591,6 @@ class C6RatiosSparse(BaseSubModule):
 
         # return dict(c6_ratios=c6_ratios)
         c6_ratios = safe_scale(jnp.abs(x_ + q), node_mask)
-        c6_ratios = _fade_to_free_atom_ratio(c6_ratios, inputs)
 
         return dict(c6_ratios=c6_ratios)
 
@@ -659,52 +651,28 @@ class PartialChargesSparse(BaseSubModule):
         # Element-dependent bias
         q_ = nn.Embed(num_embeddings=100, features=1)(atomic_numbers).squeeze(axis=-1)  # shape: (num_nodes)
 
-        # Built as modules rather than called inline so the same weights can be
-        # evaluated a second time on a zero environment below.
-        charge_final = nn.Dense(
-            1,
-            kernel_init=self.kernel_init,
-            use_bias=True,
-            name='charge_dense_final_vec'
-        )
         if self.regression_dim is not None:
-            charge_regression = nn.Dense(
+            y = nn.Dense(
                 self.regression_dim,
                 kernel_init=nn.initializers.lecun_normal(),
                 name='charge_dense_regression_vec'
-            )
-
-            def charge_readout(u):
-                return charge_final(self.activation_fn(charge_regression(u))).squeeze(axis=-1)
+            )(x)
+            y = self.activation_fn(y)
+            partial_charges = nn.Dense(
+                1,
+                kernel_init=self.kernel_init,
+                use_bias=True,
+                name='charge_dense_final_vec'
+            )(y).squeeze(axis=-1)  # (num_nodes)
         else:
-            def charge_readout(u):
-                return charge_final(u).squeeze(axis=-1)
-
-        partial_charges = charge_readout(x)  # (num_nodes)
+            partial_charges = nn.Dense(
+                1,
+                kernel_init=self.kernel_init,
+                use_bias=True,
+                name='charge_dense_final_vec'
+            )(x).squeeze(axis=-1)  # (num_nodes)
 
         x_q = safe_scale(partial_charges + q_, node_mask)
-
-        # Short-range OOD gate. Below the trained range the head extrapolates to
-        # absurd charges (~1e2-1e3 e at a hard clash), so fade those atoms to the
-        # charge the head itself predicts for a zero environment. That is NOT 0:
-        # the raw per-atom charge sits on a large element-dependent offset which
-        # charge conservation removes as a uniform shift, so fading to 0 strips
-        # the offset from the clashed atom and conservation then dumps its full
-        # correction onto it (the spurious ~+7 e artifact). Evaluating the readout
-        # on a zero feature vector recovers that offset exactly, per element and
-        # per checkpoint, with nothing to calibrate -- the offset differs by
-        # several e between the model families (H: -9.4 e for so3lr-m, -5.6 e for
-        # so3lr-l, -1.2 e for legacy so3lr), so no single constant can serve them.
-        q_free = safe_scale(
-            charge_readout(jnp.zeros((1, x.shape[-1]), dtype=x.dtype)) + q_,
-            node_mask
-        )  # (num_nodes)
-
-        # Written as x + (1-g)*(fallback - x), not fallback + g*(x - fallback):
-        # (1 - g) is exactly 0 wherever the gate is open, so every atom at a
-        # trained geometry keeps its prediction bit for bit.
-        g = short_range_gate(inputs)
-        x_q = safe_scale(x_q + (1.0 - g) * (q_free - x_q), node_mask)
 
         # If residue_charge/segments is provided, use it for charge conservation per residue/monomer
         residue_charge = inputs.get('residue_charge')
@@ -796,51 +764,6 @@ def sigma(x):
 def switching_fn(x, x_on, x_off):
     c = (x - x_on) / (x_off - x_on)
     return sigma(1 - c) / (sigma(1 - c) + sigma(c))
-
-
-# Short-range out-of-distribution gate. Below the trained interatomic range
-# (steric clashes) the learned per-atom heads extrapolate and blow up — a 0.13 A
-# clash makes the charge head predict ~1e2-1e3 e, so the Coulomb energy reaches
-# ~1e7 eV. We fade those quantities to a physical reference there, so the
-# repulsion module (which correctly diverges at contact) carries the short-range
-# energy. Each head fades to a reference it can derive for itself: the ratio
-# heads to the free-atom value 1.0, the NN energy to its per-element
-# ``energy_offset``, and the charge head to its own zero-environment prediction
-# (see PartialChargesSparse) -- no calibrated constants.
-# SR_GATE_ON (0.8 A) sits below the shortest real bond (O-H ~0.96 A), so normal
-# chemistry is left untouched; the training data is filtered at min_distance 0.5 A.
-SR_GATE_ON = 0.8    # [A] neighbour distance >= this -> gate 1 (trust the model)
-SR_GATE_OFF = 0.4   # [A] neighbour distance <= this -> gate 0 (reference fallback)
-
-
-def short_range_gate(inputs):
-    """Per-atom gate in [0, 1] from the short-range graph: 1.0 in the trained
-    regime, ->0 when an atom has a neighbour at a clash distance. Reuses
-    ``switching_fn``; returns ones when no short-range graph is present."""
-    d_ij, idx_i, idx_j = inputs.get('d_ij'), inputs.get('idx_i'), inputs.get('idx_j')
-    n = len(inputs['node_mask'])
-    if d_ij is None or idx_i is None or idx_j is None:
-        return jnp.ones((n,), dtype=jnp.float32)
-    # Padding edges are identified by ``idx_i == idx_j``, which every graph
-    # builder here uses (jax-md sparse pads both with N, jraph's pad_with_graphs
-    # with the first padding node, mlff.indexing.indices with -1). Masking on
-    # that rather than on ``d_ij > 0`` matters: d_ij == 0 is also what two atoms
-    # at exactly the same position produce, and excluding those would leave the
-    # gate open in the single worst out-of-distribution case there is.
-    real_edge = idx_i != idx_j
-    # switching_fn(d, OFF, ON): 1 at a clash (d<=OFF), exactly 0 in the trained
-    # range (d>=ON). Sum the per-edge clash amount per atom.
-    clash = segment_sum(
-        jnp.where(real_edge, switching_fn(d_ij, SR_GATE_OFF, SR_GATE_ON), 0.0),
-        idx_i, num_segments=n)
-    return jnp.clip(1.0 - clash, 0.0, 1.0)
-
-
-def _fade_to_free_atom_ratio(ratios, inputs):
-    """Short-range OOD gate for the ratio heads: fade a predicted per-atom
-    ratio to the free-atom value (1.0) at clash distances."""
-    g = short_range_gate(inputs)
-    return g * ratios + (1.0 - g)
 
 
 @partial(jax.jit, static_argnames=('neighborlist_format',))

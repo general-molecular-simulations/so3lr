@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from functools import partial
 from typing import (Any, Dict, Sequence)
@@ -136,29 +137,76 @@ class GeometryEmbedE3x(BaseSubModule):
                 }
 
 
-# Closest approach the v2 checkpoints were trained on: their hyperparameters
-# record ``data.filter.min_distance = 0.5``, so no training structure contains a
-# pair below this. Distances handed to the radial basis are floored here.
-DESCRIPTOR_MIN_DISTANCE = 0.5   # [A] floor for the descriptor's radial basis
-DESCRIPTOR_FLOOR_OFF = 0.7      # [A] at or above this the floor is exactly inert
+# --- descriptor distance floor -------------------------------------------------
+# Below the closest approach it was trained on, the network extrapolates wildly:
+# a steric clash makes the charge head emit >100 e and the energy head >1e10 eV,
+# and on so3lr-l a compressed S-S pair returns NaN outright. The learned heads
+# are the only part that fails this way -- NLH/ZBL repulsion, electrostatics and
+# dispersion are analytic and remain valid at any separation. So the distance
+# fed to the RADIAL BASIS is floored, while every physics term keeps the true
+# geometry and still diverges at real contact.
+#
+# The floor is per element pair, because the edge of validity is: for so3lr-l,
+# S-S degrades below ~1.0 A while H-H never does. The scale comes from the model
+# itself -- NLH repulsion is ke*Zi*Zj/r * sum_k a_k exp(-b_k r), whose b_k are
+# inverse lengths, so the distance at which the tabulated repulsion reaches
+# PAIR_FLOOR_ENERGY is a per-pair length. It lands essentially on the covalent
+# bond length (O-H 0.97, C-H 1.08, S-S 2.03 A) with nothing to calibrate, and it
+# is by construction consistent with the repulsion that takes over there.
+PAIR_FLOOR_ENERGY = 1.0    # [eV] NLH repulsion level defining the pair length scale
+PAIR_FLOOR_SCALE = 0.7     # floor at this fraction of it (~30% bond compression)
+PAIR_FLOOR_WIDTH = 0.2     # [A] handover; the floor is exactly inert above it
+
+_NLH_REFERENCE_DISTANCE = {}
 
 
-def floor_descriptor_distance(
-        d_ij,
-        rmin: float = DESCRIPTOR_MIN_DISTANCE,
-        d_off: float = DESCRIPTOR_FLOOR_OFF
-):
-    """Smoothly floor ``d_ij`` at ``rmin`` for use in the radial basis.
+def nlh_reference_distance(target_energy: float = PAIR_FLOOR_ENERGY):
+    """Distance at which the tabulated NLH repulsion reaches ``target_energy``.
 
-    Exactly the identity for ``d_ij >= d_off`` (so every real bond -- the
-    shortest is H-H at 0.74 A -- is bit-for-bit untouched), C1 at the handover,
-    monotone, and bounded below by ``rmin``. Apply to the descriptor only; the
-    repulsion and electrostatics must keep the true distance.
+    Returns a plain numpy ``(n_elements, n_elements)`` array indexed
+    ``[min(Z)-1, max(Z)-1]`` (the NLH tables are stored triangularly). Computed
+    once by bisection; the repulsion decreases monotonically with r over the
+    bracketed range.
+
+    Deliberately cached as numpy, never as a jax array: the first caller may be
+    inside a jit trace, and caching a value created there would let a tracer
+    escape its scope and fail every subsequent call.
     """
+    if target_energy in _NLH_REFERENCE_DISTANCE:
+        return _NLH_REFERENCE_DISTANCE[target_energy]
+    from so3lr.mlff.nn.observable.dispersion_ref_data import NLH_AA, NLH_BB
+    ke = 14.399645351950548
+    n = NLH_AA.shape[0]
+    z = np.arange(1, n + 1)
+    zi, zj = np.meshgrid(z, z, indexing='ij')
+    a, b = np.asarray(NLH_AA), np.asarray(NLH_BB)
+    lo, hi = np.full((n, n), 0.02), np.full((n, n), 5.0)
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        with np.errstate(over='ignore', invalid='ignore'):
+            e = ke * zi * zj / mid * np.sum(a * np.exp(-b * mid[..., None]), axis=-1)
+        above = np.nan_to_num(e, nan=0.0) > target_energy
+        lo = np.where(above, mid, lo)
+        hi = np.where(above, hi, mid)
+    _NLH_REFERENCE_DISTANCE[target_energy] = 0.5 * (lo + hi)
+    return _NLH_REFERENCE_DISTANCE[target_energy]
+
+
+def floor_descriptor_distance(d_ij, atomic_numbers, idx_i, idx_j):
+    """Floor the distance handed to the radial basis, per element pair.
+
+    Exactly the identity at and above ``rmin + PAIR_FLOOR_WIDTH`` -- which sits
+    below every real bond -- so ordinary chemistry is bit-for-bit untouched.
+    C1 at the handover, monotone, and finite-gradient at d = 0. Apply to the
+    descriptor only: the repulsion and the electrostatics need the true distance.
+    """
+    table = jnp.asarray(nlh_reference_distance())
+    zi = atomic_numbers[idx_i] - 1
+    zj = atomic_numbers[idx_j] - 1
+    rmin = PAIR_FLOOR_SCALE * table[jnp.minimum(zi, zj), jnp.maximum(zi, zj)]
+    d_off = rmin + PAIR_FLOOR_WIDTH
     u = (d_off - d_ij) / (d_off - rmin)
-    return jnp.where(d_ij >= d_off,
-                     d_ij,
-                     d_off - (d_off - rmin) * jnp.tanh(u))
+    return jnp.where(d_ij >= d_off, d_ij, d_off - (d_off - rmin) * jnp.tanh(u))
 
 
 class GeometryEmbedSparse(BaseSubModule):
@@ -278,7 +326,8 @@ class GeometryEmbedSparse(BaseSubModule):
         # steric clash -- on so3lr-m a 0.2 A contact puts >100 e on atoms a bond
         # away, and the resulting Coulomb term buries the repulsion (2.5e4 eV of
         # electrostatics against 200 eV of repulsion).
-        d_ij_basis = floor_descriptor_distance(d_ij)
+        d_ij_basis = floor_descriptor_distance(
+            d_ij, inputs['atomic_numbers'], idx_i, idx_j)
 
         # Gaussian basis expansion of distances.
         rbf_ij = self.rbf_fn(jnp.expand_dims(d_ij_basis, axis=-1))  # shape: (num_pairs, num_radial_basis_fn)
