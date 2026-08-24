@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 
 from so3lr.mlff.calculators.potential import load_model_from_workdir
-from so3lr.mlff.utils.param_utils import MAX_NUM_THEORY_LEVELS
 from so3lr.model_registry import resolve_model
 
 
@@ -34,27 +33,9 @@ def make_so3lr(
         charge_equilibration_total_charge=charge_equilibration_total_charge
     )
 
-    # Change shapes to allow for multiple theory levels, only needed for https://github.com/kabylda/mlff/tree/v1.0-tfds-pme version
-    if 'energy_offset' in params['params']['observables_0']:
-        num_theory_levels = MAX_NUM_THEORY_LEVELS
-        old_energy_offset = params['params']['observables_0']['energy_offset']
-        if len(old_energy_offset.shape) == 1:
-            # print("\nOriginal energy_offset:")
-            # print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-            new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-            params['params']['observables_0']['energy_offset'] = new_energy_offset
-
-            old_atomic_scales = params['params']['observables_0']['atomic_scales']
-            new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-            params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-
-            old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-            new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-            params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-
-            # print("\nNew energy_offset:")
-            # print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-            # print("Values:", params['params']['observables_0']['energy_offset'])
+    # No theory-level expansion here: load_model_from_workdir above already did
+    # it. This used to hold a copy of the tiling that could never fire (the
+    # params are 2-D by then) and which omitted the final-bias case.
 
     def forward(
             positions,

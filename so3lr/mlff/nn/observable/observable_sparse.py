@@ -1628,14 +1628,14 @@ class NLHRepulsionSparse(BaseSubModule):
         zj = jnp.maximum(z_i, z_j)                       # (E,)
 
         # Get NLH coefficients
-        # First gather along Z_i (axis 0), then along Z_j (axis 1)
-        a = jnp.asarray(jnp.take(NLH_AA, zi, axis=0), dtype=dtype)   # (E, 93, 3)
-        a = jnp.take_along_axis(a, zj[:, None, None], axis=1)     # (E, 1, 3)
-        a = a.squeeze(1)                                           # (E, 3)
-
-        b = jnp.asarray(jnp.take(NLH_BB, zi, axis=0), dtype=dtype)   # (E, 93, 3)
-        b = jnp.take_along_axis(b, zj[:, None, None], axis=1)     # (E, 1, 3)
-        b = b.squeeze(1)                                           # (E, 3)
+        # Two-index lookup straight into the (92, 92, 3) tables. Gathering along
+        # axis 0 first materialised an (E, 92, 3) intermediate per table only to
+        # keep one row of it -- ~550 MB per table for a 5e5-edge system, twice
+        # over, plus the autodiff residuals. Result is numerically identical.
+        # NLH_AA/NLH_BB are numpy arrays, so they must become jnp arrays before
+        # being indexed with traced zi/zj (numpy would call __array__ on a tracer).
+        a = jnp.asarray(NLH_AA, dtype=dtype)[zi, zj]               # (E, 3)
+        b = jnp.asarray(NLH_BB, dtype=dtype)[zi, zj]               # (E, 3)
 
         # Coulomb factor ke * Z_i * Z_j / r (dtype-safe) 
         z_over_r = safe_mask(

@@ -674,16 +674,24 @@ class QCMLDataLoaderSparseParallel:
             else:
                 yield batch
 
-    def next_epoch(self, split, mode):
+    def next_epoch(self, split, mode, parallel: bool = True):
         """Loads the data for ONE epoch.
 
         Args:
             split: Dataset split to use
+            mode: 'train' or 'validation'
+            parallel: Use the multiprocessing pipeline. Pass ``False`` for a
+                consumer that reads only a few batches and abandons the
+                generator: the parallel workers are submitted to a persistent
+                ProcessPoolExecutor and block forever writing into a
+                ``maxsize=2`` queue that nobody drains, occupying every worker
+                slot so no later epoch can ever be scheduled. Closing the
+                generator does not release them -- the tasks outlive it.
 
         Returns:
             Generator yielding batches of data
         """
-        if mode == 'train': # use multiporcessing for training batch
+        if mode == 'train' and parallel: # use multiporcessing for training batch
             return self._generator(split, mode)
         else:
             return self._generator_sync(split, mode)

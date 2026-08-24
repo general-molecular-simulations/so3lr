@@ -172,3 +172,28 @@ def test_expand_observables_tiles_the_optional_final_bias():
         already, num_theory_levels=n
     )
     npt.assert_equal(out['params']['observables_0']['energy_dense_final']['bias'].shape, (n,))
+
+
+def test_log_gradient_values_is_not_overwritten():
+    """Per-leaf gradient norms must survive the step function.
+
+    They were written to metrics['grad_norm'], which the unconditional global
+    norm assignment then overwrote, making log_gradient_values a pure no-op.
+    """
+    import inspect
+    src = inspect.getsource(training_utils.make_training_step_fn)
+    assert "metrics['grad_norm_per_leaf']" in src
+    # The global norm still lands under its own key, and no longer clobbers.
+    assert src.count("metrics['grad_norm'] =") == 1
+
+
+def test_fit_skips_checkpoints_with_non_finite_loss():
+    """fit() used to save NaN-loss checkpoints; orbax ranks with best_mode='min'
+    and a NaN can be retained as 'best', evicting the real best weights.
+    fit_from_iterator has always guarded this."""
+    import inspect
+    for fn in (training_utils.fit, training_utils.fit_from_iterator):
+        src = inspect.getsource(fn)
+        assert 'jnp.isfinite(eval_loss)' in src, (
+            f'{fn.__name__} saves checkpoints without a finite-loss guard'
+        )
