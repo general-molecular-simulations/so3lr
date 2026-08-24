@@ -33,6 +33,9 @@ import jax_md
 from jax_md import units, partition
 from jax_md.space import DisplacementOrMetricFn, raw_transform, transform
 from so3lr.mlff.calculators.potential import PotentialSparse
+from so3lr.mlff.nn.observable.dispersion_ref_data import (
+    check_atomic_numbers_supported,
+)
 from so3lr.mlff.nn.observable.observable_sparse import (
     compute_avg_dispersion_coefficients,
     dispersion_tail_correction_energy,
@@ -1041,6 +1044,15 @@ def process_model(
     Returns:
         Tuple[callable, callable, callable]: Neighbor functions and energy function.
     """
+
+    # Refuse elements this model was never trained on, before any jit tracing.
+    # Both perform_md and perform_min funnel through here, and the set is
+    # model-dependent: legacy v1 saw only the eight biomolecular elements, the
+    # v2 models Z = 1..85. Past that the reference tables are indexed out of
+    # bounds inside jit, so JAX returns a value belonging to some other element
+    # instead of raising.
+    check_atomic_numbers_supported(
+        species, getattr(potential, 'supported_atomic_numbers', None))
 
     neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = to_jax_md_custom(
         potential=potential,

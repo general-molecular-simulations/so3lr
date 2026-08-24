@@ -16,7 +16,7 @@ from ..utils import calculator_utils
 from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
 from .base_calculator import make_base_calculator
 from ..nn.stacknet.observable_function_sparse import get_observable_fn_sparse
-from ..nn.observable.dispersion_ref_data import max_supported_atomic_number
+from ..nn.observable.dispersion_ref_data import supported_atomic_numbers
 from ml_collections import config_dict
 from ..config import from_config
 from orbax import checkpoint
@@ -198,11 +198,12 @@ class PotentialSparse(MachineLearningPotential):
 
     potential_fn: Callable[[Graph, bool], jnp.ndarray] = struct.field(pytree_node=False)
     dtype: Type = struct.field(pytree_node=False)
-    # Largest atomic number this model's reference tables cover, so callers can
-    # reject unsupported elements before they reach the jitted gathers. Optional
+    # Atomic numbers this model may be asked about, so callers can reject
+    # unsupported elements before they reach the jitted gathers. Optional
     # (default None = unknown, no check) so externally-constructed instances keep
     # working unchanged.
-    max_atomic_number: Optional[int] = struct.field(pytree_node=False, default=None)
+    supported_atomic_numbers: Optional[frozenset] = struct.field(
+        pytree_node=False, default=None)
 
     @classmethod
     def create_from_ckpt_dir(
@@ -311,10 +312,10 @@ class PotentialSparse(MachineLearningPotential):
 
         long_range_bool = (cfg.model.electrostatic_energy_bool is True) or (cfg.model.dispersion_energy_bool is True)
 
-        # Which free-atom reference tables this model indexes, hence the largest Z
-        # it can represent: the refitted alpha_0/C6 tables stop at Rn (86) and the
-        # NLH repulsion table at U (92), while the legacy v1 references run to 102.
-        max_atomic_number = max_supported_atomic_number(
+        # Which elements this model may be asked about: the reference tables it
+        # indexes intersected with what it was trained on (v1 SO3LR: the eight
+        # biomolecular elements; v2: Z = 1..85).
+        supported_z = supported_atomic_numbers(
             legacy=cfg.model.get('legacy_so3lr_bool', False) is True,
             dispersion=cfg.model.dispersion_energy_bool is True,
         )
@@ -386,7 +387,7 @@ class PotentialSparse(MachineLearningPotential):
             long_range_cutoff=long_range_kwargs['cutoff_lr'] if long_range_bool is True else None,
             potential_fn=potential_fn,
             dtype=dtype,
-            max_atomic_number=max_atomic_number
+            supported_atomic_numbers=supported_z
         )
 
     def __call__(
