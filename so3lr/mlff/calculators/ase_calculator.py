@@ -94,6 +94,8 @@ class AseCalculatorSparse(Calculator):
             kspace_electrostatics: Optional[str] = None,
             kspace_smearing: Optional[float] = None,
             kspace_spacing: Optional[float] = None,
+            charge_embed_total_charge: Optional[float] = None,
+            charge_equilibration_total_charge: Optional[float] = None,
             **kwargs
     ):
         if observables is not None and len(observables) > 0:
@@ -129,7 +131,11 @@ class AseCalculatorSparse(Calculator):
             dtype=dtype,
             model=model,
             from_file=from_file,
-            output_intermediate_quantities=output_intermediate_quantities
+            output_intermediate_quantities=output_intermediate_quantities,
+            # Named explicitly rather than left to **kwargs: **kwargs is folded
+            # into long_range_kwargs above, where this would be silently dropped.
+            charge_embed_total_charge=charge_embed_total_charge,
+            charge_equilibration_total_charge=charge_equilibration_total_charge
         )
 
         return cls(potential=mlff_potential,
