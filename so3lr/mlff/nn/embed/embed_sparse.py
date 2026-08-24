@@ -155,7 +155,15 @@ class GeometryEmbedE3x(BaseSubModule):
 # is by construction consistent with the repulsion that takes over there.
 PAIR_FLOOR_ENERGY = 1.0    # [eV] NLH repulsion level defining the pair length scale
 PAIR_FLOOR_SCALE = 0.7     # floor at this fraction of it (~30% bond compression)
-PAIR_FLOOR_WIDTH = 0.2     # [A] handover; the floor is exactly inert above it
+PAIR_FLOOR_WIDTH = 0.05    # [A] handover; the floor is exactly inert above it
+# The O-H bond sets this. Two constraints bracket it: the floor must stay ABOVE
+# the network's edge of validity (so3lr-l degrades below 0.61 A for O-H), and
+# the handover must stay BELOW the shortest O-H that real simulation samples.
+# Measured on equilibrated 900-molecule water: 0.863 A at 673 K / 250 bar in a
+# single snapshot, 0.874 A over a 251-frame 300 K trajectory, and a
+# (conservative) Gaussian tail estimate of 0.78-0.84 A for a full supercritical
+# run. That leaves only ~0.17 A of room, so the handover is kept narrow:
+# floor 0.677 A, onset 0.727 A for O-H.
 
 _NLH_REFERENCE_DISTANCE = {}
 
