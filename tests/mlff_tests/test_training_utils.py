@@ -136,3 +136,39 @@ def test_expand_observables_to_theory_levels():
     # Missing observables_0 -> returned unchanged.
     empty = {'params': {}}
     assert training_utils.expand_observables_to_theory_levels(empty) is empty
+
+
+def test_expand_observables_tiles_the_optional_final_bias():
+    """`use_final_bias_bool=True` models (the legacy single-level SO3LR) carry a
+    'bias' next to the kernel; leaving it 1-wide while the kernel is tiled makes
+    the head shapes inconsistent. Bias-free models must stay untouched."""
+    n = 4
+    with_bias = {'params': {'observables_0': {'energy_dense_final': {
+        'kernel': jnp.ones((8, 1)),
+        'bias': jnp.full((1,), 0.5),
+    }}}}
+    obs0 = training_utils.expand_observables_to_theory_levels(
+        with_bias, num_theory_levels=n
+    )['params']['observables_0']
+    npt.assert_equal(obs0['energy_dense_final']['kernel'].shape, (8, n))
+    npt.assert_equal(obs0['energy_dense_final']['bias'].shape, (n,))
+    npt.assert_allclose(obs0['energy_dense_final']['bias'], jnp.full((n,), 0.5))
+
+    # No bias key (so3lr-s/m/l) -> nothing added.
+    without_bias = {'params': {'observables_0': {'energy_dense_final': {
+        'kernel': jnp.ones((8, 1)),
+    }}}}
+    out = training_utils.expand_observables_to_theory_levels(
+        without_bias, num_theory_levels=n
+    )
+    assert 'bias' not in out['params']['observables_0']['energy_dense_final']
+
+    # Already multi-level bias -> unchanged.
+    already = {'params': {'observables_0': {'energy_dense_final': {
+        'kernel': jnp.ones((8, n)),
+        'bias': jnp.ones((n,)),
+    }}}}
+    out = training_utils.expand_observables_to_theory_levels(
+        already, num_theory_levels=n
+    )
+    npt.assert_equal(out['params']['observables_0']['energy_dense_final']['bias'].shape, (n,))

@@ -11,6 +11,8 @@ import jraph
 import os
 from pathlib import Path
 
+from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
+
 import logging
 
 logger = logging.getLogger("SO3LR")
@@ -210,7 +212,7 @@ def ASE_to_jraph(
     if energy is None:
         energy = np.array([np.nan])
 
-    max_num_theory_levels = 16
+    max_num_theory_levels = MAX_NUM_THEORY_LEVELS
     theory_level = np.reshape(5, (1,))
     theory_mask = np.eye(max_num_theory_levels)[theory_level] # (1, num_theory_levels)
 

@@ -4,6 +4,7 @@ import numpy as np
 from ase import Atoms
 from ase.neighborlist import neighbor_list
 from so3lr.mlff.utils.jraph_utils import dynamically_batch_with_lr
+from so3lr.mlff.utils.param_utils import MAX_NUM_THEORY_LEVELS
 
 from dataclasses import dataclass
 from typing import Optional
@@ -144,7 +145,7 @@ def create_graph_tuple_tf(
         cutoff: float,
         calculate_neighbors_lr: bool = False,
         cutoff_lr: Optional[float] = None,
-        max_num_theory_levels: int = 16, #get from the config
+        max_num_theory_levels: int = MAX_NUM_THEORY_LEVELS, #get from the config
 ) -> jraph.GraphsTuple:
 
     """Takes a data element and wraps relevant components in a GraphsTuple."""
@@ -488,7 +489,7 @@ class QCMLDataLoaderSparseParallel:
                 cutoff=cutoff,
                 calculate_neighbors_lr=calculate_neighbors_lr,
                 cutoff_lr=cutoff_lr,
-                max_num_theory_levels=16
+                max_num_theory_levels=MAX_NUM_THEORY_LEVELS
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
         )

@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 
 from .. import __version__
+# Import-cheap by design (no JAX): `so3lr --help` builds the --strategy
+# choices from this table at import time, and run_fine_tuning resolves the
+# same table into parameter keys, so the two cannot drift apart.
+from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
 
 # NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
 # submodules, which pull in jax/flax/jax-md/glp/orbax) are deferred so that
@@ -622,6 +626,18 @@ def common_model_options(f: Callable) -> Callable:
                      help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')(f)
     f = click.option('--total-charge', default=DEFAULT_TOTAL_CHARGE, type=int,
                      help=f'Total charge of the system. [default: {DEFAULT_TOTAL_CHARGE}]')(f)
+    f = click.option('--charge-embed-total-charge', 'charge_embed_total_charge',
+                     default=None, type=float,
+                     help='Total charge seen by the charge EMBEDDING. Unset '
+                          '(default) follows --total-charge; 0 embeds a neutral '
+                          'system. [default: follow --total-charge]')(f)
+    f = click.option('--charge-equilibration-total-charge',
+                     'charge_equilibration_total_charge',
+                     default=None, type=float,
+                     help='Total charge that charge EQUILIBRATION conserves to. '
+                          'Unset (default) follows --total-charge; 0 conserves to '
+                          'neutral. Independent of --charge-embed-total-charge. '
+                          '[default: follow --total-charge]')(f)
     f = click.option('--spin', 'num_unpaired_electrons', default=DEFAULT_SPIN, type=int,
                      help=f'Spin: number of unpaired electrons (multiplicity - 1; equivalently, multiplicity = spin + 1). [default: {DEFAULT_SPIN}]')(f)
     return f
@@ -781,6 +797,8 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     # K-space electrostatics
     'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing',
     'kspace_interp_nodes', 'kspace_npt_cycles',
+    # Charge overrides (default None -> follow total_charge)
+    'charge_embed_total_charge', 'charge_equilibration_total_charge',
     # K-space dispersion
     'kspace_dispersion', 'kspace_dispersion_smearing',
     'kspace_dispersion_spacing', 'kspace_dispersion_interp_nodes',
@@ -1153,6 +1171,11 @@ def run_md_simulation(
     kspace_spacing: float = DEFAULT_KSPACE_SPACING,
     kspace_interp_nodes: int = DEFAULT_KSPACE_INTERP_NODES,
     kspace_npt_cycles: Optional[int] = None,
+    # Charge embedding: overrides only what the embedding sees, never
+    # equilibration. Must be declared here -- nvt_md(**kwargs) forwards every
+    # common_model_options flag straight into this explicit signature.
+    charge_embed_total_charge: Optional[float] = None,
+    charge_equilibration_total_charge: Optional[float] = None,
 ) -> None:
     """Shared runner for NVT, NVT-Langevin, NPT, and NVE MD simulations."""
     if not input_file or help:
@@ -1211,6 +1234,8 @@ def run_md_simulation(
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
+        'charge_embed_total_charge': charge_embed_total_charge,
+        'charge_equilibration_total_charge': charge_equilibration_total_charge,
     }
 
     # Only insert kspace_npt_cycles when the user explicitly passed
@@ -1298,6 +1323,8 @@ def fire_optimization(
     kspace_spacing: float,
     kspace_interp_nodes: int,
     kspace_npt_cycles: Optional[int],
+    charge_embed_total_charge: Optional[float],
+    charge_equilibration_total_charge: Optional[float],
     help: bool,
     overwrite: bool = False,
 ) -> None:
@@ -1399,6 +1426,8 @@ def fire_optimization(
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
+        'charge_embed_total_charge': charge_embed_total_charge,
+        'charge_equilibration_total_charge': charge_equilibration_total_charge,
         'overwrite': overwrite,
     }
 
@@ -1541,6 +1570,14 @@ def nve_md(**kwargs) -> None:
                    '[default: forces,dipole_vec,hirshfeld_ratios]')
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
               help='Use JIT compilation for speed. [default: enabled]')
+@click.option('--charge-embed-total-charge', 'charge_embed_total_charge', default=None, type=float,
+              help='Total charge seen by the charge EMBEDDING only. Unset (default) '
+                   'follows --total-charge; 0 embeds a neutral system. Independent '
+                   'of --charge-equilibration-total-charge.')
+@click.option('--charge-equilibration-total-charge', 'charge_equilibration_total_charge', default=None, type=float,
+              help='Total charge that charge EQUILIBRATION conserves to. Unset (default) '
+                   'follows --total-charge; 0 conserves to neutral. Independent of '
+                   '--charge-embed-total-charge.')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def eval_model(
@@ -1555,6 +1592,8 @@ def eval_model(
     dispersion_damping: float,
     total_charge: Optional[int],
     num_unpaired_electrons: Optional[int],
+    charge_embed_total_charge: Optional[float],
+    charge_equilibration_total_charge: Optional[float],
     # Evaluation settings
     batch_size: int,
     targets: str,
@@ -1663,6 +1702,8 @@ def eval_model(
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
         overwrite=overwrite,
+        charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge,
     )
     logger.info("=" * 60)
     logger.info("Evaluation completed successfully!")
@@ -1681,7 +1722,7 @@ def eval_model(
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Finetuning settings.
-@click.option('--strategy', type=click.Choice(['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer','obs_0','obs_023','obs_23','obs_3','ll_fmlp','ll_obs_023','freeze_long_range','forces_only']),
+@click.option('--strategy', type=click.Choice(list(FINETUNING_STRATEGY_NAMES)),
               default='full', help='Strategy for finetuning. [default: full]')
 @click.option('--config', '--config_path', 'config_path', type=click.Path(exists=False), default=None,
               help='Path to the finetuning config (YAML only; unlike `so3lr train --config`, JSON is not supported here). '
@@ -1864,6 +1905,10 @@ def tune_ewald(
     kspace_spacing: float,
     kspace_interp_nodes: int,
     kspace_npt_cycles: Optional[int],
+    # Accepted because common_model_options supplies it; k-space tuning does
+    # not apply it, since what is being tuned is grid convergence.
+    charge_embed_total_charge: Optional[float],
+    charge_equilibration_total_charge: Optional[float],
     # Help option
     help: bool
 ) -> None:

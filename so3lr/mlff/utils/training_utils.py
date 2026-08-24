@@ -13,7 +13,12 @@ from typing import Any, Callable, Dict
 
 from ..masking import mask as gradient_utils
 from ..utils import checkpoint_utils
-from ..utils.param_utils import print_param_shapes, count_params
+from ..utils.param_utils import (
+    MAX_NUM_THEORY_LEVELS,
+    count_params,
+    path_matches_key,
+    print_param_shapes,
+)
 from .jraph_utils import dynamically_batch_with_lr
 
 from .robust_loss_jax import distribution as robust_loss_dist
@@ -62,6 +67,64 @@ def init_adaptive_robust_loss_params(
             # 'target_names': targets,  # for reference (not a parameter)
         }
     }
+
+
+def ensure_adaptive_robust_loss_params(
+    params: Dict,
+    targets: list,
+    init_alpha: float = 1.5,
+    init_scale: float = 1.0
+) -> Dict:
+    """Attach adaptive robust loss parameters to an already-loaded ``params`` tree.
+
+    ``fit`` and ``fit_from_iterator`` only create these on the branch that
+    *initializes* a fresh model (``params is None``), which fine-tuning never
+    takes -- it always passes the restored checkpoint. Without this, enabling
+    ``use_adaptive_robust_loss`` while fine-tuning either silently did nothing
+    (checkpoint has no 'adaptive_robust_loss' key, so ``make_loss_fn`` falls
+    through to the plain loss) or, worse, reused the pretraining run's alphas
+    indexed by the *new* target order -- so `forces` could be scaled by whatever
+    alpha the pretraining had learned for its first target.
+
+    Existing entries are reused only when their length still matches
+    ``targets``; otherwise they are re-initialized, because the per-target index
+    is positional and a different target list makes the old values meaningless.
+    The checkpoint stores no target *names*, so a same-length but different (or
+    reordered) target list is indistinguishable from a genuine continuation and
+    is reused as-is -- the log line below states the assumption so such a run is
+    at least diagnosable.
+
+    Returns a new dict; ``params`` is not mutated.
+    """
+    existing = params.get('adaptive_robust_loss')
+    if existing is not None and existing['alpha_raw'].shape[0] == len(targets):
+        logger.info(
+            'Reusing the checkpoint\'s %d adaptive robust loss parameter(s), '
+            'assuming they correspond positionally to the targets %s. If the '
+            'run that wrote the checkpoint trained a different target list of '
+            'the same length, each target inherits the wrong alpha/scale.',
+            len(targets), targets
+        )
+        return params
+
+    if existing is not None:
+        logger.warning(
+            'Discarding adaptive robust loss parameters from the checkpoint: they '
+            'hold %d target(s) but this run trains %d (%s). The values are indexed '
+            'positionally, so keeping them would apply the wrong alpha/scale to '
+            'each target.',
+            existing['alpha_raw'].shape[0], len(targets), targets
+        )
+
+    adaptive_params = init_adaptive_robust_loss_params(
+        targets=targets,
+        init_alpha=init_alpha,
+        init_scale=init_scale
+    )
+    logger.info(
+        'Initialized adaptive robust loss params for targets: %s', targets
+    )
+    return {**params, **adaptive_params}
 
 
 def transform_adaptive_robust_params(alpha_raw: jnp.ndarray, scale_raw: jnp.ndarray):
@@ -824,13 +887,17 @@ def make_validation_step_fn(
 
     return validation_step_fn
 
-def expand_observables_to_theory_levels(params, num_theory_levels: int = 16):
+def expand_observables_to_theory_levels(
+        params,
+        num_theory_levels: int = MAX_NUM_THEORY_LEVELS
+):
     """Expand a restored single-theory-level checkpoint to ``num_theory_levels``.
 
     Tiles the per-atom energy-head parameters (``energy_offset``,
-    ``atomic_scales`` and the ``energy_dense_final`` kernel) of ``observables_0``
-    from one level of theory to ``num_theory_levels`` levels. Parameters that
-    are already multi-level are left unchanged. Mutates and returns ``params``.
+    ``atomic_scales`` and the ``energy_dense_final`` kernel plus its optional
+    ``bias``) of ``observables_0`` from one level of theory to
+    ``num_theory_levels`` levels. Parameters that are already multi-level are
+    left unchanged. Mutates and returns ``params``.
     """
     if 'params' not in params or 'observables_0' not in params['params']:
         return params
@@ -844,10 +911,20 @@ def expand_observables_to_theory_levels(params, num_theory_levels: int = 16):
         obs0['atomic_scales'] = jnp.tile(obs0['atomic_scales'][:, None], (1, num_theory_levels))
         logger.debug('Tiled atomic_scales to %d theory levels.', num_theory_levels)
 
-    if 'energy_dense_final' in obs0 and obs0['energy_dense_final']['kernel'].shape[1] == 1:
-        kernel = obs0['energy_dense_final']['kernel']
-        obs0['energy_dense_final']['kernel'] = jnp.tile(kernel, (1, num_theory_levels))
-        logger.debug('Tiled energy_dense_final kernel to %d theory levels.', num_theory_levels)
+    if 'energy_dense_final' in obs0:
+        if obs0['energy_dense_final']['kernel'].shape[1] == 1:
+            kernel = obs0['energy_dense_final']['kernel']
+            obs0['energy_dense_final']['kernel'] = jnp.tile(kernel, (1, num_theory_levels))
+            logger.debug('Tiled energy_dense_final kernel to %d theory levels.', num_theory_levels)
+
+        # Tile the optional final bias too (use_final_bias_bool=True base models,
+        # e.g. the single-level legacy SO3LR). Mirrors potential.py so finetuning
+        # a 1-level model into num_theory_levels works; bias-free models
+        # (so3lr-s/m/l) have no 'bias' key and are left untouched.
+        bias = obs0['energy_dense_final'].get('bias')
+        if bias is not None and bias.shape[-1] == 1:
+            obs0['energy_dense_final']['bias'] = jnp.tile(bias, (num_theory_levels,))
+            logger.debug('Tiled energy_dense_final bias to %d theory levels.', num_theory_levels)
 
     return params
 
@@ -1765,39 +1842,9 @@ def freeze_parameters(optimizer, trainable_subset_keys=None, frozen_subset_keys=
     )
 
 
-def _path_matches_key(path, key):
-    """Return True if a parameter ``path`` (tuple of nested module/leaf names)
-    matches a selection ``key``.
-
-    Supported key forms:
-      * Plain component, e.g. ``'observables_0'`` — matches if it equals ANY
-        single component of ``path`` (the historical behaviour).
-      * Hierarchical, e.g. ``'observables_0/energy_dense_final'`` — matches if
-        its '/'-separated parts appear as a CONTIGUOUS subsequence of ``path``.
-        (The previous ``set(keys) & set(path)`` test silently matched nothing
-        for slashed keys, so strategies like ``final_mlp`` froze everything.)
-      * Trailing ``*`` on any component for prefix matching, e.g.
-        ``'observables_0/energy_dense*'`` matches ``energy_dense_regression``,
-        ``energy_dense_hidden_0``, ``energy_dense_final``, ...
-    """
-    def _component_matches(component, pattern):
-        if pattern.endswith('*'):
-            return component.startswith(pattern[:-1])
-        return component == pattern
-
-    parts = key.split('/')
-    n = len(parts)
-    if n == 1:
-        return any(_component_matches(c, parts[0]) for c in path)
-    for i in range(len(path) - n + 1):
-        if all(_component_matches(path[i + j], parts[j]) for j in range(n)):
-            return True
-    return False
-
-
 def make_annotation_fn(keys):
     return lambda params: traverse_util.path_aware_map(
-        lambda path, v: 'trainable' if any(_path_matches_key(path, k) for k in keys) else 'frozen', params
+        lambda path, v: 'trainable' if any(path_matches_key(path, k) for k in keys) else 'frozen', params
     )
 
 
@@ -1805,7 +1852,7 @@ def make_freeze_annotation_fn(keys):
     """Inverse of make_annotation_fn: parameters whose path matches any of
     ``keys`` are 'frozen', everything else is 'trainable'."""
     return lambda params: traverse_util.path_aware_map(
-        lambda path, v: 'frozen' if any(_path_matches_key(path, k) for k in keys) else 'trainable', params
+        lambda path, v: 'frozen' if any(path_matches_key(path, k) for k in keys) else 'trainable', params
     )
 
 

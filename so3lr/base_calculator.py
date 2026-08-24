@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 
 from so3lr.mlff.calculators.potential import load_model_from_workdir
+from so3lr.mlff.utils.param_utils import MAX_NUM_THEORY_LEVELS
 from so3lr.model_registry import resolve_model
 
 
@@ -11,7 +12,9 @@ def make_so3lr(
     calculate_forces=True,
     model=None,
     workdir=None,
-    output_intermediate_quantities=None
+    output_intermediate_quantities=None,
+    charge_embed_total_charge=None,
+    charge_equilibration_total_charge=None
 ):
     # ``workdir`` (legacy arg) takes precedence over ``model``; either may be a
     # bundled model name or a filesystem path. None -> DEFAULT_MODEL.
@@ -26,12 +29,14 @@ def make_so3lr(
             dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
             neighborlist_format_lr='sparse'
         ),
-        output_intermediate_quantities=output_intermediate_quantities
+        output_intermediate_quantities=output_intermediate_quantities,
+        charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge
     )
 
     # Change shapes to allow for multiple theory levels, only needed for https://github.com/kabylda/mlff/tree/v1.0-tfds-pme version
     if 'energy_offset' in params['params']['observables_0']:
-        num_theory_levels=16
+        num_theory_levels = MAX_NUM_THEORY_LEVELS
         old_energy_offset = params['params']['observables_0']['energy_offset']
         if len(old_energy_offset.shape) == 1:
             # print("\nOriginal energy_offset:")

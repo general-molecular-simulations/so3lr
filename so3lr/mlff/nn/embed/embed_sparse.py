@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from functools import partial
-from typing import (Any, Dict, Sequence)
+from typing import (Any, Dict, Optional, Sequence)
 
 import flax.linen as nn
 import e3x
@@ -500,6 +500,21 @@ class ChargeEmbedSparse(BaseSubModule):
     num_features: int
     activation_fn: str = 'silu'
     zmax: int = 118
+    # Inference-time override for the charge fed to THIS module only. None ->
+    # use the graph's ``total_charge`` (the default; behaviour unchanged). A
+    # float -> embed that value instead, while charge equilibration in
+    # ElectrostaticEnergySparse keeps using the true ``total_charge``.
+    #
+    # Deliberately not ``use_charge_embed``: that flag decides whether this
+    # module exists at all (see make_embedding_modules), so flipping it changes
+    # the parameter tree and a released checkpoint no longer loads. Overriding
+    # the *input* keeps every trained weight in place. At 0.0 the contribution
+    # is exactly zero -- ``a = psi * y / denominator`` in ChargeSpinEmbedSparse
+    # vanishes and its Residual carries no bias.
+    #
+    # Not exposed in __dict_repr__ on purpose: this is a per-run choice, not
+    # architecture, and must not be written into hyperparameters.json.
+    total_charge_override: Optional[float] = None
     module_name: str = 'charge_embed_sparse'
 
     @nn.compact
@@ -530,6 +545,11 @@ class ChargeEmbedSparse(BaseSubModule):
             raise ValueError(
                 f'ChargeEmbedSparse requires to pass `total_charge != None`.'
             )
+
+        if self.total_charge_override is not None:
+            # full_like keeps psi at (num_graphs) and floating dtype, which
+            # ChargeSpinEmbedSparse asserts on.
+            Q = jnp.full_like(Q, self.total_charge_override)
 
         return ChargeSpinEmbedSparse(
             zmax=self.zmax,
