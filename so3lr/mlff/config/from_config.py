@@ -18,7 +18,13 @@ import os
 import jax.numpy as jnp
 
 from ..utils import checkpoint_utils
-from ..utils.param_utils import print_param_shapes, count_params, count_trainable_params
+from ..utils.param_utils import (
+    count_params,
+    count_trainable_params,
+    print_param_shapes,
+    unmatched_param_keys,
+)
+from ...finetuning_strategies import resolve_finetuning_strategy
 
 logger = logging.getLogger("SO3LR")
 
@@ -235,7 +241,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
         try:
             config.data.avg_num_neighbors
         except AttributeError:
-            logging.warning(
+            logger.warning(
                 'Passing a config without data.avg_num_neighbors is deprecated and will raise an error in the future.'
                 'Add data.avg_num_neighbors: null to the config to disable the warning. For now, we automatically set '
                 'data.avg_num_neighbors: null.'
@@ -633,45 +639,9 @@ def run_evaluation(
 
     print("\nParameter shapes:")
 
-    # Modify parameters to handle theory levels
-    if 'params' in params and 'observables_0' in params['params']:
-        num_theory_levels = 16
-
-        # Modify energy_offset
-        if 'energy_offset' in params['params']['observables_0']:
-            old_energy_offset = params['params']['observables_0']['energy_offset']
-
-            # Only tile if shape is 1D
-            if len(old_energy_offset.shape) == 1:
-                new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-                params['params']['observables_0']['energy_offset'] = new_energy_offset
-
-        # Modify atomic_scales
-        if 'atomic_scales' in params['params']['observables_0']:
-            old_atomic_scales = params['params']['observables_0']['atomic_scales']
-
-            # Only tile if shape is 1D
-            if len(old_atomic_scales.shape) == 1:
-                new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-                params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-
-        # Modify energy_dense_final
-        if 'energy_dense_final' in params['params']['observables_0']:
-            old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-
-            # Check the shape to determine if tiling is needed
-            if old_kernel.shape[1] == 1:
-                new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-                params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-
-            # Tile the optional final bias too (use_final_bias_bool=True base models, e.g.
-            # the single-level SO3LR base / v1). Mirrors potential.py so finetuning a
-            # 1-level model into num_theory_levels works; bias-free models (so3lr-s/m/l)
-            # have no 'bias' key and are left untouched.
-            old_bias = params['params']['observables_0']['energy_dense_final'].get('bias')
-            if old_bias is not None and old_bias.shape[-1] == 1:
-                new_bias = jnp.tile(old_bias, (num_theory_levels,))
-                params['params']['observables_0']['energy_dense_final']['bias'] = new_bias
+    # Expand a single-theory-level checkpoint to the multi-head energy readout.
+    # Shared with fit()/fit_from_iterator() so the three call sites cannot drift.
+    params = training_utils.expand_observables_to_theory_levels(params)
 
     print("=" * 50)
     print_param_shapes(params)
@@ -734,108 +704,58 @@ def run_fine_tuning(
         )
     
     # Load the config in the workdir to obtain the model hyperparameters and other important statistics.
+    # Read once: this object also supplies `config.model` below and is what the
+    # network is built from, so a second read later would shadow it with a
+    # different (but equal) ConfigDict and silently split the two.
     hyperparams_path = start_from_workdir / 'hyperparameters.json'
     with open(hyperparams_path, mode='r') as fp:
         config_start_from_workdir = config_dict.ConfigDict(json.load(fp=fp))
 
-    # Select a fine-tuning strategy.
+    # The net is built from `config_start_from_workdir` (see below), so forcing
+    # 'sparse' on `config` alone was dead: a checkpoint saved with
+    # `neighborlist_format_lr: ordered_sparse` would have been rebuilt with
+    # ordered_sparse long-range indexing while the data loader emits plain
+    # sparse pairs -- and the finetune workdir would then advertise 'sparse' in
+    # its own hyperparameters.json. Override the value the model is actually
+    # built with, and add the key when the source config predates it.
+    if config_start_from_workdir.get('neighborlist_format_lr', None) != 'sparse':
+        with config_start_from_workdir.unlocked():
+            config_start_from_workdir.neighborlist_format_lr = 'sparse'
+
+    # Select a fine-tuning strategy. The name -> keys table lives in
+    # so3lr.finetuning_strategies so that the CLI's --strategy choices and this
+    # dispatch cannot drift apart (they had: `freeze_all_but_final_mlp` was
+    # implemented here but rejected by click, and `final_mlp_and_hirshfeld` was
+    # missing from the unknown-strategy message).
+    #
     # trainable_subset_keys: whitelist (train only these). frozen_subset_keys:
     # blacklist (freeze only these, train the rest). At most one is set.
-    frozen_subset_keys = None
-    if strategy == 'full':
-        # All parameters are re-fined.
-        trainable_subset_keys = None
-    elif strategy in ('freeze_long_range', 'forces_only'):
-        # Forces-only fine-tuning: train the short-range representation + energy
-        # head, but FREEZE the long-range heads (dipole/partial-charges,
-        # a0/hirshfeld, c6) so the (unlabelled) electrostatics and dispersion
-        # keep their physically-meaningful pretrained predictions.
-        trainable_subset_keys = None
-        frozen_subset_keys = ['observables_1', 'observables_2', 'observables_3']
-    elif strategy == 'obs_0':
-        # Only the final MLP is refined
-        trainable_subset_keys = ['observables_0']
-    elif strategy in ('final_mlp', 'freeze_all_but_final_mlp'):
-        # Freeze EVERYTHING (the SO3krates backbone and the partial-charge /
-        # Hirshfeld / C6 heads) and refine ONLY the per-atom energy readout MLP:
-        # the regression layer, any deeper 'energy_dense_hidden_*' layers, and the
-        # final projection, plus the atomic scales/offsets. This keeps the
-        # physically-meaningful charge & ratio predictions untouched.
-        # ('energy_dense*' is a prefix match — see _path_matches_key.)
-        trainable_subset_keys = [
-            'observables_0/atomic_scales',
-            'observables_0/energy_dense*',
-            'observables_0/energy_offset'
-        ]
-    elif strategy == 'll_fmlp':
-        # Last MP layer + the full energy readout MLP (incl. deeper head layers).
-        trainable_subset_keys = [
-            f'layers_{config_start_from_workdir.model.num_layers - 1}',
-            'observables_0/atomic_scales',
-            'observables_0/energy_dense*',
-            'observables_0/energy_offset'
-        ]
-    elif strategy == 'final_mlp_and_hirshfeld':
-        # Only the final MLP and the Hirshfeld are refined
-        trainable_subset_keys = ['observables_0', 'observables_2']
-    elif strategy == 'obs_023':
-        # Only the final MLP and the Hirshfeld are refined
-        trainable_subset_keys = ['observables_0', 'observables_2', 'observables_3']
-    elif strategy == 'obs_23':
-        # Only the final MLP and the Hirshfeld are refined
-        trainable_subset_keys = ['observables_2', 'observables_3']
-    elif strategy == 'hirshfeld':
-        # Only the Hirshfeld is refined
-        trainable_subset_keys = ['observables_2']
-    elif strategy == 'obs_3':
-        # Only the C6 ratios are refined
-        trainable_subset_keys = ['observables_3']
-    elif strategy == 'last_layer':
-        # Only the last MP layer is refined.
-        trainable_subset_keys = [f'layers_{config_start_from_workdir.model.num_layers - 1}']
-    elif strategy == 'last_layer_and_final_mlp':
-        # Only the last layer and the final MLP are refined.
-        trainable_subset_keys = [f'layers_{config_start_from_workdir.model.num_layers - 1}', 'observables_0']
-    #elif strategy == 'last_layer_and_final_mlp023':
-    elif strategy == 'll_obs_023':
-        # Only the last layer and the final MLP are refined.
-        trainable_subset_keys = [f'layers_{config_start_from_workdir.model.num_layers - 1}', 'observables_0', 'observables_2', 'observables_3']
-    elif strategy == 'first_layer':
-        # Only the first layer is refined.
-        trainable_subset_keys = ['layers_0']
-    elif strategy == 'first_layer_and_last_layer':
-        # Only the first and layer MP layer are refined.
-        trainable_subset_keys = ['layers_0', f'layers_{config_start_from_workdir.model.num_layers - 1}']
-    else:
-        raise ValueError(
-            f'--strategy {strategy} is unknown. Select one of '
-            f'(`full`, '
-            f'`freeze_long_range` (alias `forces_only`), '
-            f'`final_mlp`, '
-            f'`last_layer`, '
-            f'`last_layer_and_final_mlp`, '
-            f'`first_layer`, '
-            f'`first_layer_and_last_layer`, '
-            f'`obs_0`, '
-            f'`obs_023`, '
-            f'`obs_23`, '
-            f'`obs_3`, '
-            f'`hirshfeld`, '
-            f'`ll_fmlp`, '
-            f'`ll_obs_023`)'
-        )
-    
+    #
+    # `num_layers` must come from the checkpoint, not from the user's finetune
+    # config: the last-layer strategies index the module by name, and an
+    # off-by-one selects a `layers_N` that does not exist.
+    trainable_subset_keys, frozen_subset_keys = resolve_finetuning_strategy(
+        strategy,
+        num_layers=config_start_from_workdir.model.num_layers
+    )
+
     # Finalize the config for IO.
     # The fine-tuned model's architecture is fully determined by the
     # checkpoint we are starting from, so any `model:` block in the user's
     # finetune YAML cannot actually take effect — the saved hyperparameters
     # are authoritative. Previously this assignment was silent; now warn
     # loudly so users notice that their model: overrides are being dropped.
+    #
+    # Capture the values the checkpoint is about to overwrite FIRST: the
+    # consistency checks below have to compare the user's request against the
+    # checkpoint. Running them after the assignment compared the checkpoint
+    # against itself, so the message-normalization guard could never fire and
+    # the avg_num_neighbors warning fired on every single run.
+    user_message_normalization = None
+    user_avg_num_neighbors = config.data.get('avg_num_neighbors', None)
     if 'model' in config and config.model is not None:
-        try:
-            user_model_keys = sorted(config.model.keys())
-        except Exception:
-            user_model_keys = []
+        user_model_keys = sorted(config.model.keys())
+        user_message_normalization = config.model.get('message_normalization', None)
         if user_model_keys:
             logger.warning(
                 'Ignoring user-supplied `model:` block in finetune config; '
@@ -844,13 +764,37 @@ def run_fine_tuning(
                 start_from_workdir,
                 user_model_keys,
             )
+
+    # Check that message normalization has not changed from the original model
+    # to the fine-tuning model. Fails before any data is loaded.
+    message_normalization = config_start_from_workdir.model.message_normalization
+    if (user_message_normalization is not None
+            and user_message_normalization != message_normalization):
+        raise ValueError(
+            f'Message normalization must be the same. '
+            f'Found {message_normalization} for the original config '
+            f'and {user_message_normalization} for the fine tuning config.'
+        )
+
     config.model = config_start_from_workdir.model
+
     # For average number of neighbors message normalization, we have to overwrite the average
     # number of neighbors in case a finetuned model will serve as starting point for another finetuning run.
     # Otherwise the second finetuned model, will use the average number of neighbors from the first finetuning run, 
     # not corresponding to the trained message normalization.
-    if config_start_from_workdir.model.message_normalization == 'avg_num_neighbors':
+    if message_normalization == 'avg_num_neighbors':
+        if user_avg_num_neighbors is not None:
+            logger.warning(
+                'Running fine tuning with config.model.message_normalization: avg_num_neighbors does not allow to '
+                'reset the avg_num_neighbors in the fine tuning config and must be set to null. It will be loaded from '
+                'the config in the workdir that is starting point for the fine tuning.'
+            )
+
         config.data.avg_num_neighbors = config_start_from_workdir.data.avg_num_neighbors
+        logger.info(
+            f'Read average number of neighbors = {config.data.avg_num_neighbors} from original config at '
+            f'{start_from_workdir}.'
+        )
 
     # Workdir for fine-tuning experiments.
     workdir = workdir_from_config(config=config)
@@ -869,55 +813,79 @@ def run_fine_tuning(
             fp=fp
         )
 
+    # Robust loss configuration. Read before the parameters are counted: the
+    # adaptive variant adds learnable parameters to the tree and has to be part
+    # of the trainable selection.
+    use_robust_loss = config.training.get('use_robust_loss', False)
+    robust_loss_alpha = config.training.get('robust_loss_alpha', 1.0)
+    use_adaptive_robust_loss = config.training.get('use_adaptive_robust_loss', False)
+
+    # Validate: can't use both fixed and adaptive robust loss
+    if use_robust_loss and use_adaptive_robust_loss:
+        raise ValueError(
+            "Cannot use both 'use_robust_loss' (fixed) and 'use_adaptive_robust_loss' (learned). "
+            "Please enable only one."
+        )
+
+    adaptive_robust_loss_targets = list(config.training.loss_weights.keys()) if use_adaptive_robust_loss else None
+    adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)
+    adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
+
     # Load the parameters from the model for fine-tuning.
     params = checkpoint_utils.load_params_from_workdir(start_from_workdir)
 
-    # Modify parameters to handle theory levels
-    if 'params' in params and 'observables_0' in params['params']:
-        num_theory_levels = 16 
+    # Expand a single-theory-level checkpoint to the multi-head energy readout.
+    # Shared with fit()/fit_from_iterator() so the three call sites cannot drift.
+    params = training_utils.expand_observables_to_theory_levels(params)
 
-        # Modify energy_offset
-        if 'energy_offset' in params['params']['observables_0']:
-            old_energy_offset = params['params']['observables_0']['energy_offset']
+    # A selection key that matches nothing is never intentional. As a whitelist
+    # it contributes no trainable parameters -- and if NO key matches, every
+    # parameter is frozen, so training runs to completion, writes checkpoints
+    # and exits 0 without having updated anything. Fail instead.
+    selection_keys = trainable_subset_keys if trainable_subset_keys is not None else frozen_subset_keys
+    if selection_keys:
+        available_modules = sorted(params.get('params', params).keys())
+        unmatched = unmatched_param_keys(params, selection_keys)
+        if unmatched:
+            logger.warning(
+                'Fine-tuning strategy %r selects %s, which match no parameter in the '
+                'checkpoint at %s. Available top-level modules: %s.',
+                strategy, unmatched, start_from_workdir, available_modules
+            )
+        if trainable_subset_keys is not None and len(unmatched) == len(trainable_subset_keys):
+            raise ValueError(
+                f'Fine-tuning strategy {strategy!r} would freeze every parameter: none of '
+                f'{list(trainable_subset_keys)} match a parameter in the checkpoint at '
+                f'{start_from_workdir}, so training would run to completion without '
+                f'updating anything. Available top-level modules: {available_modules}.'
+            )
 
-            # Only tile if shape is 1D
-            if len(old_energy_offset.shape) == 1:
-                new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-                params['params']['observables_0']['energy_offset'] = new_energy_offset
-
-        # Modify atomic_scales
-        if 'atomic_scales' in params['params']['observables_0']:
-            old_atomic_scales = params['params']['observables_0']['atomic_scales']
-
-            # Only tile if shape is 1D
-            if len(old_atomic_scales.shape) == 1:
-                new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-                params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-
-        # Modify energy_dense_final
-        if 'energy_dense_final' in params['params']['observables_0']:
-            old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-
-            # Check the shape to determine if tiling is needed
-            if old_kernel.shape[1] == 1:
-                new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-                params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-
-            # Tile the optional final bias too (use_final_bias_bool=True base models, e.g.
-            # the single-level SO3LR base / v1). Mirrors potential.py so finetuning a
-            # 1-level model into num_theory_levels works; bias-free models (so3lr-s/m/l)
-            # have no 'bias' key and are left untouched.
-            old_bias = params['params']['observables_0']['energy_dense_final'].get('bias')
-            if old_bias is not None and old_bias.shape[-1] == 1:
-                new_bias = jnp.tile(old_bias, (num_theory_levels,))
-                params['params']['observables_0']['energy_dense_final']['bias'] = new_bias
+    if use_adaptive_robust_loss:
+        # fit()/fit_from_iterator() only create these when they initialize a
+        # fresh model, which fine-tuning never does -- so without this the
+        # feature silently did nothing (or reused the pretraining run's alphas
+        # under the new target ordering).
+        params = training_utils.ensure_adaptive_robust_loss_params(
+            params,
+            targets=adaptive_robust_loss_targets,
+            init_alpha=adaptive_robust_loss_init_alpha,
+            init_scale=adaptive_robust_loss_init_scale
+        )
+        if trainable_subset_keys is not None:
+            # A whitelist strategy would otherwise freeze the learnable
+            # alpha/scale, leaving 'adaptive' robust loss fixed at its init.
+            trainable_subset_keys = list(trainable_subset_keys) + ['adaptive_robust_loss']
 
     print("=" * 50)
     print_param_shapes(params)
     print("=" * 50)
 
     total_params = count_params(params)
-    trainable_params = count_trainable_params(params, trainable_subset_keys)
+    trainable_params = count_trainable_params(
+        params,
+        trainable_keys=trainable_subset_keys,
+        frozen_keys=frozen_subset_keys
+    )
 
     print(f"\nTotal number of parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
@@ -946,33 +914,6 @@ def run_fine_tuning(
         tf_record_present=tf_record_present
     )
 
-    # Check that message normalization has not change from original model to fine-tuning model.
-    hyperparams_path = start_from_workdir / 'hyperparameters.json'
-    with open(hyperparams_path, mode='r') as fp:
-        config_start_from_workdir = config_dict.ConfigDict(json.load(fp=fp))
-
-    if config_start_from_workdir.model.message_normalization != config.model.message_normalization:
-        raise ValueError(
-            f'Message normalization must be the same. '
-            f'Found {config_start_from_workdir.model.message_normalization} for the original config '
-            f'and {config.model.message_normalization} for the fine tuning config.'
-        )
-
-    # If messages are normalized by the average number of neighbors, we need to load it from the old config file.
-    if config.model.message_normalization == 'avg_num_neighbors':
-        if config.data.avg_num_neighbors is not None:
-            logging.warning(
-                'Running fine tuning with config.model.message_normalization: avg_num_neighbors does not allow to '
-                'reset the avg_num_neighbors in the fine tuning config and must be set to null. It will be loaded from '
-                'the config in the workdir that is starting point for the fine tuning.'
-            )
-
-        config.data.avg_num_neighbors = config_start_from_workdir.data.avg_num_neighbors
-        logger.info(
-            f'Read average number of neighbors = {config.data.avg_num_neighbors} from original config at '
-            f'{start_from_workdir}.'
-        )
-
     opt = make_optimizer_from_config(config)
 
     # Freeze all parameter arrays except those under trainable_subset_keys, or
@@ -993,18 +934,6 @@ def run_fine_tuning(
     else:
         raise ValueError(
             f'{model=} is not a valid model.'
-        )
-
-    # Robust loss configuration
-    use_robust_loss = config.training.get('use_robust_loss', False)
-    robust_loss_alpha = config.training.get('robust_loss_alpha', 1.0)
-    use_adaptive_robust_loss = config.training.get('use_adaptive_robust_loss', False)
-
-    # Validate: can't use both fixed and adaptive robust loss
-    if use_robust_loss and use_adaptive_robust_loss:
-        raise ValueError(
-            "Cannot use both 'use_robust_loss' (fixed) and 'use_adaptive_robust_loss' (learned). "
-            "Please enable only one."
         )
 
     loss_fn = training_utils.make_loss_fn(
@@ -1092,11 +1021,6 @@ def run_fine_tuning(
     logger.info(
         f'Fine tuning model from {start_from_workdir} on {data_filepath}!'
     )
-
-    # Adaptive robust loss settings for fine-tuning
-    adaptive_robust_loss_targets = list(config.training.loss_weights.keys()) if use_adaptive_robust_loss else None
-    adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)
-    adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
 
     ckpt_dir = workdir / 'checkpoints'
     if Path(ckpt_dir).exists() and not config.training.allow_restart:

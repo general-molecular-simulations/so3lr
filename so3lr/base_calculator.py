@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 
 from so3lr.mlff.calculators.potential import load_model_from_workdir
+from so3lr.mlff.utils.param_utils import MAX_NUM_THEORY_LEVELS
 from so3lr.model_registry import resolve_model
 
 
@@ -31,7 +32,7 @@ def make_so3lr(
 
     # Change shapes to allow for multiple theory levels, only needed for https://github.com/kabylda/mlff/tree/v1.0-tfds-pme version
     if 'energy_offset' in params['params']['observables_0']:
-        num_theory_levels=16
+        num_theory_levels = MAX_NUM_THEORY_LEVELS
         old_energy_offset = params['params']['observables_0']['energy_offset']
         if len(old_energy_offset.shape) == 1:
             # print("\nOriginal energy_offset:")

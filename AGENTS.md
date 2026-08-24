@@ -68,6 +68,15 @@ exact split produced a bug where `kspace_electrostatics` selected the k-space
 grid but not the solver on the ASE side only (PR #22). When you change how a
 model is configured, check both.
 
+**`so3lr/finetuning_strategies.py` is the single source of truth for
+`--strategy`.** The CLI builds its `click.Choice` from that table at import time
+and `run_fine_tuning` resolves the same table into parameter keys. Keeping the
+two hand-written lists in sync had already failed: `freeze_all_but_final_mlp`
+was implemented but rejected by click. Selection keys use the matching grammar
+of `param_utils.path_matches_key` (`a`, `a/b`, `a/b*`), and a key that matches
+nothing is rejected rather than silently freezing the model. That module must
+stay import-cheap — the CLI imports it at module scope.
+
 **Training and fine-tuning are separate loops.** `run_training` and
 `run_fine_tuning` in `so3lr/mlff/config/from_config.py` do not share a code
 path, and they read different `training:` keys — fine-tuning ignores `use_ema`,

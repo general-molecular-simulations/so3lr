@@ -13,6 +13,7 @@ from typing import Any, Callable, Type, Dict, Sequence, Optional
 from glp.graph import Graph
 
 from ..utils import calculator_utils
+from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
 from .base_calculator import make_base_calculator
 from ..nn.stacknet.observable_function_sparse import get_observable_fn_sparse
 from ml_collections import config_dict
@@ -116,7 +117,7 @@ def load_model_from_workdir(
 
     if 'energy_offset' in params['params']['observables_0']:
         # Change shapes to allow for multiple theory levels
-        num_theory_levels = 16
+        num_theory_levels = MAX_NUM_THEORY_LEVELS
         old_energy_offset = params['params']['observables_0']['energy_offset']
         if len(old_energy_offset.shape) == 1:
             new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
@@ -264,7 +265,7 @@ class PotentialSparse(MachineLearningPotential):
 
         # Handle multi-theory level support
         if 'energy_offset' in params['params']['observables_0']:
-            num_theory_levels = 16
+            num_theory_levels = MAX_NUM_THEORY_LEVELS
             old_energy_offset = params['params']['observables_0']['energy_offset']
             if len(old_energy_offset.shape) == 1:
                 new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
