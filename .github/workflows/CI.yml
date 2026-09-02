@@ -60,8 +60,8 @@ jobs:
           - group: 6
             name: "so3lr-other"
             install_extras: ""
-            run_short: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py -v --tb=short"
-            run_full: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_hessian.py -v --tb=short --full"
+            run_short: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_eval_kspace.py tests/test_charge_embed_override.py -v --tb=short"
+            run_full: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_eval_kspace.py tests/test_charge_embed_override.py tests/test_hessian.py -v --tb=short --full"
           - group: 7
             name: "pysages"
             install_extras: "[pysages]"
