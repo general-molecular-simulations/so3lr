@@ -34,8 +34,8 @@ jobs:
           - group: 2
             name: "so3lr-cli"
             install_extras: ""
-            run_short: "pytest tests/test_cli_eval.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_finetuning_strategies.py tests/test_cli.py -v --tb=short"
-            run_full: "pytest tests/test_cli_eval.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_finetuning_strategies.py tests/test_cli.py -v --tb=short --full"
+            run_short: "pytest tests/test_cli_eval.py tests/test_eval_kspace.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_finetuning_strategies.py tests/test_cli.py -v --tb=short"
+            run_full: "pytest tests/test_cli_eval.py tests/test_eval_kspace.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_finetuning_strategies.py tests/test_cli.py -v --tb=short --full"
           # tests/test_integration.py ran ~31-41 min as a single job -- the
           # critical path for the whole workflow, and long enough that runners
           # were twice reclaimed mid-run (SIGTERM, exit 143, no test failure).
@@ -60,8 +60,8 @@ jobs:
           - group: 6
             name: "so3lr-other"
             install_extras: ""
-            run_short: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_eval_kspace.py tests/test_charge_embed_override.py -v --tb=short"
-            run_full: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_eval_kspace.py tests/test_charge_embed_override.py tests/test_hessian.py -v --tb=short --full"
+            run_short: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py -v --tb=short"
+            run_full: "pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_hessian.py -v --tb=short --full"
           - group: 7
             name: "pysages"
             install_extras: "[pysages]"
