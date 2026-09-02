@@ -61,6 +61,7 @@ def make_stub_ase_calculator():
     calc.kspace_smearing = 4.0
     calc.kspace_spacing = 0.5
     calc._kspace_reported_source = None
+    calc.supported_atomic_numbers = None
     return calc
 
 
