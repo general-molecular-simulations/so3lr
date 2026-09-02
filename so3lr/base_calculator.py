@@ -13,21 +13,38 @@ def make_so3lr(
     workdir=None,
     output_intermediate_quantities=None,
     charge_embed_total_charge=None,
-    charge_equilibration_total_charge=None
+    charge_equilibration_total_charge=None,
+    kspace_electrostatics=None,
+    kspace_interp_nodes=4,
+    kspace_dispersion=None,
+    kspace_dispersion_interp_nodes=4,
 ):
     # ``workdir`` (legacy arg) takes precedence over ``model``; either may be a
     # bundled model name or a filesystem path. None -> DEFAULT_MODEL.
     spec = resolve_model(workdir if workdir is not None else model)
 
+    # K-space (Ewald/PME/P3M) electrostatics and dispersion are opt-in and mirror
+    # so3lr_md.load_model: requesting one builds the corresponding reciprocal-space
+    # submodule here, but it only contributes at runtime if the caller also passes
+    # `k_smearing` / `k_smearing_disp` in the inputs (EnergySparse gates on those).
+    # Callers that pass nothing keep exactly the previous behaviour.
+    long_range_kwargs = dict(
+        cutoff_lr=lr_cutoff,
+        dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
+        neighborlist_format_lr='sparse'
+    )
+    if kspace_electrostatics is not None:
+        long_range_kwargs['coulomb_kspace_method'] = kspace_electrostatics
+        long_range_kwargs['coulomb_kspace_interp_nodes'] = kspace_interp_nodes
+    if kspace_dispersion is not None:
+        long_range_kwargs['dispersion_kspace_do_ewald'] = (kspace_dispersion == 'ewald')
+        long_range_kwargs['dispersion_kspace_interp_nodes'] = kspace_dispersion_interp_nodes
+
     model, params = load_model_from_workdir(
         spec.dir,
         model='so3krates', # or 'itp_net'
         from_file=spec.from_file,
-        long_range_kwargs=dict(
-            cutoff_lr=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
-            neighborlist_format_lr='sparse'
-        ),
+        long_range_kwargs=long_range_kwargs,
         output_intermediate_quantities=output_intermediate_quantities,
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge

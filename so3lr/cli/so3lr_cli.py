@@ -1582,6 +1582,30 @@ def nve_md(**kwargs) -> None:
               help='Total charge that charge EQUILIBRATION conserves to. Unset (default) '
                    'follows --total-charge; 0 conserves to neutral. Independent of '
                    '--charge-embed-total-charge.')
+# K-space (periodic) settings. Not the shared kspace_options decorator, which
+# also carries --kspace-npt-cycles; that is meaningless for a static evaluation.
+@click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None,
+              type=click.Choice(['ewald', 'pme', 'p3m'], case_sensitive=False),
+              help='Reciprocal-space method for long-range electrostatics on PERIODIC '
+                   'structures: "ewald", "pme", or "p3m". The real-space neighbour list '
+                   'is already an all-image sum, but the Coulomb tail cannot be truncated; '
+                   'set this to match the ASE calculator on periodic systems. '
+                   'Requires every structure to have a cell. [default: None]')
+@click.option('--kspace-smearing', 'kspace_smearing', default=DEFAULT_KSPACE_SMEARING, type=float,
+              help=f'Smearing width for k-space electrostatics in Å. [default: {DEFAULT_KSPACE_SMEARING}]')
+@click.option('--kspace-spacing', 'kspace_spacing', default=DEFAULT_KSPACE_SPACING, type=float,
+              help=f'Grid spacing for k-space electrostatics in Å. [default: {DEFAULT_KSPACE_SPACING}]')
+@click.option('--kspace-interp-nodes', 'kspace_interp_nodes', default=DEFAULT_KSPACE_INTERP_NODES, type=int,
+              help=f'Interpolation nodes for PME/P3M electrostatics. [default: {DEFAULT_KSPACE_INTERP_NODES}]')
+@click.option('--kspace-dispersion', 'kspace_dispersion', default=None,
+              type=click.Choice(['ewald', 'pme'], case_sensitive=False),
+              help='Reciprocal-space method for long-range dispersion. [default: None]')
+@click.option('--kspace-dispersion-smearing', 'kspace_dispersion_smearing', default=2.0, type=float,
+              help='Smearing width for k-space dispersion in Å. [default: 2.0]')
+@click.option('--kspace-dispersion-spacing', 'kspace_dispersion_spacing', default=3.0, type=float,
+              help='Grid spacing for k-space dispersion in Å. [default: 3.0]')
+@click.option('--kspace-dispersion-interp-nodes', 'kspace_dispersion_interp_nodes', default=4, type=int,
+              help='Interpolation nodes for PME dispersion. [default: 4]')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def eval_model(
@@ -1602,6 +1626,15 @@ def eval_model(
     batch_size: int,
     targets: str,
     jit_compile: bool,
+    # K-space settings
+    kspace_electrostatics: Optional[str],
+    kspace_smearing: float,
+    kspace_spacing: float,
+    kspace_interp_nodes: int,
+    kspace_dispersion: Optional[str],
+    kspace_dispersion_smearing: float,
+    kspace_dispersion_spacing: float,
+    kspace_dispersion_interp_nodes: int,
     # Output policy
     overwrite: bool,
     # Help option
@@ -1662,6 +1695,11 @@ def eval_model(
     logger.info(f"Total charge:              {'(from info{} or 0)' if total_charge is None else total_charge}")
     logger.info(f"Spin (unpaired e-):        {'(from info{} or 0)' if num_unpaired_electrons is None else num_unpaired_electrons}")
     logger.info(f"JIT compilation:           {'Enabled' if jit_compile else 'Disabled'}")
+    if kspace_electrostatics or kspace_dispersion:
+        logger.info(f"K-space electrostatics:    {kspace_electrostatics or 'off'}"
+                    + (f" (smearing {kspace_smearing} Å, spacing {kspace_spacing} Å)"
+                       if kspace_electrostatics else ""))
+        logger.info(f"K-space dispersion:        {kspace_dispersion or 'off'}")
     if save_to:
         logger.info(f"Saving to:                 {save_to}")
         logger.info(f"Overwrite if exists:       {'Yes' if overwrite else 'No (default)'}")
@@ -1708,6 +1746,14 @@ def eval_model(
         overwrite=overwrite,
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge,
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_smearing=kspace_smearing,
+        kspace_spacing=kspace_spacing,
+        kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion,
+        kspace_dispersion_smearing=kspace_dispersion_smearing,
+        kspace_dispersion_spacing=kspace_dispersion_spacing,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
     )
     logger.info("=" * 60)
     logger.info("Evaluation completed successfully!")

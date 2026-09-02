@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from ase.io import write
 from so3lr.mlff.utils import jraph_utils, evaluation_utils
+from so3lr.mlff.utils.kspace_utils import setup_kspace_grid
 from so3lr.mlff.data import AseDataLoaderSparse
 from pathlib import Path
 import json
@@ -240,6 +241,19 @@ def evaluate_so3lr_on(
         total_charge: Optional[int] = None,
         num_unpaired_electrons: Optional[int] = None,
         overwrite: bool = False,
+        kspace_electrostatics: Optional[str] = None,
+        # Defaults mirror DEFAULT_KSPACE_SMEARING / DEFAULT_KSPACE_SPACING in
+        # so3lr_cli, so a direct Python call and the CLI agree. Note that
+        # matching another engine (the ASE calculator, or an MD run) requires
+        # matching BOTH smearing and spacing: they set the real/reciprocal split
+        # and the mesh density, and different values give different energies.
+        kspace_smearing: float = 4.0,
+        kspace_spacing: float = 2.0,
+        kspace_interp_nodes: int = 4,
+        kspace_dispersion: Optional[str] = None,
+        kspace_dispersion_smearing: float = 2.0,
+        kspace_dispersion_spacing: float = 3.0,
+        kspace_dispersion_interp_nodes: int = 4,
         charge_embed_total_charge: Optional[float] = None,
         charge_equilibration_total_charge: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -399,8 +413,15 @@ def evaluate_so3lr_on(
     from .so3lr_md import setup_jax_globals
     setup_jax_globals(precision=precision, matmul_precision='highest')
 
+    kspace_enabled = (kspace_electrostatics is not None
+                      or kspace_dispersion is not None)
+
     so3lr_calc = make_so3lr(
         workdir=workdir_path,
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
         lr_cutoff=lr_cutoff,
         dispersion_energy_cutoff_lr_damping=dispersion_damping,
         calculate_forces=True,
@@ -492,14 +513,89 @@ def evaluate_so3lr_on(
 
     logger.info(f"Batch size: n_node={n_node}, n_edge={n_edge}, n_graph={n_graph}, n_pairs={n_pairs}")
 
+    # --- K-space (Ewald/PME/P3M) long-range ---------------------------------
+    # The real-space neighbour list built above already carries cell offsets
+    # (ASE `neighbor_list('ijS', ...)`), so it is a full all-image sum and is
+    # correct for cells smaller than the cutoff. What it cannot do is converge
+    # the Coulomb tail, which decays too slowly to truncate; that is what the
+    # reciprocal-space term adds, and it is what makes `so3lr eval` agree with
+    # the ASE calculator run with kspace_electrostatics on a periodic system.
+    #
+    # The mesh shape depends on the cell, and a JIT-compiled step needs a fixed
+    # shape, so structures are grouped by cell: one mesh and one compilation per
+    # distinct cell. A dataset of MD frames sharing a cell therefore compiles
+    # once. Reusing a single cell's mesh for a dataset of different cells would
+    # be silently wrong, so it is not done.
+    kspace_groups = None
+    order = None
+    if kspace_enabled:
+        cells = []
+        for _g, _ in data:
+            _c = _g.globals.get('cell') if _g.globals is not None else None
+            _c = None if _c is None else np.asarray(_c).reshape(3, 3)
+            if _c is None or not np.any(_c):
+                raise ValueError(
+                    "--kspace-electrostatics/--kspace-dispersion require periodic "
+                    "structures, but a structure in the dataset has no cell. "
+                    "Drop the k-space flags for non-periodic data."
+                )
+            cells.append(_c)
+
+        buckets = {}
+        for idx, c in enumerate(cells):
+            buckets.setdefault(np.round(c, 8).tobytes(), []).append(idx)
+        logger.info(
+            f"K-space enabled: electrostatics={kspace_electrostatics} "
+            f"(smearing={kspace_smearing} A, spacing={kspace_spacing} A), "
+            f"dispersion={kspace_dispersion}. "
+            f"{len(buckets)} distinct cell(s) -> {len(buckets)} mesh(es)/compilation(s)."
+        )
+
+        kspace_groups, order = [], []
+        for idx_list in buckets.values():
+            box = jnp.asarray(cells[idx_list[0]])
+            k_grid, k_smear = setup_kspace_grid(
+                kspace_electrostatics=kspace_electrostatics,
+                kspace_smearing=kspace_smearing,
+                kspace_spacing=kspace_spacing,
+                box=box)
+            k_grid_d, k_smear_d = setup_kspace_grid(
+                kspace_electrostatics=kspace_dispersion,
+                kspace_smearing=kspace_dispersion_smearing,
+                kspace_spacing=kspace_dispersion_spacing,
+                box=box)
+            # Cast to the working precision. setup_kspace_grid builds its
+            # arrays from Python floats, which become float64 under x64 even
+            # when the run is float32; feeding a float64 smearing into a float32
+            # graph promotes the dispersion path and then collides with the
+            # float32 free-atom tables in mixing_rules ("expected tensor<86xf64>,
+            # provided tensor<86xf32>") once a second k-grid is compiled.
+            work_dtype = jnp.float64 if precision == 'float64' else jnp.float32
+            _cast = lambda a: None if a is None else jnp.asarray(a, dtype=work_dtype)
+            kspace_groups.append((
+                [data[i] for i in idx_list],
+                {'k_grid': _cast(k_grid), 'k_smearing': _cast(k_smear),
+                 'k_grid_disp': _cast(k_grid_d),
+                 'k_smearing_disp': _cast(k_smear_d)},
+            ))
+            order.extend(idx_list)
+
     # Batch the graphs using MLFF's custom batch function that supports n_pairs
-    batched_graphs = jraph_utils.dynamically_batch_with_lr(
-        data,
-        n_node=n_node,
-        n_edge=n_edge,
-        n_graph=n_graph,
-        n_pairs=n_pairs
-    )
+    def _batch_stream():
+        """Yield (graph_batch, kspace_constants); constants are None without k-space."""
+        if not kspace_enabled:
+            for b in jraph_utils.dynamically_batch_with_lr(
+                    data, n_node=n_node, n_edge=n_edge, n_graph=n_graph,
+                    n_pairs=n_pairs):
+                yield b, None
+            return
+        for subset, kconst in kspace_groups:
+            for b in jraph_utils.dynamically_batch_with_lr(
+                    subset, n_node=n_node, n_edge=n_edge, n_graph=n_graph,
+                    n_pairs=n_pairs):
+                yield b, kconst
+
+    batched_graphs = _batch_stream()
 
     # JIT compilation if requested
     if jit_compile:
@@ -519,8 +615,10 @@ def evaluate_so3lr_on(
 
         try:
             dummy_batch = next(dummy_batched_graphs)
+            _dummy_kconst = kspace_groups[0][1] if kspace_enabled else None
             _compile_out = jax.block_until_ready(
-                so3lr_calc(jraph_utils.graph_to_batch_fn(*dummy_batch))
+                so3lr_calc(jraph_utils.graph_to_batch_fn(
+                    *dummy_batch, kspace_constants=_dummy_kconst))
             )
             compile_end = time.time()
             compile_time = compile_end - compile_start
@@ -548,10 +646,11 @@ def evaluate_so3lr_on(
         progress_bar = tqdm(total=num_data, desc="Processing structures", unit="structure",
                             smoothing=0.1, mininterval=0.5)
 
-        for graph_batch in batched_graphs:
+        for graph_batch, kspace_constants in batched_graphs:
             # Transform the batched graph to inputs dict
             # graph_batch is a tuple of (main_graph, long_range_graph)
-            inputs = jraph_utils.graph_to_batch_fn(*graph_batch)
+            inputs = jraph_utils.graph_to_batch_fn(
+                *graph_batch, kspace_constants=kspace_constants)
 
             # Run the model
             start = time.time()
@@ -596,6 +695,17 @@ def evaluate_so3lr_on(
         
         # Close the progress bar
         progress_bar.close()
+
+        # Grouping by cell (k-space) reorders the stream, so put the
+        # per-structure outputs back into dataset order before anything is
+        # written or indexed. Metrics are order-independent sums and are
+        # unaffected; `predicted` and `all_x` are per structure and are not.
+        if kspace_enabled and order is not None:
+            inverse = np.argsort(np.asarray(order))
+            if len(predicted) == len(order):
+                predicted = [predicted[i] for i in inverse]
+            if save_x_bool and len(all_x) == len(order):
+                all_x = [all_x[i] for i in inverse]
         
         logger.info(f'Completed evaluation on {total_num_structures} / {num_data} structures')
         logger.info(f'Pure evaluation time: {total_time:.3f} seconds')
