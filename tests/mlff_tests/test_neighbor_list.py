@@ -46,3 +46,4 @@ def test_neighborhood_list():
         atoms = Atoms(zs[i], positions=Rs[i])
         ase_d_ij = atoms.get_all_distances(mic=mic)
         compare_distances(d_ij, ase_d_ij, cutoff=cutoff)
+    config.update("jax_enable_x64", False)
