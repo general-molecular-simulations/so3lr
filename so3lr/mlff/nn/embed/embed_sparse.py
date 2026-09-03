@@ -348,16 +348,8 @@ class GeometryEmbedSparse(BaseSubModule):
         # part comes from ``unit_r_ij`` (untouched, so equivariance is unaffected)
         # and ``cut``/``d_ij`` below stay on the true geometry, so the NLH/ZBL
         # repulsion and the electrostatics still diverge at real contact.
-        # The floor needs the element pair; production inputs always carry
-        # atomic_numbers, but this module is also used on bare geometry (the
-        # equivariance tests build it with positions and indices only), and a
-        # KeyError there is not a useful failure. Without Z there is nothing to
-        # look the pair floor up by, so the descriptor sees the true distance.
-        atomic_numbers = inputs.get('atomic_numbers')
-        if atomic_numbers is not None:
-            d_ij_basis = floor_descriptor_distance(d_ij, atomic_numbers, idx_i, idx_j)
-        else:
-            d_ij_basis = d_ij
+        d_ij_basis = floor_descriptor_distance(
+            d_ij, inputs['atomic_numbers'], idx_i, idx_j)
 
         # Gaussian basis expansion of distances.
         rbf_ij = self.rbf_fn(jnp.expand_dims(d_ij_basis, axis=-1))  # shape: (num_pairs, num_radial_basis_fn)
