@@ -30,6 +30,36 @@ def load_hyperparameters(workdir: str):
     return cfg
 
 
+def build_long_range_kwargs(
+        lr_cutoff,
+        dispersion_energy_cutoff_lr_damping,
+        neighborlist_format_lr,
+        kspace_electrostatics=None,
+        kspace_interp_nodes=4,
+        kspace_dispersion=None,
+        kspace_dispersion_interp_nodes=4,
+):
+    """Translate user-facing k-space names into the keys load_model_from_workdir reads.
+
+    ``kspace_electrostatics`` -> ``coulomb_kspace_method``, ``kspace_dispersion ==
+    'ewald'`` -> ``dispersion_kspace_do_ewald``. A key left out falls back to the
+    consumer's default ('pme' for electrostatics, off for dispersion), so None
+    here means "do not override".
+    """
+    kw = dict(
+        cutoff_lr=lr_cutoff,
+        dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
+        neighborlist_format_lr=neighborlist_format_lr,
+    )
+    if kspace_electrostatics is not None:
+        kw['coulomb_kspace_method'] = kspace_electrostatics
+        kw['coulomb_kspace_interp_nodes'] = kspace_interp_nodes
+    if kspace_dispersion is not None:
+        kw['dispersion_kspace_do_ewald'] = (kspace_dispersion == 'ewald')
+        kw['dispersion_kspace_interp_nodes'] = kspace_dispersion_interp_nodes
+    return kw
+
+
 def load_model_from_workdir(
         workdir: str,
         model='so3krates',

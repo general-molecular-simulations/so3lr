@@ -76,6 +76,22 @@ def package_dir():
     return get_package_dir()
 
 
+@pytest.fixture
+def pme_case(package_dir, full_test):
+    """(atoms, smearing, lr_cutoff) for the k-space tests below.
+
+    Default: the 192-atom water_64 box at KSPACE_LR_CUTOFF/KSPACE_SMEARING (minimum
+    image holds: 12.4 A cell, 6 A cutoff). --full: 2x2x2 (1536 atoms) at the
+    paper's 12 A / 4 A, which on a 2-core CI runner blew the group's 60-minute
+    budget. Every assertion here is about shapes, finiteness or agreement with a
+    direct jax-pme evaluation on the same charges, none of which depends on size.
+    """
+    box = read(package_dir / 'tests/test_data/water_64.xyz')
+    if full_test:
+        return box * [2, 2, 2], 4.0, 12.
+    return box, KSPACE_SMEARING, KSPACE_LR_CUTOFF
+
+
 class TestPMEDirectComparison:
     """
     Test that electrostatic_energy_kspace and partial_charges from SO3LR
@@ -86,7 +102,7 @@ class TestPMEDirectComparison:
     """
 
     @pytest.mark.parametrize('kspace_method', ['ewald', 'pme', 'p3m'])
-    def test_kspace_energy_matches_direct_calculation(self, kspace_method, package_dir):
+    def test_kspace_energy_matches_direct_calculation(self, kspace_method, package_dir, pme_case):
         """
         Test that electrostatic_energy_kspace from SO3LR matches direct jax-pme calculation.
         
@@ -100,14 +116,13 @@ class TestPMEDirectComparison:
         from jaxpme.kspace import generate_kvectors, get_reciprocal, get_kgrid_mesh, get_kgrid_ewald
 
         # Create a periodic water box - repeat to ensure enough for 12 Å cutoff
-        atoms = read(package_dir / 'tests/test_data/water_64.xyz') * [2, 2, 2]
+        atoms, smearing, lr_cutoff = pme_case
         
         # Set up k-space parameters
         cell = jnp.array(atoms.get_cell().array, dtype=DTYPE)
         positions = jnp.array(atoms.get_positions(), dtype=DTYPE)
         
         # Choose smearing based on cell size
-        smearing = 4.0  # Angstrom
         
         # Set up k-grid based on method
         if kspace_method == 'ewald':
@@ -126,7 +141,7 @@ class TestPMEDirectComparison:
         # Create SO3LR calculator with observables
         calc = AseCalculatorSparse.create_from_workdir(
             workdir=MODEL_DIR,
-            lr_cutoff=12.,
+            lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
             dtype=np.float64,
@@ -190,7 +205,7 @@ class TestPMEDirectComparison:
         )
 
     @pytest.mark.parametrize('kspace_method', ['ewald', 'pme', 'p3m'])
-    def test_partial_charges_are_reasonable(self, kspace_method, package_dir):
+    def test_partial_charges_are_reasonable(self, kspace_method, package_dir, pme_case):
         """
         Test that extracted partial charges have reasonable properties.
         
@@ -199,10 +214,9 @@ class TestPMEDirectComparison:
         from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald
 
         # Create a periodic water box
-        atoms = read(package_dir / 'tests/test_data/water_64.xyz') * [2, 2, 2]
+        atoms, smearing, lr_cutoff = pme_case
         
         cell = jnp.array(atoms.get_cell().array, dtype=DTYPE)
-        smearing = 4.0
         
         if kspace_method == 'ewald':
             k_spacing = jnp.array([smearing / 2])
@@ -216,7 +230,7 @@ class TestPMEDirectComparison:
 
         calc = AseCalculatorSparse.create_from_workdir(
             workdir=MODEL_DIR,
-            lr_cutoff=12.,
+            lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
             dtype=np.float64,
@@ -253,6 +267,13 @@ class TestPMEDirectComparison:
 
 
 class TestASECalculatorKSpaceReporting:
+    @pytest.fixture(autouse=True)
+    def _so3lr_logs_reach_caplog(self, monkeypatch):
+        # setup_logger() (so3lr_md.py) sets propagate=False on "SO3LR" while
+        # caplog listens on the root logger: after any test in this process has
+        # run the CLI/eval path, these records would otherwise never arrive.
+        monkeypatch.setattr(logging.getLogger("SO3LR"), "propagate", True)
+
     def test_logs_atoms_info_override_for_kspace_kwargs(self, monkeypatch, caplog):
         calc = make_stub_ase_calculator()
         atoms = Atoms('H2', positions=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.74)])
@@ -328,7 +349,7 @@ class TestPMEEnergyDecomposition:
     """Test that k-space energy properly contributes to total energy."""
 
     @pytest.mark.parametrize('kspace_method', ['pme'])  # Start with PME only for speed
-    def test_kspace_energy_contribution(self, kspace_method, package_dir):
+    def test_kspace_energy_contribution(self, kspace_method, package_dir, pme_case):
         """
         Test that electrostatic_energy_kspace adds a sensible contribution 
         to the total electrostatic energy.
@@ -336,10 +357,9 @@ class TestPMEEnergyDecomposition:
         from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald
 
         # Create a periodic water box
-        atoms = read(package_dir / 'tests/test_data/water_64.xyz') * [2, 2, 2]
+        atoms, smearing, lr_cutoff = pme_case
         
         cell = jnp.array(atoms.get_cell().array, dtype=DTYPE)
-        smearing = 4.0
         
         if kspace_method == 'ewald':
             k_spacing = jnp.array([smearing / 2])
@@ -354,7 +374,7 @@ class TestPMEEnergyDecomposition:
         # Get calculation with both short-range and k-space electrostatics
         calc = AseCalculatorSparse.create_from_workdir(
             workdir=MODEL_DIR,
-            lr_cutoff=12.,
+            lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=2.,
             from_file=True,
             dtype=np.float64,
@@ -386,17 +406,16 @@ class TestPMEForces:
     """Test that forces can be computed with PME."""
 
     @pytest.mark.parametrize('kspace_method', ['ewald', 'pme', 'p3m'])
-    def test_forces_are_finite(self, kspace_method, package_dir):
+    def test_forces_are_finite(self, kspace_method, package_dir, pme_case):
         """
         Test that forces are computed correctly with PME.
         """
         from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald
 
         # Use a periodic water box
-        atoms = read(package_dir / 'tests/test_data/water_64.xyz') * [2, 2, 2]
+        atoms, smearing, lr_cutoff = pme_case
         
         cell = jnp.array(atoms.get_cell().array, dtype=DTYPE)
-        smearing = 4.0
         
         if kspace_method == 'ewald':
             k_spacing = jnp.array([smearing / 2])
@@ -409,7 +428,7 @@ class TestPMEForces:
         atoms.info['k_smearing'] = np.array([smearing])
 
         calc = So3lrCalculator(
-            lr_cutoff=12.,
+            lr_cutoff=lr_cutoff,
             dtype=np.float64,
             coulomb_kspace_method=kspace_method,
         )
@@ -437,16 +456,15 @@ class TestPMEStress:
     """Test PME stress calculations."""
 
     @pytest.mark.parametrize('kspace_method', ['ewald', 'pme', 'p3m'])
-    def test_stress_calculation(self, kspace_method, package_dir):
+    def test_stress_calculation(self, kspace_method, package_dir, pme_case):
         """
         Test that stress can be calculated with PME.
         """
         from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald
 
-        atoms = read(package_dir / 'tests/test_data/water_64.xyz') * [2, 2, 2]
+        atoms, smearing, lr_cutoff = pme_case
         
         cell = jnp.array(atoms.get_cell().array, dtype=DTYPE)
-        smearing = 4.0
         
         if kspace_method == 'ewald':
             k_spacing = jnp.array([smearing / 2])
@@ -459,7 +477,7 @@ class TestPMEStress:
         atoms.info['k_smearing'] = np.array([smearing])
 
         calc = So3lrCalculator(
-            lr_cutoff=12.,
+            lr_cutoff=lr_cutoff,
             dtype=np.float64,
             calculate_stress=True,
             coulomb_kspace_method=kspace_method,
@@ -485,16 +503,15 @@ class TestPMEJaxMD:
     """Test PME with JAX-MD backend."""
 
     @pytest.mark.parametrize('kspace_method', ['ewald', 'pme', 'p3m'])
-    def test_jaxmd_pme_energy(self, kspace_method, package_dir):
+    def test_jaxmd_pme_energy(self, kspace_method, package_dir, pme_case):
         """
         Test PME energy calculation through JAX-MD interface.
         """
         from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald
 
-        atoms = read(package_dir / 'tests/test_data/water_64.xyz') * [2, 2, 2]
+        atoms, smearing, lr_cutoff = pme_case
         
         cell_ase = np.array(atoms.get_cell().array, dtype=np.float64)
-        smearing = 4.0
         
         if kspace_method == 'ewald':
             k_spacing = jnp.array([smearing / 2])
@@ -518,6 +535,9 @@ class TestPMEJaxMD:
         neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
             potential=So3lrPotential(
                 dtype=DTYPE,
+                # Same cutoff switch as the ASE cases: at the default 12 A the
+                # 192-atom box (12.4 A) would violate minimum image.
+                lr_cutoff=lr_cutoff,
                 coulomb_kspace_method=kspace_method,
             ),
             displacement_or_metric=displacement,

@@ -34,8 +34,8 @@ jobs:
           - group: 2
             name: "so3lr-cli"
             install_extras: ""
-            run_short: "pytest tests/test_cli_eval.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_finetuning_strategies.py tests/test_cli.py -v --tb=short"
-            run_full: "pytest tests/test_cli_eval.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_finetuning_strategies.py tests/test_cli.py -v --tb=short --full"
+            run_short: "pytest tests/test_cli_eval.py tests/test_eval_kspace.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_finetuning_strategies.py tests/test_cli.py -v --tb=short"
+            run_full: "pytest tests/test_cli_eval.py tests/test_eval_kspace.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_finetuning_strategies.py tests/test_cli.py -v --tb=short --full"
           # tests/test_integration.py ran ~31-41 min as a single job -- the
           # critical path for the whole workflow, and long enough that runners
           # were twice reclaimed mid-run (SIGTERM, exit 143, no test failure).
@@ -97,6 +97,9 @@ jobs:
           path: ${{ steps.pip-cache.outputs.dir }}
           key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
 
+      - name: Runner facts (for stalls that only reproduce here)
+        run: |
+          nproc; free -g | head -2; lscpu | grep -E 'Model name|Flags' | cut -c1-200
       - name: Test with pytest
         # TEST_MODE / HEAD_COMMIT_MESSAGE are passed through the environment
         # rather than interpolated into the script body: a commit message
@@ -106,6 +109,9 @@ jobs:
         # is empty there and the [full tests] check is simply false.
         env:
           TEST_MODE: ${{ github.event.inputs.test_mode }}
+          # Dump every thread's stack if one test runs 15 min: a stall then
+          # leaves a traceback in the log instead of a blank 60-minute cancel.
+          PYTEST_ADDOPTS: "-o faulthandler_timeout=900"
           HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           pip install ".${{ matrix.install_extras }}"

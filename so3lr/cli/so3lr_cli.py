@@ -4,6 +4,7 @@ import sys
 import time
 import yaml
 import click
+from so3lr.mlff.utils import kspace_utils as _KS
 import difflib
 import logging
 import warnings
@@ -178,9 +179,9 @@ DEFAULT_MIN_N_MIN = 2
 DEFAULT_SUZUKI_YOSHIDA_STEPS = 3
 
 # K-space electrostatics parameters
-DEFAULT_KSPACE_SMEARING = 4.0       # Å
-DEFAULT_KSPACE_SPACING = 2.0        # Å
-DEFAULT_KSPACE_INTERP_NODES = 4
+DEFAULT_KSPACE_SMEARING = _KS.DEFAULT_KSPACE_SMEARING
+DEFAULT_KSPACE_SPACING = _KS.DEFAULT_KSPACE_SPACING
+DEFAULT_KSPACE_INTERP_NODES = _KS.DEFAULT_KSPACE_INTERP_NODES
 
 # Additional parameters
 DEFAULT_OBSERVABLES = ()
@@ -709,8 +710,8 @@ def langevin_options(f: Callable) -> Callable:
     return f
 
 
-def kspace_options(f: Callable) -> Callable:
-    """K-space electrostatics options for periodic systems."""
+def kspace_electrostatics_options(f: Callable) -> Callable:
+    """Reciprocal-space electrostatics for periodic systems (shared by MD and eval)."""
     f = click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None,
                      type=click.Choice(['ewald', 'pme', 'p3m'], case_sensitive=False),
                      help='K-space method for long-range electrostatics: "ewald", "pme", or "p3m". [default: None]')(f)
@@ -720,8 +721,31 @@ def kspace_options(f: Callable) -> Callable:
                      help=f'Grid spacing for k-space summation in Å. [default: {DEFAULT_KSPACE_SPACING}]')(f)
     f = click.option('--kspace-interp-nodes', 'kspace_interp_nodes', default=DEFAULT_KSPACE_INTERP_NODES, type=int,
                      help=f'Number of interpolation nodes for PME/P3M. [default: {DEFAULT_KSPACE_INTERP_NODES}]')(f)
+    return f
+
+
+def kspace_options(f: Callable) -> Callable:
+    """K-space electrostatics options for MD: the shared set plus NPT re-tuning."""
+    f = kspace_electrostatics_options(f)
     f = click.option('--kspace-npt-cycles', 'kspace_npt_cycles', default=None, type=int,
                      help='Frequency (in MD cycles) to re-tune k-space grid in NPT. [default: None]')(f)
+    return f
+
+
+def kspace_dispersion_options(f: Callable) -> Callable:
+    """Reciprocal-space dispersion for periodic systems."""
+    f = click.option('--kspace-dispersion', 'kspace_dispersion', default=None,
+                     type=click.Choice(['ewald', 'pme'], case_sensitive=False),
+                     help='K-space method for long-range dispersion: "ewald" or "pme". [default: None]')(f)
+    f = click.option('--kspace-dispersion-smearing', 'kspace_dispersion_smearing',
+                     default=_KS.DEFAULT_KSPACE_DISPERSION_SMEARING, type=float,
+                     help=f'Smearing width for k-space dispersion in Å. [default: {_KS.DEFAULT_KSPACE_DISPERSION_SMEARING}]')(f)
+    f = click.option('--kspace-dispersion-spacing', 'kspace_dispersion_spacing',
+                     default=_KS.DEFAULT_KSPACE_DISPERSION_SPACING, type=float,
+                     help=f'Grid spacing for k-space dispersion in Å. [default: {_KS.DEFAULT_KSPACE_DISPERSION_SPACING}]')(f)
+    f = click.option('--kspace-dispersion-interp-nodes', 'kspace_dispersion_interp_nodes',
+                     default=_KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES, type=int,
+                     help=f'Interpolation nodes for PME dispersion. [default: {_KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES}]')(f)
     return f
 
 
@@ -1582,6 +1606,8 @@ def nve_md(**kwargs) -> None:
               help='Total charge that charge EQUILIBRATION conserves to. Unset (default) '
                    'follows --total-charge; 0 conserves to neutral. Independent of '
                    '--charge-embed-total-charge.')
+@kspace_electrostatics_options
+@kspace_dispersion_options
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def eval_model(
@@ -1602,6 +1628,15 @@ def eval_model(
     batch_size: int,
     targets: str,
     jit_compile: bool,
+    # K-space settings
+    kspace_electrostatics: Optional[str],
+    kspace_smearing: float,
+    kspace_spacing: float,
+    kspace_interp_nodes: int,
+    kspace_dispersion: Optional[str],
+    kspace_dispersion_smearing: float,
+    kspace_dispersion_spacing: float,
+    kspace_dispersion_interp_nodes: int,
     # Output policy
     overwrite: bool,
     # Help option
@@ -1708,6 +1743,14 @@ def eval_model(
         overwrite=overwrite,
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge,
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_smearing=kspace_smearing,
+        kspace_spacing=kspace_spacing,
+        kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion,
+        kspace_dispersion_smearing=kspace_dispersion_smearing,
+        kspace_dispersion_spacing=kspace_dispersion_spacing,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
     )
     logger.info("=" * 60)
     logger.info("Evaluation completed successfully!")

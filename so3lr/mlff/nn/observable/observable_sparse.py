@@ -1140,10 +1140,19 @@ def mixing_rules(
     C6_ratio_i = c6_ratios[idx_i]
     C6_ratio_j = c6_ratios[idx_j]
 
-    alpha_i = jnp.asarray(jnp.take(alphas_ref, atomic_number_i, axis=0), dtype=dtype) * hirshfeld_ratio_i
-    C6_i = jnp.asarray(jnp.take(C6_ref, atomic_number_i, axis=0), dtype=dtype) * C6_ratio_i
-    alpha_j = jnp.asarray(jnp.take(alphas_ref, atomic_number_j, axis=0), dtype=dtype) * hirshfeld_ratio_j
-    C6_j = jnp.asarray(jnp.take(C6_ref, atomic_number_j, axis=0), dtype=dtype) * C6_ratio_j
+    # Cast the reference tables to the working dtype BEFORE indexing them.
+    # They are numpy constants captured at trace time, so their dtype used to
+    # follow whatever jax_enable_x64 was when this function was first traced;
+    # a later trace under the other setting then re-used the cached `_take`
+    # with a mismatched operand ("expected tensor<86xf64>, provided
+    # tensor<86xf32>"). Indexing an already-cast table makes the operand dtype
+    # part of the trace rather than a side effect of global state.
+    alphas_ref = jnp.asarray(alphas_ref, dtype=dtype)
+    C6_ref = jnp.asarray(C6_ref, dtype=dtype)
+    alpha_i = jnp.take(alphas_ref, atomic_number_i, axis=0) * hirshfeld_ratio_i
+    C6_i = jnp.take(C6_ref, atomic_number_i, axis=0) * C6_ratio_i
+    alpha_j = jnp.take(alphas_ref, atomic_number_j, axis=0) * hirshfeld_ratio_j
+    C6_j = jnp.take(C6_ref, atomic_number_j, axis=0) * C6_ratio_j
     
     alpha_ij = (alpha_i + alpha_j) / 2
     C6_ij = 2 * C6_i * C6_j * alpha_j * alpha_i / (alpha_i ** 2 * C6_j + alpha_j ** 2 * C6_i)
