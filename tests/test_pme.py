@@ -44,10 +44,6 @@ DummySystem = namedtuple('DummySystem', ['R', 'k_grid', 'k_smearing'])
 def make_stub_ase_calculator():
     calc = object.__new__(AseCalculatorSparse)
     Calculator.__init__(calc)
-    # __init__ is bypassed, so mirror the attributes calculate() reads first.
-    # 8f73b631 added the per-model element check, which looks up
-    # supported_atomic_numbers before anything else; None means unrestricted.
-    calc.supported_atomic_numbers = None
     calc.calculate_fn = lambda system, neighbors: {
         'energy': np.array(0.0),
         'forces': np.zeros((len(system.R), 3)),
