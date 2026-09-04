@@ -415,3 +415,48 @@ def test_preprocess_filters_before_batching():
     graph, _ = batches[0]
     np.testing.assert_allclose(graph.globals['energy'][0], 2.0)
     assert int(np.sum(jraph.get_graph_padding_mask(graph))) == 1
+
+
+def test_validation_preprocess_order_is_seed_independent():
+    elements = {
+        'atomic_numbers': tf.constant([[1, 1]] * 3, tf.int32),
+        'positions': tf.constant([
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [1.1, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [1.2, 0.0, 0.0]],
+        ], tf.float32),
+        'cell': tf.constant([np.zeros((3, 3))] * 3, tf.float32),
+        'pbc': tf.constant([[False] * 3] * 3),
+        'energy': tf.constant([[1.0], [2.0], [3.0]], tf.float32),
+        'forces': tf.zeros((3, 2, 3), tf.float32),
+        'theory_level': tf.constant([[0], [0], [0]], tf.int32),
+        'charge': tf.constant([[0], [0], [0]], tf.int32),
+        'multiplicity': tf.constant([[1], [1], [1]], tf.int32),
+    }
+
+    def collect(seed):
+        batches = QCMLDataLoaderSparseParallel._preprocess(
+            standardize_dataset_fields(
+                tf.data.Dataset.from_tensor_slices(elements)
+            ),
+            batch_max_num_nodes=8,
+            batch_max_num_edges=16,
+            batch_max_num_graphs=4,
+            batch_max_num_pairs=0,
+            cutoff=2.0,
+            calculate_neighbors_lr=False,
+            cutoff_lr=None,
+            max_force_filter=None,
+            min_distance_filter=None,
+            energy_unit=1.0,
+            length_unit=1.0,
+            dipole_vec_unit=1.0,
+            train_seed=seed,
+            shuffle=False,
+        )
+        graph, _ = next(iter(batches))
+        mask = np.asarray(jraph.get_graph_padding_mask(graph), dtype=bool)
+        return np.asarray(graph.globals['energy'])[mask].reshape(-1)
+
+    np.testing.assert_array_equal(collect(1), [1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(collect(999), [1.0, 2.0, 3.0])

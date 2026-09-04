@@ -1,34 +1,123 @@
+import hashlib
+import importlib.metadata
+import json
 import jraph
 import logging
 import numpy as np
+import queue
+import sys
+import traceback
+import wandb
 from ase import Atoms
 from ase.neighborlist import neighbor_list
+from collections.abc import Mapping
 from so3lr.mlff.utils.jraph_utils import dynamically_batch_with_lr
 from so3lr.mlff.utils.param_utils import MAX_NUM_THEORY_LEVELS
 
-from dataclasses import dataclass
-from typing import Optional
-import queue
-import traceback
-import wandb
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+from itertools import product
 from multiprocessing import Manager, get_context
+from pathlib import Path
+from typing import Optional
 
 try:
     import tensorflow as tf
 except ModuleNotFoundError:
+    tf = None
     logging.warning(
         "For using QCMLDataLoader please install tensorflow."
     )
 try:
     import tensorflow_datasets as tfds
 except ModuleNotFoundError:
+    tfds = None
     logging.warning(
         "For using QCMLDataLoader please install tensorflow_datasets."
     )
 
 
 logger = logging.getLogger("SO3LR")
+
+_TFDS_STREAM_FINGERPRINT_VERSION = 1
+_TFDS_EPOCH_STREAM_VERSION = 1
+_NEIGHBOUR_BUCKET_OFFSETS = tuple(product((-1, 0, 1), repeat=3))
+
+
+def _canonical_fingerprint(payload):
+    """Return a stable SHA-256 digest for JSON-compatible loader metadata."""
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(',', ':'), ensure_ascii=True
+    ).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _installed_version(distribution, fallback='unavailable'):
+    try:
+        return importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return fallback
+
+
+def _json_compatible(value):
+    """Normalize ConfigDict/NumPy/Path values for canonical JSON hashing."""
+    if hasattr(value, 'to_dict'):
+        value = value.to_dict()
+    if isinstance(value, Mapping):
+        return {str(key): _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible(item) for item in value]
+    if isinstance(value, Path):
+        return str(value.expanduser().resolve())
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(
+        f'Cannot fingerprint configuration value of type {type(value).__name__}.'
+    )
+
+
+class _ClosePropagatingSkipIterator:
+    """Lazily skip a prefix and forward ``close`` to the source iterator."""
+
+    def __init__(self, iterable, count):
+        self._iterator = iter(iterable)
+        self._remaining = count
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed:
+            raise StopIteration
+        try:
+            while self._remaining:
+                next(self._iterator)
+                self._remaining -= 1
+            return next(self._iterator)
+        except StopIteration:
+            self.close()
+            raise
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self._iterator, 'close', None)
+        if close is not None:
+            close()
+
+    def __del__(self):
+        # Best-effort cleanup if consumer code exits its loop by exception.
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def convert_dataset_units_tf(element, energy_unit, length_unit, dipole_vec_unit):
@@ -99,8 +188,9 @@ def minimum_distance_is_valid_tf(positions, cell, pbc, min_distance):
     """TensorFlow wrapper for the PBC-aware minimum-distance criterion."""
     valid = tf.py_function(
         func=lambda pos, c, periodic: np.asarray(
-            not np.isnan(distance := minimum_distance_np(pos, c, periodic))
-            and distance >= min_distance,
+            minimum_distance_is_valid_np(
+                pos, c, periodic, min_distance
+            ),
             dtype=np.bool_,
         ),
         inp=[positions, cell, pbc],
@@ -108,6 +198,66 @@ def minimum_distance_is_valid_tf(positions, cell, pbc, min_distance):
     )
     valid.set_shape([])
     return valid
+
+
+def minimum_distance_is_valid_np(positions, cell, pbc, min_distance):
+    """Check for close contacts without allocating an all-pairs matrix.
+
+    The filter only needs to know whether a violating pair exists.  A spatial
+    hash handles free-space records using only direct dependencies and exits at
+    the first close pair; ASE's neighbor list handles triclinic and mixed-axis
+    periodic cells.  Periodic images of the same atom are excluded, matching
+    :func:`minimum_distance_np`.
+    """
+    positions = np.asarray(positions, dtype=float)
+    cell = np.asarray(cell, dtype=float)
+    pbc = np.asarray(pbc, dtype=bool)
+    min_distance = float(min_distance)
+
+    if positions.ndim != 2 or positions.shape[1:] != (3,):
+        return False
+    if pbc.shape != (3,):
+        return False
+    if not np.all(np.isfinite(positions)) or not np.isfinite(min_distance):
+        return False
+    if min_distance < 0:
+        return False
+    if positions.shape[0] < 2 or min_distance == 0:
+        return True
+    if np.any(pbc) and (cell.shape != (3, 3) or not np.all(np.isfinite(cell))):
+        return False
+
+    if not np.any(pbc):
+        # Cubes have side ``min_distance``.  Any violating pair must therefore
+        # be in the same cube or one of its 26 neighbours.  Dense buckets
+        # terminate on their first close pair rather than accumulating every
+        # matching pair as query_pairs/all-pairs approaches do.
+        scaled = positions / min_distance
+        if not np.all(np.isfinite(scaled)):
+            return False
+        buckets = {}
+        cutoff_squared = min_distance * min_distance
+        for position, bucket_coords in zip(positions, np.floor(scaled)):
+            bucket = tuple(int(coord) for coord in bucket_coords)
+            for offset in _NEIGHBOUR_BUCKET_OFFSETS:
+                neighbouring_bucket = tuple(
+                    coord + delta for coord, delta in zip(bucket, offset)
+                )
+                for other in buckets.get(neighbouring_bucket, ()):
+                    difference = position - other
+                    if float(np.dot(difference, difference)) < cutoff_squared:
+                        return False
+            buckets.setdefault(bucket, []).append(position)
+        return True
+
+    # The documented predicate is distance >= threshold, so ask ASE only for
+    # neighbours just below the boundary rather than rejecting an exact tie.
+    violating_cutoff = np.nextafter(min_distance, -np.inf)
+    atoms = Atoms(positions=positions, cell=cell, pbc=pbc)
+    i, j, distances = neighbor_list(
+        'ijd', atoms, violating_cutoff, self_interaction=False
+    )
+    return not bool(np.any((i != j) & (distances < min_distance)))
 
 
 def epoch_size_from_dataset_sizes(sizes, weights, mode):
@@ -653,6 +803,155 @@ class QCMLDataLoaderSparseParallel:
             'weights': normalized_weights,
         }
 
+    def _dataset_identity_metadata(self):
+        """Describe the TFDS builders without reading every record payload.
+
+        Builder metadata files are hashed, and shard names/sizes are recorded.
+        This catches ordinary dataset/version/schema replacement while keeping
+        restart startup independent of total dataset size.
+        """
+        identities = []
+        for folder in self.input_folders:
+            folder_path = Path(folder).expanduser().resolve()
+            builder = tfds.builder_from_directory(folder_path)
+            info = builder.info
+            splits = {}
+            for name, split_info in sorted(info.splits.items()):
+                splits[str(name)] = {
+                    'num_examples': int(split_info.num_examples),
+                    'shard_lengths': [
+                        int(length)
+                        for length in getattr(split_info, 'shard_lengths', ())
+                    ],
+                }
+
+            metadata_hashes = {}
+            for metadata_path in sorted(folder_path.glob('*.json')):
+                if not metadata_path.is_file():
+                    continue
+                hasher = hashlib.sha256()
+                with metadata_path.open('rb') as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                        hasher.update(chunk)
+                metadata_hashes[metadata_path.name] = hasher.hexdigest()
+
+            shards = []
+            for shard_path in sorted(folder_path.glob('*tfrecord*')):
+                if shard_path.is_file():
+                    shards.append({
+                        'name': shard_path.name,
+                        'size_bytes': int(shard_path.stat().st_size),
+                    })
+
+            config_name = getattr(info, 'config_name', None)
+            identities.append({
+                'path': str(folder_path),
+                'name': str(getattr(info, 'name', folder_path.parent.name)),
+                'config_name': (
+                    None if config_name is None else str(config_name)
+                ),
+                'version': str(getattr(info, 'version', 'unknown')),
+                'full_name': str(getattr(info, 'full_name', 'unknown')),
+                'splits': splits,
+                'metadata_sha256': metadata_hashes,
+                'record_shards': shards,
+            })
+        return identities
+
+    def restart_fingerprint_payload(self):
+        """Return the deterministic loader/config identity used for restart.
+
+        The payload intentionally excludes ``num_epochs`` so a completed run
+        can be extended.  It includes every setting that determines record
+        selection, filtering, graph construction, batching, and worker order.
+        """
+        trajectory_config = None
+        if getattr(self, 'config', None) is not None:
+            full_config = _json_compatible(self.config)
+            training_config = dict(full_config.get('training', {}))
+            # These settings affect run length/reporting, not the mathematical
+            # next update.  In particular, excluding num_epochs permits a
+            # checkpointed run to be extended.
+            for key in (
+                    'allow_restart', 'num_epochs', 'use_wandb',
+                    'wandb_init_args', 'log_gradient_values'):
+                training_config.pop(key, None)
+            trajectory_config = {
+                'data': full_config.get('data'),
+                'model': full_config.get('model'),
+                'optimizer': full_config.get('optimizer'),
+                'training': training_config,
+                'neighborlist_format_lr': full_config.get(
+                    'neighborlist_format_lr'
+                ),
+            }
+
+        return {
+            'fingerprint_schema_version': _TFDS_STREAM_FINGERPRINT_VERSION,
+            'epoch_stream_version': _TFDS_EPOCH_STREAM_VERSION,
+            'loader': f'{type(self).__module__}.{type(self).__qualname__}',
+            'datasets': self._dataset_identity_metadata(),
+            'selected_train_sizes': [int(x) for x in self._dataset_sizes('train')],
+            'selected_validation_sizes': [
+                int(x) for x in self._dataset_sizes('validation')
+            ],
+            'dataset_weights': [float(x) for x in self.dataset_weights],
+            'num_train': [None if x is None else int(x) for x in self.num_train],
+            'num_valid': [None if x is None else int(x) for x in self.num_valid],
+            'batch_budgets': {
+                'nodes': int(self.batch_max_num_nodes),
+                'edges': int(self.batch_max_num_edges),
+                'graphs': int(self.batch_max_num_graphs),
+                'pairs': int(self.batch_max_num_pairs),
+            },
+            'neighbors': {
+                'cutoff': float(self.cutoff),
+                'calculate_lr': bool(self.calculate_neighbors_lr),
+                'cutoff_lr': (
+                    None if self.cutoff_lr is None else float(self.cutoff_lr)
+                ),
+            },
+            'filters': {
+                'max_force': (
+                    None if self.max_force_filter is None
+                    else float(self.max_force_filter)
+                ),
+                'min_distance': (
+                    None if self.min_distance_filter is None
+                    else float(self.min_distance_filter)
+                ),
+            },
+            'unit_factors': {
+                'energy': float(self.energy_unit),
+                'length': float(self.length_unit),
+                'dipole_vec': float(self.dipole_vec_unit),
+            },
+            'training_seed': int(self.train_seed),
+            'n_proc': int(self.n_proc),
+            'graph_schema': {
+                'max_num_theory_levels': int(MAX_NUM_THEORY_LEVELS),
+                'shuffle_buffer_size': 10_000,
+            },
+            'trajectory_config': trajectory_config,
+            'runtime': {
+                'python': '.'.join(map(str, sys.version_info[:3])),
+                'numpy': np.__version__,
+                'tensorflow': _installed_version(
+                    'tensorflow', getattr(tf, '__version__', 'unavailable')
+                ),
+                'tensorflow_datasets': _installed_version(
+                    'tensorflow-datasets',
+                    getattr(tfds, '__version__', 'unavailable'),
+                ),
+                'ase': _installed_version('ase'),
+                'jraph': _installed_version('jraph'),
+            },
+        }
+
+    def restart_fingerprint(self):
+        """SHA-256 identity for deterministic TFDS trajectory reconstruction."""
+        return _canonical_fingerprint(self.restart_fingerprint_payload())
+
     @staticmethod
     def _preprocess(dataset,
                     batch_max_num_nodes,
@@ -667,7 +966,8 @@ class QCMLDataLoaderSparseParallel:
                     energy_unit,
                     length_unit,
                     dipole_vec_unit,
-                    train_seed):
+                    train_seed,
+                    shuffle=True):
         """Preprocess the dataset by creating graph tuples and batching.
 
         Args:
@@ -685,6 +985,7 @@ class QCMLDataLoaderSparseParallel:
             length_unit: Conversion factor from raw lengths to Angstrom
             dipole_vec_unit: Conversion factor for raw dipole-vector labels
             train_seed: Random seed for shuffling
+            shuffle: Whether to shuffle this finite epoch before batching.
 
         Returns:
             Batched dataset of graph tuples
@@ -714,12 +1015,14 @@ class QCMLDataLoaderSparseParallel:
                 )
             )
 
-        # Shuffle
-        dataset = dataset.shuffle(
-            buffer_size=10_000,
-            reshuffle_each_iteration=True,
-            seed=train_seed
-        )
+        if shuffle:
+            # A new seed is supplied for every training epoch, so this dataset
+            # itself should not silently reshuffle if iterated more than once.
+            dataset = dataset.shuffle(
+                buffer_size=10_000,
+                reshuffle_each_iteration=False,
+                seed=train_seed,
+            )
 
         # Create graph tuples only after rejecting invalid structures.
         dataset = dataset.map(
@@ -802,7 +1105,11 @@ class QCMLDataLoaderSparseParallel:
                     else:
                         split = 'validation'
 
-                dataset = builder.as_dataset(split=split, shuffle_files=True, read_config=read_config)
+                dataset = builder.as_dataset(
+                    split=split,
+                    shuffle_files=config.mode == 'train',
+                    read_config=read_config,
+                )
 
                 # Standardize dataset fields to ensure compatibility
                 dataset = standardize_dataset_fields(dataset)
@@ -835,7 +1142,8 @@ class QCMLDataLoaderSparseParallel:
                                                 energy_unit=config.energy_unit,
                                                 length_unit=config.length_unit,
                                                 dipole_vec_unit=config.dipole_vec_unit,
-                                                train_seed=config.train_seed
+                                                train_seed=config.train_seed,
+                                                shuffle=config.mode == 'train',
                                                 ):
                 if not QCMLDataLoaderSparseParallel._safe_put(
                     output_queue, batch, config.cancellation_event
@@ -876,6 +1184,7 @@ class QCMLDataLoaderSparseParallel:
         cancellation_event = self.manager.Event()
         epoch_size = self._epoch_size(mode)
 
+        futures = {}
         for i in range(self.n_proc):
             config = WorkerConfig(
                 worker_idx=i,
@@ -903,7 +1212,7 @@ class QCMLDataLoaderSparseParallel:
                 num_valid=self.num_valid,
                 mode=mode
             )
-            self.executor.submit(
+            futures[i] = self.executor.submit(
                 QCMLDataLoaderSparseParallel._worker, config, output_queues[i]
             )
 
@@ -918,6 +1227,19 @@ class QCMLDataLoaderSparseParallel:
                             batch = output_queues[worker_idx].get(timeout=3)
                             break
                         except queue.Empty:
+                            future = futures[worker_idx]
+                            if future.done():
+                                try:
+                                    worker_result = future.result()
+                                except Exception as e:
+                                    raise RuntimeError(
+                                        f'TFDS worker {worker_idx} terminated '
+                                        f'without reporting its error: {e}'
+                                    ) from e
+                                raise RuntimeError(
+                                    f'TFDS worker {worker_idx} exited without a '
+                                    f'completion token (result={worker_result!r}).'
+                                )
                             continue
                         except Exception as e:
                             raise RuntimeError(
@@ -944,7 +1266,8 @@ class QCMLDataLoaderSparseParallel:
             cancellation_event.set()
 
     def next_epoch(self, split, mode, parallel: bool = True,
-                   advance_epoch: bool = True):
+                   advance_epoch: bool = True, epoch_index: Optional[int] = None,
+                   skip_batches: int = 0):
         """Loads the data for ONE epoch.
 
         Args:
@@ -957,21 +1280,55 @@ class QCMLDataLoaderSparseParallel:
             advance_epoch: Increment the deterministic seed counter. Internal
                 metadata probes pass ``False`` so they do not alter the first
                 real training epoch.
+            epoch_index: Explicit logical training epoch. Checkpoint restart
+                uses this to rebuild the same seeded stream before skipping
+                batches already represented by the checkpoint.
+            skip_batches: Number of deterministic batches to discard from the
+                start of the selected epoch.
 
         Returns:
             Generator yielding batches of data
         """
+        if isinstance(skip_batches, bool) or int(skip_batches) != skip_batches or skip_batches < 0:
+            raise ValueError(f'skip_batches must be a non-negative integer, got {skip_batches!r}.')
+        skip_batches = int(skip_batches)
+
         if mode not in self._epoch_counters:
             self._epoch_counters[mode] = 0
-        epoch_index = self._epoch_counters[mode]
-        if advance_epoch:
-            self._epoch_counters[mode] += 1
-        epoch_seed = (int(self.train_seed) + epoch_index) % (2**31 - 1)
+        # Validation must be a stable measurement of unchanged parameters.
+        # Reuse a fixed seed/order rather than advancing the training RNG state
+        # at every evaluation.
+        if mode == 'validation':
+            selected_epoch_index = 0
+        else:
+            if epoch_index is not None and (
+                    isinstance(epoch_index, bool)
+                    or int(epoch_index) != epoch_index):
+                raise ValueError(
+                    f'epoch_index must be a non-negative integer, got {epoch_index!r}.'
+                )
+            selected_epoch_index = (
+                self._epoch_counters[mode]
+                if epoch_index is None else int(epoch_index)
+            )
+            if selected_epoch_index < 0:
+                raise ValueError(
+                    f'epoch_index must be non-negative, got {selected_epoch_index}.'
+                )
+            if advance_epoch:
+                self._epoch_counters[mode] = max(
+                    self._epoch_counters[mode], selected_epoch_index + 1
+                )
+        epoch_seed = (int(self.train_seed) + selected_epoch_index) % (2**31 - 1)
 
         if mode == 'train' and parallel: # use multiprocessing for training batches
-            return self._generator(split, mode, epoch_seed)
+            iterator = self._generator(split, mode, epoch_seed)
         else:
-            return self._generator_sync(split, mode, epoch_seed)
+            iterator = self._generator_sync(split, mode, epoch_seed)
+        return (
+            _ClosePropagatingSkipIterator(iterator, skip_batches)
+            if skip_batches else iterator
+        )
 
     def _generator_sync(self, split, mode, epoch_seed):
         """Synchronous data generator for single-process operation.
@@ -1001,7 +1358,7 @@ class QCMLDataLoaderSparseParallel:
             read_config = tfds.ReadConfig(shuffle_seed=epoch_seed)
             dataset = builder.as_dataset(
                 split=split,
-                shuffle_files=True,
+                shuffle_files=mode == 'train',
                 read_config=read_config,
             )
 
@@ -1031,6 +1388,7 @@ class QCMLDataLoaderSparseParallel:
                                    energy_unit=self.energy_unit,
                                    length_unit=self.length_unit,
                                    dipole_vec_unit=self.dipole_vec_unit,
-                                   train_seed=epoch_seed
+                                   train_seed=epoch_seed,
+                                   shuffle=mode == 'train',
                                   ):
             yield batch

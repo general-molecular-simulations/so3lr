@@ -1,3 +1,6 @@
+import hashlib
+import importlib.metadata
+import json
 import jraph
 import jax
 import jax.numpy as jnp
@@ -29,6 +32,240 @@ logger = logging.getLogger("SO3LR")
 
 # Global distribution object for adaptive robust loss (handles partition function)
 ROBUST_LOSS_DIST = robust_loss_dist.Distribution()
+
+_TFDS_TRAINING_STATE_VERSION = 1
+_TFDS_RESTART_FINGERPRINT_VERSION = 1
+_TFDS_TRAINING_STATE_KEYS = frozenset({
+    'version', 'checkpoint_step', 'restart_fingerprint',
+    'raw_params', 'optimizer_state', 'ema_params', 'jax_rng',
+    'epoch', 'batches_consumed', 'processed_graphs', 'processed_nodes',
+    'best_eval_loss', 'evals_without_improvement', 'stop_training',
+    'plateau_best_loss', 'plateau_wait', 'plateau_cooldown_counter',
+    'plateau_scale', 'plateau_active', 'reduce_lr_enabled', 'stage_two_active',
+    'header_printed', 'use_ema',
+})
+
+
+def _canonical_sha256(payload):
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(',', ':'), ensure_ascii=True
+    ).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _distribution_version(name):
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return 'unavailable'
+
+
+def _tfds_restart_fingerprint(
+        training_iterator, validation_iterator, loop_config):
+    """Fingerprint data ordering plus trajectory-relevant loop settings."""
+    loader_fingerprints = []
+    fingerprint_cache = {}
+    for name, iterator in (
+            ('training', training_iterator), ('validation', validation_iterator)):
+        make_fingerprint = getattr(iterator, 'restart_fingerprint', None)
+        if make_fingerprint is None:
+            raise ValueError(
+                f'The {name} iterator does not provide restart_fingerprint(); '
+                'exact TFDS checkpoint restart cannot be guaranteed.'
+            )
+        iterator_identity = id(iterator)
+        if iterator_identity not in fingerprint_cache:
+            fingerprint_cache[iterator_identity] = make_fingerprint()
+        digest = fingerprint_cache[iterator_identity]
+        try:
+            digest_bytes = bytes.fromhex(digest)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f'The {name} iterator returned an invalid SHA-256 restart '
+                f'fingerprint: {digest!r}.'
+            ) from exc
+        if len(digest_bytes) != hashlib.sha256().digest_size:
+            raise ValueError(
+                f'The {name} iterator returned an invalid SHA-256 restart '
+                f'fingerprint: {digest!r}.'
+            )
+        loader_fingerprints.append(digest.lower())
+
+    return _canonical_sha256({
+        'version': _TFDS_RESTART_FINGERPRINT_VERSION,
+        'training_iterator': loader_fingerprints[0],
+        'validation_iterator': loader_fingerprints[1],
+        'loop': loop_config,
+    })
+
+
+def _make_tfds_training_state(
+        *, step, restart_fingerprint, raw_params, optimizer_state, ema_params,
+        jax_rng, epoch, batches_consumed, processed_graphs, processed_nodes,
+        best_eval_loss, evals_without_improvement, stop_training,
+        plateau_best_loss, plateau_wait, plateau_cooldown_counter,
+        plateau_scale, plateau_active, reduce_lr_enabled, stage_two_active,
+        header_printed, use_ema):
+    """Build the versioned, Orbax-compatible exact-restart PyTree."""
+    return {
+        'version': _TFDS_TRAINING_STATE_VERSION,
+        'checkpoint_step': int(step),
+        # StandardCheckpointHandler does not support str leaves.  Store the
+        # digest losslessly as 32 bytes and format it as hex in diagnostics.
+        'restart_fingerprint': np.frombuffer(
+            bytes.fromhex(restart_fingerprint), dtype=np.uint8
+        ).copy(),
+        'raw_params': raw_params,
+        'optimizer_state': optimizer_state,
+        'ema_params': ema_params,
+        'jax_rng': jax_rng,
+        'epoch': int(epoch),
+        'batches_consumed': int(batches_consumed),
+        'processed_graphs': int(np.asarray(jax.device_get(processed_graphs)).item()),
+        'processed_nodes': int(np.asarray(jax.device_get(processed_nodes)).item()),
+        'best_eval_loss': float(best_eval_loss),
+        'evals_without_improvement': int(evals_without_improvement),
+        'stop_training': bool(stop_training),
+        'plateau_best_loss': float(plateau_best_loss),
+        'plateau_wait': int(plateau_wait),
+        'plateau_cooldown_counter': int(plateau_cooldown_counter),
+        'plateau_scale': float(plateau_scale),
+        'plateau_active': bool(plateau_active),
+        'reduce_lr_enabled': bool(reduce_lr_enabled),
+        'stage_two_active': bool(stage_two_active),
+        'header_printed': bool(header_printed),
+        'use_ema': bool(use_ema),
+    }
+
+
+def _validate_tfds_training_state(state, *, step, restart_fingerprint):
+    """Fail closed if a checkpoint cannot identify the exact next update."""
+    if not isinstance(state, dict):
+        raise RuntimeError(
+            f'Checkpoint step {step} has no readable versioned TFDS training state.'
+        )
+    missing = sorted(_TFDS_TRAINING_STATE_KEYS.difference(state))
+    if missing:
+        raise RuntimeError(
+            f'Checkpoint step {step} has incomplete TFDS training state; '
+            f'missing {missing}. Exact restart is unsafe.'
+        )
+    if state['version'] != _TFDS_TRAINING_STATE_VERSION:
+        raise RuntimeError(
+            f'Checkpoint step {step} uses TFDS training-state version '
+            f'{state["version"]!r}; expected {_TFDS_TRAINING_STATE_VERSION}.'
+        )
+    if state['checkpoint_step'] != int(step):
+        raise RuntimeError(
+            f'Checkpoint step {step} contains training state for step '
+            f'{state["checkpoint_step"]!r}.'
+        )
+
+    try:
+        fingerprint_array = np.asarray(
+            state['restart_fingerprint'], dtype=np.uint8
+        )
+        if fingerprint_array.shape != (hashlib.sha256().digest_size,):
+            raise ValueError(f'unexpected shape {fingerprint_array.shape}')
+        saved_fingerprint = fingerprint_array.tobytes().hex()
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f'Checkpoint step {step} has an invalid restart fingerprint.'
+        ) from exc
+    if saved_fingerprint != restart_fingerprint:
+        raise RuntimeError(
+            f'TFDS restart fingerprint changed at checkpoint step {step} '
+            f'(saved {saved_fingerprint}, current {restart_fingerprint}). '
+            'Dataset identity, sampling/filter/unit/batch settings, runtime, or '
+            'trajectory-relevant training settings differ; refusing an '
+            'inexact restart.'
+        )
+
+    for key in (
+            'epoch', 'batches_consumed', 'processed_graphs', 'processed_nodes',
+            'evals_without_improvement', 'plateau_wait',
+            'plateau_cooldown_counter'):
+        value = state[key]
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
+            raise RuntimeError(
+                f'Checkpoint step {step} has invalid {key}={value!r}.'
+            )
+    for key in (
+            'stop_training', 'plateau_active', 'reduce_lr_enabled',
+            'stage_two_active', 'header_printed', 'use_ema'):
+        if not isinstance(state[key], (bool, np.bool_)):
+            raise RuntimeError(
+                f'Checkpoint step {step} has invalid {key}={state[key]!r}.'
+            )
+    for key in ('best_eval_loss', 'plateau_best_loss'):
+        if np.isnan(float(state[key])):
+            raise RuntimeError(
+                f'Checkpoint step {step} has invalid {key}={state[key]!r}.'
+            )
+    if (not np.isfinite(float(state['plateau_scale']))
+            or float(state['plateau_scale']) < 0):
+        raise RuntimeError(
+            f'Checkpoint step {step} has invalid '
+            f'plateau_scale={state["plateau_scale"]!r}.'
+        )
+    if state['raw_params'] is None or state['optimizer_state'] is None:
+        raise RuntimeError(
+            f'Checkpoint step {step} lacks raw parameters or optimizer state; '
+            'exact restart is unsafe.'
+        )
+    if state['use_ema'] and state['ema_params'] is None:
+        raise RuntimeError(
+            f'Checkpoint step {step} says EMA is active but lacks EMA state.'
+        )
+    if state['jax_rng'] is None:
+        raise RuntimeError(
+            f'Checkpoint step {step} lacks its JAX RNG state.'
+        )
+
+
+def _restore_tfds_training_state(
+        checkpoint_manager, *, step, optimizer, restart_fingerprint):
+    """Restore training state while preserving Optax namedtuple structure."""
+    try:
+        untyped = checkpoint_manager.restore(
+            step,
+            args=ocp.args.Composite(
+                training_state=ocp.args.StandardRestore()
+            ),
+        )['training_state']
+    except Exception as exc:
+        raise RuntimeError(
+            f'Checkpoint step {step} is params-only or its TFDS training-state '
+            'item is unreadable. Inference can still load its params, but exact '
+            'TFDS training restart is impossible; start a new work directory.'
+        ) from exc
+
+    _validate_tfds_training_state(
+        untyped, step=step, restart_fingerprint=restart_fingerprint
+    )
+
+    # Target-free Orbax restore turns Optax namedtuples into lists/dicts.  A
+    # fresh optimizer state supplies the exact container structure, then Orbax
+    # fills it with the saved values.  A changed optimizer structure therefore
+    # fails closed rather than producing a subtly invalid continuation.
+    restore_target = dict(untyped)
+    restore_target['optimizer_state'] = optimizer.init(untyped['raw_params'])
+    try:
+        restored = checkpoint_manager.restore(
+            step,
+            args=ocp.args.Composite(
+                training_state=ocp.args.StandardRestore(restore_target)
+            ),
+        )['training_state']
+    except Exception as exc:
+        raise RuntimeError(
+            f'Checkpoint step {step} training state is incompatible with the '
+            'current optimizer or parameter structure; refusing an inexact restart.'
+        ) from exc
+    _validate_tfds_training_state(
+        restored, step=step, restart_fingerprint=restart_fingerprint
+    )
+    return restored
 
 
 def init_adaptive_robust_loss_params(
@@ -1468,8 +1705,61 @@ def fit_from_iterator(
     Returns:
 
     """
-    del training_seed
     jax_rng = jax.random.PRNGKey(seed=model_seed)
+
+    batch_n_proc = getattr(training_iterator, 'n_proc', None)
+    loop_config = {
+        'training_seed': int(training_seed),
+        'model_seed': int(model_seed),
+        'batch_n_proc': None if batch_n_proc is None else int(batch_n_proc),
+        'batch_max_num_nodes': int(batch_max_num_nodes),
+        'batch_max_num_edges': int(batch_max_num_edges),
+        'batch_max_num_graphs': int(batch_max_num_graphs),
+        'batch_max_num_pairs': int(batch_max_num_pairs),
+        'eval_every_num_steps': int(eval_every_num_steps),
+        'use_robust_loss_validation': bool(use_robust_loss_validation),
+        'robust_loss_alpha_validation': float(robust_loss_alpha_validation),
+        'use_adaptive_robust_loss': bool(use_adaptive_robust_loss),
+        'adaptive_robust_loss_targets': (
+            None if adaptive_robust_loss_targets is None
+            else list(adaptive_robust_loss_targets)
+        ),
+        'adaptive_robust_loss_init_alpha': float(adaptive_robust_loss_init_alpha),
+        'adaptive_robust_loss_init_scale': float(adaptive_robust_loss_init_scale),
+        'use_ema': bool(use_ema),
+        'ema_decay': float(ema_decay),
+        'early_stopping_patience': (
+            None if early_stopping_patience is None
+            else int(early_stopping_patience)
+        ),
+        'early_stopping_min_delta': float(early_stopping_min_delta),
+        'reduce_lr_on_plateau': bool(reduce_lr_on_plateau),
+        'reduce_lr_factor': float(reduce_lr_factor),
+        'reduce_lr_patience': int(reduce_lr_patience),
+        'reduce_lr_min_scale': float(reduce_lr_min_scale),
+        'reduce_lr_min_delta': float(reduce_lr_min_delta),
+        'reduce_lr_cooldown': int(reduce_lr_cooldown),
+        'stage_two_start_epoch': (
+            None if stage_two_start_epoch is None else int(stage_two_start_epoch)
+        ),
+        'has_stage_two_loss': stage_two_loss_fn is not None,
+        'has_stage_two_validation': stage_two_val_fn is not None,
+        'runtime': {
+            'jax': _distribution_version('jax'),
+            'jaxlib': _distribution_version('jaxlib'),
+            'optax': _distribution_version('optax'),
+            'flax': _distribution_version('flax'),
+            'orbax_checkpoint': _distribution_version('orbax-checkpoint'),
+            'backend': jax.default_backend(),
+            'devices': [
+                {'platform': device.platform, 'kind': device.device_kind}
+                for device in jax.devices()
+            ],
+        },
+    }
+    restart_fingerprint = _tfds_restart_fingerprint(
+        training_iterator, validation_iterator, loop_config
+    )
 
     # Create checkpoint directory.
     ckpt_dir = Path(ckpt_dir).expanduser().resolve()
@@ -1486,7 +1776,7 @@ def fit_from_iterator(
         **ckpt_manager_options
     )
 
-    ckpt_mngr = checkpoint_utils.make_checkpoint_manager(
+    ckpt_mngr = checkpoint_utils.make_training_checkpoint_manager(
         ckpt_dir=ckpt_dir,
         ckpt_mngr_options=options
     )
@@ -1505,7 +1795,8 @@ def fit_from_iterator(
     processed_nodes = 0
     step = 0
     header_printed = False
-
+    start_epoch = 0
+    resume_batches_consumed = 0
     opt_state = None
     # Shadow EMA copy of the parameters; see fit().
     ema_params = None
@@ -1542,7 +1833,78 @@ def fit_from_iterator(
         logger.info(f"Two-stage loss reweighting enabled (switch at epoch "
                     f"{stage_two_start_epoch}).")
 
-    for epoch in range(num_epochs):
+    # A TFDS checkpoint must identify the exact next update.  Restore the raw
+    # training weights (not the EMA/deployed copy), optimizer and all control
+    # state together with the iterator position.  Legacy params-only
+    # checkpoints remain loadable for inference, but are deliberately unsafe
+    # for continuation.
+    latest_step = ckpt_mngr.latest_step()
+    if latest_step is not None:
+        if not allow_restart:
+            raise RuntimeError(
+                f'{ckpt_dir} already exists at step {latest_step}. If you want '
+                f'to re-start training, set `allow_restart=True`.'
+            )
+        training_state = _restore_tfds_training_state(
+            ckpt_mngr,
+            step=latest_step,
+            optimizer=optimizer,
+            restart_fingerprint=restart_fingerprint,
+        )
+        params = training_state['raw_params']
+        opt_state = training_state['optimizer_state']
+        ema_params = training_state['ema_params']
+        jax_rng = training_state['jax_rng']
+        step = int(training_state['checkpoint_step'])
+        start_epoch = int(training_state['epoch'])
+        resume_batches_consumed = int(training_state['batches_consumed'])
+        processed_graphs = int(training_state['processed_graphs'])
+        processed_nodes = int(training_state['processed_nodes'])
+        best_eval_loss = float(training_state['best_eval_loss'])
+        evals_without_improvement = int(
+            training_state['evals_without_improvement']
+        )
+        stop_training = bool(training_state['stop_training'])
+        plateau_best_loss = float(training_state['plateau_best_loss'])
+        plateau_wait = int(training_state['plateau_wait'])
+        plateau_cooldown_counter = int(
+            training_state['plateau_cooldown_counter']
+        )
+        plateau_scale = float(training_state['plateau_scale'])
+        _plateau_active = bool(training_state['plateau_active'])
+        reduce_lr_on_plateau = bool(training_state['reduce_lr_enabled'])
+        _stage_two_active = bool(training_state['stage_two_active'])
+        header_printed = bool(training_state['header_printed'])
+
+        if _stage_two_active:
+            if stage_two_loss_fn is None:
+                raise RuntimeError(
+                    'Checkpoint is in stage two but no stage_two_loss_fn was provided.'
+                )
+            training_step_fn = make_training_step_fn(
+                optimizer, stage_two_loss_fn, log_gradient_values
+            )
+            validation_step_fn = make_validation_step_fn(
+                stage_two_val_fn
+                if stage_two_val_fn is not None else stage_two_loss_fn
+            )
+
+        logger.info(
+            'Restored exact TFDS training state from %s at step %s.',
+            ckpt_dir, latest_step,
+        )
+        print(
+            f'Re-start training from step {latest_step}, epoch {start_epoch}, '
+            f'after {resume_batches_consumed} batch(es).'
+        )
+
+    for epoch in range(start_epoch, num_epochs):
+        if stop_training:
+            logger.info(
+                'Checkpoint step %s already reached its early-stopping condition; '
+                'no further optimizer updates will be applied.', step
+            )
+            break
         # Switch to the stage-two loss at the configured epoch boundary.
         if (stage_two_start_epoch is not None and stage_two_loss_fn is not None
                 and not _stage_two_active and epoch >= stage_two_start_epoch):
@@ -1564,8 +1926,18 @@ def fit_from_iterator(
         if use_wandb:
             wandb.log({"epoch": epoch})
         print(f'Epoch {epoch} of {num_epochs}')
-        training_iterator_loop = training_iterator.next_epoch(split='train', mode='train')
-        for graph_batch_training, lr_batch_training in training_iterator_loop:
+        skipped_batches = (
+            resume_batches_consumed if epoch == start_epoch else 0
+        )
+        training_iterator_loop = training_iterator.next_epoch(
+            split='train',
+            mode='train',
+            epoch_index=epoch,
+            skip_batches=skipped_batches,
+        )
+        for batch_index, (graph_batch_training, lr_batch_training) in enumerate(
+                training_iterator_loop, start=skipped_batches):
+            batches_consumed = batch_index + 1
             batch_training = graph_to_batch_fn(graph_batch_training, lr_batch_training)
             processed_graphs += batch_training['num_of_non_padded_graphs']
             processed_nodes += int(batch_max_num_nodes - jraph.get_number_of_padding_with_graphs_nodes(graph_batch_training))
@@ -1574,39 +1946,24 @@ def fit_from_iterator(
 
             # If params are None (in the first step), initialize the parameters or load from existing checkpoint.
             if params is None:
-                # Check if checkpoint already exists.
-                latest_step = ckpt_mngr.latest_step()
-                if latest_step is not None:
-                    if allow_restart:
-                        params = checkpoint_utils.load_params_from_checkpoint(
-                            ckpt_dir=ckpt_dir
-                        )
-                        logger.info(f"Loaded parameters from {ckpt_dir} (keys: {list(params.keys())}).")
-                        params = expand_observables_to_theory_levels(params)
-                        step += latest_step
-                        print(f'Re-start training from {latest_step}.')
-                    else:
-                        raise RuntimeError(f'{ckpt_dir} already exists at step {latest_step}. If you want to re-start '
-                                           f'training, set `allow_restart=True`.')
-                else:
-                    print(f'Initialize new parameters.')
-                    params = model.init(jax_rng, batch_training)
+                print(f'Initialize new parameters.')
+                params = model.init(jax_rng, batch_training)
 
-                    # Initialize adaptive robust loss parameters if enabled
-                    if use_adaptive_robust_loss and adaptive_robust_loss_targets is not None:
-                        adaptive_params = init_adaptive_robust_loss_params(
-                            targets=adaptive_robust_loss_targets,
-                            init_alpha=adaptive_robust_loss_init_alpha,
-                            init_scale=adaptive_robust_loss_init_scale
-                        )
-                        params = {**params, **adaptive_params}
-                        print(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
-                        alpha, scale = transform_adaptive_robust_params(
-                            adaptive_params['adaptive_robust_loss']['alpha_raw'],
-                            adaptive_params['adaptive_robust_loss']['scale_raw']
-                        )
-                        print(f"  Initial alpha: {alpha}")
-                        print(f"  Initial scale: {scale}")
+                # Initialize adaptive robust loss parameters if enabled
+                if use_adaptive_robust_loss and adaptive_robust_loss_targets is not None:
+                    adaptive_params = init_adaptive_robust_loss_params(
+                        targets=adaptive_robust_loss_targets,
+                        init_alpha=adaptive_robust_loss_init_alpha,
+                        init_scale=adaptive_robust_loss_init_scale
+                    )
+                    params = {**params, **adaptive_params}
+                    print(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
+                    alpha, scale = transform_adaptive_robust_params(
+                        adaptive_params['adaptive_robust_loss']['alpha_raw'],
+                        adaptive_params['adaptive_robust_loss']['scale_raw']
+                    )
+                    print(f"  Initial alpha: {alpha}")
+                    print(f"  Initial scale: {scale}")
 
             # If optimizer state is None (in the first step), initialize from the parameter pyTree.
             if opt_state is None:
@@ -1684,16 +2041,6 @@ def fit_from_iterator(
                 logger.info(print_metrics_row(epoch, step, eval_metrics))
                 eval_loss = eval_metrics['eval_loss']
 
-                # Only save if loss is finite (save the EMA weights when EMA is on).
-                if jnp.isfinite(eval_loss):
-                    ckpt_mngr.save(
-                        step,
-                        args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
-                        metrics={'loss': eval_loss}
-                    )
-                else:
-                    print(f"Skipping checkpoint at step {step} because eval_loss={eval_loss}")
-
                 # Log to weights and bias.
                 if use_wandb:
                     wandb.log(
@@ -1726,9 +2073,58 @@ def fit_from_iterator(
                         factor=reduce_lr_factor, patience=reduce_lr_patience,
                         min_scale=reduce_lr_min_scale, min_delta=reduce_lr_min_delta,
                         cooldown=reduce_lr_cooldown, step=step)
+
+                # Validation can update early-stop and plateau/optimizer state.
+                # Save only after those transitions so the restored next update
+                # sees exactly the same control state as uninterrupted training.
+                if jnp.isfinite(eval_loss):
+                    training_state = _make_tfds_training_state(
+                        step=step,
+                        restart_fingerprint=restart_fingerprint,
+                        raw_params=params,
+                        optimizer_state=opt_state,
+                        ema_params=ema_params,
+                        jax_rng=jax_rng,
+                        epoch=epoch,
+                        batches_consumed=batches_consumed,
+                        processed_graphs=processed_graphs,
+                        processed_nodes=processed_nodes,
+                        best_eval_loss=best_eval_loss,
+                        evals_without_improvement=evals_without_improvement,
+                        stop_training=stop_training,
+                        plateau_best_loss=plateau_best_loss,
+                        plateau_wait=plateau_wait,
+                        plateau_cooldown_counter=plateau_cooldown_counter,
+                        plateau_scale=plateau_scale,
+                        plateau_active=_plateau_active,
+                        reduce_lr_enabled=reduce_lr_on_plateau,
+                        stage_two_active=_stage_two_active,
+                        header_printed=header_printed,
+                        use_ema=use_ema,
+                    )
+                    checkpoint_started = ckpt_mngr.save(
+                        step,
+                        args=ocp.args.Composite(
+                            params=ocp.args.StandardSave(eval_params),
+                            training_state=ocp.args.StandardSave(training_state),
+                        ),
+                        metrics={'loss': eval_loss}
+                    )
+                    if checkpoint_started:
+                        ckpt_mngr.wait_until_finished()
+                else:
+                    print(
+                        f"Skipping checkpoint at step {step} because "
+                        f"eval_loss={eval_loss}"
+                    )
             # Finished validation process.
 
             if stop_training:
+                close_training_iterator = getattr(
+                    training_iterator_loop, 'close', None
+                )
+                if close_training_iterator is not None:
+                    close_training_iterator()
                 break  # exit the batch loop
 
         if stop_training:

@@ -38,6 +38,11 @@ def load_params_from_checkpoint(
     with suppress_absl_warnings():
         mngr_state = loaded_mngr.restore(
             loaded_mngr.latest_step(),
+            # A training checkpoint may contain additional atomic items (for
+            # example the optimizer/iterator state).  Asking explicitly for
+            # ``params`` keeps inference compatible with both those composite
+            # checkpoints and the historical params-only layout.
+            args=ocp.args.Composite(params=ocp.args.StandardRestore()),
         )
     params = mngr_state.get("params")
 
@@ -46,7 +51,7 @@ def load_params_from_checkpoint(
             f'Parameters loaded from {ckpt_dir_cleaned} are None.'
         )
 
-    del loaded_mngr
+    loaded_mngr.close()
 
     return params
 
@@ -100,3 +105,32 @@ def make_checkpoint_manager(
         options=options
     )
     return ckpt_mngr
+
+
+def make_training_checkpoint_manager(
+        ckpt_dir,
+        ckpt_mngr_options: Optional[ocp.CheckpointManagerOptions] = None
+):
+    """Create the atomic two-item manager used by iterator-based training.
+
+    ``params`` remains the deployable/inference item.  ``training_state`` is a
+    versioned PyTree containing everything needed to reproduce the next update.
+    CheckpointManager commits and prunes the two items as one checkpoint, so a
+    retained params item can never point at a separately-pruned sidecar.
+    """
+    ckpt_dir_cleaned = Path(ckpt_dir).expanduser().resolve()
+
+    if ckpt_mngr_options is None:
+        options = ocp.CheckpointManagerOptions(step_prefix='ckpt')
+    else:
+        options = ckpt_mngr_options
+
+    return ocp.CheckpointManager(
+        ckpt_dir_cleaned,
+        item_names=('params', 'training_state'),
+        item_handlers={
+            'params': ocp.StandardCheckpointHandler(),
+            'training_state': ocp.StandardCheckpointHandler(),
+        },
+        options=options,
+    )

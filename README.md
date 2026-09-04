@@ -368,8 +368,23 @@ equal to the total selected record count across datasets with non-zero weights.
 Sampling is with replacement and is reproducible from `training_seed` for a
 fixed `batch_n_proc`. When a dataset's weight equals its selected size, it is
 visited once per epoch in expectation. Validation does not repeat records and
-visits every selected record exactly once. TFDS records are converted to
-eV/Angstrom before filters and neighbor lists are evaluated. `filter.max_force`
+visits every selected record exactly once in a fixed order, so unchanged model
+parameters are evaluated on identical batches. Each new TFDS checkpoint
+atomically stores deployable `params` and a versioned training-state item. The
+latter contains raw parameters, optimizer/EMA state, logical epoch and batch
+position, counters, early-stop/plateau/two-stage state, and the JAX RNG key.
+Restart rebuilds the seeded epoch and skips the recorded prefix. A SHA-256
+fingerprint rejects changes to TFDS builder identity metadata, shard names and
+sizes, dataset weights/caps, batch budgets, neighbor/filter/unit settings,
+seeds, process count, model/optimizer/objective configuration, relevant runtime
+versions, and trajectory-control settings. Metadata fingerprinting does not
+hash every TFRecord payload and cannot prove that Python model/loss/optimizer
+code is semantically unchanged despite identical configuration;
+keep data directories immutable and use source/environment provenance for that.
+Legacy params-only checkpoints remain loadable for inference but are rejected
+for TFDS training restart because their exact trajectory cannot be recovered.
+TFDS records are converted to eV/Angstrom before filters and neighbor lists are
+evaluated. `filter.max_force`
 uses the largest absolute force component and rejects non-finite forces, while
 `filter.min_distance` uses the minimum-image distance along exactly the axes
 enabled by each record's `pbc` value.
