@@ -8,6 +8,13 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
+try:
+    # JAX <= 0.5 exposed this context manager from ``experimental``.
+    from jax.experimental import enable_x64 as _enable_x64
+except ImportError:
+    # Newer supported JAX releases moved it to the top-level namespace.
+    from jax import enable_x64 as _enable_x64
+
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     alphas_legacy,
     C6_coef,
@@ -30,6 +37,13 @@ class _OnesC6Head(nn.Module):
                 inputs['atomic_numbers'], dtype=inputs['positions'].dtype
             )
         }
+
+
+class _InputC6Head(nn.Module):
+    """Expose deterministic predictions without using dataset C6 labels."""
+
+    def __call__(self, inputs):
+        return {'c6_ratios': inputs['predicted_c6_ratios']}
 
 
 def _real_space_energy_fn(*, legacy=True, cutoff=6.0, damping=1.0):
@@ -71,7 +85,7 @@ def _real_space_energy_fn(*, legacy=True, cutoff=6.0, damping=1.0):
 
 def test_complete_pme_residual_is_value_and_force_continuous_at_cutoff():
     """C6, C8, and C10 must all vanish smoothly with the neighbor pair."""
-    with jax.enable_x64():
+    with _enable_x64():
         energy_fn = _real_space_energy_fn()
         force_fn = jax.jit(lambda r: -jax.grad(energy_fn)(r))
         energy_fn = jax.jit(energy_fn)
@@ -135,7 +149,7 @@ def _expected_legacy_real_space_energy(distance, *, use_pme):
 @pytest.mark.parametrize('use_pme', [False, True])
 def test_legacy_real_space_and_pme_subtraction_use_legacy_tables(use_pme):
     """The legacy Casimir-Polder term and PME subtraction must agree."""
-    with jax.enable_x64():
+    with _enable_x64():
         distance = jnp.asarray(3.0)
         if use_pme:
             energy_fn = _real_space_energy_fn(legacy=True)
@@ -218,7 +232,7 @@ def test_legacy_reciprocal_c6_selection_matches_single_and_batched_paths():
     # Keep this comparison in float32 even if another test module has globally
     # enabled x64; production batching uses int32 segment indices, and the
     # coefficient-selection signal is much larger than float32 roundoff.
-    with jax.enable_x64(False):
+    with _enable_x64(False):
         legacy_single, legacy_batched = _kspace_energies(legacy=True)
         v2_single, v2_batched = _kspace_energies(legacy=False)
 
@@ -228,3 +242,144 @@ def test_legacy_reciprocal_c6_selection_matches_single_and_batched_paths():
     npt.assert_allclose(
         legacy_single / v2_single, expected_ratio, rtol=2.0e-6, atol=1.0e-9
     )
+
+
+def _heteronuclear_kspace_case(*, do_ewald, grid_size):
+    """Build one triclinic H-O reference case for either reciprocal solver."""
+    module = DispersionEnergyKspace(
+        prop_keys=None,
+        hirshfeld_ratios=None,
+        c6_ratios=_InputC6Head(),
+        do_ewald=do_ewald,
+        interpolation_nodes=4,
+        legacy=False,
+    )
+    inputs = {
+        'positions': jnp.array([
+            [0.2, 0.3, 0.4],
+            [1.7, 0.8, 0.6],
+        ]),
+        'k_grid_disp': jnp.ones((grid_size, grid_size, grid_size)),
+        'k_smearing_disp': jnp.asarray(2.0),
+        'cell': jnp.array([
+            [9.0, 0.4, 0.1],
+            [0.0, 8.5, 0.3],
+            [0.0, 0.0, 8.0],
+        ]),
+        'node_mask': jnp.array([True, True]),
+        'atomic_numbers': jnp.array([1, 8]),
+        'predicted_c6_ratios': jnp.array([0.8, 1.3]),
+    }
+    variables = module.init(jax.random.key(0), inputs)
+    return module, variables, inputs
+
+
+def _total_energy_and_forces(module, variables, inputs):
+    """Evaluate one single-graph reciprocal method under JIT and autodiff."""
+    def energy_fn(positions):
+        return jnp.sum(
+            module.apply(
+                variables, {**inputs, 'positions': positions}
+            )['dispersion_energy_kspace']
+        )
+
+    energy = jax.jit(energy_fn)(inputs['positions'])
+    forces = jax.jit(
+        lambda positions: -jax.grad(energy_fn)(positions)
+    )(inputs['positions'])
+    return energy, forces
+
+
+def test_pme_matches_ewald_reference_for_heteronuclear_cell():
+    """Converged PME must match an independently evaluated Ewald sum."""
+    with _enable_x64(False):
+        pme_case = _heteronuclear_kspace_case(do_ewald=False, grid_size=32)
+        ewald_case = _heteronuclear_kspace_case(do_ewald=True, grid_size=32)
+        pme_energy, pme_forces = _total_energy_and_forces(*pme_case)
+        ewald_energy, ewald_forces = _total_energy_and_forces(*ewald_case)
+
+    npt.assert_allclose(pme_energy, ewald_energy, rtol=2.0e-4, atol=1.0e-9)
+    relative_force_error = jnp.linalg.norm(
+        pme_forces - ewald_forces
+    ) / jnp.linalg.norm(ewald_forces)
+    assert float(relative_force_error) < 3.0e-3
+
+
+@pytest.mark.parametrize('do_ewald', [False, True], ids=['pme', 'ewald'])
+def test_mixed_periodicity_batch_is_finite_and_matches_single_graph(do_ewald):
+    """Zero cells for non-PBC/padding graphs must never reach the solver."""
+    with _enable_x64(False):
+        module, variables, single_inputs = _heteronuclear_kspace_case(
+            do_ewald=do_ewald, grid_size=8
+        )
+        periodic_positions = single_inputs['positions']
+        periodic_cell = single_inputs['cell']
+        k_grid = single_inputs['k_grid_disp']
+
+        def single_energy(positions):
+            graph_inputs = dict(single_inputs)
+            graph_inputs['positions'] = positions
+            return jnp.sum(
+                module.apply(variables, graph_inputs)['dispersion_energy_kspace']
+            )
+
+        single_per_atom = jax.jit(
+            lambda positions: module.apply(
+                variables, {**single_inputs, 'positions': positions}
+            )['dispersion_energy_kspace']
+        )(periodic_positions)
+        single_forces = jax.jit(
+            lambda positions: -jax.grad(single_energy)(positions)
+        )(periodic_positions)
+
+        # Graph 0 is periodic H-O, graph 1 is a real non-periodic C atom, and
+        # graph 2 is jraph-style padding.  Both skipped graphs intentionally
+        # carry singular zero cells, which previously contaminated the result.
+        batched_inputs = {
+            'positions': jnp.concatenate([
+                periodic_positions,
+                jnp.array([[0.5, 0.6, 0.7], [0.0, 0.0, 0.0]]),
+            ]),
+            'k_grid_disp': k_grid,
+            'k_smearing_disp': jnp.asarray(2.0),
+            'cell': jnp.stack([
+                periodic_cell,
+                jnp.zeros((3, 3)),
+                jnp.zeros((3, 3)),
+            ]),
+            'node_mask': jnp.array([True, True, True, False]),
+            'atomic_numbers': jnp.array([1, 8, 6, 1]),
+            'predicted_c6_ratios': jnp.array([0.8, 1.3, 1.1, 0.0]),
+            'batch_segments': jnp.array([0, 0, 1, 2], dtype=jnp.int32),
+            'graph_mask': jnp.array([True, True, False]),
+        }
+        bound_module = module.bind(variables)
+
+        def batched_energy(positions):
+            graph_inputs = dict(batched_inputs)
+            graph_inputs['positions'] = positions
+            return jnp.sum(
+                _batched_kspace_dispersion(
+                    bound_module, graph_inputs
+                )['dispersion_energy_kspace']
+            )
+
+        batched_per_atom = jax.jit(
+            lambda positions: _batched_kspace_dispersion(
+                bound_module, {**batched_inputs, 'positions': positions}
+            )['dispersion_energy_kspace']
+        )(batched_inputs['positions'])
+        batched_forces = jax.jit(
+            lambda positions: -jax.grad(batched_energy)(positions)
+        )(batched_inputs['positions'])
+
+    assert np.all(np.isfinite(np.asarray(batched_per_atom)))
+    assert np.all(np.isfinite(np.asarray(batched_forces)))
+    npt.assert_allclose(
+        batched_per_atom[:2], single_per_atom, rtol=3.0e-6, atol=1.0e-9
+    )
+    npt.assert_allclose(
+        batched_forces[:2], single_forces, rtol=3.0e-5, atol=2.0e-8
+    )
+    npt.assert_array_equal(np.asarray(batched_per_atom[2:]), np.zeros(2))
+    npt.assert_array_equal(np.asarray(batched_forces[2:]), np.zeros((2, 3)))

@@ -61,13 +61,26 @@ def _vmap_kspace_per_graph(solve_fn, inputs, per_atom_arrays, output_key):
         for a in per_atom_arrays
     ]
 
-    has_pbc = jnp.any(cell.reshape(num_graphs, -1) != 0, axis=-1)  # (num_graphs,)
+    # Reciprocal-space solvers invert the cell before doing any useful work.
+    # A batched neighbor list represents non-periodic and padding graphs with a
+    # zero cell, so evaluating those entries and masking afterwards produces
+    # NaNs (NaN * 0 is still NaN).  Only full-rank cells belonging to real
+    # graphs are eligible for the solver; all other entries get a harmless
+    # finite stand-in before vmap.
+    graph_mask = inputs['graph_mask'].astype(bool)
+    cell_is_finite = jnp.all(jnp.isfinite(cell), axis=(-2, -1))
+    cell_is_full_rank = jnp.abs(jnp.linalg.det(cell)) > 0
+    has_pbc = graph_mask & cell_is_finite & cell_is_full_rank
+    identity_cell = jnp.broadcast_to(jnp.eye(3, dtype=cell.dtype), cell.shape)
+    solver_cell = jnp.where(has_pbc[:, None, None], cell, identity_cell)
 
     # vmap the solver over graphs — solver must be pure JAX (no Flax state)
-    energies_padded = jax.vmap(solve_fn)(cell, *padded_arrays)
+    energies_padded = jax.vmap(solve_fn)(solver_cell, *padded_arrays)
 
     # Zero out non-PBC graphs and scatter back to flat array
-    energies_padded = energies_padded * has_pbc[:, None]
+    energies_padded = jnp.where(
+        has_pbc[:, None], energies_padded, jnp.zeros_like(energies_padded)
+    )
     energies_flat = _padded_to_flat(energies_padded, batch_segments, node_mask, local_idx)
 
     return {output_key: energies_flat}
