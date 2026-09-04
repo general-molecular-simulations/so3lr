@@ -108,6 +108,19 @@ def test_wandb_opt_in_redacts_outbound_config_and_credential_args(caplog):
     assert "do-not-send" not in caplog.text
 
 
+def test_wandb_opt_in_without_optional_dependency_is_actionable(monkeypatch):
+    real_import = builtins.__import__
+
+    def import_without_wandb(name, *args, **kwargs):
+        if name == "wandb":
+            raise ModuleNotFoundError("No module named 'wandb'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_wandb)
+    with pytest.raises(ImportError, match=r"so3lr\[wandb\]"):
+        initialize_wandb({"training": {"use_wandb": True}})
+
+
 def test_bundled_train_and_finetune_configs_disable_wandb():
     for config_name in ("config.yaml", "finetune.yaml"):
         with open(PROJECT_ROOT / "so3lr" / "config" / config_name) as stream:

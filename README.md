@@ -39,10 +39,11 @@ pip install .
 
 ### Optional extras
 
-The base install is JAX-only and lightweight. Two extras are available:
+The base install is JAX-only and lightweight. Three extras are available:
 
 - `pip install .[pysages]` — installs PySAGES for enhanced-sampling MD (collective variables, ABF, metadynamics, harmonic bias).
 - `pip install .[tfds]` — installs `tensorflow-cpu` + `tensorflow-datasets` for the fast TFDS-based data loader used by training/fine-tuning (needed only if you want to point `--datafile` at a TFDS dataset or run `tests/mlff_tests/test_data_loader_tfds.py`).
+- `pip install .[wandb]` — installs the optional Weights & Biases client used only when `training.use_wandb: true` is explicitly enabled.
 
 ## Models
 
@@ -356,7 +357,9 @@ so3lr train --config config.yaml
 
 Weights & Biases logging is disabled by default for both training and
 fine-tuning. SO3LR does not initialize W&B or send metrics when
-`training.use_wandb` is absent or `false`. To opt in explicitly:
+`training.use_wandb` is absent or `false`, and the base installation does not
+include the W&B client. Install it with `pip install .[wandb]`, then opt in
+explicitly:
 
 ```yaml
 training:

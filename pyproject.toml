@@ -28,7 +28,7 @@ e3x = "*"
 flax = "<0.12.9"
 optax = "*"
 tqdm = "*"
-wandb = "*"
+wandb = { version = "*", optional = true }
 pyyaml = "*"
 ml_collections = "*"
 click = "*"
@@ -46,6 +46,10 @@ pysages = ["pysages"]
 # (tests/mlff_tests/test_data_loader_tfds.py). Kept optional so the base
 # install stays light and JAX-only.
 tfds = ["tensorflow-cpu", "tensorflow-datasets"]
+# Only needed when training.use_wandb is explicitly enabled. Keeping the
+# telemetry client out of the base environment makes offline inference truly
+# local by default and avoids its networking/observability stack.
+wandb = ["wandb"]
 
 
 [tool.poetry.group.dev.dependencies]
