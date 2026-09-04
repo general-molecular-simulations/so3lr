@@ -2382,6 +2382,44 @@ def save_restart_checkpoints(
         save_pysages_state(pysages_result, restart_pysages_save_path)
 
 
+def _validate_md_output_write_policy(
+    *,
+    output_file: Optional[Union[str, Path]],
+    output_format: Optional[str],
+    overwrite: bool,
+    restart_load_path: Optional[Union[str, Path]],
+    current_run_output: bool = False,
+) -> None:
+    """Reject an existing trajectory that the selected writer would truncate.
+
+    EXTXYZ is intentionally appendable when continuing from a restart. HDF5 is
+    opened in ``mode='w'`` and therefore needs a fresh output path unless the
+    caller explicitly opts in to replacement with ``--overwrite``. The
+    ``current_run_output`` exception is reserved for the relaxation stage that
+    created this same run's output immediately before MD starts.
+    """
+    if output_file is None or overwrite or current_run_output:
+        return
+
+    output_path = Path(output_file)
+    if not output_path.exists():
+        return
+    if restart_load_path is not None and output_format == 'extxyz':
+        return
+
+    if restart_load_path is not None and output_format == 'hdf5':
+        raise RuntimeError(
+            f"HDF5 output file already exists: {output_file}. Refusing to "
+            "truncate it during restart. Choose a new --output path for the "
+            "continued trajectory, or pass --overwrite to replace it."
+        )
+
+    raise RuntimeError(
+        f"Output file already exists: {output_file}. Refusing to overwrite. "
+        "Pass --overwrite to replace it, or choose a different --output."
+    )
+
+
 def perform_md(
     all_settings: Dict,
     opt_structure: Optional[jnp.ndarray] = None,
@@ -2403,22 +2441,21 @@ def perform_md(
     # Extract settings with defaults
     input_file = all_settings.get('input_file')
     output_file = all_settings.get('output_file')
+    output_format = all_settings.get('output_format')
     restart_save_path = all_settings.get('restart_save_path')
     restart_load_path = all_settings.get('restart_load_path')
     overwrite = bool(all_settings.get('overwrite', False))
 
     # Refuse to clobber existing output unless the user opted in via
-    # --overwrite. The previous behavior was format-dependent: HDF5 silently
-    # truncated, extxyz silently appended. With this guard the policy is
-    # uniform across formats and across restarts.
-    if (output_file and Path(output_file).exists() and not overwrite
-            and not restart_load_path
-            and not all_settings.get('_relax_wrote_output')):
-        raise RuntimeError(
-            f"Output file already exists: {output_file}. Refusing to overwrite. "
-            f"Pass --overwrite to overwrite, choose a different --output, or "
-            f"pass --restart-load to resume from a checkpoint."
-        )
+    # --overwrite. A deliberate exception lets EXTXYZ append a continued run;
+    # HDF5 cannot append safely and therefore still requires a fresh path.
+    _validate_md_output_write_policy(
+        output_file=output_file,
+        output_format=output_format,
+        overwrite=overwrite,
+        restart_load_path=restart_load_path,
+        current_run_output=bool(all_settings.get('_relax_wrote_output')),
+    )
 
     # Model parameters
     model_path = all_settings.get('model_path')
@@ -2491,7 +2528,6 @@ def perform_md(
         )
 
     # Format control
-    output_format = all_settings.get('output_format')
     save_buffer = all_settings.get('save_buffer')
     seed = all_settings.get('seed')
     relax_before_run = all_settings.get('relax_before_run')
