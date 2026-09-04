@@ -1303,7 +1303,11 @@ def normalize_npt_coupling(npt_coupling: str) -> str:
     evolves.  Keep the safe orthorhombic modes available and fail before model
     loading or integration for the unsupported mode.
     """
-    coupling = str(npt_coupling).strip().lower().replace('_', '-')
+    # JAX-MD historically accepted spaces and underscores as separators. Keep
+    # those public spellings while returning one stable SO3LR representation.
+    coupling = '-'.join(
+        str(npt_coupling).strip().lower().replace('_', ' ').replace('-', ' ').split()
+    )
     if coupling == 'anisotropic':
         raise ValueError(
             "npt_coupling='anisotropic' is not currently supported by SO3LR MD. "

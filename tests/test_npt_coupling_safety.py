@@ -15,6 +15,8 @@ from so3lr.cli import so3lr_md
         (' IsOtRoPiC ', 'isotropic'),
         ('semi-isotropic', 'semi-isotropic'),
         ('SEMI_ISOTROPIC', 'semi-isotropic'),
+        ('semi isotropic', 'semi-isotropic'),
+        (' semi   isotropic ', 'semi-isotropic'),
     ],
 )
 def test_normalize_npt_coupling_accepts_only_orthorhombic_modes(value, expected):
