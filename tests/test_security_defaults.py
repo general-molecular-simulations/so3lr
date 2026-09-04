@@ -6,13 +6,18 @@ import json
 import pathlib
 import pickle
 from types import SimpleNamespace
+import warnings
 
 import numpy as np
 import pytest
 import yaml
 from ml_collections import config_dict
 
-from so3lr._serialization import UnsafePickleWarning
+from so3lr._serialization import (
+    UnsafePickleWarning,
+    _is_bundled_model_path,
+    load_pickle_with_warning,
+)
 from so3lr.mlff.config.wandb_utils import (
     REDACTED_CREDENTIAL,
     REDACTED_LOCAL_PATH,
@@ -189,6 +194,16 @@ def test_params_pickle_loader_emits_trust_warning(tmp_path):
     with pytest.warns(UnsafePickleWarning, match="checksum has been verified"):
         params = load_params_from_workdir(tmp_path)
     np.testing.assert_allclose(params["parameter"], [1.0])
+
+
+def test_installed_bundled_weights_share_the_package_trust_boundary():
+    path = PROJECT_ROOT / "so3lr" / "models" / "so3lr-s-2606" / "params.pkl"
+    assert _is_bundled_model_path(path)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        params = load_pickle_with_warning(path)
+    assert isinstance(params, dict)
+    assert not any(isinstance(item.message, UnsafePickleWarning) for item in caught)
 
 
 def test_pysages_restart_loader_emits_trust_warning(monkeypatch, tmp_path):
