@@ -3784,7 +3784,10 @@ def load_state(
         Tuple: Tuple containing the state, the box and the cycle number.
     """
 
-    loaded_state = np.load(path_to_load, allow_pickle=True)
+    # SO3LR restart files are numeric/string NPZ archives written by
+    # save_state(); object arrays are neither needed nor accepted. Disabling
+    # pickle prevents an untrusted archive from executing Python during load.
+    loaded_state = np.load(path_to_load, allow_pickle=False)
 
     # Helper: enumerate which fields in the .npz are about to be dropped if
     # we cannot/won't reconstruct the integrator state (ensemble mismatch or

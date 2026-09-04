@@ -638,4 +638,9 @@ def save_pysages_state(pysages_result, path_to_save):
 
 def load_pysages_state(path_to_load):
     """Load PySAGES result from restart file."""
+    from .._serialization import warn_before_pickle_load
+    warn_before_pickle_load(
+        path_to_load,
+        artifact='PySAGES pickle restart state',
+    )
     return pysages.serialization.load(path_to_load)

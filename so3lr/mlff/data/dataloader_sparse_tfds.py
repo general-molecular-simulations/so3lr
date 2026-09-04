@@ -9,7 +9,6 @@ from so3lr.mlff.utils.param_utils import MAX_NUM_THEORY_LEVELS
 from dataclasses import dataclass
 from typing import Optional
 import queue
-import wandb
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import Manager, get_context
 
@@ -349,6 +348,10 @@ class QCMLDataLoaderSparseParallel:
         self.batch_max_num_edges = config.training.batch_max_num_edges
         self.batch_max_num_graphs = config.training.batch_max_num_graphs
         self.batch_max_num_pairs = config.training.batch_max_num_pairs if config.training.batch_max_num_pairs is not None else 0
+        # Queue telemetry must follow the same explicit opt-in as the training
+        # loop. Merely having an unrelated global wandb.run is not consent for
+        # this loader to transmit SO3LR metrics.
+        self.use_wandb = config.training.get('use_wandb', False) is True
 
         # num_train and num_valid can be used to limit the number of examples taken from TFDS splits
         if hasattr(config.data, 'datasets'):
@@ -662,8 +665,10 @@ class QCMLDataLoaderSparseParallel:
 
             if ctr % 1000 == 0:
                 size = output_queue.qsize()
-                if wandb.run is not None:
-                    wandb.log({"queue_size_"+mode: size})
+                if self.use_wandb:
+                    import wandb
+                    if wandb.run is not None:
+                        wandb.log({"queue_size_"+mode: size})
 
             if isinstance(batch, StopToken):
                 n_stop_token += 1
