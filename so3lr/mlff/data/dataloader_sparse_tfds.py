@@ -9,6 +9,7 @@ from so3lr.mlff.utils.param_utils import MAX_NUM_THEORY_LEVELS
 from dataclasses import dataclass
 from typing import Optional
 import queue
+import traceback
 import wandb
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import Manager, get_context
@@ -28,6 +29,128 @@ except ModuleNotFoundError:
 
 
 logger = logging.getLogger("SO3LR")
+
+
+def convert_dataset_units_tf(element, energy_unit, length_unit, dipole_vec_unit):
+    """Convert one TFDS record to SO3LR's canonical eV/Angstrom units.
+
+    Conversion happens before filtering and neighbor construction.  In
+    particular, positions and the periodic cell must be scaled together: cell
+    offsets are integer lattice translations and would otherwise be combined
+    with positions expressed in a different unit.
+    """
+    converted = dict(element)
+
+    def _scale(key, factor):
+        if key in converted:
+            value = converted[key]
+            converted[key] = value * tf.cast(factor, value.dtype)
+
+    _scale('energy', energy_unit)
+    _scale('forces', energy_unit / length_unit)
+    _scale('stress', energy_unit / length_unit ** 3)
+    _scale('positions', length_unit)
+    _scale('cell', length_unit)
+    _scale('dipole_vec', dipole_vec_unit)
+    return converted
+
+
+def force_is_valid_tf(forces, max_force):
+    """Return whether all force labels are finite and within the threshold."""
+    forces = tf.convert_to_tensor(forces)
+    finite = tf.reduce_all(tf.math.is_finite(forces))
+    max_abs_force = tf.cond(
+        tf.size(forces) > 0,
+        lambda: tf.reduce_max(tf.abs(forces)),
+        lambda: tf.zeros((), dtype=forces.dtype),
+    )
+    return tf.logical_and(
+        finite,
+        max_abs_force <= tf.cast(max_force, forces.dtype),
+    )
+
+
+def minimum_distance_np(positions, cell, pbc):
+    """Return the closest distinct-atom distance using the requested PBC axes.
+
+    ASE's minimum-image implementation supports triclinic cells and mixed PBC.
+    Periodic images of the same atom are deliberately excluded: the data filter
+    describes an interatomic, rather than a shortest lattice-vector, distance.
+    """
+    positions = np.asarray(positions)
+    cell = np.asarray(cell)
+    pbc = np.asarray(pbc, dtype=bool)
+    if positions.ndim != 2 or positions.shape[1:] != (3,):
+        return np.nan
+    if positions.shape[0] < 2:
+        return np.inf
+    if not np.all(np.isfinite(positions)):
+        return np.nan
+    if np.any(pbc) and (cell.shape != (3, 3) or not np.all(np.isfinite(cell))):
+        return np.nan
+
+    atoms = Atoms(positions=positions, cell=cell, pbc=pbc)
+    distances = atoms.get_all_distances(mic=bool(np.any(pbc)))
+    distinct_pairs = distances[np.triu_indices(positions.shape[0], k=1)]
+    return float(np.min(distinct_pairs))
+
+
+def minimum_distance_is_valid_tf(positions, cell, pbc, min_distance):
+    """TensorFlow wrapper for the PBC-aware minimum-distance criterion."""
+    valid = tf.py_function(
+        func=lambda pos, c, periodic: np.asarray(
+            not np.isnan(distance := minimum_distance_np(pos, c, periodic))
+            and distance >= min_distance,
+            dtype=np.bool_,
+        ),
+        inp=[positions, cell, pbc],
+        Tout=tf.bool,
+    )
+    valid.set_shape([])
+    return valid
+
+
+def epoch_size_from_dataset_sizes(sizes, weights, mode):
+    """Compute the finite number of raw records attempted in an epoch."""
+    if len(sizes) != len(weights):
+        raise ValueError('sizes and weights must have the same length.')
+    if any(int(size) < 0 for size in sizes):
+        raise ValueError('dataset sizes must be non-negative.')
+    if mode == 'train':
+        return sum(
+            int(size) for size, weight in zip(sizes, weights) if weight > 0
+        )
+    return sum(int(size) for size in sizes)
+
+
+def combine_epoch_datasets(datasets, weights, mode, epoch_size, seed):
+    """Build a deterministic, finite dataset for one logical epoch.
+
+    A training epoch makes ``epoch_size`` weighted draws with replacement.  In
+    the usual case where weights are dataset sizes, each source is visited once
+    in expectation.  Validation never repeats sources and therefore visits
+    every selected record exactly once; weights affect training only.
+    """
+    if not datasets:
+        raise ValueError('At least one TFDS dataset is required.')
+    if epoch_size < 0:
+        raise ValueError(f'epoch_size must be non-negative, got {epoch_size}.')
+
+    if mode == 'train':
+        repeated = [dataset.repeat() for dataset in datasets]
+        combined = tf.data.Dataset.sample_from_datasets(
+            repeated,
+            weights=weights,
+            seed=seed,
+            stop_on_empty_dataset=False,
+        )
+        return combined.take(epoch_size)
+
+    return tf.data.Dataset.sample_from_datasets(
+        datasets,
+        seed=seed,
+        stop_on_empty_dataset=False,
+    )
 
 
 def compute_edges_np(positions, atomic_numbers, cell, pbc, cutoff):
@@ -304,10 +427,16 @@ class WorkerConfig:
     shuffle_seed: int
     n_workers: int
     worker_idx: int
-    max_force_filter: float
+    max_force_filter: Optional[float]
+    min_distance_filter: Optional[float]
     calculate_neighbors_lr: bool
-    cutoff_lr: float
+    cutoff_lr: Optional[float]
     train_seed: int
+    energy_unit: float
+    length_unit: float
+    dipole_vec_unit: float
+    epoch_size: int
+    cancellation_event: object
     mode: str
     input_folders: list
     dataset_weights: list
@@ -318,12 +447,23 @@ class StopToken:
     """Token to signal that a worker has finished processing."""
     pass
 
+
+@dataclass
+class WorkerError:
+    """Serializable worker failure sent back to the parent process."""
+
+    worker_idx: int
+    message: str
+    traceback: str
+
+
 class QCMLDataLoaderSparseParallel:
     """Data loader for TFDS datasets that loads data in parallel."""
 
     STOP_TOKEN = StopToken()
 
-    def __init__(self, config, input_folders, dataset_weights, length_unit, energy_unit):
+    def __init__(self, config, input_folders, dataset_weights, length_unit,
+                 energy_unit, dipole_vec_unit=1.0):
         """Initialize the data loader with configuration parameters.
 
         Args:
@@ -332,18 +472,41 @@ class QCMLDataLoaderSparseParallel:
             dataset_weights: List of weights for each dataset.
             length_unit: Unit for length measurements.
             energy_unit: Unit for energy measurements.
+            dipole_vec_unit: Unit for dipole-vector measurements.
         """
         self.config = config
         self.input_folders = input_folders
-        self.dataset_weights = dataset_weights
+        if dataset_weights is None:
+            dataset_weights = [1.0] * len(input_folders)
+        if len(dataset_weights) != len(input_folders):
+            raise ValueError(
+                'dataset_weights must contain one entry per input folder.'
+            )
+        if (not all(np.isfinite(weight) and weight >= 0 for weight in dataset_weights)
+                or not any(weight > 0 for weight in dataset_weights)):
+            raise ValueError('dataset_weights must be finite, non-negative, and not all zero.')
+        self.dataset_weights = [float(weight) for weight in dataset_weights]
         self.length_unit = length_unit
         self.energy_unit = energy_unit
+        self.dipole_vec_unit = dipole_vec_unit
 
         # Set parameters from config
         self.calculate_neighbors_lr = config.data.neighbors_lr_bool
-        self.cutoff = config.model.cutoff / self.length_unit
-        self.cutoff_lr = config.data.neighbors_lr_cutoff / self.length_unit if self.calculate_neighbors_lr else None
-        self.max_force_filter = config.data.filter.max_force / self.energy_unit * self.length_unit if hasattr(config.data.filter, 'max_force') else 1.e6
+        # TFDS records are converted before neighbors and filters, so these
+        # user-facing values remain in canonical Angstrom/eV units.
+        self.cutoff = config.model.cutoff
+        self.cutoff_lr = config.data.neighbors_lr_cutoff if self.calculate_neighbors_lr else None
+        data_filter = getattr(config.data, 'filter', None)
+        self.max_force_filter = (
+            getattr(data_filter, 'max_force', None) if data_filter is not None else None
+        )
+        self.min_distance_filter = (
+            getattr(data_filter, 'min_distance', None) if data_filter is not None else None
+        )
+        if self.max_force_filter is not None and self.max_force_filter < 0:
+            raise ValueError('data.filter.max_force must be non-negative.')
+        if self.min_distance_filter is not None and self.min_distance_filter < 0:
+            raise ValueError('data.filter.min_distance must be non-negative.')
         self.train_seed = config.training.training_seed
         self.batch_max_num_nodes = config.training.batch_max_num_nodes
         self.batch_max_num_edges = config.training.batch_max_num_edges
@@ -367,13 +530,14 @@ class QCMLDataLoaderSparseParallel:
         else:
             print("Using full TFDS splits without limits")
 
-        #TODO: add checks for num_train and num_valid
         try:
             self.n_proc = int(config.training.batch_n_proc)
             print(f"Using {self.n_proc} processes for parallel data loading")
-        except:
+        except (AttributeError, TypeError, ValueError):
             self.n_proc = 8
             print("Warning: No number of processes specified. Defaulting to 8.")
+        if self.n_proc < 1:
+            raise ValueError('training.batch_n_proc must be at least 1.')
 
         # multithread stuff # important
         ctx = get_context("spawn")
@@ -382,6 +546,54 @@ class QCMLDataLoaderSparseParallel:
 
         # Cache for cardinality
         self._cardinality = None
+        self._dataset_sizes_cache = {}
+        self._epoch_counters = {'train': 0, 'validation': 0}
+
+    @staticmethod
+    def _safe_put(output_queue, item, cancellation_event=None):
+        """Put an item without leaving a worker blocked after consumer exit."""
+        while cancellation_event is None or not cancellation_event.is_set():
+            try:
+                output_queue.put(item, timeout=0.5)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _dataset_sizes(self, mode):
+        """Return exact selected-record counts for an epoch's source splits."""
+        if mode in self._dataset_sizes_cache:
+            return self._dataset_sizes_cache[mode]
+
+        split_name = 'train' if mode == 'train' else 'validation'
+        limits = self.num_train if mode == 'train' else self.num_valid
+        sizes = []
+        for i, folder in enumerate(self.input_folders):
+            builder = tfds.builder_from_directory(folder)
+            try:
+                size = int(builder.info.splits[split_name].num_examples)
+            except (KeyError, TypeError, AttributeError):
+                dataset = builder.as_dataset(split=split_name)
+                size = int(tf.data.experimental.cardinality(dataset).numpy())
+                if size < 0:
+                    raise ValueError(
+                        f'Cannot determine cardinality of TFDS split {split_name!r} '
+                        f'in {folder!r}; a finite epoch cannot be defined.'
+                    )
+            limit = limits[i] if i < len(limits) else None
+            if limit is not None:
+                if int(limit) < 0:
+                    raise ValueError(f'{split_name} limit must be non-negative, got {limit}.')
+                size = min(size, int(limit))
+            sizes.append(size)
+
+        self._dataset_sizes_cache[mode] = sizes
+        return sizes
+
+    def _epoch_size(self, mode):
+        return epoch_size_from_dataset_sizes(
+            self._dataset_sizes(mode), self.dataset_weights, mode
+        )
 
     def cardinality(self) -> int:
         """Calculate total number of examples across all datasets, respecting limits.
@@ -428,19 +640,7 @@ class QCMLDataLoaderSparseParallel:
         """
         from pathlib import Path
         names = [Path(f).name for f in self.input_folders]
-        sizes = []
-        for i, folder in enumerate(self.input_folders):
-            builder = tfds.builder_from_directory(folder)
-            if i < len(self.num_train) and self.num_train[i] is not None:
-                split_str = f'train[:{self.num_train[i]}]'
-            else:
-                split_str = 'train'
-            try:
-                dataset = builder.as_dataset(split=split_str)
-                count = tf.data.experimental.cardinality(dataset).numpy()
-                sizes.append(int(count))
-            except Exception:
-                sizes.append(0)
+        sizes = self._dataset_sizes('train')
 
         # Normalize weights
         raw_weights = self.dataset_weights if self.dataset_weights is not None else [1.0] * len(self.input_folders)
@@ -463,6 +663,10 @@ class QCMLDataLoaderSparseParallel:
                     calculate_neighbors_lr,
                     cutoff_lr,
                     max_force_filter,
+                    min_distance_filter,
+                    energy_unit,
+                    length_unit,
+                    dipole_vec_unit,
                     train_seed):
         """Preprocess the dataset by creating graph tuples and batching.
 
@@ -476,13 +680,48 @@ class QCMLDataLoaderSparseParallel:
             calculate_neighbors_lr: Whether to calculate long-range neighbors
             cutoff_lr: Distance cutoff for long-range neighbors
             max_force_filter: Maximum force value for filtering
+            min_distance_filter: Minimum distinct-atom separation in Angstrom
+            energy_unit: Conversion factor from raw energies to eV
+            length_unit: Conversion factor from raw lengths to Angstrom
+            dipole_vec_unit: Conversion factor for raw dipole-vector labels
             train_seed: Random seed for shuffling
 
         Returns:
             Batched dataset of graph tuples
         """
 
-        # First create graph tuples (returns (graph, long_range) tuples)
+        # Normalize all geometry and labels before applying canonical-unit
+        # filters or constructing neighbor lists.
+        dataset = dataset.map(
+            lambda element: convert_dataset_units_tf(
+                element, energy_unit, length_unit, dipole_vec_unit
+            ),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+
+        if max_force_filter is not None and 'forces' in dataset.element_spec:
+            dataset = dataset.filter(
+                lambda element: force_is_valid_tf(
+                    element['forces'], max_force_filter
+                )
+            )
+
+        if min_distance_filter is not None:
+            dataset = dataset.filter(
+                lambda element: minimum_distance_is_valid_tf(
+                    element['positions'], element['cell'], element['pbc'],
+                    min_distance_filter,
+                )
+            )
+
+        # Shuffle
+        dataset = dataset.shuffle(
+            buffer_size=10_000,
+            reshuffle_each_iteration=True,
+            seed=train_seed
+        )
+
+        # Create graph tuples only after rejecting invalid structures.
         dataset = dataset.map(
             lambda element: create_graph_tuple_tf(
                 element,
@@ -494,22 +733,8 @@ class QCMLDataLoaderSparseParallel:
             num_parallel_calls=tf.data.AUTOTUNE,
         )
 
-        # Apply force filter (access graph from the tuple)
-        dataset = dataset.filter(
-            lambda graph, lr_dict: tf.math.less(tf.math.reduce_max(graph.nodes['forces']), tf.constant(max_force_filter))
-        )
-
-        # Shuffle
-        dataset = dataset.shuffle(
-            buffer_size=10_000,
-            reshuffle_each_iteration=True,
-            seed=train_seed
-        )
-
         # Prefetch for better performance
         dataset = dataset.prefetch(tf.data.AUTOTUNE)
-
-        #TODO: need to add data.transformations.unit_conversion_graph before filtering
 
         # Create batches using the new wrapper that handles both budgets
         def _numpy_tuple_iterator(ds):
@@ -582,13 +807,17 @@ class QCMLDataLoaderSparseParallel:
                 # Standardize dataset fields to ensure compatibility
                 dataset = standardize_dataset_fields(dataset)
 
-                if config.mode == 'train':
-                    dataset = dataset.repeat() # to avoid exhausting the smaller dataset, makes one epoch infinite
-
                 datasets.append(dataset)
 
-            # Combine datasets with weighted sampling
-            dataset = tf.data.Dataset.sample_from_datasets(datasets, weights=config.dataset_weights)
+            # Training sources repeat only inside this bounded mixer.  The
+            # resulting iterator always terminates at the configured epoch size.
+            dataset = combine_epoch_datasets(
+                datasets,
+                weights=config.dataset_weights,
+                mode=config.mode,
+                epoch_size=config.epoch_size,
+                seed=config.shuffle_seed,
+            )
 
             # Shard the combined dataset
             dataset = dataset.shard(num_shards=config.n_workers, index=config.worker_idx)
@@ -602,16 +831,35 @@ class QCMLDataLoaderSparseParallel:
                                                 calculate_neighbors_lr=config.calculate_neighbors_lr,
                                                 cutoff_lr=config.cutoff_lr,
                                                 max_force_filter=config.max_force_filter,
+                                                min_distance_filter=config.min_distance_filter,
+                                                energy_unit=config.energy_unit,
+                                                length_unit=config.length_unit,
+                                                dipole_vec_unit=config.dipole_vec_unit,
                                                 train_seed=config.train_seed
                                                 ):
-                output_queue.put(batch)
+                if not QCMLDataLoaderSparseParallel._safe_put(
+                    output_queue, batch, config.cancellation_event
+                ):
+                    break
         except Exception as e:
-            print(f"[!] Error in worker {config.worker_idx}: {e}")
+            QCMLDataLoaderSparseParallel._safe_put(
+                output_queue,
+                WorkerError(
+                    worker_idx=config.worker_idx,
+                    message=str(e),
+                    traceback=traceback.format_exc(),
+                ),
+                config.cancellation_event,
+            )
         finally:
             # Finished processing data, always put a stop token
-            QCMLDataLoaderSparseParallel._safe_put(output_queue, QCMLDataLoaderSparseParallel.STOP_TOKEN)
+            QCMLDataLoaderSparseParallel._safe_put(
+                output_queue,
+                QCMLDataLoaderSparseParallel.STOP_TOKEN,
+                config.cancellation_event,
+            )
 
-    def _generator(self, split, mode):
+    def _generator(self, split, mode, epoch_seed):
         """Generator reads data from the queue.
 
         Args:
@@ -621,15 +869,19 @@ class QCMLDataLoaderSparseParallel:
         Yields:
             Batches of data
         """
-        shuffle_seed = np.random.randint(0, 2**31 - 1) # different shuffle seed for each epoch
-        output_queue = self.manager.Queue(maxsize=2) # cache maximum of 2 batches
+        # One queue per worker lets the consumer drain batches round-robin.
+        # This makes batch order independent of process scheduling while still
+        # allowing every worker to prepare two batches ahead.
+        output_queues = [self.manager.Queue(maxsize=2) for _ in range(self.n_proc)]
+        cancellation_event = self.manager.Event()
+        epoch_size = self._epoch_size(mode)
 
         for i in range(self.n_proc):
             config = WorkerConfig(
                 worker_idx=i,
                 n_workers=self.n_proc,
                 split=split,
-                shuffle_seed=shuffle_seed,
+                shuffle_seed=epoch_seed,
                 batch_max_num_nodes=self.batch_max_num_nodes,
                 batch_max_num_edges=self.batch_max_num_edges,
                 batch_max_num_graphs=self.batch_max_num_graphs,
@@ -638,65 +890,90 @@ class QCMLDataLoaderSparseParallel:
                 calculate_neighbors_lr=self.calculate_neighbors_lr,
                 cutoff_lr=self.cutoff_lr,
                 max_force_filter=self.max_force_filter,
-                train_seed=self.train_seed,
+                min_distance_filter=self.min_distance_filter,
+                train_seed=epoch_seed,
+                energy_unit=self.energy_unit,
+                length_unit=self.length_unit,
+                dipole_vec_unit=self.dipole_vec_unit,
+                epoch_size=epoch_size,
+                cancellation_event=cancellation_event,
                 input_folders=self.input_folders,
                 dataset_weights=self.dataset_weights,
                 num_train=self.num_train,
                 num_valid=self.num_valid,
                 mode=mode
             )
-            self.executor.submit(QCMLDataLoaderSparseParallel._worker, config, output_queue)
+            self.executor.submit(
+                QCMLDataLoaderSparseParallel._worker, config, output_queues[i]
+            )
 
-        n_stop_token = 0
+        active_workers = list(range(self.n_proc))
         ctr = 0
-        while True:
-            ctr += 1
-            try:
-                batch = output_queue.get(timeout=3)
-            except queue.Empty:
-                # Timeout expired, try again
-                continue
-            except Exception as e:
-                print(f"[!] Unexpected error retrieving item from queue: {e}")
-                break
+        try:
+            while active_workers:
+                next_active_workers = []
+                for worker_idx in active_workers:
+                    while True:
+                        try:
+                            batch = output_queues[worker_idx].get(timeout=3)
+                            break
+                        except queue.Empty:
+                            continue
+                        except Exception as e:
+                            raise RuntimeError(
+                                f'Could not read from TFDS worker {worker_idx}: {e}'
+                            ) from e
 
-            if ctr % 1000 == 0:
-                size = output_queue.qsize()
-                if wandb.run is not None:
-                    wandb.log({"queue_size_"+mode: size})
+                    ctr += 1
+                    if ctr % 1000 == 0 and wandb.run is not None:
+                        size = sum(output_queue.qsize() for output_queue in output_queues)
+                        wandb.log({"queue_size_"+mode: size})
 
-            if isinstance(batch, StopToken):
-                n_stop_token += 1
+                    if isinstance(batch, WorkerError):
+                        raise RuntimeError(
+                            f'TFDS worker {batch.worker_idx} failed: {batch.message}\n'
+                            f'{batch.traceback}'
+                        )
+                    if not isinstance(batch, StopToken):
+                        next_active_workers.append(worker_idx)
+                        yield batch
+                active_workers = next_active_workers
+        finally:
+            # Early stopping or a consumer exception closes this generator.
+            # Wake blocked workers so the shared executor remains usable.
+            cancellation_event.set()
 
-                # wait for all processes to finish
-                if n_stop_token == self.n_proc:
-                    break
-            else:
-                yield batch
-
-    def next_epoch(self, split, mode, parallel: bool = True):
+    def next_epoch(self, split, mode, parallel: bool = True,
+                   advance_epoch: bool = True):
         """Loads the data for ONE epoch.
 
         Args:
             split: Dataset split to use
             mode: 'train' or 'validation'
             parallel: Use the multiprocessing pipeline. Pass ``False`` for a
-                consumer that reads only a few batches and abandons the
-                generator: the parallel workers are submitted to a persistent
-                ProcessPoolExecutor and block forever writing into a
-                ``maxsize=2`` queue that nobody drains, occupying every worker
-                slot so no later epoch can ever be scheduled. Closing the
-                generator does not release them -- the tasks outlive it.
+                lightweight consumer that reads only a few batches, such as a
+                metadata probe. Parallel generators cancel their workers when
+                closed before the finite epoch is exhausted.
+            advance_epoch: Increment the deterministic seed counter. Internal
+                metadata probes pass ``False`` so they do not alter the first
+                real training epoch.
 
         Returns:
             Generator yielding batches of data
         """
-        if mode == 'train' and parallel: # use multiporcessing for training batch
-            return self._generator(split, mode)
-        else:
-            return self._generator_sync(split, mode)
+        if mode not in self._epoch_counters:
+            self._epoch_counters[mode] = 0
+        epoch_index = self._epoch_counters[mode]
+        if advance_epoch:
+            self._epoch_counters[mode] += 1
+        epoch_seed = (int(self.train_seed) + epoch_index) % (2**31 - 1)
 
-    def _generator_sync(self, split, mode):
+        if mode == 'train' and parallel: # use multiprocessing for training batches
+            return self._generator(split, mode, epoch_seed)
+        else:
+            return self._generator_sync(split, mode, epoch_seed)
+
+    def _generator_sync(self, split, mode, epoch_seed):
         """Synchronous data generator for single-process operation.
 
         Args:
@@ -721,15 +998,25 @@ class QCMLDataLoaderSparseParallel:
                 else:
                     split = 'validation'
 
-            dataset = builder.as_dataset(split=split, shuffle_files=True)
+            read_config = tfds.ReadConfig(shuffle_seed=epoch_seed)
+            dataset = builder.as_dataset(
+                split=split,
+                shuffle_files=True,
+                read_config=read_config,
+            )
 
             # Standardize dataset fields to ensure compatibility
             dataset = standardize_dataset_fields(dataset)
 
             datasets.append(dataset)
 
-        # Combine datasets with weighted sampling
-        dataset = tf.data.Dataset.sample_from_datasets(datasets) #, weights=self.dataset_weights)
+        dataset = combine_epoch_datasets(
+            datasets,
+            weights=self.dataset_weights,
+            mode=mode,
+            epoch_size=self._epoch_size(mode),
+            seed=epoch_seed,
+        )
 
         for batch in self._preprocess(dataset,
                                    batch_max_num_nodes=self.batch_max_num_nodes,
@@ -740,6 +1027,10 @@ class QCMLDataLoaderSparseParallel:
                                    calculate_neighbors_lr=self.calculate_neighbors_lr,
                                    cutoff_lr=self.cutoff_lr,
                                    max_force_filter=self.max_force_filter,
-                                   train_seed=self.train_seed
+                                   min_distance_filter=self.min_distance_filter,
+                                   energy_unit=self.energy_unit,
+                                   length_unit=self.length_unit,
+                                   dipole_vec_unit=self.dipole_vec_unit,
+                                   train_seed=epoch_seed
                                   ):
             yield batch

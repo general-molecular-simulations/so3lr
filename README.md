@@ -359,7 +359,20 @@ data:
       weight: 0.5
 ```
 
-The `num_train` per-dataset cap is only honored by the **TFDS** dataloader — install via `pip install .[tfds]` (see *Optional extras*). With the default ASE-based loader the `weight` field is still used to control sampling, but per-dataset `num_train` caps are ignored.
+Multi-dataset sampling currently requires the **TFDS** dataloader; install it
+via `pip install .[tfds]` (see *Optional extras*). `num_train` caps each source's
+training split before its weight is applied.
+
+For TFDS mixtures, one training epoch makes a finite number of weighted draws
+equal to the total selected record count across datasets with non-zero weights.
+Sampling is with replacement and is reproducible from `training_seed` for a
+fixed `batch_n_proc`. When a dataset's weight equals its selected size, it is
+visited once per epoch in expectation. Validation does not repeat records and
+visits every selected record exactly once. TFDS records are converted to
+eV/Angstrom before filters and neighbor lists are evaluated. `filter.max_force`
+uses the largest absolute force component and rejects non-finite forces, while
+`filter.min_distance` uses the minimum-image distance along exactly the axes
+enabled by each record's `pbc` value.
 
 ### Optional training features
 

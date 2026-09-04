@@ -44,13 +44,11 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
 
     # Get a cell from the first periodic structure in training data.
     if tf_record_present:
-        # For TFDS, peek at the first batch to get the cell. `parallel=False`
-        # is required: this loop breaks after one batch, and the parallel
-        # pipeline's workers would then block forever on a full queue, holding
-        # every slot of the shared ProcessPoolExecutor so the real training
-        # epoch never starts (training hangs at 0 steps with no error).
+        # For TFDS, peek synchronously so a one-batch metadata read does not
+        # start the multiprocessing pipeline.  Do not advance the epoch seed:
+        # this batch is inspected, not used for an optimizer update.
         first_iter = training_data.next_epoch(
-            split='train', mode='train', parallel=False
+            split='train', mode='train', parallel=False, advance_epoch=False
         )
         for graph_batch, _ in first_iter:
             cell = graph_batch.globals.get('cell')
@@ -1149,6 +1147,7 @@ def data_loader_from_config(config):
 
     energy_unit = energy_unit_from_config(config=config)
     length_unit = length_unit_from_config(config=config)
+    dipole_vec_unit = dipole_vec_unit_from_config(config=config)
 
     if tf_record_present:
         loader = data.QCMLDataLoaderSparseParallel(
@@ -1156,7 +1155,8 @@ def data_loader_from_config(config):
             input_folders=dataset_paths,
             dataset_weights=dataset_weights,
             length_unit=length_unit,
-            energy_unit=energy_unit
+            energy_unit=energy_unit,
+            dipole_vec_unit=dipole_vec_unit,
         )
     else:
         # config.data.filter.min_distance / max_force are honoured only by the TFDS loader.
@@ -1377,7 +1377,9 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
             raise NotImplementedError(
                 'For TFDSDataSets, energy shifting is not supported yet.'
             )
-        # TODO: Handle unit conversion inside the dataloader
+        # Unit conversion is performed by the TFDS loader before filters and
+        # neighbor construction.  Applying it here would convert every batch a
+        # second time.
             
 
     return training_data, validation_data, data_stats

@@ -4,13 +4,20 @@ Validates compute_edges_np, standardize_dataset_fields, and create_graph_tuple_t
 for both non-PBC and PBC cases using synthetic tf.data.Dataset elements.
 """
 
+import jraph
 import numpy as np
 import pytest
-import tensorflow as tf
+
+tf = pytest.importorskip('tensorflow')
 
 from so3lr.mlff.data.dataloader_sparse_tfds import (
+    QCMLDataLoaderSparseParallel,
+    combine_epoch_datasets,
     compute_edges_np,
+    convert_dataset_units_tf,
     create_graph_tuple_tf,
+    force_is_valid_tf,
+    minimum_distance_is_valid_tf,
     standardize_dataset_fields,
 )
 
@@ -280,3 +287,131 @@ def test_non_pbc_edges_match_ase_neighbor_list():
         assert i.shape == (0,) and i.dtype == np.int32
         assert j.shape == (0,) and j.dtype == np.int32
         assert offsets.shape == (0, 3) and offsets.dtype == np.int32
+
+
+def test_weighted_epoch_dataset_is_finite_and_seeded():
+    def collect(seed):
+        dataset = combine_epoch_datasets(
+            [
+                tf.data.Dataset.from_tensor_slices([0, 1]),
+                tf.data.Dataset.from_tensor_slices([10, 11, 12, 13]),
+            ],
+            weights=[1.0, 3.0],
+            mode='train',
+            epoch_size=6,
+            seed=seed,
+        )
+        return list(dataset.as_numpy_iterator())
+
+    first = collect(17)
+    assert len(first) == 6
+    assert first == collect(17)
+
+    validation = combine_epoch_datasets(
+        [
+            tf.data.Dataset.from_tensor_slices([0, 1]),
+            tf.data.Dataset.from_tensor_slices([10, 11, 12]),
+        ],
+        weights=[1.0, 100.0],
+        mode='validation',
+        epoch_size=5,
+        seed=3,
+    )
+    assert sorted(validation.as_numpy_iterator()) == [0, 1, 10, 11, 12]
+
+
+@pytest.mark.parametrize(
+    ('forces', 'expected'),
+    [
+        ([[25.0, -25.0, 0.0]], True),
+        ([[-25.01, -1.0, -2.0]], False),
+        ([[np.nan, 0.0, 0.0]], False),
+        ([[np.inf, 0.0, 0.0]], False),
+    ],
+)
+def test_force_filter_uses_finite_absolute_maximum(forces, expected):
+    actual = force_is_valid_tf(tf.constant(forces, tf.float32), 25.0)
+    assert bool(actual.numpy()) is expected
+
+
+def test_minimum_distance_filter_uses_minimum_image():
+    positions = tf.constant([[0.1, 0.0, 0.0], [9.9, 0.0, 0.0]], tf.float32)
+    cell = tf.constant(np.diag([10.0, 10.0, 10.0]), tf.float32)
+
+    periodic = minimum_distance_is_valid_tf(
+        positions, cell, tf.constant([True, False, False]), 0.5
+    )
+    nonperiodic = minimum_distance_is_valid_tf(
+        positions, cell, tf.constant([False, False, False]), 0.5
+    )
+    assert not bool(periodic.numpy())
+    assert bool(nonperiodic.numpy())
+
+
+def test_units_are_converted_before_periodic_neighbor_construction():
+    element = _make_nacl_element()
+    element.update({
+        'positions': tf.constant([[0.25, 0.0, 0.0], [0.75, 0.0, 0.0]], tf.float32),
+        'atomic_numbers': tf.constant([11, 17], tf.int32),
+        'cell': tf.constant(np.diag([1.0, 1.0, 1.0]), tf.float32),
+        'energy': tf.constant([4.0], tf.float32),
+        'forces': tf.constant([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]], tf.float32),
+        'stress': tf.constant(np.ones(6), tf.float32),
+        'dipole_vec': tf.constant([1.0, 2.0, 3.0], tf.float32),
+    })
+    converted = convert_dataset_units_tf(
+        element, energy_unit=2.0, length_unit=0.5, dipole_vec_unit=3.0
+    )
+    graph, _ = create_graph_tuple_tf(converted, cutoff=0.3)
+
+    np.testing.assert_allclose(graph.nodes['positions'].numpy(), [[0.125, 0, 0], [0.375, 0, 0]])
+    np.testing.assert_allclose(graph.globals['cell'].numpy()[0], np.diag([0.5] * 3))
+    np.testing.assert_allclose(graph.globals['energy'].numpy(), [8.0])
+    np.testing.assert_allclose(graph.nodes['forces'].numpy()[:, 0], [4.0, -4.0])
+    np.testing.assert_allclose(graph.globals['stress'].numpy(), np.full((1, 6), 16.0))
+    np.testing.assert_allclose(graph.globals['dipole_vec'].numpy(), [[3.0, 6.0, 9.0]])
+    assert np.any(graph.edges['cell_offset'].numpy() != 0)
+
+
+def test_preprocess_filters_before_batching():
+    elements = {
+        'atomic_numbers': tf.constant([[1, 1], [1, 1], [1, 1]], tf.int32),
+        'positions': tf.constant([
+            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            [[0.1, 0.0, 0.0], [9.9, 0.0, 0.0]],
+        ], tf.float32),
+        'cell': tf.constant([np.zeros((3, 3)), np.zeros((3, 3)), np.diag([10.0] * 3)], tf.float32),
+        'pbc': tf.constant([[False] * 3, [False] * 3, [True, False, False]]),
+        'energy': tf.constant([[1.0], [2.0], [3.0]], tf.float32),
+        'forces': tf.constant([
+            [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]],
+            # Raw magnitude 7 is below the threshold, but converts to 28 eV/A.
+            [[-7.0, 0.0, 0.0], [-7.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        ], tf.float32),
+        'theory_level': tf.constant([[0], [0], [0]], tf.int32),
+        'charge': tf.constant([[0], [0], [0]], tf.int32),
+        'multiplicity': tf.constant([[1], [1], [1]], tf.int32),
+    }
+    batches = list(QCMLDataLoaderSparseParallel._preprocess(
+        standardize_dataset_fields(tf.data.Dataset.from_tensor_slices(elements)),
+        batch_max_num_nodes=8,
+        batch_max_num_edges=16,
+        batch_max_num_graphs=4,
+        batch_max_num_pairs=0,
+        cutoff=3.0,
+        calculate_neighbors_lr=False,
+        cutoff_lr=None,
+        max_force_filter=25.0,
+        min_distance_filter=0.5,
+        energy_unit=2.0,
+        length_unit=0.5,
+        dipole_vec_unit=1.0,
+        train_seed=0,
+    ))
+
+    assert len(batches) == 1
+    graph, _ = batches[0]
+    np.testing.assert_allclose(graph.globals['energy'][0], 2.0)
+    assert int(np.sum(jraph.get_graph_padding_mask(graph))) == 1
