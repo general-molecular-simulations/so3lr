@@ -19,7 +19,7 @@ def train_so3krates_sparse():
             cfg = config_dict.ConfigDict(json.load(fp=fp))
     elif config.suffix == '.yaml':
         with open(config, mode='r') as fp:
-            cfg = config_dict.ConfigDict(yaml.load(fp, Loader=yaml.FullLoader))
+            cfg = config_dict.ConfigDict(yaml.safe_load(fp))
 
     from_config.check_config(cfg)
     from_config.run_training(cfg)
@@ -95,7 +95,7 @@ def fine_tune_so3krates_sparse():
             cfg = config_dict.ConfigDict(json.load(fp=fp))
     elif config.suffix == '.yaml':
         with open(config, mode='r') as fp:
-            cfg = config_dict.ConfigDict(yaml.load(fp, Loader=yaml.FullLoader))
+            cfg = config_dict.ConfigDict(yaml.safe_load(fp))
 
     from_config.run_fine_tuning(
         cfg,

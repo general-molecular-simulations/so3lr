@@ -1,4 +1,3 @@
-from ase.units import *
 import functools
 import json
 from so3lr.mlff import nn
@@ -25,6 +24,7 @@ from ..utils.param_utils import (
     unmatched_param_keys,
 )
 from ...finetuning_strategies import resolve_finetuning_strategy
+from .unit_parser import parse_unit_expression
 
 logger = logging.getLogger("SO3LR")
 
@@ -1411,12 +1411,9 @@ def data_path_from_config(config):
 
 def dipole_vec_unit_from_config(config):
     dipole_vec_unit = config.data.dipole_vec_unit
-
-    # We need to define elementary charge, as it is not defined in ase.units.
-    e = 1.
-
     try:
-        return eval(dipole_vec_unit)
+        return parse_unit_expression(
+            dipole_vec_unit, field_name="data.dipole_vec_unit")
     except Exception as exc:
         raise ValueError(
             f"Could not parse unit string {dipole_vec_unit!r} for data.dipole_vec_unit. "
@@ -1427,12 +1424,9 @@ def dipole_vec_unit_from_config(config):
 
 def charge_unit_from_config(config):
     electric_charge_unit = config.data.electric_charge_unit
-
-    # We need to define elementary charge, as it is not defined in ase.units.
-    e = 1.
-
     try:
-        return eval(electric_charge_unit)
+        return parse_unit_expression(
+            electric_charge_unit, field_name="data.electric_charge_unit")
     except Exception as exc:
         raise ValueError(
             f"Could not parse unit string {electric_charge_unit!r} for data.electric_charge_unit. "
@@ -1443,7 +1437,8 @@ def charge_unit_from_config(config):
 def energy_unit_from_config(config):
     energy_unit_str = config.data.energy_unit
     try:
-        energy_unit = eval(energy_unit_str)
+        energy_unit = parse_unit_expression(
+            energy_unit_str, field_name="data.energy_unit")
     except Exception as exc:
         raise ValueError(
             f"Could not parse unit string {energy_unit_str!r} for data.energy_unit. "
@@ -1456,7 +1451,8 @@ def energy_unit_from_config(config):
 def length_unit_from_config(config):
     length_unit_str = config.data.length_unit
     try:
-        length_unit = eval(length_unit_str)
+        length_unit = parse_unit_expression(
+            length_unit_str, field_name="data.length_unit")
     except Exception as exc:
         raise ValueError(
             f"Could not parse unit string {length_unit_str!r} for data.length_unit. "
