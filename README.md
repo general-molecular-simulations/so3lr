@@ -165,6 +165,13 @@ so3lr nve --input geometry.xyz --temperature 300 --dt 0.5 --md-cycles 100 --md-s
 
 Both NVT and NPT ensembles are supported using the Nosé–Hoover chain thermostat and barostat. The trajectories can be saved in `.hdf5` or `.xyz` format. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart if needed.
 
+HDF5 trajectories use a frame-major layout: `positions` and `momenta` have
+shape `(n_frames, n_atoms, 3)`, while `box` has shape `(n_frames, 3)` for an
+orthorhombic cell or `(n_frames, 3, 3)` for a flexible cell. The
+`fractional_coordinates`, `trajectory_layout`, and `box_convention` root
+attributes describe how to interpret these arrays. The write buffer controls
+I/O chunking only; a final partial buffer is always written.
+
 Example with additional parameters for NVT:
 
 ```shell script
@@ -178,7 +185,7 @@ so3lr nvt --input geometry.xyz --output trajectory.hdf5 --temperature 300 \
 MD simulations can be restarted from a previously saved checkpoint. This is useful for extending simulations or recovering from interruptions. To enable restart:
 
 ```shell script
-#1. First save a checkpoint (updated every `save_buffer` cycles) during your simulation:
+#1. First save a checkpoint (updated every `save_buffer` cycles and at the final cycle) during your simulation:
 so3lr nvt --input geometry.xyz --output trajectory.xyz --temperature 300 --md-cycles 100 --restart-save checkpoint.npz
 
 #2. Then restart from this checkpoint to continue the simulation:
@@ -200,12 +207,15 @@ The `.npz` written by `--restart-save` is produced by `save_state()` in `so3lr/c
 - enhanced-sampling (PySAGES) state, when `restart_pysages_save_path` is also used — saved/loaded as a separate `.pkl` (see the PySAGES section below)
 
 **NOT preserved (regenerated on each launch):**
-- the JAX/NumPy PRNG keys, including the Langevin-thermostat key — `nvt-langevin` runs reseed from `--seed` on restart, so trajectories are not bit-identical past the restart point
+- the initial JAX/NumPy setup key; the active Langevin-thermostat key is part of the saved integrator state
 - elapsed wall-clock time (the wall-time log resets to zero for the restarted process)
 - neighbor-list allocations and JIT-compiled functions (rebuilt on launch from current geometry and buffer multipliers)
-- output/log file buffers (the new run appends a fresh header to the log and continues writing the trajectory file)
+- output/log file buffers (use a new output path for a continued run; extxyz
+  appends on restart, while HDF5 initializes a new trajectory file)
 
-For `nvt-langevin`, this means restart preserves the dynamical state but not the stochastic noise stream; for the deterministic NVT/NPT Nose-Hoover and NVE integrators, the restart is reproducible up to numerics.
+The deterministic NVT/NPT Nose-Hoover and NVE integrators, and the saved
+Langevin integrator state including its active RNG key, are reproducible across
+a restart up to numerical and backend differences.
 
 ### Freezing atoms during MD
 

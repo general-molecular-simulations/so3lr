@@ -31,7 +31,7 @@ import jax
 import jax.numpy as jnp
 import jax_md
 from jax_md import units, partition
-from jax_md.space import DisplacementOrMetricFn, raw_transform, transform
+from jax_md.space import DisplacementOrMetricFn, raw_transform
 from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported,
@@ -64,6 +64,7 @@ import h5py
 from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
+from ..md_settings_validation import validate_positive_md_settings
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -129,13 +130,72 @@ class HDF5Store(object):
                     chunks=(x.chunk_length,) + x.shape)
 
     def append(self, x: Dict):
-        with h5py.File(self.datapath, mode='a') as h5f:
-            for key, values in x.items():
-                dset = h5f[key]
-                dset.resize((self.i + 1,) + self.dataset[key].shape)
-                dset[self.i] = [values]
+        """Append one or more frames after validating the complete batch.
 
-            self.i += 1
+        The old store appended a single fixed-size *buffer* as one HDF5 row.
+        That layout could not represent the final short buffer without either
+        dropping frames or broadcasting duplicates.  Dataset shapes are now
+        frame-major, and this method grows their leading frame axis by the
+        actual number of values supplied.
+        """
+        if not x:
+            return
+
+        unknown = sorted(set(x) - set(self.dataset))
+        if unknown:
+            raise KeyError(f"Unknown HDF5 dataset(s): {unknown}")
+
+        prepared = {}
+        n_frames = None
+        for key, values in x.items():
+            entry = self.dataset[key]
+            array = np.asarray(values, dtype=entry.dtype)
+            expected_shape = entry.shape
+            if array.ndim != len(expected_shape) + 1 or array.shape[1:] != expected_shape:
+                raise ValueError(
+                    f"Dataset '{key}' expects a batch shaped "
+                    f"(n_frames, {', '.join(map(str, expected_shape))}), "
+                    f"received {array.shape}."
+                )
+            if n_frames is None:
+                n_frames = array.shape[0]
+            elif array.shape[0] != n_frames:
+                raise ValueError(
+                    f"All HDF5 arrays must contain the same number of frames; "
+                    f"'{key}' has {array.shape[0]}, expected {n_frames}."
+                )
+            prepared[key] = array
+
+        if not n_frames:
+            return
+
+        with h5py.File(self.datapath, mode='a') as h5f:
+            # Check the on-disk state before resizing any dataset.  A failed
+            # partial write must never leave arrays with mismatched lengths.
+            for key in prepared:
+                if key not in h5f:
+                    raise KeyError(f"HDF5 dataset '{key}' does not exist")
+                if h5f[key].shape[0] != self.i:
+                    raise RuntimeError(
+                        f"HDF5 dataset '{key}' has {h5f[key].shape[0]} frames, "
+                        f"but the store expected {self.i}."
+                    )
+
+            new_i = self.i + n_frames
+            resized = []
+            try:
+                for key, array in prepared.items():
+                    dset = h5f[key]
+                    dset.resize((new_i,) + self.dataset[key].shape)
+                    resized.append(dset)
+                    dset[self.i:new_i] = array
+            except Exception:
+                for dset in resized:
+                    dset.resize((self.i,) + dset.shape[1:])
+                h5f.flush()
+                raise
+
+            self.i = new_i
             h5f.flush()
 
 # Setup logging
@@ -458,7 +518,7 @@ def init_hdf5_store(
     save_to: Union[str, Path],
     batch_size: int,
     num_atoms: int,
-    num_box_entries: int,
+    num_box_entries: Union[int, Sequence[int]],
     exist_ok: bool = False,
     observables: Optional[Sequence[str]] = [],
     num_features: Optional[int] = None,
@@ -470,15 +530,17 @@ def init_hdf5_store(
     cell_a0: Optional[Any] = None,
     input_file: Optional[str] = None,
     model_path: Optional[str] = None,
+    dtype: Any = np.float32,
+    fractional_coordinates: Optional[bool] = None,
 ) -> HDF5Store:
     """
     Initialize an HDF5 storage object for trajectory data.
 
     Args:
         save_to: Path to save the HDF5 file.
-        batch_size: Batch size for the storage.
+        batch_size: Number of frames per HDF5 chunk / normal write buffer.
         num_atoms: Number of atoms in the system.
-        num_box_entries: Number of entries in the box vector (typically 3).
+        num_box_entries: Shape of a stored box, or the length of a box vector.
         exist_ok: Whether to overwrite the file if it exists.
         observables: Observable names that get their own dataset.
         num_features: Per-atom feature width, needed to size the 'x' dataset.
@@ -492,6 +554,9 @@ def init_hdf5_store(
         cell_a0: Initial cell as a (3,3) or (3,) array in Angstrom. Zeros if non-periodic.
         input_file: Original input geometry filename.
         model_path: Resolved SO3LR model name or path.
+        dtype: Floating-point storage dtype. This should match the configured
+            simulation precision.
+        fractional_coordinates: Whether stored positions are fractional.
 
     Raises:
         RuntimeError: If the file exists and exist_ok is set to False.
@@ -512,31 +577,47 @@ def init_hdf5_store(
             f'Set exist_ok=True to override file.'
         )
 
-    # Define dataset structure
+    if isinstance(batch_size, bool) or not isinstance(batch_size, (int, np.integer)) or batch_size <= 0:
+        raise ValueError(
+            f"batch_size must be a positive integer (received {batch_size!r})."
+        )
+
+    storage_dtype = np.dtype(dtype)
+    box_shape = (
+        (int(num_box_entries),)
+        if isinstance(num_box_entries, (int, np.integer))
+        else tuple(int(n) for n in num_box_entries)
+    )
+    if not box_shape or any(n <= 0 for n in box_shape):
+        raise ValueError(f"Invalid HDF5 box shape: {box_shape}")
+
+    # Dataset shapes exclude the resizable leading frame dimension.  The
+    # configured save buffer controls HDF5 chunking only; it is not part of
+    # the public trajectory shape.
     dataset = {
         'positions': DataSetEntry(
-            chunk_length=1,
-            shape=(batch_size, num_atoms, 3),
-            dtype=np.float32
+            chunk_length=batch_size,
+            shape=(num_atoms, 3),
+            dtype=storage_dtype
         ),
         'momenta': DataSetEntry(
-            chunk_length=1,
-            shape=(batch_size, num_atoms, 3),
-            dtype=np.float32
+            chunk_length=batch_size,
+            shape=(num_atoms, 3),
+            dtype=storage_dtype
         ),
         'box': DataSetEntry(
-            chunk_length=1,
-            shape=(batch_size, num_box_entries),
-            dtype=np.float32
+            chunk_length=batch_size,
+            shape=box_shape,
+            dtype=storage_dtype
         )
     }
 
     for o in observables:
         if o == "dipole_vec":
             dataset['dipole_vec'] = DataSetEntry(
-                chunk_length=1,
-                shape=(batch_size, 1, 3),
-                dtype=np.float32
+                chunk_length=batch_size,
+                shape=(1, 3),
+                dtype=storage_dtype
             )
         elif o == 'x':
             # Per-atom embeddings: (num_atoms, num_features). Unlike every other
@@ -550,9 +631,9 @@ def init_hdf5_store(
                 )
                 continue
             dataset['x'] = DataSetEntry(
-                chunk_length=1,
-                shape=(batch_size, num_atoms, num_features),
-                dtype=np.float32
+                chunk_length=batch_size,
+                shape=(num_atoms, num_features),
+                dtype=storage_dtype
             )
         elif is_per_atom_observable(o) or o in ('hirshfeld_ratios', 'c6_ratios',
                                                'electrostatic_energy_kspace'):
@@ -562,9 +643,9 @@ def init_hdf5_store(
             # so requesting them failed at write time with
             # "object '<name>' doesn't exist" even after the model produced them.
             dataset[o] = DataSetEntry(
-                chunk_length=1,
-                shape=(batch_size, num_atoms,),
-                dtype=np.float32
+                chunk_length=batch_size,
+                shape=(num_atoms,),
+                dtype=storage_dtype
             )
         else:
             logger.warning(
@@ -593,13 +674,17 @@ def init_hdf5_store(
                     atomic_numbers, dtype=np.int32
                 )
             if cell_a0 is not None:
-                h5f.attrs['cell_a0'] = np.asarray(cell_a0, dtype=np.float32)
+                h5f.attrs['cell_a0'] = np.asarray(cell_a0, dtype=storage_dtype)
             if observables is not None:
                 h5f.attrs['observables'] = ','.join(str(o) for o in observables)
             if input_file is not None:
                 h5f.attrs['input_file'] = str(input_file)
             if model_path is not None:
                 h5f.attrs['model_path'] = str(model_path)
+            if fractional_coordinates is not None:
+                h5f.attrs['fractional_coordinates'] = bool(fractional_coordinates)
+            h5f.attrs['trajectory_layout'] = 'frame-major-v1'
+            h5f.attrs['box_convention'] = 'ase-cell-vectors-as-rows'
     except Exception as e:
         logger.warning(f"Could not write HDF5 root attributes: {e}")
 
@@ -611,7 +696,7 @@ def write_to_hdf5(
     momenta: Optional[List[jnp.ndarray]],
     positions: List[jnp.ndarray],
     boxes: Union[float, jnp.ndarray, List[jnp.ndarray], None],
-    obs_dict: MutableMapping[str, list] = {},
+    obs_dict: Optional[MutableMapping[str, list]] = None,
     indices: Optional[List[int]] = None,
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
     """
@@ -629,33 +714,67 @@ def write_to_hdf5(
         Tuple of empty lists for momenta, positions, and boxes.
     """
     try:
+        if not positions:
+            return (
+                momenta if momenta is not None else [],
+                positions,
+                boxes,
+                obs_dict or {},
+            )
+
+        if obs_dict is None:
+            obs_dict = {}
+
+        n_frames = len(positions)
         if indices is None:
             indices = list(range(positions[0].shape[0]))
 
         step_data = {
-            'positions': jnp.stack(positions, axis=0)[:,indices],
+            'positions': np.stack(positions, axis=0)[:, indices],
         }
 
-        if np.any(boxes != 0):
-            step_data['box'] = jnp.stack(boxes, axis=0)
-    
+        if boxes is not None:
+            expected_box_shape = hdf5_store.dataset['box'].shape
+            box_array = np.asarray(boxes)
+            if box_array.ndim == 0:
+                box_array = np.full(
+                    (n_frames,) + expected_box_shape,
+                    box_array.item(),
+                )
+            elif box_array.shape == expected_box_shape:
+                box_array = np.repeat(box_array[None, ...], n_frames, axis=0)
+            elif box_array.shape != (n_frames,) + expected_box_shape:
+                raise ValueError(
+                    f"boxes must have shape {expected_box_shape} or "
+                    f"{(n_frames,) + expected_box_shape}; received {box_array.shape}"
+                )
+            step_data['box'] = box_array
+
         if momenta is not None:
-            step_data['momenta'] = jnp.stack(momenta, axis=0)[:,indices]
+            if len(momenta) != n_frames:
+                raise ValueError(
+                    f"momenta contains {len(momenta)} frames; expected {n_frames}"
+                )
+            step_data['momenta'] = np.stack(momenta, axis=0)[:, indices]
 
         for o in obs_dict.keys():
+            if len(obs_dict[o]) != n_frames:
+                raise ValueError(
+                    f"Observable '{o}' contains {len(obs_dict[o])} frames; "
+                    f"expected {n_frames}"
+                )
             # Check if the observable has atom_wise data, this test could be improved
             if obs_dict[o][0].shape == (positions[0].shape[0],):
-                step_data.update(
-                    {o: jnp.stack(obs_dict[o], axis=0)[:,indices]},
-                )
+                step_data[o] = np.stack(obs_dict[o], axis=0)[:, indices]
             else:
-                step_data.update(
-                    {o: jnp.stack(obs_dict[o], axis=0)},
-                )
-
-        step_data = jax.tree.map(
-            lambda u: np.asarray(u), step_data
-            )
+                values = np.stack(obs_dict[o], axis=0)
+                expected_shape = hdf5_store.dataset[o].shape
+                if values.shape[1:] != expected_shape:
+                    # Model dipoles are commonly emitted as (3,), while the
+                    # HDF5 schema keeps the historical singleton molecular axis.
+                    if expected_shape == (1, 3) and values.shape[1:] == (3,):
+                        values = values[:, None, :]
+                step_data[o] = values
         
         hdf5_store.append(step_data)
         
@@ -674,7 +793,7 @@ def write_to_extxyz(
     boxes: Union[float, jnp.ndarray, List, None],
     momenta: List,
     positions: List,
-    obs_dict: MutableMapping[str, list] = {},
+    obs_dict: Optional[MutableMapping[str, list]] = None,
     indices: Optional[List[int]] = None,
     fractional_coordinates: bool = True,
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
@@ -705,6 +824,9 @@ def write_to_extxyz(
         (matches the HDF5 writer behavior).
     """
     try:
+        if obs_dict is None:
+            obs_dict = {}
+
         # Ensure output_file is a Path object
         output_path = Path(output_file) if isinstance(
             output_file, str) else output_file
@@ -715,7 +837,7 @@ def write_to_extxyz(
         # Check if we have data to write
         if not positions:
             logger.info('No positions to write to extxyz file')
-            return momenta, positions, boxes
+            return momenta, positions, boxes, obs_dict
 
         # Convert positions to numpy array
         positions = np.asarray(positions)
@@ -725,40 +847,31 @@ def write_to_extxyz(
         for i in range(len(positions)):
             atoms_copy = atoms.copy()
 
-            # TODO: replace with raw_transform(box, positions)
-            # Handle different box types and set positions accordingly
-            if isinstance(boxes, float):
-                if boxes == 0:
-                    atoms_copy.set_positions(positions[i])
+            # Resolve the box for this frame.  Lists are the trajectory form;
+            # an ndarray/scalar is a fixed box shared by all frames.
+            if isinstance(boxes, list):
+                if len(boxes) != len(positions):
+                    raise ValueError(
+                        f"boxes contains {len(boxes)} frames; expected {len(positions)}"
+                    )
+                frame_box = boxes[i]
+            else:
+                frame_box = boxes
+
+            if frame_box is not None and np.any(np.asarray(frame_box) != 0):
+                atoms_copy.set_cell(frame_box)
+                if fractional_coordinates:
+                    # ASE applies the full cell matrix here.  Element-wise
+                    # multiplication only happened to work for diagonal boxes
+                    # and corrupted coordinates in sheared cells.
+                    atoms_copy.set_scaled_positions(positions[i])
                 else:
-                    atoms_copy.set_cell(boxes)
-                    if fractional_coordinates:
-                        atoms_copy.set_positions(positions[i] * boxes)
-                    else:
-                        atoms_copy.set_positions(positions[i])
-            elif isinstance(boxes, (jnp.ndarray, np.ndarray)):
-                if np.any(boxes == 0):
                     atoms_copy.set_positions(positions[i])
-                else:
-                    atoms_copy.set_cell(boxes)
-                    if fractional_coordinates:
-                        atoms_copy.set_positions(positions[i] * boxes)
-                    else:
-                        atoms_copy.set_positions(positions[i])
-            elif isinstance(boxes, list):
-                if np.any(boxes[0] == 0):
-                    atoms_copy.set_positions(positions[i])
-                else:
-                    atoms_copy.set_cell(boxes[i])
-                    if fractional_coordinates:
-                        atoms_copy.set_positions(positions[i] * boxes[i])
-                    else:
-                        atoms_copy.set_positions(positions[i])
             else:
                 atoms_copy.set_positions(positions[i])
 
             # Set momenta if available
-            if momenta and i < len(momenta):
+            if momenta is not None and i < len(momenta):
                 atoms_copy.set_momenta(momenta[i])
 
             # Canonicalize the extxyz column name so the eval-side reader
@@ -894,6 +1007,42 @@ def check_cell(
     #     raise ValueError(f'Each dimension of the cell {np.diag(cell)} must be at least twice the long-range cutoff distance [{lr_cutoff} Å].')
 
     return cell
+
+
+def cell_from_atoms_boundary_conditions(
+    atoms: ase.Atoms,
+    lr_cutoff: float,
+    kspace_electrostatics: str,
+    kspace_smearing: float = None,
+) -> Optional[np.ndarray]:
+    """Return a periodic cell only when all three ASE PBC axes are enabled.
+
+    The current JAX-MD neighbor-list and reciprocal-space plumbing carries a
+    box but not a per-axis PBC mask, so mixed boundary conditions cannot be
+    represented faithfully.  A nonzero ASE cell with ``pbc=False`` is merely a
+    bounding cell and must not silently make a gas-phase system periodic.
+    """
+    pbc = np.asarray(atoms.get_pbc(), dtype=bool)
+    if np.any(pbc) and not np.all(pbc):
+        raise ValueError(
+            f"Mixed-axis periodic boundary conditions {pbc.tolist()} are not "
+            f"supported by SO3LR MD. Use either pbc=[True, True, True] for "
+            f"three-dimensional periodicity or pbc=[False, False, False] for "
+            f"a nonperiodic system."
+        )
+
+    if not np.any(pbc):
+        # Preserve check_cell's cutoff validation without interpreting the
+        # (possibly non-orthogonal) bounding cell as a periodic simulation box.
+        return check_cell(
+            np.zeros((3, 3)), lr_cutoff, kspace_electrostatics,
+            kspace_smearing,
+        )
+
+    return check_cell(
+        np.asarray(atoms.get_cell()), lr_cutoff, kspace_electrostatics,
+        kspace_smearing,
+    )
 
 def _is_legacy_model(model_dir) -> bool:
     """Return True if the resolved model is the legacy v1 SO3LR (legacy_so3lr_bool)."""
@@ -1130,6 +1279,19 @@ def box_to_diag(box):
     """Extract diagonal from box matrix, or return as-is if already 1D."""
     if box is not None and hasattr(box, 'ndim') and box.ndim == 2:
         return jnp.diag(box)
+    return box
+
+
+def box_for_trajectory(box):
+    """Convert a JAX-MD box to the row-vector convention used by ASE/HDF5.
+
+    JAX-MD represents a general cell as the affine transform ``x = box @ s``
+    for column-vector fractional coordinates.  ASE stores lattice vectors as
+    rows, so the corresponding cell is ``box.T``.  Vectors and scalars have no
+    convention ambiguity and are returned unchanged.
+    """
+    if box is not None and hasattr(box, 'ndim') and box.ndim == 2:
+        return jnp.swapaxes(box, -1, -2)
     return box
 
 
@@ -2195,6 +2357,31 @@ def output_position_array(position, box, fractional_coordinates: bool, output_ca
     return position
 
 
+def save_restart_checkpoints(
+    state,
+    box,
+    current_cycle: int,
+    *,
+    ensemble: str,
+    fractional_coordinates: bool,
+    restart_save_path: Optional[str] = None,
+    pysages_result=None,
+    restart_pysages_save_path: Optional[str] = None,
+) -> None:
+    """Persist SO3LR and optional PySAGES state for one accepted cycle."""
+    if restart_save_path is not None:
+        save_state(
+            state,
+            box,
+            current_cycle,
+            restart_save_path,
+            ensemble=ensemble,
+            fractional_coordinates=fractional_coordinates,
+        )
+    if restart_pysages_save_path is not None:
+        save_pysages_state(pysages_result, restart_pysages_save_path)
+
+
 def perform_md(
     all_settings: Dict,
     opt_structure: Optional[jnp.ndarray] = None,
@@ -2340,6 +2527,16 @@ def perform_md(
     restart_pysages_load_path = all_settings.get('restart_pysages_load_path')
     enforce_cartesian_coordinates = all_settings.get('enforce_cartesian_coordinates', False)
 
+    # This entry point is also a public Python API and may bypass Click/YAML
+    # parsing, so enforce the same count/frequency constraints here before any
+    # modulo, division, model loading, or output-file mutation occurs.
+    validate_positive_md_settings({
+        'md_cycles': md_cycles,
+        'md_steps': md_steps,
+        'save_buffer': save_buffer,
+        'kspace_npt_cycles': kspace_npt_cycles,
+    })
+
     if do_enhanced_sampling and not HAS_PYSAGES:
         raise ImportError(
             "PySAGES is required for enhanced sampling but is not installed. "
@@ -2391,8 +2588,12 @@ def perform_md(
     if opt_structure is not None:
         initial_geometry.set_positions(opt_structure)
 
-    cell = initial_geometry.get_cell()
-    cell = check_cell(cell, lr_cutoff, kspace_electrostatics, kspace_smearing)
+    cell = cell_from_atoms_boundary_conditions(
+        initial_geometry,
+        lr_cutoff,
+        kspace_electrostatics,
+        kspace_smearing,
+    )
 
     if md_P is not None and cell is None:
         raise ValueError(
@@ -2453,47 +2654,7 @@ def perform_md(
         )
 
     save_buffer = min(md_cycles, save_buffer)
-    # Initialize HDF5 storage
     hdf5_store = None
-    if output_format == 'hdf5':
-        if output_atom_indices is None:
-            num_atoms = position.shape[0]
-        else:
-            num_atoms = len(output_atom_indices)
-
-        # Record initial cell (zeros if non-periodic) for self-describing attrs.
-        try:
-            _cell_a0 = np.asarray(initial_geometry.get_cell(), dtype=np.float32)
-        except Exception:
-            _cell_a0 = np.zeros((3, 3), dtype=np.float32)
-        try:
-            _atomic_numbers_attr = np.asarray(
-                initial_geometry.get_atomic_numbers(), dtype=np.int32
-            )
-        except Exception:
-            _atomic_numbers_attr = None
-        # md_dt is in picoseconds at this point (the CLI parser converts fs->ps).
-        # Record the user-facing femtosecond value as the root attr.
-        _md_dt_fs = float(md_dt) * 1000.0 if md_dt is not None else None
-        from .. import __version__ as _so3lr_version
-        _num_features = _model_num_features(model_path) if 'x' in observables else None
-        hdf5_store = init_hdf5_store(
-            save_to=output_file,
-            batch_size=save_buffer,
-            num_atoms=num_atoms,
-            num_box_entries=box.shape[0],
-            exist_ok=True,
-            observables = observables,
-            num_features=_num_features,
-            so3lr_version=_so3lr_version,
-            ensemble=ensemble,
-            md_dt_fs=_md_dt_fs,
-            md_steps=md_steps,
-            atomic_numbers=_atomic_numbers_attr,
-            cell_a0=_cell_a0,
-            input_file=input_file,
-            model_path=model_path,
-        )
 
     current_cycle = 0
     # Loading restart
@@ -2519,10 +2680,10 @@ def perform_md(
             saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
             if saved_fractional and not fractional_coordinates:
                 logger.info('Converting restart positions from fractional to cartesian coordinates.')
-                position = transform(jnp.array(box), position)
+                position = positions_to_cartesian(position, jnp.array(box), True)
             elif not saved_fractional and fractional_coordinates:
                 logger.info('Converting restart positions from cartesian to fractional coordinates.')
-                position = transform(1.0 / jnp.array(box), position)
+                position = cartesian_to_positions(position, jnp.array(box), True)
             restart = False
         except RestartSchemaMismatchError as e:
             # Surface the full schema-mismatch message (missing field, ensemble,
@@ -2941,6 +3102,7 @@ def perform_md(
     # is correctly loaded).
     total_time_for_steps = 0
     first_loop = True
+    last_checkpoint_cycle = None
 
     # PySAGES setup (pysages_set_dict was already parsed during validation)
     if do_enhanced_sampling:
@@ -2960,6 +3122,58 @@ def perform_md(
     # Ensure the initial box matches this shape so fori_loop carry types are consistent.
     if npt_coupling in ('semi-isotropic', 'anisotropic') and box.ndim == 1:
         box = jnp.diag(box)
+
+    # Initialize trajectory storage only after restart loading and flexible-cell
+    # normalization.  Those paths can change a vector box into a full matrix;
+    # creating the HDF5 schema earlier permanently chose the wrong shape.
+    if output_format == 'hdf5':
+        if output_atom_indices is None:
+            num_atoms = position.shape[0]
+        else:
+            num_atoms = len(output_atom_indices)
+
+        trajectory_box = np.asarray(box_for_trajectory(box), dtype=np.dtype(dtype))
+        if not np.any(trajectory_box):
+            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(dtype))
+        elif trajectory_box.ndim == 1 and trajectory_box.shape == (3,):
+            _cell_a0 = np.diag(trajectory_box)
+        else:
+            _cell_a0 = trajectory_box
+
+        try:
+            _atomic_numbers_attr = np.asarray(
+                initial_geometry.get_atomic_numbers(), dtype=np.int32
+            )
+            if output_atom_indices is not None:
+                _atomic_numbers_attr = _atomic_numbers_attr[output_atom_indices]
+        except Exception:
+            _atomic_numbers_attr = None
+
+        # md_dt_ps remains the pre-unit-conversion value captured above.
+        _md_dt_fs = md_dt_ps * 1000.0
+        from .. import __version__ as _so3lr_version
+        _num_features = _model_num_features(model_path) if 'x' in observables else None
+        hdf5_store = init_hdf5_store(
+            save_to=output_file,
+            batch_size=save_buffer,
+            num_atoms=num_atoms,
+            num_box_entries=tuple(trajectory_box.shape),
+            exist_ok=True,
+            observables=observables,
+            num_features=_num_features,
+            so3lr_version=_so3lr_version,
+            ensemble=ensemble,
+            md_dt_fs=_md_dt_fs,
+            md_steps=md_steps,
+            atomic_numbers=_atomic_numbers_attr,
+            cell_a0=_cell_a0,
+            input_file=input_file,
+            model_path=model_path,
+            dtype=np.dtype(dtype),
+            fractional_coordinates=(
+                fractional_coordinates and not output_cartesian_positions
+            ),
+        )
 
     sr_overflow_extra = 0
     lr_overflow_extra = 0
@@ -3181,7 +3395,7 @@ def perform_md(
             positions.append(np.array(out_pos))
             momenta.append(np.array(state.momentum))
             if box is not None:
-                boxes.append(np.array(box_to_diag(box)))
+                boxes.append(np.array(box_for_trajectory(box)))
 
             # Calculate observables
             if len(observables)>0:
@@ -3189,15 +3403,27 @@ def perform_md(
                 for key in obs_dict.keys():
                     obs_dict[key].append(obs_data[1][key])
 
-            # This only fires on exact save_buffer multiples, so frames
-            # accumulated after the last full buffer are still pending when the
-            # loop ends and are LOST (see the warning after the loop). They
-            # cannot simply be flushed here: the HDF5 datasets are shaped
-            # (n_batches, save_buffer, ...), so a partial final batch gets
-            # broadcast up to save_buffer frames -- silently duplicating the
-            # last frame, which is worse than dropping it. Storing the tail
-            # needs a flat per-frame layout; until then, warn loudly.
-            if ((len(positions) % save_buffer == 0 and len(positions) > 0) or (len(positions) == md_cycles)):
+            if len(positions) >= save_buffer:
+                # Checkpoints track accepted simulation state, not successful
+                # trajectory I/O. Save them first so a disk/write failure does
+                # not erase the latest restartable state.
+                if create_restart or (
+                    do_enhanced_sampling and restart_pysages_save_path is not None
+                ):
+                    save_restart_checkpoints(
+                        state,
+                        box,
+                        current_cycle,
+                        ensemble=ensemble,
+                        fractional_coordinates=fractional_coordinates,
+                        restart_save_path=restart_save_path if create_restart else None,
+                        pysages_result=pysages_result if do_enhanced_sampling else None,
+                        restart_pysages_save_path=(
+                            restart_pysages_save_path if do_enhanced_sampling else None
+                        ),
+                    )
+                    last_checkpoint_cycle = current_cycle
+
                 # Saving the output
                 if output_format == 'hdf5':
                     positions, momenta, boxes, obs_dict = write_to_hdf5(
@@ -3217,30 +3443,60 @@ def perform_md(
                         positions,
                         obs_dict,
                         output_atom_indices,
-                        fractional_coordinates=fractional_coordinates
+                        fractional_coordinates=(
+                            fractional_coordinates and not output_cartesian_positions
+                        )
                     )
-                # Saving the state for restart
-                if create_restart:
-                    save_state(
-                        state,
-                        box,
-                        current_cycle,
-                        restart_save_path,
-                        ensemble=ensemble,
-                        fractional_coordinates=fractional_coordinates
-                    )
-                # Saving PySAGES state for restart
-                if do_enhanced_sampling and restart_pysages_save_path is not None:
-                    save_pysages_state(pysages_result, restart_pysages_save_path)
 
-    if len(positions) > 0:
-        logger.warning(
-            f'{len(positions)} trajectory frame(s) from the final partial buffer '
-            f'were NOT written: md_cycles ({md_cycles}) is not a multiple of '
-            f'--save-buffer ({save_buffer}), and the {output_format} writer can '
-            f'only emit whole buffers. Choose a --save-buffer that divides '
-            f'md_cycles to keep every frame.'
+    # Always persist the accepted final state, even when the number of cycles
+    # is not a multiple of save_buffer.  This is intentionally independent of
+    # trajectory flushing: if the tail write fails, users can still restart
+    # from the last completed MD cycle.
+    if (
+        last_checkpoint_cycle != current_cycle
+        and (
+            create_restart
+            or (do_enhanced_sampling and restart_pysages_save_path is not None)
         )
+    ):
+        save_restart_checkpoints(
+            state,
+            box,
+            current_cycle,
+            ensemble=ensemble,
+            fractional_coordinates=fractional_coordinates,
+            restart_save_path=restart_save_path if create_restart else None,
+            pysages_result=pysages_result if do_enhanced_sampling else None,
+            restart_pysages_save_path=(
+                restart_pysages_save_path if do_enhanced_sampling else None
+            ),
+        )
+
+    # A frame-major HDF5 layout and extxyz both support arbitrary batch sizes,
+    # so flush the final short buffer instead of dropping or padding it.
+    if positions:
+        if output_format == 'hdf5':
+            positions, momenta, boxes, obs_dict = write_to_hdf5(
+                hdf5_store,
+                momenta,
+                positions,
+                boxes,
+                obs_dict,
+                output_atom_indices
+            )
+        elif output_format == 'extxyz':
+            positions, momenta, boxes, obs_dict = write_to_extxyz(
+                output_file,
+                initial_geometry,
+                boxes,
+                momenta,
+                positions,
+                obs_dict,
+                output_atom_indices,
+                fractional_coordinates=(
+                    fractional_coordinates and not output_cartesian_positions
+                )
+            )
 
     logger.info('Results saved to: ' + output_file)
     # The first cycle is excluded from timing (it includes JIT compilation /
@@ -3974,13 +4230,13 @@ def load_state(
         # identically regardless of coordinate system — only positions differ.
         logger.info('Converting restart positions from fractional to cartesian coordinates.')
         state = state.set(
-            position=transform(jnp.array(box), state.position)
+            position=positions_to_cartesian(state.position, jnp.array(box), True)
         )
     elif not saved_fractional and fractional_coordinates:
         # Restart was saved in cartesian coords, current run uses fractional.
         logger.info('Converting restart positions from cartesian to fractional coordinates.')
         state = state.set(
-            position=transform(1.0 / jnp.array(box), state.position)
+            position=cartesian_to_positions(state.position, jnp.array(box), True)
         )
 
     # Normalize the reconstructed state/box to match the dtypes (and weak typing)
