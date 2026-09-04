@@ -2566,9 +2566,8 @@ def perform_md(
     overwrite = bool(all_settings.get('overwrite', False))
 
     # Refuse to clobber existing output unless the user opted in via
-    # --overwrite. The previous behavior was format-dependent: HDF5 silently
-    # truncated, extxyz silently appended. With this guard the policy is
-    # uniform across formats and across restarts.
+    # --overwrite. A deliberate exception lets EXTXYZ append a continued run;
+    # HDF5 cannot append safely and therefore still requires a fresh path.
     _validate_md_output_write_policy(
         output_file=output_file,
         output_format=output_format,
