@@ -28,6 +28,7 @@ from ..mlff.nn.observable.dispersion_ref_data import (
     supported_atomic_numbers,
 )
 from .so3lr_md import load_model, setup_logger
+from ..pbc import is_fully_periodic
 
 # Get logger
 logger = logging.getLogger("SO3LR")
@@ -533,6 +534,13 @@ def evaluate_so3lr_on(
                     "structures, but a structure in the dataset has no cell. "
                     "Drop the k-space flags for non-periodic data."
                 )
+            pbc = (_g.globals or {}).get('pbc')
+            if pbc is None:
+                raise ValueError(
+                    "K-space evaluation requires explicit PBC metadata for every "
+                    "structure; reload the data through the current ASE loader."
+                )
+            is_fully_periodic(pbc, context=f"K-space structure {idx}")
             cell = np.asarray(cell).reshape(3, 3)
             key = (kspace_grid_shape(kspace_electrostatics, kspace_spacing, cell),
                    kspace_grid_shape(kspace_dispersion, kspace_dispersion_spacing, cell))
