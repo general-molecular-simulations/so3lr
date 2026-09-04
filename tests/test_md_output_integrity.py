@@ -10,6 +10,7 @@ from ase.io import read
 
 from so3lr.cli import so3lr_md
 from so3lr.cli.so3lr_md import (
+    _validate_md_output_write_policy,
     box_for_trajectory,
     cell_from_atoms_boundary_conditions,
     init_hdf5_store,
@@ -187,6 +188,47 @@ def test_hdf5_validates_whole_batch_before_resizing(tmp_path):
     with h5py.File(path, "r") as h5f:
         assert h5f["positions"].shape[0] == 0
         assert h5f["box"].shape[0] == 0
+
+
+def test_hdf5_restart_refuses_to_truncate_existing_trajectory(tmp_path):
+    output = tmp_path / "trajectory.hdf5"
+    original = b"published trajectory bytes"
+    output.write_bytes(original)
+
+    with pytest.raises(RuntimeError, match="Refusing to truncate"):
+        _validate_md_output_write_policy(
+            output_file=output,
+            output_format="hdf5",
+            overwrite=False,
+            restart_load_path=tmp_path / "restart.npz",
+        )
+
+    assert output.read_bytes() == original
+
+
+def test_extxyz_restart_may_append_to_existing_trajectory(tmp_path):
+    output = tmp_path / "trajectory.extxyz"
+    output.write_text("existing frame\n", encoding="utf-8")
+
+    _validate_md_output_write_policy(
+        output_file=output,
+        output_format="extxyz",
+        overwrite=False,
+        restart_load_path=tmp_path / "restart.npz",
+    )
+
+
+def test_nonrestart_output_still_requires_explicit_overwrite(tmp_path):
+    output = tmp_path / "trajectory.extxyz"
+    output.write_text("existing frame\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Refusing to overwrite"):
+        _validate_md_output_write_policy(
+            output_file=output,
+            output_format="extxyz",
+            overwrite=False,
+            restart_load_path=None,
+        )
 
 
 def _nve_state(position):
