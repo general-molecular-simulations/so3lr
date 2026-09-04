@@ -165,9 +165,16 @@ so3lr nve --input geometry.xyz --temperature 300 --dt 0.5 --md-cycles 100 --md-s
 
 Both NVT and NPT ensembles are supported using the Nosé–Hoover chain thermostat and barostat. The trajectories can be saved in `.hdf5` or `.xyz` format. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart if needed.
 
+NPT settings support `npt_coupling: isotropic` and
+`npt_coupling: semi-isotropic` (the x/y dimensions scale together while z
+changes independently). Fully flexible `anisotropic` coupling is currently
+rejected: its shear components are not yet represented consistently by every
+neighbor-list, reciprocal-space, and dispersion-tail path, so accepting it
+could silently produce incorrect dynamics.
+
 HDF5 trajectories use a frame-major layout: `positions` and `momenta` have
 shape `(n_frames, n_atoms, 3)`, while `box` has shape `(n_frames, 3)` for an
-orthorhombic cell or `(n_frames, 3, 3)` for a flexible cell. The
+isotropic orthorhombic cell or `(n_frames, 3, 3)` for a semi-isotropic cell. The
 `fractional_coordinates`, `trajectory_layout`, and `box_convention` root
 attributes describe how to interpret these arrays. The write buffer controls
 I/O chunking only; a final partial buffer is always written.
