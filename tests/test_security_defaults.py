@@ -113,12 +113,34 @@ def test_wandb_opt_in_without_optional_dependency_is_actionable(monkeypatch):
 
     def import_without_wandb(name, *args, **kwargs):
         if name == "wandb":
-            raise ModuleNotFoundError("No module named 'wandb'")
+            raise ModuleNotFoundError(
+                "No module named 'wandb'", name="wandb"
+            )
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", import_without_wandb)
     with pytest.raises(ImportError, match=r"so3lr\[wandb\]"):
         initialize_wandb({"training": {"use_wandb": True}})
+
+
+def test_wandb_broken_transitive_import_preserves_original_error(monkeypatch):
+    real_import = builtins.__import__
+
+    def import_broken_wandb(name, *args, **kwargs):
+        if name == "wandb":
+            raise ModuleNotFoundError(
+                "No module named 'wandb_transitive_dependency'",
+                name="wandb_transitive_dependency",
+            )
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_broken_wandb)
+    with pytest.raises(
+        ModuleNotFoundError, match="wandb_transitive_dependency"
+    ) as exc_info:
+        initialize_wandb({"training": {"use_wandb": True}})
+
+    assert exc_info.value.name == "wandb_transitive_dependency"
 
 
 def test_bundled_train_and_finetune_configs_disable_wandb():
