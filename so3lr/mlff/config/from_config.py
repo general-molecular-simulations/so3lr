@@ -31,6 +31,20 @@ from ...pbc import is_fully_periodic
 logger = logging.getLogger("SO3LR")
 
 
+def _publish_training_metadata(workdir, metadata):
+    """Publish prepared metadata only after the loop accepts its restart."""
+    for filename, content in metadata.items():
+        (workdir / filename).write_text(content)
+
+
+def _record_split_metadata(workdir, split_metadata, pending_metadata):
+    content = json.dumps(split_metadata)
+    if pending_metadata is None:
+        (workdir / 'data_splits.json').write_text(content)
+    else:
+        pending_metadata['data_splits.json'] = content
+
+
 def _validate_kspace_graph_pbc(graph):
     """Check each graph before entering the jitted reciprocal-space model."""
     pbc = graph.globals.get('pbc')
@@ -249,6 +263,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     """
     workdir = workdir_from_config(config=config)
     workdir.mkdir(exist_ok=config.training.allow_restart)
+    pending_metadata = {}
 
     # Update the workdir in config with absolute path.
     config.workdir = str(workdir)
@@ -264,7 +279,8 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     training_data, validation_data, data_stats = prepare_training_and_validation_data(
         config=config,
         loader=loader,
-        tf_record_present=tf_record_present
+        tf_record_present=tf_record_present,
+        pending_metadata=pending_metadata,
     )
 
     # If messages are normalized by the average number of neighbors, we need to calculate this quantity from the
@@ -406,11 +422,13 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     logger.info(f"  num_epochs:              {config.training.num_epochs}")
     logger.info("=" * 60)
 
-    with open(workdir / 'hyperparameters.json', 'w') as fp:
-        json.dump(config.to_dict(), fp)
-
-    with open(workdir / "hyperparameters.yaml", "w") as yaml_file:
-        yaml.dump(config.to_dict(), yaml_file, default_flow_style=False)
+    pending_metadata['hyperparameters.json'] = json.dumps(config.to_dict())
+    pending_metadata['hyperparameters.yaml'] = yaml.dump(
+        config.to_dict(), default_flow_style=False
+    )
+    publish_metadata = functools.partial(
+        _publish_training_metadata, workdir, pending_metadata
+    )
 
     # Initialize wandb if needed.
     use_wandb = config.training.use_wandb
@@ -440,6 +458,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             training_data=training_data,
             validation_data=validation_data,
             ckpt_dir=workdir / 'checkpoints',
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             num_epochs=config.training.num_epochs,
@@ -484,6 +503,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             training_iterator=training_data,
             validation_iterator=validation_data,
             ckpt_dir=workdir / 'checkpoints',
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             training_seed=config.training.training_seed,
@@ -839,19 +859,15 @@ def run_fine_tuning(
     # Workdir for fine-tuning experiments.
     workdir = workdir_from_config(config=config)
     workdir.mkdir(exist_ok=True)
+    pending_metadata = {}
 
     # Update the workdir in config with absolute path.
     config.workdir = str(workdir)
 
-    # Save fine-tuning hyper-parameters.
-    with open(workdir / 'fine_tuning.json', mode='w') as fp:
-        json.dump(
-            {
-                'start_from_workdir': start_from_workdir.as_posix(),
-                'strategy': strategy
-            },
-            fp=fp
-        )
+    pending_metadata['fine_tuning.json'] = json.dumps({
+        'start_from_workdir': start_from_workdir.as_posix(),
+        'strategy': strategy,
+    })
 
     # Robust loss configuration. Read before the parameters are counted: the
     # adaptive variant adds learnable parameters to the tree and has to be part
@@ -951,7 +967,8 @@ def run_fine_tuning(
         config=config,
         model_config=None,
         loader=loader,
-        tf_record_present=tf_record_present
+        tf_record_present=tf_record_present,
+        pending_metadata=pending_metadata,
     )
 
     opt = make_optimizer_from_config(config)
@@ -1046,11 +1063,13 @@ def run_fine_tuning(
     logger.info(f"  num_epochs:              {config.training.num_epochs}")
     logger.info("=" * 60)
 
-    with open(workdir / 'hyperparameters.json', 'w') as fp:
-        json.dump(config.to_dict(), fp)
-
-    with open(workdir / "hyperparameters.yaml", "w") as yaml_file:
-        yaml.dump(config.to_dict(), yaml_file, default_flow_style=False)
+    pending_metadata['hyperparameters.json'] = json.dumps(config.to_dict())
+    pending_metadata['hyperparameters.yaml'] = yaml.dump(
+        config.to_dict(), default_flow_style=False
+    )
+    publish_metadata = functools.partial(
+        _publish_training_metadata, workdir, pending_metadata
+    )
 
     # Initialize wandb if needed.
     use_wandb = config.training.use_wandb
@@ -1087,6 +1106,7 @@ def run_fine_tuning(
             validation_iterator=validation_data,
             params=params,
             ckpt_dir=ckpt_dir,
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             training_seed=config.training.training_seed,
@@ -1117,6 +1137,7 @@ def run_fine_tuning(
             validation_data=validation_data,
             params=params,
             ckpt_dir=ckpt_dir, #TODO: or ckpt_dir=workdir / 'checkpoints',?
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             num_epochs=config.training.num_epochs,
@@ -1214,7 +1235,9 @@ def data_loader_from_config(config):
     return loader, tf_record_present
 
 
-def prepare_training_and_validation_data(config, loader, tf_record_present, model_config: Optional = None):
+def prepare_training_and_validation_data(config, loader, tf_record_present,
+                                         model_config: Optional = None,
+                                         pending_metadata=None):
     # Lock the config.
     config = config.lock()
     # If model config is not None, lock it. Otherwise, use model config from the config. 
@@ -1289,13 +1312,11 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
         validation_indices = training_and_validation_indices[internal_validation_indices]
         assert len(train_indices) == num_train
         assert len(validation_indices) == num_valid
-        with open(workdir / 'data_splits.json', 'w') as fp:
-            j = dict(
-                training=train_indices.tolist(),
-                validation=validation_indices.tolist(),
-                test=test_indices.tolist()
-            )
-            json.dump(j, fp)
+        _record_split_metadata(workdir, dict(
+            training=train_indices.tolist(),
+            validation=validation_indices.tolist(),
+            test=test_indices.tolist(),
+        ), pending_metadata)
     else:
         # Prepared TFDS datasets already contain train/validation splits and
         # use their per-dataset caps. Global counts belong to the ASE/NPZ
@@ -1332,13 +1353,9 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
 
         data_stats = None
         # Save the splits.
-        with open(workdir / 'data_splits.json', 'w') as fp:
-            j = dict(
-                training='tfds',
-                validation='tfds',
-                test='tfds',
-            )
-            json.dump(j, fp)
+        _record_split_metadata(workdir, dict(
+            training='tfds', validation='tfds', test='tfds',
+        ), pending_metadata)
 
     # Explicitly unlock the config.
     config = config.unlock()

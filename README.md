@@ -383,6 +383,12 @@ code is semantically unchanged despite identical configuration;
 keep data directories immutable and use source/environment provenance for that.
 Legacy params-only checkpoints remain loadable for inference but are rejected
 for TFDS training restart because their exact trajectory cannot be recovered.
+ASE/NPZ restarts remain weights-only continuations: they load the target
+checkpoint's parameters and step, but reinitialize the optimizer, EMA, and
+data-order state. They do not provide TFDS's exact full-state continuation.
+Training and fine-tuning publish updated split/model metadata only after the
+target checkpoint has passed restart validation, so a rejected restart leaves
+the retained checkpoint's metadata intact.
 TFDS records are converted to eV/Angstrom before filters and neighbor lists are
 evaluated. `filter.max_force`
 uses the largest absolute force component and rejects non-finite forces, while

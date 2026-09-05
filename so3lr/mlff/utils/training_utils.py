@@ -1277,7 +1277,8 @@ def fit(
         # trackers (the loss scale changes between stages). ``None`` disables.
         stage_two_start_epoch: int = None,
         stage_two_loss_fn=None,
-        stage_two_val_fn=None
+        stage_two_val_fn=None,
+        on_training_ready=None,
 ):
     """
     Fit model.
@@ -1293,8 +1294,8 @@ def fit(
         batch_max_num_edges (int): Maximal number of edges per batch.
         batch_max_num_graphs (int): Maximal number of graphs per batch.
         batch_max_num_pairs (int): Maximal number of pairs in long-range indices.
-        params: Parameters to start from during training. If not given, either new parameters are initialized randomly
-            or loaded from ckpt_dir if the checkpoint already exists and `allow_restart=True`.
+        params: Initial parameters for a new run. When a target checkpoint exists
+            and `allow_restart=True`, its weights take precedence over these parameters.
         val_fn (Callable, optional): Validation function to use for metrics during validation.
             If None, loss_fn will be used. Defaults to None.
         num_epochs (int): Number of training epochs.
@@ -1312,6 +1313,8 @@ def fit(
         adaptive_robust_loss_targets (list): List of target names for adaptive robust loss.
         adaptive_robust_loss_init_alpha (float): Initial alpha for adaptive robust loss. Defaults to 1.5.
         adaptive_robust_loss_init_scale (float): Initial scale for adaptive robust loss. Defaults to 1.0.
+        on_training_ready (Callable, optional): Called after checkpoint validation
+            and restoration, before optimizer updates, to publish run metadata.
     Returns:
 
     """
@@ -1359,6 +1362,24 @@ def fit(
     processed_nodes = 0
     step = 0
     header_printed = False
+
+    # Fine-tuning supplies initial parameters, but an existing target
+    # checkpoint takes precedence for a requested restart. Validate this
+    # before publishing new metadata or entering the optimizer loop.
+    latest_step = ckpt_mngr.latest_step()
+    if latest_step is not None:
+        if not allow_restart:
+            raise RuntimeError(
+                f'{ckpt_dir} already exists at step {latest_step}. If you want '
+                'to re-start training, set `allow_restart=True`.'
+            )
+        params = checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir)
+        params = expand_observables_to_theory_levels(params)
+        step = latest_step
+        logger.info('Loaded parameters from %s at step %s.', ckpt_dir, latest_step)
+
+    if on_training_ready is not None:
+        on_training_ready()
 
     opt_state = None
     # Shadow EMA copy of the parameters. Updated after every
@@ -1439,45 +1460,25 @@ def fit(
             # Training data is numpy arrays so we now transform them to jax.numpy arrays.
             batch_training = jax.tree_util.tree_map(jnp.array, batch_training)
 
-            # If params are None (in the first step), initialize the parameters or load from existing checkpoint.
+            # Initialize only when neither caller weights nor a restart were supplied.
             if params is None:
-                # Check if checkpoint already exists.
-                latest_step = ckpt_mngr.latest_step()
-                if latest_step is not None:
-                    if allow_restart:
-                        # params = ckpt_mngr.restore(
-                        #     latest_step,
-                        #     args=ocp.args.Composite(params=ocp.args.StandardRestore())
-                        # )['params']
-                        params = checkpoint_utils.load_params_from_checkpoint(
-                            ckpt_dir=ckpt_dir
-                        )
-                        logger.info(f"Loaded parameters from {ckpt_dir} (keys: {list(params.keys())}).")
-                        params = expand_observables_to_theory_levels(params)
-                        step += latest_step
+                params = model.init(jax_rng, batch_training)
 
-                        print(f'Re-start training from {latest_step}.')
-                    else:
-                        raise RuntimeError(f'{ckpt_dir} already exists at step {latest_step}. If you want to re-start '
-                                           f'training, set `allow_restart=True`.')
-                else:
-                    params = model.init(jax_rng, batch_training)
-
-                    # Initialize adaptive robust loss parameters if enabled
-                    if use_adaptive_robust_loss and adaptive_robust_loss_targets is not None:
-                        adaptive_params = init_adaptive_robust_loss_params(
-                            targets=adaptive_robust_loss_targets,
-                            init_alpha=adaptive_robust_loss_init_alpha,
-                            init_scale=adaptive_robust_loss_init_scale
-                        )
-                        params = {**params, **adaptive_params}
-                        print(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
-                        alpha, scale = transform_adaptive_robust_params(
-                            adaptive_params['adaptive_robust_loss']['alpha_raw'],
-                            adaptive_params['adaptive_robust_loss']['scale_raw']
-                        )
-                        print(f"  Initial alpha: {alpha}")
-                        print(f"  Initial scale: {scale}")
+                # Initialize adaptive robust loss parameters if enabled
+                if use_adaptive_robust_loss and adaptive_robust_loss_targets is not None:
+                    adaptive_params = init_adaptive_robust_loss_params(
+                        targets=adaptive_robust_loss_targets,
+                        init_alpha=adaptive_robust_loss_init_alpha,
+                        init_scale=adaptive_robust_loss_init_scale
+                    )
+                    params = {**params, **adaptive_params}
+                    print(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
+                    alpha, scale = transform_adaptive_robust_params(
+                        adaptive_params['adaptive_robust_loss']['alpha_raw'],
+                        adaptive_params['adaptive_robust_loss']['scale_raw']
+                    )
+                    print(f"  Initial alpha: {alpha}")
+                    print(f"  Initial scale: {scale}")
 
             # If optimizer state is None (in the first step), initialize from the parameter pyTree.
             if opt_state is None:
@@ -1666,6 +1667,7 @@ def fit_from_iterator(
         stage_two_start_epoch: int = None,
         stage_two_loss_fn=None,
         stage_two_val_fn=None,
+        on_training_ready=None,
 ):
     """
     Fit model.
@@ -1702,6 +1704,8 @@ def fit_from_iterator(
         adaptive_robust_loss_init_scale (float): Initial scale for adaptive robust loss. Defaults to 1.0.
         dataset_info (dict): Per-dataset info from dataloader.dataset_info() with keys
             'names', 'sizes', 'weights'. Used to log effective epochs per dataset.
+        on_training_ready (Callable, optional): Called after checkpoint validation
+            and restoration, before optimizer updates, to publish run metadata.
     Returns:
 
     """
@@ -1897,6 +1901,9 @@ def fit_from_iterator(
             f'Re-start training from step {latest_step}, epoch {start_epoch}, '
             f'after {resume_batches_consumed} batch(es).'
         )
+
+    if on_training_ready is not None:
+        on_training_ready()
 
     for epoch in range(start_epoch, num_epochs):
         if stop_training:
