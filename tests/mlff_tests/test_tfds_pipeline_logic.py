@@ -10,8 +10,10 @@ import orbax.checkpoint as ocp
 import pytest
 import queue
 import threading
+from types import SimpleNamespace
 
 from ase import Atoms
+from ml_collections import config_dict
 
 from so3lr.mlff.data.dataloader_sparse_tfds import (
     QCMLDataLoaderSparseParallel,
@@ -22,6 +24,8 @@ from so3lr.mlff.data.dataloader_sparse_tfds import (
     minimum_distance_np,
 )
 from so3lr.mlff.data.transformations import unit_conversion
+from so3lr.mlff.config import from_config
+from so3lr.mlff.config.from_config import prepare_training_and_validation_data
 from so3lr.mlff.utils import checkpoint_utils
 from so3lr.mlff.utils import training_utils
 from so3lr.mlff.utils.training_utils import (
@@ -41,6 +45,59 @@ def test_weighted_epoch_size_is_finite_and_ignores_disabled_sources():
         epoch_size_from_dataset_sizes(sizes, weights[:2], 'train')
     with pytest.raises(ValueError, match='non-negative'):
         epoch_size_from_dataset_sizes([3, -1], [1.0, 1.0], 'train')
+
+
+@pytest.mark.parametrize('global_counts', [(None, None), (950, 50)])
+def test_tfds_preparation_uses_existing_splits_not_global_counts(
+        tmp_path, global_counts):
+    class PreparedLoader:
+        def cardinality(self):
+            raise AssertionError('TFDS split selection is owned by the loader')
+
+    loader = PreparedLoader()
+    config = config_dict.ConfigDict({
+        'workdir': str(tmp_path),
+        'model': {},
+        'data': {
+            'datasets': [{'path': '/prepared/tfds', 'num_train': 3, 'num_valid': 1}],
+            'energy_unit': 'eV', 'length_unit': 'Angstrom',
+            'dipole_vec_unit': 'e * Angstrom',
+            'neighbors_lr_bool': False, 'shift_mode': None, 'energy_shifts': None,
+        },
+        'training': {
+            'num_train': global_counts[0], 'num_valid': global_counts[1],
+            'batch_max_num_nodes': 8, 'batch_max_num_edges': 16,
+            'batch_max_num_pairs': None,
+        },
+    })
+    training, validation, stats = prepare_training_and_validation_data(
+        config, loader, tf_record_present=True
+    )
+    assert training is validation is loader
+    assert stats is None
+
+
+def test_kspace_batch_conversion_validates_later_training_records(monkeypatch):
+    constants = {'k_grid': 'test-grid'}
+    monkeypatch.setattr(from_config, '_compute_kspace_constants', lambda *args: constants)
+    converted = []
+    monkeypatch.setattr(
+        from_config.jraph_utils, 'graph_to_batch_fn',
+        lambda graph, lr, **kwargs: converted.append(graph) or kwargs,
+    )
+    convert = from_config._make_graph_to_batch_fn(None, None, True)
+    periodic = SimpleNamespace(
+        globals={'pbc': np.array([[True, True, True], [False, False, False]])},
+        n_node=np.array([2, 1]),
+    )
+    assert convert(periodic, {}) == {'kspace_constants': constants}
+    mixed = SimpleNamespace(
+        globals={'pbc': np.array([[True, True, True], [True, False, True]])},
+        n_node=np.array([2, 2]),
+    )
+    with pytest.raises(ValueError, match='mixed-axis'):
+        convert(mixed, {})
+    assert converted == [periodic]
 
 
 def test_epoch_seed_progression_is_deterministic_and_probe_safe():

@@ -1,5 +1,6 @@
 from ase.units import *
 import functools
+from contextlib import closing
 import json
 from so3lr.mlff import nn
 from so3lr.mlff import training_utils
@@ -25,8 +26,29 @@ from ..utils.param_utils import (
     unmatched_param_keys,
 )
 from ...finetuning_strategies import resolve_finetuning_strategy
+from ...pbc import is_fully_periodic
 
 logger = logging.getLogger("SO3LR")
+
+
+def _validate_kspace_graph_pbc(graph):
+    """Check each graph before entering the jitted reciprocal-space model."""
+    pbc = graph.globals.get('pbc')
+    if pbc is not None:
+        flags = np.asarray(pbc, dtype=bool)
+        if flags.shape != (len(graph.n_node), 3):
+            raise ValueError('K-space training expects PBC flags of shape (num_graphs, 3).')
+        for graph_flags in flags:
+            is_fully_periodic(graph_flags, context='K-space training')
+
+
+def _graph_to_kspace_batch(graph, lr_batch, *, kspace_constants):
+    # Check every training and validation batch, not just the first structure
+    # used to choose a reciprocal grid. Later TFDS records can have other PBC.
+    _validate_kspace_graph_pbc(graph)
+    return jraph_utils.graph_to_batch_fn(
+        graph, lr_batch, kspace_constants=kspace_constants
+    )
 
 
 def _compute_kspace_constants(config, training_data, tf_record_present):
@@ -50,31 +72,30 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
         first_iter = training_data.next_epoch(
             split='train', mode='train', parallel=False, advance_epoch=False
         )
-        for graph_batch, _ in first_iter:
-            cell = graph_batch.globals.get('cell')
-            if cell is not None:
-                # cell shape: (num_graphs, 3, 3) — take the first non-zero cell
-                for g in range(cell.shape[0]):
-                    c = cell[g]
-                    if np.any(c != 0):
-                        cell_3x3 = jnp.array(c)
-                        break
-                else:
-                    continue
-                break
-        else:
-            # (No close() needed here: the for/else runs only once the
-            # generator is exhausted, which already closed it.)
-            raise ValueError(
-                "kspace_electrostatics is enabled but no periodic cell found in training data."
-            )
-        # Release the synchronous generator (and its TFDS iterator) now that the
-        # cell is known; we deliberately consume only one batch.
-        first_iter.close()
+        # Also release the probe when invalid boundary flags raise an error.
+        with closing(first_iter):
+            for graph_batch, _ in first_iter:
+                _validate_kspace_graph_pbc(graph_batch)
+                cell = graph_batch.globals.get('cell')
+                if cell is not None:
+                    # cell shape: (num_graphs, 3, 3) — take the first non-zero cell
+                    for g in range(cell.shape[0]):
+                        c = cell[g]
+                        if np.any(c != 0):
+                            cell_3x3 = jnp.array(c)
+                            break
+                    else:
+                        continue
+                    break
+            else:
+                raise ValueError(
+                    "kspace_electrostatics is enabled but no periodic cell found in training data."
+                )
     else:
         # For ASE/Npz data, training_data is a list of (graph, lr_data) tuples.
         cell_3x3 = None
         for graph, _ in training_data:
+            _validate_kspace_graph_pbc(graph)
             cell = graph.globals.get('cell')
             if cell is not None and np.any(cell != 0):
                 # cell shape: (1, 3, 3) for a single graph
@@ -112,7 +133,7 @@ def _make_graph_to_batch_fn(config, training_data, tf_record_present):
     kspace_constants = _compute_kspace_constants(config, training_data, tf_record_present)
     if kspace_constants is not None:
         return functools.partial(
-            jraph_utils.graph_to_batch_fn,
+            _graph_to_kspace_batch,
             kspace_constants=kspace_constants,
         )
     return jraph_utils.graph_to_batch_fn
@@ -1217,22 +1238,15 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
     else:
         dataset_weights = [1.0]  # Default weight for single dataset
 
-    num_train = config.training.num_train
-    num_valid = config.training.num_valid
-
-    # Get the total number of data points.
     if not tf_record_present:
+        num_train = config.training.num_train
+        num_valid = config.training.num_valid
         num_data = loader.cardinality()
-    else:
-        num_data = loader.cardinality()
-        print(f"Number of points in train tfds split: {num_data}")
-
-    if num_train + num_valid > num_data:
-        raise ValueError(
-            f"num_train + num_valid = {num_train + num_valid} exceeds the number of data points {num_data}"
-            f" in {data_filepaths}."
-        )
-    if not tf_record_present:
+        if num_train + num_valid > num_data:
+            raise ValueError(
+                f"num_train + num_valid = {num_train + num_valid} exceeds the number of data points {num_data}"
+                f" in {data_filepaths}."
+            )
         split_seed = config.data.split_seed
         numpy_rng = np.random.RandomState(split_seed)
 
@@ -1283,6 +1297,10 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
             )
             json.dump(j, fp)
     else:
+        # Prepared TFDS datasets already contain train/validation splits and
+        # use their per-dataset caps. Global counts belong to the ASE/NPZ
+        # random split; they may be null (fine-tuning defaults), or unrelated
+        # to the selected TFDS records.
         # For parallel data loading, we need to ensure batch parameters are set
         if config.training.batch_max_num_nodes is None or config.training.batch_max_num_edges is None:
             raise ValueError(

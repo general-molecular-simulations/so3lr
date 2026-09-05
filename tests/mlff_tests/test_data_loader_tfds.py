@@ -281,6 +281,59 @@ def test_numpy_tuple_iterator_keeps_pbc():
         assert cell_offsets_lr.shape[1] == 3
 
 
+@pytest.mark.parametrize('pbc', [[False, False, False], [True, False, True]])
+def test_preprocess_preserves_explicit_pbc_with_nonzero_cell(pbc):
+    element = _make_water_element()
+    element['cell'] = tf.constant(np.diag([10.0] * 3), tf.float32)
+    element['pbc'] = tf.constant(pbc)
+    graph, lr = next(iter(QCMLDataLoaderSparseParallel._preprocess(
+        standardize_dataset_fields(tf.data.Dataset.from_tensors(element)),
+        batch_max_num_nodes=8, batch_max_num_edges=16,
+        batch_max_num_graphs=4, batch_max_num_pairs=16,
+        cutoff=2.0, calculate_neighbors_lr=True, cutoff_lr=2.0,
+        max_force_filter=None, min_distance_filter=None,
+        energy_unit=1.0, length_unit=1.0, dipole_vec_unit=1.0,
+        train_seed=0, shuffle=False,
+    )))
+
+    np.testing.assert_array_equal(graph.globals['pbc'][0], pbc)
+    assert ('cell' in graph.globals) is any(pbc)
+    assert ('cell_offset' in graph.edges) is any(pbc)
+    assert (lr['cell_offsets_lr'] is not None) is any(pbc)
+
+
+def test_periodic_batch_preserves_offsets_after_graph_with_no_lr_neighbors():
+    elements = []
+    for positions in (
+        [[1.0, 1.0, 1.0], [5.0, 5.0, 5.0]],
+        [[0.1, 0.0, 0.0], [9.9, 0.0, 0.0]],
+    ):
+        element = _make_nacl_element()
+        element['atomic_numbers'] = tf.constant([11, 17], tf.int32)
+        element['positions'] = tf.constant(positions, tf.float32)
+        element['forces'] = tf.zeros((2, 3), tf.float32)
+        element['cell'] = tf.constant(np.diag([10.0] * 3), tf.float32)
+        elements.append(element)
+    dataset = tf.data.Dataset.from_tensors(elements[0]).concatenate(
+        tf.data.Dataset.from_tensors(elements[1])
+    )
+    graph, lr = next(iter(QCMLDataLoaderSparseParallel._preprocess(
+        standardize_dataset_fields(dataset),
+        batch_max_num_nodes=8, batch_max_num_edges=8,
+        batch_max_num_graphs=4, batch_max_num_pairs=8,
+        cutoff=1.0, calculate_neighbors_lr=True, cutoff_lr=1.0,
+        max_force_filter=None, min_distance_filter=None,
+        energy_unit=1.0, length_unit=1.0, dipole_vec_unit=1.0,
+        train_seed=0, shuffle=False,
+    )))
+
+    assert int(np.sum(jraph.get_graph_padding_mask(graph))) == 2
+    assert lr['cell_offsets_lr'] is not None
+    np.testing.assert_array_equal(
+        np.sort(lr['cell_offsets_lr'][:2, 0]), [-1, 1]
+    )
+
+
 def test_non_pbc_edges_match_ase_neighbor_list():
     """The numpy all-pairs rewrite must reproduce ase.neighbor_list exactly.
 

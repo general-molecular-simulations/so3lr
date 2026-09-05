@@ -516,6 +516,9 @@ def create_graph_tuple_tf(
     # Non-PBC entries will have zeros; _numpy_tuple_iterator strips them later.
     edges_dict = {'cell_offset': cell_offsets}
     globals_dict['cell'] = tf.reshape(cell, (1, 3, 3))
+    # A molecule can carry a vacuum cell while remaining non-periodic. Keep
+    # the original axis flags rather than inferring periodicity from its cell.
+    globals_dict['pbc'] = tf.reshape(pbc, (1, 3))
 
     if calculate_neighbors_lr is True:
         if cutoff_lr is None:
@@ -1043,9 +1046,7 @@ class QCMLDataLoaderSparseParallel:
         def _numpy_tuple_iterator(ds):
             """Convert TF dataset of (graph, lr_dict) tuples to numpy iterator."""
             for graph, lr_dict in ds.as_numpy_iterator():
-                # Check if this structure has PBC (non-zero cell)
-                cell = graph.globals.get('cell')
-                has_pbc = cell is not None and np.any(cell != 0.0)
+                has_pbc = bool(np.any(graph.globals['pbc']))
 
                 # Strip PBC fields for non-periodic systems to match ASE/NPZ behavior
                 if not has_pbc:
@@ -1057,7 +1058,9 @@ class QCMLDataLoaderSparseParallel:
 
                 # Determine cell_offsets_lr
                 offsets = np.asarray(lr_dict['cell_offsets_lr'])
-                cell_offsets_lr = offsets if has_pbc and offsets.shape[0] > 0 else None
+                # Keep the empty (0, 3) array for a periodic graph with no LR
+                # neighbors: later graphs in its batch can still have offsets.
+                cell_offsets_lr = offsets if has_pbc else None
 
                 lr_data = {
                     'idx_i_lr': np.asarray(lr_dict['idx_i_lr']),
