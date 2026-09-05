@@ -383,3 +383,57 @@ def test_mixed_periodicity_batch_is_finite_and_matches_single_graph(do_ewald):
     )
     npt.assert_array_equal(np.asarray(batched_per_atom[2:]), np.zeros(2))
     npt.assert_array_equal(np.asarray(batched_forces[2:]), np.zeros((2, 3)))
+
+
+@pytest.mark.parametrize('do_ewald', [False, True], ids=['pme', 'ewald'])
+def test_explicit_vacuum_flags_override_a_nonzero_batch_cell(do_ewald):
+    """Keeping a vacuum box must not enable reciprocal-space interactions."""
+    with _enable_x64(False):
+        module, variables, inputs = _heteronuclear_kspace_case(
+            do_ewald=do_ewald, grid_size=8
+        )
+        inputs.update({
+            'cell': inputs['cell'][None, ...],
+            'pbc': jnp.zeros((1, 3), dtype=bool),
+            'batch_segments': jnp.zeros(2, dtype=jnp.int32),
+            'graph_mask': jnp.array([True]),
+        })
+        bound_module = module.bind(variables)
+
+        def energy(positions):
+            return jnp.sum(_batched_kspace_dispersion(
+                bound_module, {**inputs, 'positions': positions}
+            )['dispersion_energy_kspace'])
+
+        value, gradient = jax.jit(jax.value_and_grad(energy))(
+            inputs['positions']
+        )
+    npt.assert_array_equal(value, 0.0)
+    npt.assert_array_equal(gradient, np.zeros((2, 3)))
+
+
+def test_padded_reciprocal_dispersion_has_finite_c6_gradients():
+    """Training differentiates predicted C6 values as well as positions."""
+    with _enable_x64(False):
+        module, variables, inputs = _heteronuclear_kspace_case(
+            do_ewald=False, grid_size=8
+        )
+        inputs.update({
+            'positions': jnp.concatenate([inputs['positions'], jnp.zeros((1, 3))]),
+            'cell': jnp.stack([inputs['cell'], jnp.zeros((3, 3))]),
+            'atomic_numbers': jnp.array([1, 8, 0]),
+            'predicted_c6_ratios': jnp.array([0.8, 1.3, 0.0]),
+            'node_mask': jnp.array([True, True, False]),
+            'batch_segments': jnp.array([0, 0, 1], dtype=jnp.int32),
+            'graph_mask': jnp.array([True, False]),
+        })
+        bound_module = module.bind(variables)
+
+        def energy(c6):
+            return jnp.sum(_batched_kspace_dispersion(
+                bound_module, {**inputs, 'predicted_c6_ratios': c6}
+            )['dispersion_energy_kspace'])
+
+        gradient = jax.jit(jax.grad(energy))(inputs['predicted_c6_ratios'])
+    assert np.all(np.isfinite(np.asarray(gradient)))
+    assert float(gradient[-1]) == 0.0

@@ -71,6 +71,11 @@ def _vmap_kspace_per_graph(solve_fn, inputs, per_atom_arrays, output_key):
     cell_is_finite = jnp.all(jnp.isfinite(cell), axis=(-2, -1))
     cell_is_full_rank = jnp.abs(jnp.linalg.det(cell)) > 0
     has_pbc = graph_mask & cell_is_finite & cell_is_full_rank
+    # A vacuum structure may retain a finite simulation/visualization cell.
+    # Explicit boundary flags take precedence over that cell geometry.
+    pbc = inputs.get('pbc')
+    if pbc is not None:
+        has_pbc = has_pbc & jnp.all(pbc, axis=-1)
     identity_cell = jnp.broadcast_to(jnp.eye(3, dtype=cell.dtype), cell.shape)
     solver_cell = jnp.where(has_pbc[:, None, None], cell, identity_cell)
 
