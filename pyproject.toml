@@ -37,6 +37,7 @@ jax-md = { git = "https://github.com/kabylda/jax-md.git", branch = "npt-anisotro
 glp = { git = "https://github.com/fbruenig/glp.git", branch = "electrostatics_neighbourlist", optional = false }
 jax-pme = { git = "https://github.com/fbruenig/jax-pme", branch = "main" , optional = false }
 pysages = { git = "https://github.com/em819/PySAGES.git", branch = "nve_npt_ensembles", optional = true }
+importlib-resources = { version = ">=6,<8", optional = true }
 tensorflow-cpu = { version = "*", optional = true }
 tensorflow-datasets = { version = "*", optional = true }
 
@@ -45,7 +46,7 @@ pysages = ["pysages"]
 # Only needed for the TFDS-based data loader and its tests
 # (tests/mlff_tests/test_data_loader_tfds.py). Kept optional so the base
 # install stays light and JAX-only.
-tfds = ["tensorflow-cpu", "tensorflow-datasets"]
+tfds = ["importlib-resources", "tensorflow-cpu", "tensorflow-datasets"]
 
 
 [tool.poetry.group.dev.dependencies]

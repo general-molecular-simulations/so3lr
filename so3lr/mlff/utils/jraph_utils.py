@@ -117,7 +117,10 @@ def dynamically_batch_with_lr(
             'idx_j_lr': np.array([], dtype=np.int32),
             'cell_offsets_lr': None,
         }
-        graphs_only = [g for g, _ in data_iterator]
+        # Keep this as a generator.  TFDS training iterators may be large and
+        # used to be infinite; eagerly materializing them delayed the first
+        # batch until exhaustion and could consume all available memory.
+        graphs_only = (g for g, _ in data_iterator)
         for batched in jraph.dynamically_batch(
             iter(graphs_only), n_node=n_node, n_edge=n_edge, n_graph=n_graph
         ):

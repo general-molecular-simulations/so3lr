@@ -290,3 +290,25 @@ def test_lr_empty_raises_on_single_graph_too_large():
             n_pairs=2,  # Too small - single graph has 3 pairs
         ))
 
+
+def test_no_lr_fast_path_consumes_input_lazily():
+    """The first batch must not require exhausting the source iterator."""
+    consumed = []
+
+    def source():
+        for index in range(20):
+            consumed.append(index)
+            yield graph1, lr1
+
+    batches = dynamically_batch_with_lr(
+        source(),
+        n_node=7,
+        n_edge=9,
+        n_graph=3,
+        n_pairs=0,
+    )
+    graph, lr = next(batches)
+
+    assert len(consumed) < 20
+    npt.assert_equal(jnp.sum(jraph.get_graph_padding_mask(graph)).item(), 2)
+    assert lr['idx_i_lr'].size == 0

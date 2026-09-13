@@ -359,7 +359,41 @@ data:
       weight: 0.5
 ```
 
-The `num_train` per-dataset cap is only honored by the **TFDS** dataloader — install via `pip install .[tfds]` (see *Optional extras*). With the default ASE-based loader the `weight` field is still used to control sampling, but per-dataset `num_train` caps are ignored.
+Multi-dataset sampling currently requires the **TFDS** dataloader; install it
+via `pip install .[tfds]` (see *Optional extras*). `num_train` caps each source's
+training split before its weight is applied.
+
+For TFDS mixtures, one training epoch makes a finite number of weighted draws
+equal to the total selected record count across datasets with non-zero weights.
+Sampling is with replacement and is reproducible from `training_seed` for a
+fixed `batch_n_proc`. When a dataset's weight equals its selected size, it is
+visited once per epoch in expectation. Validation does not repeat records and
+visits every selected record exactly once in a fixed order, so unchanged model
+parameters are evaluated on identical batches. Each new TFDS checkpoint
+atomically stores deployable `params` and a versioned training-state item. The
+latter contains raw parameters, optimizer/EMA state, logical epoch and batch
+position, counters, early-stop/plateau/two-stage state, and the JAX RNG key.
+Restart rebuilds the seeded epoch and skips the recorded prefix. A SHA-256
+fingerprint rejects changes to TFDS builder identity metadata, shard names and
+sizes, dataset weights/caps, batch budgets, neighbor/filter/unit settings,
+seeds, process count, model/optimizer/objective configuration, relevant runtime
+versions, and trajectory-control settings. Metadata fingerprinting does not
+hash every TFRecord payload and cannot prove that Python model/loss/optimizer
+code is semantically unchanged despite identical configuration;
+keep data directories immutable and use source/environment provenance for that.
+Legacy params-only checkpoints remain loadable for inference but are rejected
+for TFDS training restart because their exact trajectory cannot be recovered.
+ASE/NPZ restarts remain weights-only continuations: they load the target
+checkpoint's parameters and step, but reinitialize the optimizer, EMA, and
+data-order state. They do not provide TFDS's exact full-state continuation.
+Training and fine-tuning publish updated split/model metadata only after the
+target checkpoint has passed restart validation, so a rejected restart leaves
+the retained checkpoint's metadata intact.
+TFDS records are converted to eV/Angstrom before filters and neighbor lists are
+evaluated. `filter.max_force`
+uses the largest absolute force component and rejects non-finite forces, while
+`filter.min_distance` uses the minimum-image distance along exactly the axes
+enabled by each record's `pbc` value.
 
 ### Optional training features
 

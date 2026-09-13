@@ -16,8 +16,8 @@ data:
   # More details see README.
   avg_num_neighbors: null  # Average number of neighbors per atom in the data set. If not set, it will be calculated from the data.
   filter:
-    min_distance: 0.25  # Minimal allowed distance in Angstrom. Is converted to the data set units internally.
-    max_force: 25.  # Maximal allowed force component in eV/Angstrom. Is converted to the data set units internally.
+    min_distance: 0.25  # Minimum distinct-atom distance in Angstrom; TFDS applies the minimum image on configured PBC axes.
+    max_force: 25.  # Maximum absolute force component in eV/Angstrom; TFDS also rejects non-finite forces.
 optimizer:
   name: adamw  # Name of the optimizer. See https://optax.readthedocs.io/en/latest/api.html#common-optimizers for available ones.
   optimizer_args: null
