@@ -1,11 +1,11 @@
 """Utilities for checkpointing."""
-import pickle
 import orbax.checkpoint as ocp
 
 from pathlib import Path
 from typing import Optional
 
 from .logging_utils import suppress_absl_warnings
+from ..._serialization import load_pickle_with_warning
 
 
 def load_params_from_checkpoint(
@@ -75,9 +75,10 @@ def load_params_from_workdir(workdir):
     # Try loading from params.pkl first (faster, more portable)
     pkl_path = workdir_path / "params.pkl"
     if pkl_path.exists():
-        with open(pkl_path, 'rb') as f:
-            params = pickle.load(f)
-        return params
+        return load_pickle_with_warning(
+            pkl_path,
+            artifact='params.pkl model parameters',
+        )
 
     # Fall back to orbax checkpoint
     ckpt_dir = workdir_path / "checkpoints"

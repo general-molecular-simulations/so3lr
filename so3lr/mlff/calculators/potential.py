@@ -20,6 +20,7 @@ from ..nn.observable.dispersion_ref_data import supported_atomic_numbers
 from ml_collections import config_dict
 from ..config import from_config
 from orbax import checkpoint
+from ..._serialization import load_pickle_with_warning
 
 
 def load_hyperparameters(workdir: str):
@@ -128,10 +129,10 @@ def load_model_from_workdir(
             cfg.model.dispersion_energy_cutoff_lr_damping = dispersion_energy_cutoff_lr_damping
 
     if from_file is True:
-        import pickle
-
-        with open(pathlib.Path(workdir) / 'params.pkl', 'rb') as f:
-            params = pickle.load(f)
+        params = load_pickle_with_warning(
+            pathlib.Path(workdir) / 'params.pkl',
+            artifact='params.pkl model parameters',
+        )
     else:
         loaded_mngr = checkpoint.CheckpointManager(
             pathlib.Path(workdir) / "checkpoints",

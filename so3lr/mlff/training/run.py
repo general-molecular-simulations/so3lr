@@ -3,7 +3,6 @@ import numpy as np
 import jax
 import logging
 import time
-import wandb
 import optax
 
 from orbax.checkpoint import (CheckpointManagerOptions,
@@ -27,6 +26,12 @@ MetricFn = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 DataTupleT = Tuple[Dict[str, jnp.ndarray], Dict[str, jnp.ndarray]]
 Derivative = Tuple[str, Tuple[str, str, Callable]]
 ObservableFn = Callable[[FrozenDict, Dict[str, Array]], Dict[str, Array]]
+
+
+def _wandb_log(*args, **kwargs):
+    """Import and call W&B only from an explicitly enabled logging branch."""
+    import wandb
+    return wandb.log(*args, **kwargs)
 
 
 @partial(jax.jit, static_argnums=2)
@@ -121,7 +126,7 @@ def run_training(state: TrainState,
                  stop_metric_fn: Callable[[Dict[str, float]], bool] = None,
                  loss_fn_input: Any = None,
                  seed: int = 0,
-                 use_wandb: bool = True
+                 use_wandb: bool = False
                  ):
     """
     Run training for a NN. The checkpoints are saved, such that _n corresponds to the case of n optimizer updates. By
@@ -251,7 +256,7 @@ def run_training(state: TrainState,
             valid_batch_metrics_np = jax.device_get(valid_metrics)
 
             if use_wandb:
-                wandb.log({f'Validation {k}': v for (k, v) in valid_batch_metrics_np.items()}, step=i)
+                _wandb_log({f'Validation {k}': v for (k, v) in valid_batch_metrics_np.items()}, step=i)
             else:
                 print("Validation metrics: ")
                 print(valid_batch_metrics_np)
@@ -288,7 +293,7 @@ def run_training(state: TrainState,
         if i % log_every_t == 0:
             # log the training metrics
             if use_wandb:
-                wandb.log({'Training {}'.format(k): v for (k, v) in train_batch_metrics_np.items()}, step=i)
+                _wandb_log({'Training {}'.format(k): v for (k, v) in train_batch_metrics_np.items()}, step=i)
             else:
                 print('Training metrics: ')
                 print(train_batch_metrics_np)
@@ -302,7 +307,7 @@ def run_training(state: TrainState,
             lr = jax.device_get(state.opt_state[3].hyperparams['step_size'] * decay)
 
             if use_wandb:
-                wandb.log({'Learning rate': abs(lr)}, step=i)
+                _wandb_log({'Learning rate': abs(lr)}, step=i)
 
             if stop_lr_fn is not None:
                 if stop_lr_fn(abs(lr)):
@@ -311,5 +316,5 @@ def run_training(state: TrainState,
 
             if (i > 1) and (i % log_every_t == 0):
                 if use_wandb:
-                    wandb.log(times, step=i)
+                    _wandb_log(times, step=i)
     # mngr.wait_until_finished()

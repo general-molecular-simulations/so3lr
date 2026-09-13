@@ -40,7 +40,7 @@ class Coach:
             valid_ds,
             loss_fn,
             metric_fn=None,
-            use_wandb: bool = True,
+            use_wandb: bool = False,
             ckpt_manager_options: dict = None,
             *args,
             **kwargs):
