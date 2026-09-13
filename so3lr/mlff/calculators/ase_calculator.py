@@ -12,6 +12,7 @@ from ase.calculators.calculator import Calculator
 from so3lr.mlff.utils.structures import Graph
 from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
+from so3lr.pbc import is_fully_periodic
 
 try:
     from glp.calculators.utils import strain_graph, get_strain, strain_system
@@ -642,6 +643,9 @@ class AseCalculatorSparse(Calculator):
     def calculate(self, atoms=None, hessian_slice_index=None, *args, **kwargs):
         super(AseCalculatorSparse, self).calculate(atoms, *args, **kwargs)
 
+        pbc_periodic = is_fully_periodic(
+            atoms.get_pbc(), context=f'{type(self).__name__}.calculate')
+
         # Reject elements the free-atom reference tables do not cover, here where
         # the structure is still eager and nameable. Past this point the lookups are
         # jnp.take under jit, which resolves an out-of-range Z by JAX's
@@ -663,7 +667,6 @@ class AseCalculatorSparse(Calculator):
                 theory_mask=jnp.eye(num_theory_levels, dtype=self.dtype)[self.head_index].reshape(1, -1)
             )
 
-        pbc_any = atoms.get_pbc().any()
         has_atoms_k_grid = 'k_grid' in atoms.info
         has_atoms_k_smearing = 'k_smearing' in atoms.info
         if has_atoms_k_grid != has_atoms_k_smearing:
@@ -675,6 +678,10 @@ class AseCalculatorSparse(Calculator):
         kspace_source = None
         kspace_message = None
         if has_atoms_k_grid:
+            if not pbc_periodic:
+                raise ValueError(
+                    'atoms.info k_grid/k_smearing require a fully periodic system.'
+                )
             if self.kspace_electrostatics is not None:
                 kspace_source = 'atoms.info.override'
                 kspace_message = ('Using k-space grid from atoms.info; it overrides ASE '
@@ -684,7 +691,7 @@ class AseCalculatorSparse(Calculator):
                 kspace_message = 'Using k-space grid from atoms.info.'
 
         if self.kspace_electrostatics is not None and not has_atoms_k_grid:
-            if not pbc_any:
+            if not pbc_periodic:
                 kspace_source = 'kwargs.ignored'
                 kspace_message = ('Ignoring ASE calculator k-space kwargs because the system '
                                   'is non-periodic.')
@@ -706,7 +713,7 @@ class AseCalculatorSparse(Calculator):
             logger.info(kspace_message)
             self._kspace_reported_source = kspace_source
 
-        if pbc_any:
+        if pbc_periodic:
             cell = jnp.array(np.array(atoms.get_cell()), dtype=self.dtype).T  # (3, 3)
         else:
             cell = None

@@ -76,6 +76,18 @@ def main():
         out['nocell'] = None
     except ValueError as exc:
         out['nocell'] = str(exc)
+    slab = b.copy()
+    slab.pbc = [True, True, False]
+    try:
+        eval_energies([slab], 'pme', tmp, 'slab')
+        out['mixed_pbc_eval'] = None
+    except ValueError as exc:
+        out['mixed_pbc_eval'] = str(exc)
+    try:
+        ase_energy(slab, 'pme')
+        out['mixed_pbc_ase'] = None
+    except ValueError as exc:
+        out['mixed_pbc_ase'] = str(exc)
     print(json.dumps(out))
 
 
