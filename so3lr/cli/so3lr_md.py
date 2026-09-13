@@ -763,8 +763,14 @@ def write_to_hdf5(
                     f"Observable '{o}' contains {len(obs_dict[o])} frames; "
                     f"expected {n_frames}"
                 )
-            # Check if the observable has atom_wise data, this test could be improved
-            if obs_dict[o][0].shape == (positions[0].shape[0],):
+            # A molecular dipole has three components even for a three-atom
+            # system. Classify it by name before interpreting an axis as atoms.
+            # Embeddings have a second feature axis but need the same atom
+            # selection as positions and scalar per-atom observables.
+            if o != 'dipole_vec' and (
+                o == 'x'
+                or obs_dict[o][0].shape == (positions[0].shape[0],)
+            ):
                 step_data[o] = np.stack(obs_dict[o], axis=0)[:, indices]
             else:
                 values = np.stack(obs_dict[o], axis=0)
@@ -896,6 +902,11 @@ def write_to_extxyz(
 
                 elif o == "dipole_vec" :
                     atoms_copy.info['dipole_vec'] = np.asarray(obs_dict['dipole_vec'][i]).flatten()
+
+                elif o == 'x':
+                    # EXTXYZ supports multi-column per-atom arrays. Retain the
+                    # feature axis so the later atom selection also subsets x.
+                    atoms_copy.set_array(col, np.asarray(obs_dict[o][i]))
 
                 elif obs_dict[o][0].shape == (positions[0].shape[0],):
                     atoms_copy.set_array(col, np.asarray(obs_dict[o][i]).flatten())
