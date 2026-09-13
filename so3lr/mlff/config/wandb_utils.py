@@ -194,6 +194,19 @@ def initialize_wandb(config: Any, *, wandb_module: Any = None) -> bool:
     )
 
     if wandb_module is None:
-        import wandb as wandb_module
+        try:
+            import wandb as wandb_module
+        except ModuleNotFoundError as exc:
+            # Only replace the error when the optional top-level package is
+            # genuinely absent. If an installed W&B client fails while
+            # importing one of its own dependencies, preserve that exception
+            # so users can diagnose the broken environment.
+            if exc.name != "wandb":
+                raise
+            raise ImportError(
+                "W&B telemetry was enabled but the optional client is not "
+                "installed. Install it with `pip install 'so3lr[wandb]'` "
+                "(or `pip install '.[wandb]'` from a checkout), then retry."
+            ) from exc
     wandb_module.init(config=telemetry_config, **init_args)
     return True

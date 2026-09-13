@@ -56,7 +56,7 @@ training:
   model_seed: 42  # Seed used for the initialization of the model parameters.
   training_seed: 42  # Seed used for shuffling the batches during training.
   log_gradient_values: False  # Log the norm of the gradients for each set of weights.
-  use_wandb: false  # Opt in to sending metrics and a redacted effective config to W&B. No W&B calls are made while false/absent.
+  use_wandb: false  # Opt in to sending metrics and a redacted effective config to W&B (requires `pip install .[wandb]`). No W&B calls are made while false/absent.
   wandb_init_args:  # Arguments to wandb.init(), used only when use_wandb is true. Keep credentials outside this file.
     # Uncomment `name:` to pin the run name in the WandB dashboard; if left
     # commented out, wandb.init() auto-generates a random run name. A common
