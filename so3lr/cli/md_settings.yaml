@@ -121,7 +121,7 @@ nhc_thermo: 100.0                          # Nose-Hoover thermostat damping fact
 md_P: null                                 # Target pressure in bar. Setting this enables NPT. [Default: null]  (CLI: --pressure)
 nhc_baro: 1000.0                           # Nose-Hoover barostat damping factor. Effective damping timescale tau is roughly nhc_baro * md_dt (e.g. ~500 fs at the default md_dt=0.5 fs). The literal formula tau = md_dt * nhc_baro holds only after the internal ps -> jax-md natural-units conversion. [Default: 1000.0]
 nhc_sy_steps: 3                            # Number of Suzuki-Yoshida integration steps [Default: 3]
-npt_coupling: "isotropic"                  # NPT box coupling: "isotropic" (cubic scaling), "semi-isotropic" (independent in x/y vs z — bilayer-compatible), or "anisotropic" (full cell-vector flexibility). Requires the npt-anisotropic jax-md fork. [Default: "isotropic"]
+npt_coupling: "isotropic"                  # NPT box coupling: "isotropic" (uniform scaling) or "semi-isotropic" (x/y scale together, z independently — bilayer-compatible). Fully flexible "anisotropic" cells are rejected until neighbor-list, reciprocal-space, and tail-correction support for shear is validated. [Default: "isotropic"]
 
 ## NVE Ensemble Settings
 init_T: 300.0                              # Initial temperature (K) for velocity initialization, NVE only [Default: 300.0]  (CLI: --temperature)
