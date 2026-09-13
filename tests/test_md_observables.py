@@ -44,7 +44,7 @@ def test_every_per_atom_observable_gets_an_hdf5_dataset(tmp_path):
         missing = [o for o in PER_ATOM_OBSERVABLES if o not in f]
         assert missing == [], f'no HDF5 dataset created for {missing}'
         for o in PER_ATOM_OBSERVABLES:
-            assert f[o].shape[1:] == (2, 5), f'{o} has shape {f[o].shape}'
+            assert f[o].shape[1:] == (5,), f'{o} has shape {f[o].shape}'
 
 
 def test_embeddings_get_a_dataset_when_the_feature_width_is_known(tmp_path):
@@ -61,7 +61,7 @@ def test_embeddings_get_a_dataset_when_the_feature_width_is_known(tmp_path):
         exist_ok=True, observables=['x'], num_features=128,
     )
     with h5py.File(out, 'r') as f:
-        assert f['x'].shape[1:] == (2, 5, 128)
+        assert f['x'].shape[1:] == (5, 128)
 
 
 def test_embeddings_are_reported_when_the_width_is_unknown(tmp_path):

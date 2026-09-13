@@ -68,6 +68,33 @@ def test_opt_bad_model_name_suggests(runner, tmp_xyz):
     assert "Did you mean" in result.output
 
 
+@pytest.mark.parametrize("flag", [
+    "--md-cycles", "--md-steps", "--save-buffer", "--kspace-npt-cycles",
+])
+def test_md_cli_rejects_zero_count_settings(runner, tmp_xyz, flag):
+    """Count/frequency options fail in Click before model initialization."""
+    result = runner.invoke(cli, ["npt", "--input", tmp_xyz, flag, "0"])
+    assert result.exit_code != 0
+    assert "0 is not in the range" in result.output
+
+
+@pytest.mark.parametrize("key", [
+    "md_cycles", "md_steps", "save_buffer", "kspace_npt_cycles",
+])
+def test_md_yaml_rejects_zero_count_settings(runner, tmp_xyz, tmp_path, key):
+    """The settings-file path enforces the same positive-integer contract."""
+    y = tmp_path / f"{key}.yaml"
+    y.write_text(yaml.safe_dump({
+        "input_file": tmp_xyz,
+        "output_file": str(tmp_path / f"{key}.xyz"),
+        key: 0,
+    }))
+    result = runner.invoke(cli, ["--settings", str(y)])
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
+    assert key in str(result.exception)
+
+
 # NOTE: eval reaches setup_logger() and get_hardware_info() before the
 # overwrite guard, both of which import jax/flax, so this path is not
 # sub-second and is intentionally marked slow (deselected by default).

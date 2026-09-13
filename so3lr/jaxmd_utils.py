@@ -59,20 +59,24 @@ def neighbor_list_featurizer(
             else:
                 raise ValueError(f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
 
-        need_positions = (k_grid is not None) or (k_grid_disp is not None)
-        if need_positions:
-            if k_grid is not None:
-                k_smearing = kwargs.get('k_smearing')
-                assert box is not None, "k_grid requires a box to be defined."
-                assert k_smearing is not None, "k_grid requires k_smearing to be defined."
-            if k_grid_disp is not None:
-                k_smearing_disp = kwargs.get('k_smearing_disp')
-                assert box is not None, "k_grid_disp requires a box to be defined."
-                assert k_smearing_disp is not None, "k_grid_disp requires k_smearing_disp to be defined."
-            if fractional_coordinates:
-                positions = transform(box, R)  # transform to non-fractional coordinates
-            else:
-                positions = R
+        # Real-space molecular observables (most visibly dipole_vec) need
+        # Cartesian positions even when no reciprocal-space solver is active.
+        # Leaving this as None made DipoleVecSparse fall back to summing charge
+        # scalars and emit shape (num_graphs, 1), which the old HDF5 writer then
+        # silently broadcast into three identical components.
+        if fractional_coordinates and box is not None:
+            positions = transform(box, R)
+        else:
+            positions = R
+
+        if k_grid is not None:
+            k_smearing = kwargs.get('k_smearing')
+            assert box is not None, "k_grid requires a box to be defined."
+            assert k_smearing is not None, "k_grid requires k_smearing to be defined."
+        if k_grid_disp is not None:
+            k_smearing_disp = kwargs.get('k_smearing_disp')
+            assert box is not None, "k_grid_disp requires a box to be defined."
+            assert k_smearing_disp is not None, "k_grid_disp requires k_smearing_disp to be defined."
 
         if 'perturbation' in kwargs:
             pert = kwargs.get('perturbation')

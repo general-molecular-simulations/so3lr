@@ -19,8 +19,8 @@ def validate():
         'trajectory.hdf5',
         required_datasets=['positions', 'box'],
         check_shapes={
-            'positions': (n_cycles, 1, n_atoms, 3),
-            'box': (n_cycles, 1, 3),
+            'positions': (n_cycles, n_atoms, 3),
+            'box': (n_cycles, 3),
         },
     )
 

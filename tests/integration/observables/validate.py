@@ -19,9 +19,9 @@ def validate():
         'trajectory.hdf5',
         required_datasets=['positions', 'dipole_vec', 'partial_charges'],
         check_shapes={
-            'positions': (n_cycles, 1, n_atoms, 3),
-            'dipole_vec': (n_cycles, 1, 1, 3),
-            'partial_charges': (n_cycles, 1, n_atoms),
+            'positions': (n_cycles, n_atoms, 3),
+            'dipole_vec': (n_cycles, 1, 3),
+            'partial_charges': (n_cycles, n_atoms),
         },
     )
 

@@ -119,9 +119,10 @@ so the did-you-mean validator does not flag them as typos.
 
 - The CLI refuses to overwrite an existing trajectory. This is deliberate;
   `--overwrite` opts in.
-- Geometry relaxation runs before MD by default, and its frames are written to
-  the same trajectory file.
-- `nvt-langevin` is not bit-reproducible across a restart: the PRNG stream is
-  reseeded from `--seed`, by design.
+- Geometry relaxation runs before MD by default. Its frames go to a separate
+  `<output-stem>_opt.xyz` file; the MD trajectory contains accepted MD frames.
+- The active Langevin PRNG key is saved with the integrator state and restored
+  on restart. The setup key is reseeded, but does not replace that saved key.
+  Reproducibility still depends on numerical precision and backend.
 - SO3LR is single-device. There is no `pmap`/sharding, and adding one is a
   substantial change rather than a fix.
