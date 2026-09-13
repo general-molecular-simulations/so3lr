@@ -25,6 +25,58 @@ from so3lr.cli.so3lr_md import (
 from so3lr.md_settings_validation import validate_positive_md_settings
 
 
+@pytest.mark.parametrize('indices', [None, [2, 0]])
+def test_hdf_dipole_of_three_atoms_is_molecular(tmp_path, indices):
+    destination = tmp_path / 'water.hdf5'
+    positions = [np.arange(9, dtype=np.float32).reshape(3, 3)]
+    dipole = np.array([1., 2., 3.], dtype=np.float32)
+    store = init_hdf5_store(
+        destination, batch_size=1,
+        num_atoms=3 if indices is None else len(indices),
+        num_box_entries=3, observables=['dipole_vec'],
+    )
+
+    write_to_hdf5(
+        store, [np.zeros((3, 3))], positions, [np.zeros(3)],
+        {'dipole_vec': [dipole]}, indices=indices,
+    )
+
+    with h5py.File(destination) as handle:
+        assert handle['dipole_vec'].shape == (1, 1, 3)
+        np.testing.assert_array_equal(handle['dipole_vec'][0, 0], dipole)
+
+
+@pytest.mark.parametrize('output_format', ['hdf5', 'extxyz'])
+def test_embedding_output_keeps_features_and_atom_selection(tmp_path, output_format):
+    destination = tmp_path / f'embeddings.{output_format}'
+    positions = [np.arange(9, dtype=np.float32).reshape(3, 3)]
+    embeddings = np.arange(12, dtype=np.float32).reshape(3, 4)
+    indices = [2, 0]
+    if output_format == 'hdf5':
+        store = init_hdf5_store(
+            destination, batch_size=1, num_atoms=2, num_box_entries=3,
+            observables=['x'], num_features=4,
+        )
+        write_to_hdf5(
+            store, [np.zeros((3, 3))], positions, [np.zeros(3)],
+            {'x': [embeddings]}, indices=indices,
+        )
+        with h5py.File(destination) as handle:
+            actual = handle['x'][0]
+            actual_positions = handle['positions'][0]
+    else:
+        write_to_extxyz(
+            destination, Atoms('HOH'), None, [], positions,
+            {'x': [embeddings]}, indices=indices,
+            fractional_coordinates=False,
+        )
+        atoms = read(destination)
+        actual = atoms.arrays['x']
+        actual_positions = atoms.positions
+    np.testing.assert_array_equal(actual, embeddings[indices])
+    np.testing.assert_array_equal(actual_positions, positions[0][indices])
+
+
 def test_nonperiodic_atoms_with_bounding_cell_remain_free():
     atoms = Atoms(
         "H",
