@@ -28,7 +28,7 @@ def test_training_entry_point_keeps_metadata_when_loop_rejects_restart(
             'batch_max_num_edges': 16, 'batch_max_num_graphs': 4,
             'batch_max_num_pairs': 0, 'loss_weights': {'energy': 1.0},
             'eval_every_num_steps': 1, 'training_seed': 0, 'model_seed': 0,
-            'log_gradient_values': False, 'num_epochs': 1,
+            'log_gradient_values': False, 'num_epochs': 1, 'use_wandb': False,
         },
     })
     monkeypatch.setattr(from_config, 'data_loader_from_config', lambda **kwargs: (object(), tfds))
@@ -43,7 +43,6 @@ def test_training_entry_point_keeps_metadata_when_loop_rejects_restart(
         monkeypatch.setattr(from_config, name, lambda *args, **kwargs: object())
     for name in ('make_loss_fn', 'make_val_fn'):
         monkeypatch.setattr(training_utils, name, lambda *args, **kwargs: object())
-    monkeypatch.setattr(from_config, 'initialize_wandb', lambda config: False)
     if fine_tune:
         source = tmp_path / 'parent_model'
         source.mkdir()
@@ -132,7 +131,7 @@ def test_ase_restart_checks_checkpoint_even_with_supplied_parent_params(
         batch_max_num_nodes=8, batch_max_num_edges=16,
         batch_max_num_graphs=4, batch_max_num_pairs=0,
         num_epochs=1, params={'w': jnp.array(-99.0)}, ckpt_dir=tmp_path,
-        eval_every_num_steps=1, allow_restart=allow_restart,
+        eval_every_num_steps=1, allow_restart=allow_restart, use_wandb=False,
         on_training_ready=lambda: ready.append(True),
     )
     if allow_restart:
@@ -166,7 +165,7 @@ def test_tfds_rejected_checkpoint_does_not_publish_metadata(tmp_path, monkeypatc
             training_iterator=None, validation_iterator=None,
             batch_max_num_nodes=8, batch_max_num_edges=16,
             batch_max_num_graphs=4, batch_max_num_pairs=0,
-            num_epochs=1, ckpt_dir=tmp_path, allow_restart=True,
+            num_epochs=1, ckpt_dir=tmp_path, allow_restart=True, use_wandb=False,
             on_training_ready=lambda: ready.append(True),
         )
     assert ready == []
