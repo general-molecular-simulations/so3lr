@@ -156,6 +156,18 @@ def _effective_atomic_c6(atomic_numbers, c6_ratios, legacy=False, dtype=None):
     return jnp.take(reference, atomic_numbers - 1, axis=0) * c6_ratios
 
 
+def _dispersion_charges(atomic_c6, node_mask):
+    """Zero padding before differentiating the square root of atomic C6.
+
+    Multiplying sqrt(0) by a padding mask afterwards leaves its infinite
+    derivative in the backward pass, producing NaN C6 gradients. Use a finite
+    stand-in inside the square root for absent atoms, then zero their charges.
+    """
+    active = node_mask != 0
+    safe_c6 = jnp.where(active, jnp.maximum(atomic_c6, 0.0), 1.0)
+    return jnp.where(active, jnp.sqrt(safe_c6), 0.0)
+
+
 def _batched_kspace_dispersion(kspace_module, inputs):
     """Run dispersion kspace per-graph using vmap on the solver, then scatter back."""
     k_grid_disp = inputs['k_grid_disp']
@@ -171,7 +183,7 @@ def _batched_kspace_dispersion(kspace_module, inputs):
         C6_i = _effective_atomic_c6(
             z_g, c6_g, legacy=kspace_module.legacy, dtype=pos_g.dtype
         )
-        q_disp = jnp.sqrt(jnp.maximum(C6_i, 0.0)) * mask_g
+        q_disp = _dispersion_charges(C6_i, mask_g)
 
         pos_bohr = pos_g / _Bohr
         cell_bohr = cell_g / _Bohr
@@ -1996,7 +2008,7 @@ class DispersionEnergyKspace(BaseSubModule):
             atomic_numbers, c6_ratios, legacy=self.legacy,
             dtype=positions.dtype
         )
-        q_disp = jnp.sqrt(jnp.maximum(C6_i, 0.0))
+        q_disp = _dispersion_charges(C6_i, node_mask)
 
         # Convert positions and cell from Angstrom to Bohr (C6 is in a.u.)
         _Bohr = jnp.asarray(Bohr, dtype=positions.dtype)

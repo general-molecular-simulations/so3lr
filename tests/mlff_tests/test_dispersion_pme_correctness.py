@@ -412,11 +412,12 @@ def test_explicit_vacuum_flags_override_a_nonzero_batch_cell(do_ewald):
     npt.assert_array_equal(gradient, np.zeros((2, 3)))
 
 
-def test_padded_reciprocal_dispersion_has_finite_c6_gradients():
+@pytest.mark.parametrize('do_ewald', [False, True], ids=['pme', 'ewald'])
+def test_padded_reciprocal_dispersion_has_finite_c6_gradients(do_ewald):
     """Training differentiates predicted C6 values as well as positions."""
     with _enable_x64(False):
         module, variables, inputs = _heteronuclear_kspace_case(
-            do_ewald=False, grid_size=8
+            do_ewald=do_ewald, grid_size=8
         )
         inputs.update({
             'positions': jnp.concatenate([inputs['positions'], jnp.zeros((1, 3))]),
