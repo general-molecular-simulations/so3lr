@@ -47,6 +47,7 @@ def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict, kspace_constants
         idx_i=graph.receivers,
         idx_j=graph.senders,
         cell=graph.globals.get('cell'),
+        pbc=graph.globals.get('pbc'),
         cell_offset=graph.edges.get('cell_offset'),
         energy=graph.globals.get('energy'),
         forces=graph.nodes.get('forces'),

@@ -48,6 +48,13 @@ def test_kspace_requires_a_cell(results):
     assert results['nocell'] is not None and 'periodic' in results['nocell']
 
 
+def test_kspace_rejects_mixed_axis_pbc(results):
+    """Slab/wire PBC must not be silently promoted to three dimensions."""
+    for path in ('mixed_pbc_eval', 'mixed_pbc_ase'):
+        assert results[path] is not None
+        assert 'mixed-axis' in results[path]
+
+
 def test_mixed_cells_match_single_evaluations(results):
     """Different cells (here also different mesh shapes) evaluate like singles, in order."""
     for got, want in zip(results['mixed']['grouped'], results['mixed']['singles']):
