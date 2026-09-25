@@ -801,9 +801,12 @@ class AseCalculatorSparse(Calculator):
     # ------------------------------------------------------------------ exact PBC
     def _use_exact(self, atoms):
         from so3lr.mlff.calculators.exact_neighbors import needs_exact
-        if self.neighbor_backend == 'glp':
+        # An instance assembled without __init__ (as some tests do, with a stub
+        # calculate_fn) predates the option; keep the glp path it was built for.
+        backend = getattr(self, 'neighbor_backend', 'glp')
+        if backend == 'glp':
             return False
-        if self.neighbor_backend == 'exact':
+        if backend == 'exact':
             use = True
         else:
             use = needs_exact(np.array(atoms.get_cell()), self.cutoff, self.lr_cutoff,
