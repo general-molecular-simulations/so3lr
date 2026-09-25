@@ -98,6 +98,7 @@ class AseCalculatorSparse(Calculator):
             kspace_spacing: Optional[float] = None,
             charge_embed_total_charge: Optional[float] = None,
             charge_equilibration_total_charge: Optional[float] = None,
+            neighbor_backend: str = 'auto',
             **kwargs
     ):
         if observables is not None and len(observables) > 0:
@@ -157,6 +158,7 @@ class AseCalculatorSparse(Calculator):
                    kspace_electrostatics=kspace_electrostatics,
                    kspace_smearing=kspace_smearing,
                    kspace_spacing=kspace_spacing,
+                   neighbor_backend=neighbor_backend,
                    )
 
     def __init__(
@@ -176,12 +178,25 @@ class AseCalculatorSparse(Calculator):
             kspace_electrostatics: Optional[str] = None,
             kspace_smearing: Optional[float] = None,
             kspace_spacing: Optional[float] = None,
+            neighbor_backend: str = 'auto',
             *args,
             **kwargs
     ):
         """
         ASE calculator given a StackNet and parameters.
+
+        neighbor_backend:
+            'glp'   glp's minimum-image neighbour list. Exact only for orthorhombic
+                    cells whose heights all exceed 2 * (lr_cutoff + skin).
+            'exact' explicit periodic images (matscipy/ASE ``neighbor_list('ijS')``),
+                    exact for any cell size and shape, rebuilt every call.
+            'auto'  (default) 'exact' whenever the minimum image would be wrong
+                    (non-orthorhombic cell, or any height <= 2 * cutoff), else 'glp'.
+                    Finite systems always use 'glp'.
         """
+        if neighbor_backend not in ('auto', 'glp', 'exact'):
+            raise ValueError(f"neighbor_backend must be 'auto', 'glp' or 'exact', got {neighbor_backend!r}.")
+        self.neighbor_backend = neighbor_backend
 
         super(AseCalculatorSparse, self).__init__(*args, **kwargs)
 
@@ -582,6 +597,9 @@ class AseCalculatorSparse(Calculator):
                         return {'energy': out, 'forces': forces}
 
         self.calculate_fn = calculate_fn
+        self._exact_supported = not (calculate_hessian or calculate_obs_grads or has_aux)
+        self._exact_fn = _make_exact_calculate_fn(potential, calculate_stress, has_aux)
+        self._exact_caps = (None, None)
         self.neighbors = None
         self.spatial_partitioning = None
         self.capacity_multiplier = capacity_multiplier
@@ -721,6 +739,10 @@ class AseCalculatorSparse(Calculator):
             # edges of a pbc=False molecule that carries a bounding box.
             system = system._replace(cell=None)
 
+        if pbc_any and self._use_exact(atoms):
+            self._calculate_exact(atoms, system)
+            return
+
         if self.spatial_partitioning is None:
             self.neighbors, self.spatial_partitioning = neighbor_list(
                 positions=system.R,
@@ -771,6 +793,84 @@ class AseCalculatorSparse(Calculator):
             arr = np.array(x, self.dtype)
             return arr.item() if arr.ndim == 0 else arr
         self.results = jax.tree_util.tree_map(_to_numpy, output)
+
+
+    # ------------------------------------------------------------------ exact PBC
+    def _use_exact(self, atoms):
+        from so3lr.mlff.calculators.exact_neighbors import needs_exact
+        if self.neighbor_backend == 'glp':
+            return False
+        if self.neighbor_backend == 'exact':
+            use = True
+        else:
+            use = needs_exact(np.array(atoms.get_cell()), self.cutoff, self.lr_cutoff,
+                              self.skin, atoms.get_pbc())
+        if use and not self._exact_supported:
+            raise NotImplementedError(
+                'The exact periodic neighbour list supports energy, forces and stress '
+                'only (no hessian, observables or aux). This cell needs it: it is '
+                'non-orthorhombic or narrower than twice the cutoff, where glp\'s '
+                'minimum-image list is wrong. Use a supercell, or neighbor_backend="glp" '
+                'if you accept that error.')
+        if use and not np.all(atoms.get_pbc()):
+            raise ValueError('Mixed-axis periodicity is not supported.')
+        return use
+
+    def _calculate_exact(self, atoms, system):
+        from so3lr.mlff.calculators import exact_neighbors as xn
+        nb, cap, cap_lr = xn.build(atoms, self.cutoff, self.lr_cutoff,
+                                   *self._exact_caps, multiplier=self.capacity_multiplier)
+        self._exact_caps = (cap, cap_lr)
+        cell_rows = jnp.asarray(np.array(atoms.get_cell()), dtype=self.dtype)
+        output = self._exact_fn(
+            system, cell_rows,
+            jnp.asarray(nb.centers), jnp.asarray(nb.others), jnp.asarray(nb.shifts, self.dtype),
+            jnp.asarray(nb.idx_i_lr), jnp.asarray(nb.idx_j_lr), jnp.asarray(nb.shifts_lr, self.dtype))
+
+        def _to_numpy(x):
+            arr = np.array(x, self.dtype)
+            return arr.item() if arr.ndim == 0 else arr
+        self.results = jax.tree_util.tree_map(_to_numpy, output)
+
+
+def _make_exact_calculate_fn(potential, calculate_stress, has_aux):
+    """Energy/forces(/stress) from explicit (i, j, S) pairs.
+
+    r_ij = R_j - R_i + S @ cell_rows, so an atom may meet several images of the same
+    partner, or its own image. Under a homogeneous strain eps both the positions and
+    the lattice rows deform (R -> R + R eps^T, rows -> rows + rows eps^T), so the
+    integer shifts are unchanged and dE/d(eps) / V is the virial stress, exactly as
+    in the glp path (strain_system).
+    """
+    from so3lr.graph import Graph as So3lrGraph
+
+    def energy_fn(system, strain, cell_rows, ci, cj, S, ci_lr, cj_lr, S_lr):
+        system = strain_system(system, strain)
+        rows = cell_rows + jnp.einsum('ib,ab->ia', cell_rows, strain)
+        R = system.R
+        edges = R[cj] - R[ci] + S @ rows
+        edges_lr = R[cj_lr] - R[ci_lr] + S_lr @ rows
+        graph = So3lrGraph(
+            positions=R, edges=edges, nodes=system.Z, centers=ci, others=cj,
+            mask=ci != R.shape[0], total_charge=system.total_charge,
+            num_unpaired_electrons=system.num_unpaired_electrons,
+            edges_lr=edges_lr, idx_i_lr=ci_lr, idx_j_lr=cj_lr, cell=system.cell,
+            k_grid=system.k_grid, k_smearing=system.k_smearing,
+            theory_mask=system.theory_mask)
+        return potential(graph, has_aux=False).sum()
+
+    @jax.jit
+    def calculate_fn(system, cell_rows, ci, cj, S, ci_lr, cj_lr, S_lr):
+        strain = get_strain(dtype=system.R.dtype)
+        e, grads = jax.value_and_grad(energy_fn, argnums=(0, 1), allow_int=True)(
+            system, strain, cell_rows, ci, cj, S, ci_lr, cj_lr, S_lr)
+        out = {'energy': e, 'forces': -grads[0].R}
+        if calculate_stress:
+            volume = jnp.abs(jnp.linalg.det(system.cell))
+            out['stress'] = matrix_to_voigt(grads[1] / volume)
+        return out
+
+    return calculate_fn
 
 
 def to_displacement(cell):
