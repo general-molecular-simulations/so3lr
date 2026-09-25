@@ -720,7 +720,10 @@ class AseCalculatorSparse(Calculator):
                 import jaxpme
                 k_smearing = jnp.array([self.kspace_smearing], dtype=self.dtype)
                 k_spacing = jnp.array([self.kspace_spacing])
-                cell = jnp.array(np.array(atoms.get_cell()), dtype=self.dtype).T
+                # jaxpme sizes the mesh from the lattice vectors as ROWS (see
+                # PotentialSparse._cell_rows); the transpose used here before gave
+                # the wrong mesh shape for non-orthogonal cells.
+                cell = jnp.array(np.array(atoms.get_cell()), dtype=self.dtype)
                 if self.kspace_electrostatics == 'ewald':
                     k_grid = jaxpme.kspace.get_kgrid_ewald(cell, lr_wavelength=k_spacing)
                 else:

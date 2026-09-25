@@ -337,6 +337,18 @@ class PotentialSparse(MachineLearningPotential):
 
         obs_fn = get_observable_fn_sparse(net)
 
+        def _cell_rows(cell):
+            # Graphs reaching the potential carry the lattice vectors as COLUMNS:
+            # glp's System.cell is atoms.cell.T, and jax-md's box maps fractional to
+            # Cartesian as box @ s. The model's k-space solvers (jaxpme) take them
+            # as ROWS, like ASE and the training data. Passing the columns through
+            # unchanged evaluated PME on the transposed lattice -- a different
+            # crystal for any non-orthogonal cell (0.03-0.09 eV/Ang on triclinic
+            # MOFs), invisible for orthogonal ones where the transpose is a no-op.
+            if cell is None or getattr(cell, 'ndim', 0) != 2:
+                return cell
+            return cell.T
+
         def graph_to_mlff_input(graph: Graph):
             # Enhanced graph conversion with advanced field support
             x = {
@@ -347,7 +359,7 @@ class PotentialSparse(MachineLearningPotential):
                 'idx_j': graph.others,
                 'total_charge': graph.total_charge,
                 'num_unpaired_electrons': graph.num_unpaired_electrons,
-                'cell': getattr(graph, 'cell', None),
+                'cell': _cell_rows(getattr(graph, 'cell', None)),
                 'theory_mask': getattr(graph, 'theory_mask', None),
                 'k_grid': getattr(graph, 'k_grid', None),
                 'k_smearing': getattr(graph, 'k_smearing', None),
