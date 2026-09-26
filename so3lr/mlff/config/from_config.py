@@ -27,6 +27,7 @@ from ..utils.param_utils import (
 from ...finetuning_strategies import resolve_finetuning_strategy
 from ...pbc import is_fully_periodic
 from .unit_parser import parse_unit_expression
+from .wandb_utils import initialize_wandb
 
 logger = logging.getLogger("SO3LR")
 
@@ -430,11 +431,9 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
         _publish_training_metadata, workdir, pending_metadata
     )
 
-    # Initialize wandb if needed.
-    use_wandb = config.training.use_wandb
-    if use_wandb is True:
-        import wandb
-        wandb.init(config=config.to_dict(), **config.training.wandb_init_args)
+    # W&B is a strict opt-in. The helper returns before importing W&B when the
+    # setting is absent/false and redacts the effective config when enabled.
+    use_wandb = initialize_wandb(config)
 
     # Adaptive robust loss settings
     adaptive_robust_loss_targets = list(config.training.loss_weights.keys()) if use_adaptive_robust_loss else None
@@ -1071,11 +1070,8 @@ def run_fine_tuning(
         _publish_training_metadata, workdir, pending_metadata
     )
 
-    # Initialize wandb if needed.
-    use_wandb = config.training.use_wandb
-    if use_wandb is True:
-        import wandb
-        wandb.init(config=config.to_dict(), **config.training.wandb_init_args)
+    # Fine-tuning follows the same opt-in and redaction path as training.
+    use_wandb = initialize_wandb(config)
 
     logger.info(
         f'Fine tuning model from {start_from_workdir} on {data_filepath}!'

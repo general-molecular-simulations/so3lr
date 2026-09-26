@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
-import wandb
 
 from flax import traverse_util
 from flax.core.frozen_dict import unfreeze
@@ -29,6 +28,12 @@ from .robust_loss_jax import general as robust_loss_general
 
 import logging
 logger = logging.getLogger("SO3LR")
+
+
+def _wandb_log(*args, **kwargs):
+    """Import and call W&B only from an explicitly enabled logging branch."""
+    import wandb
+    return wandb.log(*args, **kwargs)
 
 # Global distribution object for adaptive robust loss (handles partition function)
 ROBUST_LOSS_DIST = robust_loss_dist.Distribution()
@@ -1239,7 +1244,7 @@ def fit(
         allow_restart: bool = False,
         training_seed: int = 0,
         model_seed: int = 0,
-        use_wandb: bool = True,
+        use_wandb: bool = False,
         log_gradient_values: bool = False,
         use_robust_loss_validation: bool = False,
         robust_loss_alpha_validation: float = 1.99,
@@ -1511,7 +1516,7 @@ def fit(
 
             # Log training metrics.
             if use_wandb:
-                wandb.log(
+                _wandb_log(
                     {f'train_{k}': v for (k, v) in train_metrics_np.items()},
                     step=step
                 )
@@ -1578,7 +1583,7 @@ def fit(
 
                 # Log to weights and bias.
                 if use_wandb:
-                    wandb.log(
+                    _wandb_log(
                         eval_metrics,
                         step=step
                     )
@@ -1640,7 +1645,7 @@ def fit_from_iterator(
         allow_restart: bool = False,
         training_seed: int = 0,
         model_seed: int = 0,
-        use_wandb: bool = True,
+        use_wandb: bool = False,
         log_gradient_values: bool = False,
         use_robust_loss_validation: bool = False,
         robust_loss_alpha_validation: float = 1.99,
@@ -1931,7 +1936,7 @@ def fit_from_iterator(
             _stage_two_active = True
 
         if use_wandb:
-            wandb.log({"epoch": epoch})
+            _wandb_log({"epoch": epoch})
         print(f'Epoch {epoch} of {num_epochs}')
         skipped_batches = (
             resume_batches_consumed if epoch == start_epoch else 0
@@ -2012,7 +2017,7 @@ def fit_from_iterator(
                         if size > 0:
                             eff_epoch = processed_graphs * weight / size
                             log_dict[f'effective_epoch/{name}'] = eff_epoch
-                wandb.log(log_dict, step=step)
+                _wandb_log(log_dict, step=step)
 
             # Start validation process.
             if step % eval_every_num_steps == 0:
@@ -2050,7 +2055,7 @@ def fit_from_iterator(
 
                 # Log to weights and bias.
                 if use_wandb:
-                    wandb.log(
+                    _wandb_log(
                         eval_metrics,
                         step=step
                     )
