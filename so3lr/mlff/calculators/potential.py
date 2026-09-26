@@ -141,10 +141,14 @@ def load_model_from_workdir(
         )
 
         mngr_state = loaded_mngr.restore(
-            loaded_mngr.latest_step()
+            loaded_mngr.latest_step(),
+            args=checkpoint.args.Composite(
+                params=checkpoint.args.StandardRestore()
+            ),
         )
 
         params = mngr_state.get('params')
+        loaded_mngr.close()
 
     if model == 'so3krates':
         net = from_config.make_so3krates_sparse_from_config(

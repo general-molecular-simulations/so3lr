@@ -1,4 +1,5 @@
 import functools
+from contextlib import closing
 import json
 from so3lr.mlff import nn
 from so3lr.mlff import training_utils
@@ -24,9 +25,44 @@ from ..utils.param_utils import (
     unmatched_param_keys,
 )
 from ...finetuning_strategies import resolve_finetuning_strategy
+from ...pbc import is_fully_periodic
 from .unit_parser import parse_unit_expression
 
 logger = logging.getLogger("SO3LR")
+
+
+def _publish_training_metadata(workdir, metadata):
+    """Publish prepared metadata only after the loop accepts its restart."""
+    for filename, content in metadata.items():
+        (workdir / filename).write_text(content)
+
+
+def _record_split_metadata(workdir, split_metadata, pending_metadata):
+    content = json.dumps(split_metadata)
+    if pending_metadata is None:
+        (workdir / 'data_splits.json').write_text(content)
+    else:
+        pending_metadata['data_splits.json'] = content
+
+
+def _validate_kspace_graph_pbc(graph):
+    """Check each graph before entering the jitted reciprocal-space model."""
+    pbc = graph.globals.get('pbc')
+    if pbc is not None:
+        flags = np.asarray(pbc, dtype=bool)
+        if flags.shape != (len(graph.n_node), 3):
+            raise ValueError('K-space training expects PBC flags of shape (num_graphs, 3).')
+        for graph_flags in flags:
+            is_fully_periodic(graph_flags, context='K-space training')
+
+
+def _graph_to_kspace_batch(graph, lr_batch, *, kspace_constants):
+    # Check every training and validation batch, not just the first structure
+    # used to choose a reciprocal grid. Later TFDS records can have other PBC.
+    _validate_kspace_graph_pbc(graph)
+    return jraph_utils.graph_to_batch_fn(
+        graph, lr_batch, kspace_constants=kspace_constants
+    )
 
 
 def _compute_kspace_constants(config, training_data, tf_record_present):
@@ -44,39 +80,36 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
 
     # Get a cell from the first periodic structure in training data.
     if tf_record_present:
-        # For TFDS, peek at the first batch to get the cell. `parallel=False`
-        # is required: this loop breaks after one batch, and the parallel
-        # pipeline's workers would then block forever on a full queue, holding
-        # every slot of the shared ProcessPoolExecutor so the real training
-        # epoch never starts (training hangs at 0 steps with no error).
+        # For TFDS, peek synchronously so a one-batch metadata read does not
+        # start the multiprocessing pipeline.  Do not advance the epoch seed:
+        # this batch is inspected, not used for an optimizer update.
         first_iter = training_data.next_epoch(
-            split='train', mode='train', parallel=False
+            split='train', mode='train', parallel=False, advance_epoch=False
         )
-        for graph_batch, _ in first_iter:
-            cell = graph_batch.globals.get('cell')
-            if cell is not None:
-                # cell shape: (num_graphs, 3, 3) — take the first non-zero cell
-                for g in range(cell.shape[0]):
-                    c = cell[g]
-                    if np.any(c != 0):
-                        cell_3x3 = jnp.array(c)
-                        break
-                else:
-                    continue
-                break
-        else:
-            # (No close() needed here: the for/else runs only once the
-            # generator is exhausted, which already closed it.)
-            raise ValueError(
-                "kspace_electrostatics is enabled but no periodic cell found in training data."
-            )
-        # Release the synchronous generator (and its TFDS iterator) now that the
-        # cell is known; we deliberately consume only one batch.
-        first_iter.close()
+        # Also release the probe when invalid boundary flags raise an error.
+        with closing(first_iter):
+            for graph_batch, _ in first_iter:
+                _validate_kspace_graph_pbc(graph_batch)
+                cell = graph_batch.globals.get('cell')
+                if cell is not None:
+                    # cell shape: (num_graphs, 3, 3) — take the first non-zero cell
+                    for g in range(cell.shape[0]):
+                        c = cell[g]
+                        if np.any(c != 0):
+                            cell_3x3 = jnp.array(c)
+                            break
+                    else:
+                        continue
+                    break
+            else:
+                raise ValueError(
+                    "kspace_electrostatics is enabled but no periodic cell found in training data."
+                )
     else:
         # For ASE/Npz data, training_data is a list of (graph, lr_data) tuples.
         cell_3x3 = None
         for graph, _ in training_data:
+            _validate_kspace_graph_pbc(graph)
             cell = graph.globals.get('cell')
             if cell is not None and np.any(cell != 0):
                 # cell shape: (1, 3, 3) for a single graph
@@ -114,7 +147,7 @@ def _make_graph_to_batch_fn(config, training_data, tf_record_present):
     kspace_constants = _compute_kspace_constants(config, training_data, tf_record_present)
     if kspace_constants is not None:
         return functools.partial(
-            jraph_utils.graph_to_batch_fn,
+            _graph_to_kspace_batch,
             kspace_constants=kspace_constants,
         )
     return jraph_utils.graph_to_batch_fn
@@ -230,6 +263,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     """
     workdir = workdir_from_config(config=config)
     workdir.mkdir(exist_ok=config.training.allow_restart)
+    pending_metadata = {}
 
     # Update the workdir in config with absolute path.
     config.workdir = str(workdir)
@@ -245,7 +279,8 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     training_data, validation_data, data_stats = prepare_training_and_validation_data(
         config=config,
         loader=loader,
-        tf_record_present=tf_record_present
+        tf_record_present=tf_record_present,
+        pending_metadata=pending_metadata,
     )
 
     # If messages are normalized by the average number of neighbors, we need to calculate this quantity from the
@@ -387,11 +422,13 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     logger.info(f"  num_epochs:              {config.training.num_epochs}")
     logger.info("=" * 60)
 
-    with open(workdir / 'hyperparameters.json', 'w') as fp:
-        json.dump(config.to_dict(), fp)
-
-    with open(workdir / "hyperparameters.yaml", "w") as yaml_file:
-        yaml.dump(config.to_dict(), yaml_file, default_flow_style=False)
+    pending_metadata['hyperparameters.json'] = json.dumps(config.to_dict())
+    pending_metadata['hyperparameters.yaml'] = yaml.dump(
+        config.to_dict(), default_flow_style=False
+    )
+    publish_metadata = functools.partial(
+        _publish_training_metadata, workdir, pending_metadata
+    )
 
     # Initialize wandb if needed.
     use_wandb = config.training.use_wandb
@@ -421,6 +458,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             training_data=training_data,
             validation_data=validation_data,
             ckpt_dir=workdir / 'checkpoints',
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             num_epochs=config.training.num_epochs,
@@ -465,6 +503,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             training_iterator=training_data,
             validation_iterator=validation_data,
             ckpt_dir=workdir / 'checkpoints',
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             training_seed=config.training.training_seed,
@@ -820,19 +859,15 @@ def run_fine_tuning(
     # Workdir for fine-tuning experiments.
     workdir = workdir_from_config(config=config)
     workdir.mkdir(exist_ok=True)
+    pending_metadata = {}
 
     # Update the workdir in config with absolute path.
     config.workdir = str(workdir)
 
-    # Save fine-tuning hyper-parameters.
-    with open(workdir / 'fine_tuning.json', mode='w') as fp:
-        json.dump(
-            {
-                'start_from_workdir': start_from_workdir.as_posix(),
-                'strategy': strategy
-            },
-            fp=fp
-        )
+    pending_metadata['fine_tuning.json'] = json.dumps({
+        'start_from_workdir': start_from_workdir.as_posix(),
+        'strategy': strategy,
+    })
 
     # Robust loss configuration. Read before the parameters are counted: the
     # adaptive variant adds learnable parameters to the tree and has to be part
@@ -932,7 +967,8 @@ def run_fine_tuning(
         config=config,
         model_config=None,
         loader=loader,
-        tf_record_present=tf_record_present
+        tf_record_present=tf_record_present,
+        pending_metadata=pending_metadata,
     )
 
     opt = make_optimizer_from_config(config)
@@ -1027,11 +1063,13 @@ def run_fine_tuning(
     logger.info(f"  num_epochs:              {config.training.num_epochs}")
     logger.info("=" * 60)
 
-    with open(workdir / 'hyperparameters.json', 'w') as fp:
-        json.dump(config.to_dict(), fp)
-
-    with open(workdir / "hyperparameters.yaml", "w") as yaml_file:
-        yaml.dump(config.to_dict(), yaml_file, default_flow_style=False)
+    pending_metadata['hyperparameters.json'] = json.dumps(config.to_dict())
+    pending_metadata['hyperparameters.yaml'] = yaml.dump(
+        config.to_dict(), default_flow_style=False
+    )
+    publish_metadata = functools.partial(
+        _publish_training_metadata, workdir, pending_metadata
+    )
 
     # Initialize wandb if needed.
     use_wandb = config.training.use_wandb
@@ -1068,6 +1106,7 @@ def run_fine_tuning(
             validation_iterator=validation_data,
             params=params,
             ckpt_dir=ckpt_dir,
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             training_seed=config.training.training_seed,
@@ -1098,6 +1137,7 @@ def run_fine_tuning(
             validation_data=validation_data,
             params=params,
             ckpt_dir=ckpt_dir, #TODO: or ckpt_dir=workdir / 'checkpoints',?
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             num_epochs=config.training.num_epochs,
@@ -1149,6 +1189,7 @@ def data_loader_from_config(config):
 
     energy_unit = energy_unit_from_config(config=config)
     length_unit = length_unit_from_config(config=config)
+    dipole_vec_unit = dipole_vec_unit_from_config(config=config)
 
     if tf_record_present:
         loader = data.QCMLDataLoaderSparseParallel(
@@ -1156,7 +1197,8 @@ def data_loader_from_config(config):
             input_folders=dataset_paths,
             dataset_weights=dataset_weights,
             length_unit=length_unit,
-            energy_unit=energy_unit
+            energy_unit=energy_unit,
+            dipole_vec_unit=dipole_vec_unit,
         )
     else:
         # config.data.filter.min_distance / max_force are honoured only by the TFDS loader.
@@ -1193,7 +1235,9 @@ def data_loader_from_config(config):
     return loader, tf_record_present
 
 
-def prepare_training_and_validation_data(config, loader, tf_record_present, model_config: Optional = None):
+def prepare_training_and_validation_data(config, loader, tf_record_present,
+                                         model_config: Optional = None,
+                                         pending_metadata=None):
     # Lock the config.
     config = config.lock()
     # If model config is not None, lock it. Otherwise, use model config from the config. 
@@ -1217,22 +1261,15 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
     else:
         dataset_weights = [1.0]  # Default weight for single dataset
 
-    num_train = config.training.num_train
-    num_valid = config.training.num_valid
-
-    # Get the total number of data points.
     if not tf_record_present:
+        num_train = config.training.num_train
+        num_valid = config.training.num_valid
         num_data = loader.cardinality()
-    else:
-        num_data = loader.cardinality()
-        print(f"Number of points in train tfds split: {num_data}")
-
-    if num_train + num_valid > num_data:
-        raise ValueError(
-            f"num_train + num_valid = {num_train + num_valid} exceeds the number of data points {num_data}"
-            f" in {data_filepaths}."
-        )
-    if not tf_record_present:
+        if num_train + num_valid > num_data:
+            raise ValueError(
+                f"num_train + num_valid = {num_train + num_valid} exceeds the number of data points {num_data}"
+                f" in {data_filepaths}."
+            )
         split_seed = config.data.split_seed
         numpy_rng = np.random.RandomState(split_seed)
 
@@ -1275,14 +1312,16 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
         validation_indices = training_and_validation_indices[internal_validation_indices]
         assert len(train_indices) == num_train
         assert len(validation_indices) == num_valid
-        with open(workdir / 'data_splits.json', 'w') as fp:
-            j = dict(
-                training=train_indices.tolist(),
-                validation=validation_indices.tolist(),
-                test=test_indices.tolist()
-            )
-            json.dump(j, fp)
+        _record_split_metadata(workdir, dict(
+            training=train_indices.tolist(),
+            validation=validation_indices.tolist(),
+            test=test_indices.tolist(),
+        ), pending_metadata)
     else:
+        # Prepared TFDS datasets already contain train/validation splits and
+        # use their per-dataset caps. Global counts belong to the ASE/NPZ
+        # random split; they may be null (fine-tuning defaults), or unrelated
+        # to the selected TFDS records.
         # For parallel data loading, we need to ensure batch parameters are set
         if config.training.batch_max_num_nodes is None or config.training.batch_max_num_edges is None:
             raise ValueError(
@@ -1314,13 +1353,9 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
 
         data_stats = None
         # Save the splits.
-        with open(workdir / 'data_splits.json', 'w') as fp:
-            j = dict(
-                training='tfds',
-                validation='tfds',
-                test='tfds',
-            )
-            json.dump(j, fp)
+        _record_split_metadata(workdir, dict(
+            training='tfds', validation='tfds', test='tfds',
+        ), pending_metadata)
 
     # Explicitly unlock the config.
     config = config.unlock()
@@ -1377,7 +1412,9 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
             raise NotImplementedError(
                 'For TFDSDataSets, energy shifting is not supported yet.'
             )
-        # TODO: Handle unit conversion inside the dataloader
+        # Unit conversion is performed by the TFDS loader before filters and
+        # neighbor construction.  Applying it here would convert every batch a
+        # second time.
             
 
     return training_data, validation_data, data_stats
