@@ -44,5 +44,5 @@ def test_custom_model_coverage_uses_its_hyperparameters(tmp_path):
 
 
 def test_custom_model_without_metadata_fails_closed(tmp_path):
-    with pytest.raises(ValueError, match="Cannot determine element coverage"):
+    with pytest.raises(FileNotFoundError, match="hyperparameters.json"):
         supported_elements_for_model(tmp_path)
