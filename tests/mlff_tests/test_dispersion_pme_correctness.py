@@ -13,11 +13,23 @@ try:
 except ImportError:
     from jax import enable_x64 as _enable_x64
 
+from so3lr.mlff.nn.observable.dispersion_ref_data import C6_coef, C6_coef_legacy
 from so3lr.mlff.nn.observable.observable_sparse import (
     DispersionEnergyKspace,
     DispersionEnergySparse,
     _batched_kspace_dispersion,
 )
+
+
+class _OnesC6Head(nn.Module):
+    """Deterministic C6 head for comparing model generations."""
+
+    def __call__(self, inputs):
+        return {
+            'c6_ratios': jnp.ones_like(
+                inputs['atomic_numbers'], dtype=inputs['positions'].dtype
+            )
+        }
 
 
 class _InputC6Head(nn.Module):
@@ -75,6 +87,64 @@ def test_complete_pme_residual_is_value_and_force_continuous_at_cutoff():
         assert abs(crossing_fd_force) < 1.0e-6
         npt.assert_allclose(float(force_fn(jnp.asarray(5.5))), midpoint_fd_force,
                             rtol=2.0e-6, atol=1.0e-10)
+
+
+def _kspace_energies(*, legacy):
+    """Return single-graph and batched PME energies for an H-H cell."""
+    module = DispersionEnergyKspace(
+        prop_keys=None,
+        hirshfeld_ratios=None,
+        c6_ratios=None if legacy else _OnesC6Head(),
+        do_ewald=False,
+        interpolation_nodes=4,
+        legacy=legacy,
+    )
+    inputs = {
+        'positions': jnp.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+        'k_grid_disp': jnp.ones((8, 8, 8)),
+        'k_smearing_disp': jnp.asarray(2.0),
+        'cell': jnp.eye(3) * 10.0,
+        'node_mask': jnp.array([True, True]),
+        'atomic_numbers': jnp.array([1, 1]),
+    }
+    if legacy:
+        inputs['hirshfeld_ratios'] = jnp.ones(2)
+    else:
+        inputs['c6_ratios'] = jnp.ones(2)
+
+    variables = module.init(jax.random.key(0), inputs)
+    single = jnp.sum(module.apply(variables, inputs)['dispersion_energy_kspace'])
+
+    batched_inputs = dict(inputs)
+    batched_inputs.update({
+        'cell': inputs['cell'][None, ...],
+        'batch_segments': jnp.zeros(2, dtype=jnp.int32),
+        'graph_mask': jnp.array([True]),
+    })
+    bound_module = module.bind(variables)
+    batched = jnp.sum(
+        _batched_kspace_dispersion(
+            bound_module, batched_inputs
+        )['dispersion_energy_kspace']
+    )
+    return float(single), float(batched)
+
+
+def test_legacy_reciprocal_c6_selection_matches_single_and_batched_paths():
+    """Both PME paths scale with the selected generation's H reference C6."""
+    # Keep this comparison in float32 even if another test module has globally
+    # enabled x64; production batching uses int32 segment indices, and the
+    # coefficient-selection signal is much larger than float32 roundoff.
+    with _enable_x64(False):
+        legacy_single, legacy_batched = _kspace_energies(legacy=True)
+        v2_single, v2_batched = _kspace_energies(legacy=False)
+
+    expected_ratio = C6_coef_legacy[0] / C6_coef[0]
+    npt.assert_allclose(legacy_single, legacy_batched, rtol=2.0e-6, atol=1.0e-9)
+    npt.assert_allclose(v2_single, v2_batched, rtol=2.0e-6, atol=1.0e-9)
+    npt.assert_allclose(
+        legacy_single / v2_single, expected_ratio, rtol=2.0e-6, atol=1.0e-9
+    )
 
 
 def _heteronuclear_kspace_case(*, do_ewald, grid_size):
