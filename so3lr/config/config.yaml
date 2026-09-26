@@ -140,7 +140,7 @@ training:
   model_seed: 42  # Random seed for model parameter initialization.
   training_seed: 42  # Random seed for shuffling training batches each epoch.
   log_gradient_values: false  # Log the L2 norm of gradients for each parameter group to WandB. Useful for debugging training dynamics.
-  use_wandb: false  # Opt in to sending metrics and a redacted effective config to Weights & Biases (requires `pip install .[wandb]`). No W&B calls are made while false/absent.
+  use_wandb: false  # Opt in to sending metrics and the effective config to Weights & Biases (requires `pip install .[wandb]`). No W&B calls are made while false/absent.
   wandb_init_args:  # Keyword arguments passed to wandb.init() only when use_wandb is true. Put credentials in the W&B environment/login, never in this file.
     name: first_experiment  # Name of this run in the WandB dashboard.
     project: mlff  # WandB project name.

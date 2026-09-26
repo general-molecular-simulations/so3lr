@@ -246,12 +246,9 @@ restart separately; the two files are not a crash-atomic pair. Keep matching
 checkpoint generations when restarting enhanced sampling.
 
 SO3LR's own `.npz` restart format contains only numeric arrays and strings and
-is loaded with NumPy object unpickling disabled. This does **not** make other
-serialization formats safe: legacy/custom model `params.pkl` files and
-PySAGES `.pkl` restart files are pickle-compatible and can execute code while
-being loaded. SO3LR emits a runtime security warning before loading either
-format. Only use them from a trusted source after verifying a published or
-out-of-band checksum; do not load an arbitrary downloaded pickle.
+is loaded with NumPy object unpickling disabled. Model `params.pkl` files and
+PySAGES `.pkl` restart files are pickles and can execute code while being
+loaded; only load them from a trusted source.
 
 #### What restart_save preserves (and what it doesn't)
 
@@ -425,7 +422,7 @@ Basic training command:
 so3lr train --config config.yaml
 ```
 
-### Optional W&B telemetry and configuration privacy
+### Optional W&B logging
 
 Weights & Biases logging is disabled by default for both training and
 fine-tuning. SO3LR does not initialize W&B or send metrics when
@@ -440,14 +437,9 @@ training:
     project: my-project
 ```
 
-Enabling it sends training metrics and a copy of the effective SO3LR
-configuration to Weights & Biases. Before `wandb.init`, SO3LR replaces obvious
-credential-like configuration values and absolute local data/work paths with
-redaction markers. Keep credentials in the W&B login/environment rather than
-the YAML file, and review the remaining configuration before enabling
-telemetry. The W&B client may collect additional runtime, system, repository,
-or environment metadata under its own settings and privacy policy; SO3LR's
-redaction applies to the configuration payload it supplies.
+Enabling it sends training metrics and the full effective SO3LR configuration
+(including paths) to Weights & Biases. Keep credentials in the W&B
+login/environment rather than the YAML file.
 
 ### Training on multiple datasets
 
@@ -1139,10 +1131,8 @@ so3lr --settings md_settings.yaml
 
 PySAGES state (bias potential, histograms, etc.) can be saved and restored independently of the SO3LR MD state:
 
-> **Security warning:** PySAGES restart files are pickle-compatible and may
-> execute arbitrary code when loaded. Only load a restart you trust and whose
-> checksum you have verified. SO3LR warns at runtime but cannot make this
-> third-party serialization format safe.
+> **Note:** PySAGES restart files are pickles and can execute code when
+> loaded. Only load restarts you trust.
 
 ```yaml
 # First run — save both states

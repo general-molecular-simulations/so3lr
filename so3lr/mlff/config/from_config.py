@@ -431,8 +431,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
         _publish_training_metadata, workdir, pending_metadata
     )
 
-    # W&B is a strict opt-in. The helper returns before importing W&B when the
-    # setting is absent/false and redacts the effective config when enabled.
+    # Initialize wandb only if training.use_wandb is explicitly true.
     use_wandb = initialize_wandb(config)
 
     # Adaptive robust loss settings
@@ -1074,7 +1073,7 @@ def run_fine_tuning(
         _publish_training_metadata, workdir, pending_metadata
     )
 
-    # Fine-tuning follows the same opt-in and redaction path as training.
+    # Initialize wandb only if training.use_wandb is explicitly true.
     use_wandb = initialize_wandb(config)
 
     logger.info(

@@ -97,8 +97,7 @@ identified by immutable dated names such as `so3lr-m-2606`.
   carries a bounding cell (a pre-existing error for cells tighter than the
   long-range cutoff). NPZ graphs record their periodic axes, so the
   mixed-periodicity check also covers NPZ data.
-- Loading user-supplied pickle artifacts emits an explicit security warning;
-  artifacts inside the installed package do not (PR #44).
+- SO3LR `.npz` MD restart files are loaded with `allow_pickle=False` (PR #44).
 - Dimer calculations validate the selected model's supported elements before
   evaluation (PR #47).
 - Replaced obsolete notebook imports from the removed top-level `mlff` package
