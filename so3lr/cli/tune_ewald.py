@@ -1,8 +1,13 @@
 """
 Tuning module for Ewald summation parameters.
 
-This tuning module is refactored from:
-https://github.com/lab-cosmo/torch-pme/tree/main/src/torchpme/tuning
+Portions are modified JAX/NumPy adaptations of torch-pme's tuning code at the
+following immutable, content-matching snapshot. This reference does not claim
+that the original checkout SHA was recorded:
+https://github.com/lab-cosmo/torch-pme/tree/d762bc8fe531f919ae0f296e8b67957a859a673a/src/torchpme/tuning
+
+Copyright (c) 2024, torch-pme developers. Used under BSD-3-Clause; the license
+is reproduced in ``LICENSE-BSD-3-CLAUSE`` at the repository root.
 """
 from jax.ops import segment_sum
 from so3lr.mlff.masking.mask import safe_scale, safe_mask
@@ -294,8 +299,8 @@ class GridSearchTuner(TunerBase):
 
 class TuningTimings:
     """
-    This class is refactored from:
-    https://github.com/lab-cosmo/torch-pme/tree/main/src/torchpme/tuning
+    Modified JAX/NumPy adaptation of the matching torch-pme snapshot:
+    https://github.com/lab-cosmo/torch-pme/tree/d762bc8fe531f919ae0f296e8b67957a859a673a/src/torchpme/tuning
 
     Class for timing a calculator.
 
@@ -436,8 +441,8 @@ def tune_ewald(
     model_kwargs: dict[str, Any] = {},
 ) -> tuple[float, dict[str, Any], float]:
     r"""
-    This class is refactored from:
-    https://github.com/lab-cosmo/torch-pme/tree/main/src/torchpme/tuning
+    Modified JAX/NumPy adaptation of the matching torch-pme snapshot:
+    https://github.com/lab-cosmo/torch-pme/tree/d762bc8fe531f919ae0f296e8b67957a859a673a/src/torchpme/tuning
 
     Find the optimal parameters for Ewald summation`.
 
@@ -508,8 +513,8 @@ def tune_ewald(
 
 class EwaldErrorBounds(TuningErrorBounds):
     r"""
-    This class is refactored from:
-    https://github.com/lab-cosmo/torch-pme/tree/main/src/torchpme/tuning
+    Modified JAX/NumPy adaptation of the matching torch-pme snapshot:
+    https://github.com/lab-cosmo/torch-pme/tree/d762bc8fe531f919ae0f296e8b67957a859a673a/src/torchpme/tuning
 
     Error bounds for :class:`torchpme.calculators.ewald.EwaldCalculator`.
 
@@ -542,17 +547,18 @@ class EwaldErrorBounds(TuningErrorBounds):
         :param smearing: see :class:`torchpme.EwaldCalculator` for details
         :param spacing: see :class:`torchpme.EwaldCalculator` for details
         """
-        # return (
-        #     self.prefac**0.5
-        #     / smearing
-        #     / np.sqrt((2 * np.pi) ** 2 * self.volume / (spacing) ** 0.5)
-        #     * np.exp(-((2 * np.pi) ** 2) * smearing**2 / (spacing))
-        # )
+        # torch-pme corrected this bound in
+        # e5a0aaee63972c03617ef4afcd5770b7d27592b8 and
+        # 83a8e69336758681159794e6cf78c440fb68c5f0; the final algebraic form is
+        # 1f612664e8e627143b19e8622bac9d2d81e85022. SO3LR's ``spacing`` is
+        # torch-pme's ``lr_wavelength``. Immutable upstream reference:
+        # https://github.com/lab-cosmo/torch-pme/blob/1f612664e8e627143b19e8622bac9d2d81e85022/src/torchpme/tuning/ewald.py#L174-L180
         return (
-            self.prefac*0.5
+            self.prefac**0.5
             / smearing
-            / np.sqrt((2 * np.pi) ** 2 * self.volume / (spacing) ** 0.5)
-            * np.exp(-((2 * np.pi) ** 2) * smearing**2 / (spacing))
+            / np.pi
+            / np.sqrt(self.volume / spacing)
+            * np.exp(-2 * (np.pi * smearing / spacing) ** 2)
         )
 
     def err_rspace(self, smearing: float, cutoff: float) -> float:

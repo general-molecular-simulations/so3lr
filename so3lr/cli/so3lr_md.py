@@ -17,6 +17,8 @@ import time
 import json
 import logging
 import pathlib
+import stat
+import tempfile
 from pathlib import Path
 from functools import partial
 from logging.handlers import RotatingFileHandler
@@ -99,6 +101,19 @@ def intermediate_quantity_kwargs(observables) -> Dict[str, Any]:
 
 # HDF5 wrapper to replace mlff.mdx.hdfdict
 DataSetEntry = namedtuple('DataSetEntry', ('chunk_length', 'shape', 'dtype'))
+
+
+def _existing_regular_output_mode(path: Path) -> Optional[int]:
+    """Reject links/special files; return an existing regular file's mode."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(
+            f'Output must be a regular file, not a symlink or special file: {path}'
+        )
+    return stat.S_IMODE(metadata.st_mode)
 
 
 class HDF5Store(object):
@@ -186,17 +201,17 @@ class HDF5Store(object):
             try:
                 for key, array in prepared.items():
                     dset = h5f[key]
-                    dset.resize((new_i,) + self.dataset[key].shape)
                     resized.append(dset)
+                    dset.resize((new_i,) + self.dataset[key].shape)
                     dset[self.i:new_i] = array
-            except Exception:
+                h5f.flush()
+            except BaseException:
                 for dset in resized:
                     dset.resize((self.i,) + dset.shape[1:])
                 h5f.flush()
                 raise
 
-            self.i = new_i
-            h5f.flush()
+        self.i = new_i
 
 # Setup logging
 logger = logging.getLogger("SO3LR")
@@ -564,14 +579,14 @@ def init_hdf5_store(
     Returns:
         HDF5Store: Initialized HDF5 storage object.
     """
-    # Convert to Path object and resolve path
-    save_path = Path(save_to).expanduser().resolve()
+    # Do not resolve the final component: that would hide a symlink target.
+    save_path = Path(save_to).expanduser().absolute()
 
     # Create parent directory if it doesn't exist
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Check if file exists
-    if save_path.exists() and not exist_ok:
+    if _existing_regular_output_mode(save_path) is not None and not exist_ok:
         raise RuntimeError(
             f'File exists: {save_path}. '
             f'Set exist_ok=True to override file.'
@@ -653,7 +668,7 @@ def init_hdf5_store(
                 f"stored in HDF5; use --output-format extxyz to record it."
             )
 
-    store = HDF5Store(save_path, datasets=dataset, mode='w')
+    store = HDF5Store(save_path, datasets=dataset, mode='w' if exist_ok else 'w-')
 
     # Write self-describing root-group attributes so the .hdf5 file carries
     # provenance on its own (model, ensemble, timestep, system, observables).
@@ -802,6 +817,9 @@ def write_to_extxyz(
     obs_dict: Optional[MutableMapping[str, list]] = None,
     indices: Optional[List[int]] = None,
     fractional_coordinates: bool = True,
+    *,
+    append: bool = True,
+    overwrite: bool = False,
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
     """
     Write trajectory data to an extended XYZ file.
@@ -822,6 +840,10 @@ def write_to_extxyz(
         fractional_coordinates: If True, positions are in fractional coordinates
             and will be scaled by box vectors. If False, positions are already
             in Cartesian Angstroms and are written directly.
+        append: Append this batch to a trajectory. MD uses False for the first
+            batch of a fresh run, then True for later batches and restarts.
+        overwrite: Allow the first batch (append=False) to replace an existing
+            file. The old file is retained until the complete batch is written.
 
     Returns:
         Tuple of empty lists (momenta, positions, boxes, obs_dict) to clear memory
@@ -921,10 +943,27 @@ def write_to_extxyz(
                 atoms_copy = atoms_copy[indices]
             atoms_list.append(atoms_copy)
 
-        # Write all atoms to file at once
-        file_exists = output_path.exists()
-        ase.io.write(output_path, atoms_list,
-                     format='extxyz', append=file_exists)
+        output_mode = _existing_regular_output_mode(output_path)
+        if append:
+            ase.io.write(output_path, atoms_list, format='extxyz', append=True)
+        else:
+            # Stage only the first batch: neither serialization failure nor a
+            # run that produces no frames should erase the previous trajectory.
+            # Later batches retain the normal streaming append behavior.
+            with tempfile.TemporaryDirectory(
+                dir=output_path.parent, prefix=f'.{output_path.name}.',
+            ) as temporary_dir:
+                temporary_path = Path(temporary_dir) / output_path.name
+                with temporary_path.open('w', encoding='utf-8') as stream:
+                    ase.io.write(stream, atoms_list, format='extxyz')
+                if overwrite:
+                    if output_mode is not None:
+                        temporary_path.chmod(output_mode)
+                    os.replace(temporary_path, output_path)
+                else:
+                    # Exclusive creation also protects a file another job
+                    # created after the initial output-path check.
+                    os.link(temporary_path, output_path)
 
         # Clear lists to free memory
         obs_dict = {o: [] for o in obs_dict.keys()}
@@ -2518,24 +2557,27 @@ def _validate_md_output_write_policy(
     output_format: Optional[str],
     overwrite: bool,
     restart_load_path: Optional[Union[str, Path]],
-    current_run_output: bool = False,
-) -> None:
+) -> bool:
     """Reject an existing trajectory that the selected writer would truncate.
 
     EXTXYZ is intentionally appendable when continuing from a restart. HDF5 is
     opened in ``mode='w'`` and therefore needs a fresh output path unless the
-    caller explicitly opts in to replacement with ``--overwrite``. The
-    ``current_run_output`` exception is reserved for the relaxation stage that
-    created this same run's output immediately before MD starts.
+    caller explicitly opts in to replacement with ``--overwrite``. Return
+    whether the first EXTXYZ batch should append to an existing restart output.
     """
-    if output_file is None or overwrite or current_run_output:
-        return
+    append = (
+        restart_load_path is not None and output_format == 'extxyz'
+        and not overwrite
+    )
+    if output_file is None:
+        return append
 
     output_path = Path(output_file)
-    if not output_path.exists():
-        return
-    if restart_load_path is not None and output_format == 'extxyz':
-        return
+    output_mode = _existing_regular_output_mode(output_path)
+    if output_mode is None or overwrite:
+        return append
+    if append:
+        return True
 
     if restart_load_path is not None and output_format == 'hdf5':
         raise RuntimeError(
@@ -2564,6 +2606,12 @@ def perform_md(
         opt_structure (Optional[jnp.ndarray], optional): Optimized structure, if 
                                     already available. Defaults to None.
     """
+    # Direct Python callers do not necessarily enter through run(). Configure
+    # precision before constructing any arrays, as perform_min already does.
+    setup_jax_globals(
+        precision=all_settings.get('precision', 'float32'),
+        matmul_precision=all_settings.get('matmul_precision', 'highest'),
+    )
     # Setup logger
     log_file = all_settings.get('log_file')
     setup_logger(log_file)
@@ -2579,12 +2627,11 @@ def perform_md(
     # Refuse to clobber existing output unless the user opted in via
     # --overwrite. A deliberate exception lets EXTXYZ append a continued run;
     # HDF5 cannot append safely and therefore still requires a fresh path.
-    _validate_md_output_write_policy(
+    append_extxyz = _validate_md_output_write_policy(
         output_file=output_file,
         output_format=output_format,
         overwrite=overwrite,
-        restart_load_path=restart_load_path,
-        current_run_output=bool(all_settings.get('_relax_wrote_output')),
+        restart_load_path=restart_load_path if restart else None,
     )
 
     # Model parameters
@@ -3335,7 +3382,7 @@ def perform_md(
             batch_size=save_buffer,
             num_atoms=num_atoms,
             num_box_entries=tuple(trajectory_box.shape),
-            exist_ok=True,
+            exist_ok=overwrite,
             observables=observables,
             num_features=_num_features,
             so3lr_version=_so3lr_version,
@@ -3622,8 +3669,11 @@ def perform_md(
                         output_atom_indices,
                         fractional_coordinates=(
                             fractional_coordinates and not output_cartesian_positions
-                        )
+                        ),
+                        append=append_extxyz,
+                        overwrite=overwrite,
                     )
+                    append_extxyz = True
 
     # Always persist the accepted final state, even when the number of cycles
     # is not a multiple of save_buffer.  This is intentionally independent of
@@ -3672,7 +3722,9 @@ def perform_md(
                 output_atom_indices,
                 fractional_coordinates=(
                     fractional_coordinates and not output_cartesian_positions
-                )
+                ),
+                append=append_extxyz,
+                overwrite=overwrite,
             )
 
     logger.info('Results saved to: ' + output_file)
@@ -3834,8 +3886,18 @@ def perform_min(
     output_format = all_settings.get('output_format')
     overwrite = bool(all_settings.get('overwrite', False))
 
+    if output_format == 'hdf5':
+        # Optimization currently writes EXTXYZ even when MD uses HDF5. Check
+        # the actual destination, not just the requested HDF5 name.
+        output_path = Path(output_file)
+        output_file = str(output_path.with_name(f'{output_path.stem}_opt.xyz'))
+        logger.warning(
+            f"Optimization trajectories use EXTXYZ; writing {output_file}."
+        )
+
     # Refuse to clobber existing output unless --overwrite was passed.
-    if output_file and Path(output_file).exists() and not overwrite:
+    if (output_file and _existing_regular_output_mode(Path(output_file)) is not None
+            and not overwrite):
         raise RuntimeError(
             f"Output file already exists: {output_file}. Refusing to overwrite. "
             f"Pass --overwrite to overwrite, or choose a different --output."
@@ -3902,8 +3964,15 @@ def perform_min(
                            total_charge=total_charge,
                            num_unpaired_electrons=num_unpaired_electrons,
                            verbose=log_input)
-    cell = initial_geometry.get_cell()
-    cell = check_cell(cell, lr_cutoff, kspace_electrostatics, kspace_smearing)
+    cell = cell_from_atoms_boundary_conditions(
+        initial_geometry, lr_cutoff, kspace_electrostatics, kspace_smearing,
+    )
+    if kspace_electrostatics is not None and cell is None:
+        raise ValueError(
+            f"kspace_electrostatics={kspace_electrostatics!r} requires a periodic "
+            "cell, but the input geometry has none. Either supply a cell, or "
+            "omit kspace_electrostatics."
+        )
 
     if cell is not None:
         shift_displacement = 'periodic'
@@ -4095,13 +4164,12 @@ def perform_min(
 
     # Save optimization result and return optimized geometry
     positions = minimization_trajectory
-    if output_format == 'extxyz':
-        write_to_extxyz(output_file, initial_geometry, boxes=box, momenta=None, positions=positions)
-    elif output_format == 'hdf5':
-        logger.warning(f"Output format is 'hdf5', changing output file extension to 'xyz' for minimization.") #TODO: Saving in xyz for simplicity for now, add hdf5 support
-        output_file = output_file.rsplit('.', 1)[0] + '_opt.xyz'
-        write_to_extxyz(output_file, initial_geometry, boxes=box, momenta=None, positions=positions)
-        # write_to_hdf5(hdf5_store, momenta=None, positions=positions, boxes=box)
+    if output_format in ('extxyz', 'hdf5'):
+        write_to_extxyz(
+            output_file, initial_geometry, boxes=box, momenta=None,
+            positions=positions, fractional_coordinates=fractional_coordinates,
+            append=False, overwrite=overwrite,
+        )
     
     logger.info(f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
 
@@ -4186,7 +4254,23 @@ def save_state(
         # stochastic trajectory continues deterministically across a restart.
         state_dict.update(rng=state.rng)
     state_dict.update(ensemble=ensemble)
-    np.savez(path_to_save, **state_dict)
+    # Preserve NumPy's historical suffix behavior while writing through a file
+    # handle, so a serialization failure cannot truncate the last checkpoint.
+    destination = Path(path_to_save)
+    if not str(destination).endswith('.npz'):
+        destination = Path(str(destination) + '.npz')
+    output_mode = _existing_regular_output_mode(destination)
+    with tempfile.TemporaryDirectory(
+        dir=destination.parent, prefix=f'.{destination.name}.',
+    ) as temporary_dir:
+        temporary_path = Path(temporary_dir) / destination.name
+        with temporary_path.open('wb') as stream:
+            np.savez(stream, **state_dict)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if output_mode is not None:
+            temporary_path.chmod(output_mode)
+        os.replace(temporary_path, destination)
 
 
 def load_state(
@@ -4533,12 +4617,21 @@ def run(
             logger.info('Restarting MD, skipping relaxation.')
             opt_structure = None
         else:
-            opt_structure = perform_min(settings, log_input=False)
-            # perform_min just wrote the optimization trajectory to output_file
-            # (extxyz). Mark it so the MD overwrite guard below does not refuse
-            # the file THIS run's own relax phase created. Stale output left by a
-            # previous run is still caught by perform_min's own guard above.
-            settings['_relax_wrote_output'] = True
+            # Validate the MD destination before writing a separate relaxation
+            # trajectory. Optimization frames are not accepted MD frames.
+            _validate_md_output_write_policy(
+                output_file=settings.get('output_file'),
+                output_format=settings.get('output_format'),
+                overwrite=bool(settings.get('overwrite', False)),
+                restart_load_path=None,
+            )
+            output_path = Path(settings['output_file'])
+            relaxation_settings = dict(settings)
+            relaxation_settings['output_file'] = str(
+                output_path.with_name(f'{output_path.stem}_opt.xyz')
+            )
+            relaxation_settings['output_format'] = 'extxyz'
+            opt_structure = perform_min(relaxation_settings, log_input=False)
             logger.info("=" * 60)
     else:
         opt_structure = None

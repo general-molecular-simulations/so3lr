@@ -958,7 +958,11 @@ def run_fine_tuning(
 
     # Create a loader and check if tf records are present.
     loader, tf_record_present = data_loader_from_config(
-        config=config
+        config=config,
+        finetuning_parameter_selection={
+            'trainable': trainable_subset_keys,
+            'frozen': frozen_subset_keys,
+        },
     )
 
     # Prepare training and validation data and load the data set statistics.
@@ -1150,11 +1154,13 @@ def run_fine_tuning(
     logger.info('Training has finished!')
 
 
-def data_loader_from_config(config):
+def data_loader_from_config(config, finetuning_parameter_selection=None):
     """Create a data loader from config.
     
     Args:
         config: Configuration object
+        finetuning_parameter_selection: Optional resolved trainable/frozen
+            keys included in TFDS restart validation.
         
     Returns:
         DataLoader instance and tf_record_present flag
@@ -1195,6 +1201,7 @@ def data_loader_from_config(config):
             length_unit=length_unit,
             energy_unit=energy_unit,
             dipole_vec_unit=dipole_vec_unit,
+            finetuning_parameter_selection=finetuning_parameter_selection,
         )
     else:
         # config.data.filter.min_distance / max_force are honoured only by the TFDS loader.

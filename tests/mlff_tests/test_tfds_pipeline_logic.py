@@ -174,7 +174,8 @@ def test_loader_restart_fingerprint_changes_with_trajectory_settings():
     assert _canonical_fingerprint(base) != _canonical_fingerprint(changed)
 
 
-def test_loader_restart_fingerprint_payload_covers_data_and_graph_config():
+@pytest.fixture
+def fingerprint_loader():
     loader = QCMLDataLoaderSparseParallel.__new__(QCMLDataLoaderSparseParallel)
     loader.input_folders = ['/dataset/version']
     loader.dataset_weights = [3.0]
@@ -212,6 +213,12 @@ def test_loader_restart_fingerprint_payload_covers_data_and_graph_config():
         'record_shards': [{'name': 'train.tfrecord-00000', 'size_bytes': 80}],
     }]
     loader._dataset_sizes = lambda mode: [17 if mode == 'train' else 5]
+    return loader
+
+
+def test_loader_restart_fingerprint_payload_covers_data_and_graph_config(
+        fingerprint_loader):
+    loader = fingerprint_loader
 
     payload = loader.restart_fingerprint_payload()
     assert payload['selected_train_sizes'] == [17]
@@ -239,11 +246,41 @@ def test_loader_restart_fingerprint_payload_covers_data_and_graph_config():
     assert loader.restart_fingerprint() != first
 
 
-def test_atomic_training_state_round_trip_and_fingerprint_validation(tmp_path):
+def test_finetuning_selection_fingerprint_preserves_aliases_and_plain_training(
+        fingerprint_loader):
+    loader = fingerprint_loader
+    plain = loader.restart_fingerprint()
+    assert 'finetuning_parameter_selection' not in loader.restart_fingerprint_payload()
+    fingerprints = []
+    for strategy in ('final_mlp', 'freeze_all_but_final_mlp'):
+        trainable, frozen = from_config.resolve_finetuning_strategy(strategy, 2)
+        loader.finetuning_parameter_selection = {
+            'trainable': trainable, 'frozen': frozen,
+        }
+        fingerprints.append(loader.restart_fingerprint())
+    assert fingerprints[0] == fingerprints[1] != plain
+    loader.finetuning_parameter_selection['trainable'] = list(reversed(trainable)) + trainable
+    assert loader.restart_fingerprint() == fingerprints[0]
+    loader.finetuning_parameter_selection['trainable'].append('adaptive_robust_loss')
+    assert loader.restart_fingerprint() != fingerprints[0]
+    loader.finetuning_parameter_selection = None
+    assert loader.restart_fingerprint() == plain
+
+
+@pytest.mark.parametrize('masked_sgd', [False, True])
+def test_atomic_training_state_round_trip_and_fingerprint_validation(
+        tmp_path, fingerprint_loader, masked_sgd):
     params = {'w': jnp.array([1.0, -2.0])}
     optimizer = optax.adam(1e-3)
+    if masked_sgd:
+        optimizer = training_utils.freeze_parameters(
+            optax.sgd(1e-3), trainable_subset_keys=['w']
+        )
+        fingerprint_loader.finetuning_parameter_selection = {
+            'trainable': ['w'], 'frozen': None,
+        }
     optimizer_state = optimizer.init(params)
-    fingerprint = 'ab' * 32
+    fingerprint = fingerprint_loader.restart_fingerprint()
     state = _make_tfds_training_state(
         step=120,
         restart_fingerprint=fingerprint,
@@ -309,12 +346,23 @@ def test_atomic_training_state_round_trip_and_fingerprint_validation(tmp_path):
     npt.assert_allclose(deployed['w'], [0.9, -1.8])
 
     manager = checkpoint_utils.make_training_checkpoint_manager(tmp_path)
+    changed_fingerprint = 'cd' * 32
+    if masked_sgd:
+        # Neither stateless SGD nor zero_grads stores the mask in its state.
+        # A different selection must fail even when the restore tree matches.
+        optimizer = training_utils.freeze_parameters(
+            optax.sgd(1e-3), trainable_subset_keys=[]
+        )
+        assert (jax.tree_util.tree_structure(optimizer.init(params))
+                == jax.tree_util.tree_structure(optimizer_state))
+        fingerprint_loader.finetuning_parameter_selection['trainable'] = []
+        changed_fingerprint = fingerprint_loader.restart_fingerprint()
     with pytest.raises(RuntimeError, match='restart fingerprint changed'):
         _restore_tfds_training_state(
             manager,
             step=120,
             optimizer=optimizer,
-            restart_fingerprint='cd' * 32,
+            restart_fingerprint=changed_fingerprint,
         )
     manager.close()
 

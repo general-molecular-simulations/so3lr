@@ -1,4 +1,8 @@
 """Evaluation utilities for SO3LR models."""
+from contextlib import contextmanager
+import os
+import stat
+import tempfile
 import jax
 import jraph
 import numpy as np
@@ -194,10 +198,41 @@ def calculate_metrics(
     return metrics
 
 
+def _check_output_destination(destination: Path, *, overwrite: bool) -> None:
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        raise RuntimeError(f"Output destination is not a regular file: {destination}")
+    if destination.exists() and not overwrite:
+        raise RuntimeError(
+            f"Output file already exists: {destination}. Refusing to overwrite. "
+            "Pass --overwrite or choose a different --save-to path."
+        )
+
+
+@contextmanager
+def _staged_output(destination: Path, *, overwrite: bool):
+    """Replace one complete file; this is not a multi-file transaction."""
+    _check_output_destination(destination, overwrite=overwrite)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.so3lr-eval-', dir=destination.parent) as folder:
+        temporary = Path(folder) / destination.name
+        yield temporary
+        _check_output_destination(destination, overwrite=overwrite)
+        if overwrite:
+            if destination.exists():
+                temporary.chmod(stat.S_IMODE(destination.stat().st_mode))
+            os.replace(temporary, destination)
+        else:
+            # Exclusive creation remains enforced after a long evaluation;
+            # unlike a preflight existence check, this cannot clobber a rival job.
+            os.link(temporary, destination)
+
+
 def save_to_file(
     predicted_graphs: List,
     save_to: str,
-    num_data: int
+    num_data: int,
+    *,
+    overwrite: bool = True,
 ) -> None:
     """
     Save predictions to an extxyz file.
@@ -215,6 +250,8 @@ def save_to_file(
     
     # Convert the length to Python int to avoid JAX array issues with tqdm
     total = len(predicted_graphs)
+    if total == 0:
+        raise ValueError("Cannot save an empty prediction collection.")
 
     # Label keys that the dataloader fills with NaN when the source extxyz
     # info{} did not actually carry that ground-truth value. The real model
@@ -231,13 +268,13 @@ def save_to_file(
         except (TypeError, ValueError):
             return False
 
-    # Use tqdm for progress reporting
-    for predicted_graph in tqdm(predicted_graphs, desc="Saving predictions"):
-        atoms = jraph_to_ase_atoms(predicted_graph)
-        for _k in _label_keys_to_check:
-            if _k in atoms.info and _is_all_nan(atoms.info[_k]):
-                del atoms.info[_k]
-        write(save_to, images=atoms, append=True)
+    with _staged_output(Path(save_to), overwrite=overwrite) as temporary:
+        for index, predicted_graph in enumerate(tqdm(predicted_graphs, desc="Saving predictions")):
+            atoms = jraph_to_ase_atoms(predicted_graph)
+            for _k in _label_keys_to_check:
+                if _k in atoms.info and _is_all_nan(atoms.info[_k]):
+                    del atoms.info[_k]
+            write(temporary, images=atoms, format='extxyz', append=index > 0)
 
     logger.info(f'Successfully saved predictions for {total} structures')
 
@@ -299,8 +336,9 @@ def evaluate_so3lr_on(
     log_file : str or None
         Path to log file. If None, logging only goes to console.
     overwrite : bool
-        If True and `save_to` already exists, truncate and overwrite it.
-        If False (default) a pre-existing `save_to` raises RuntimeError.
+        Replace existing predictions and/or embedding archives only when True.
+        Otherwise a pre-existing output raises RuntimeError. Each file is
+        replaced separately; the outputs are not a multi-file transaction.
         Matches the --overwrite policy used by perform_md / perform_min.
 
     Returns:
@@ -353,20 +391,8 @@ def evaluate_so3lr_on(
     if observable_targets:
         logger.info(f"Observable targets (no ground truth expected): {', '.join(observable_targets)}")
 
-    # Embeddings ('x') are large and saved to a separate compressed NPZ file.
-    # Destination: when --save-to is provided the NPZ lands next to it; when
-    # --save-to is None it lands next to --datafile, which may be a read-only
-    # location (e.g. a shared dataset directory) and fail at write time. The
-    # final path is logged via `Embeddings saved to: ...` when the write
-    # succeeds; pass --save-to under a writable directory to control it.
-    save_x_bool = 'x' in target_list
-    if save_x_bool:
-        base_path = save_to if save_to is not None else datafile
-        npz_path = Path(base_path).with_name(Path(base_path).stem + '_x.npz')
-        all_x = []  # accumulates (n_atoms_i, features) per structure
-
     # Process input file path
-    datafile = Path(datafile).resolve().expanduser()
+    datafile = Path(datafile).expanduser().resolve()
     if not datafile.exists():
         raise FileNotFoundError(f"Data file not found: {datafile}")
 
@@ -375,12 +401,10 @@ def evaluate_so3lr_on(
     # behave the same way: refuse to clobber by default, opt in explicitly.
     save_predictions_bool = save_to is not None
     if save_predictions_bool:
-        save_to = Path(save_to).resolve().expanduser()
-        if save_to.exists() and not overwrite:
-            raise RuntimeError(
-                f"Output file already exists: {save_to}. Refusing to overwrite. "
-                f"Pass --overwrite to overwrite, or choose a different --save-to."
-            )
+        # Do not resolve the final component: that would hide a symlink from
+        # the output guard and redirect replacement to its target.
+        save_to = Path(save_to).expanduser().absolute()
+        _check_output_destination(save_to, overwrite=overwrite)
 
         if save_to.suffix not in ('.xyz', '.extxyz'):
             raise ValueError(
@@ -388,6 +412,15 @@ def evaluate_so3lr_on(
 
         # Create parent directory if it doesn't exist
         save_to.parent.mkdir(parents=True, exist_ok=True)
+
+    # Embeddings use the same explicit overwrite policy as predictions. With
+    # no --save-to they live beside the input; check before loading the model.
+    save_x_bool = 'x' in target_list
+    if save_x_bool:
+        base_path = save_to if save_to is not None else datafile
+        npz_path = base_path.with_name(base_path.stem + '_x.npz')
+        _check_output_destination(npz_path, overwrite=overwrite)
+        all_x = []
 
     # Initialize the model. A registered name (see model_registry) or a custom
     # path; None falls back to the default model.
@@ -704,7 +737,8 @@ def evaluate_so3lr_on(
         if save_x_bool and all_x:
             x_concat = np.concatenate(all_x, axis=0)  # (total_atoms, features)
             n_atoms = np.array([xi.shape[0] for xi in all_x], dtype=np.int32)
-            np.savez_compressed(npz_path, embeddings=x_concat, n_atoms=n_atoms)
+            with _staged_output(npz_path, overwrite=overwrite) as temporary:
+                np.savez_compressed(temporary, embeddings=x_concat, n_atoms=n_atoms)
             logger.info(f'Embeddings saved to: {npz_path}  '
                         f'(shape: {x_concat.shape}, {len(all_x)} structures)')
 
@@ -784,7 +818,7 @@ def evaluate_so3lr_on(
 
         # Save predictions if requested
         if save_predictions_bool:
-            save_to_file(predicted, str(save_to), num_data)
+            save_to_file(predicted, str(save_to), num_data, overwrite=overwrite)
 
         total_time_end = time.time()
         logger.info(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
