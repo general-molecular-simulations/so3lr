@@ -615,7 +615,8 @@ class QCMLDataLoaderSparseParallel:
     STOP_TOKEN = StopToken()
 
     def __init__(self, config, input_folders, dataset_weights, length_unit,
-                 energy_unit, dipole_vec_unit=1.0):
+                 energy_unit, dipole_vec_unit=1.0,
+                 finetuning_parameter_selection=None):
         """Initialize the data loader with configuration parameters.
 
         Args:
@@ -625,8 +626,11 @@ class QCMLDataLoaderSparseParallel:
             length_unit: Unit for length measurements.
             energy_unit: Unit for energy measurements.
             dipole_vec_unit: Unit for dipole-vector measurements.
+            finetuning_parameter_selection: Resolved trainable/frozen keys,
+                when this loader is used for fine-tuning.
         """
         self.config = config
+        self.finetuning_parameter_selection = finetuning_parameter_selection
         self.input_folders = input_folders
         if dataset_weights is None:
             dataset_weights = [1.0] * len(input_folders)
@@ -892,7 +896,7 @@ class QCMLDataLoaderSparseParallel:
                 ),
             }
 
-        return {
+        payload = {
             'fingerprint_schema_version': _TFDS_STREAM_FINGERPRINT_VERSION,
             'epoch_stream_version': _TFDS_EPOCH_STREAM_VERSION,
             'loader': f'{type(self).__module__}.{type(self).__qualname__}',
@@ -953,6 +957,16 @@ class QCMLDataLoaderSparseParallel:
                 'jraph': _installed_version('jraph'),
             },
         }
+        selection = getattr(self, 'finetuning_parameter_selection', None)
+        if selection is not None:
+            # Stateless optimizers do not store their parameter masks. Check
+            # the resolved selection explicitly; aliases/order are immaterial.
+            # Omit this for ordinary training to preserve existing fingerprints.
+            payload['finetuning_parameter_selection'] = {
+                name: None if keys is None else sorted(set(keys))
+                for name, keys in selection.items()
+            }
+        return payload
 
     def restart_fingerprint(self):
         """SHA-256 identity for deterministic TFDS trajectory reconstruction."""

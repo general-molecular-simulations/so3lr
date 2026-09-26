@@ -29,9 +29,16 @@ def test_training_entry_point_keeps_metadata_when_loop_rejects_restart(
             'batch_max_num_pairs': 0, 'loss_weights': {'energy': 1.0},
             'eval_every_num_steps': 1, 'training_seed': 0, 'model_seed': 0,
             'log_gradient_values': False, 'num_epochs': 1, 'use_wandb': False,
+            'use_adaptive_robust_loss': fine_tune,
         },
     })
-    monkeypatch.setattr(from_config, 'data_loader_from_config', lambda **kwargs: (object(), tfds))
+    loader_calls = []
+
+    def make_loader(**kwargs):
+        loader_calls.append(kwargs)
+        return object(), tfds
+
+    monkeypatch.setattr(from_config, 'data_loader_from_config', make_loader)
 
     def prepare(*, pending_metadata, **kwargs):
         pending_metadata['data_splits.json'] = 'changed split metadata'
@@ -50,11 +57,13 @@ def test_training_entry_point_keeps_metadata_when_loop_rejects_restart(
             'model': {'num_layers': 1, 'message_normalization': None},
         }))
         monkeypatch.setattr(from_config, 'resolve_finetuning_strategy',
-                            lambda *args, **kwargs: (None, None))
+                            lambda *args, **kwargs: (['w'], None))
         monkeypatch.setattr(from_config.checkpoint_utils, 'load_params_from_workdir',
                             lambda *args: {'w': jnp.array(0.0)})
         monkeypatch.setattr(training_utils, 'expand_observables_to_theory_levels',
                             lambda params: params)
+        monkeypatch.setattr(training_utils, 'freeze_parameters',
+                            lambda optimizer, **kwargs: optimizer)
         monkeypatch.setattr(from_config, 'print_param_shapes', lambda *args: None)
         for name in ('count_params', 'count_trainable_params'):
             monkeypatch.setattr(from_config, name, lambda *args, **kwargs: 1)
@@ -76,6 +85,12 @@ def test_training_entry_point_keeps_metadata_when_loop_rejects_restart(
         else:
             from_config.run_training(config)
     assert len(calls) == 1
+    if fine_tune:
+        assert loader_calls[0]['finetuning_parameter_selection'] == {
+            'trainable': ['w', 'adaptive_robust_loss'], 'frozen': None,
+        }
+    else:
+        assert 'finetuning_parameter_selection' not in loader_calls[0]
     for name in names:
         assert (tmp_path / name).read_text() == 'original checkpoint metadata'
 
