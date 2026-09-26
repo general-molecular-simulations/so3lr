@@ -20,7 +20,6 @@ from .. import __version__
 # same table into parameter keys, so the two cannot drift apart.
 from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
 from ..md_observables import MD_OBSERVABLES
-from ..md_settings_validation import validate_positive_md_settings
 
 # NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
 # submodules, which pull in jax/flax/jax-md/glp/orbax) are deferred so that
@@ -1006,7 +1005,6 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
         settings_dict.setdefault(key, default)
 
     settings_dict = canonicalize_ensemble(settings_dict)
-    validate_positive_md_settings(settings_dict)
 
     # Fast-fail on missing required keys before setup_logger / banner /
     # get_hardware_info (which triggers a slow JAX init). `input_file` is the
@@ -1511,7 +1509,9 @@ def nvt_langevin_md(**kwargs) -> None:
 
 
 # Define the 'npt' subcommand
-@cli.command(name='npt', help="Run NPT molecular dynamics simulation with `so3lr npt --input geometry.xyz`.")
+@cli.command(name='npt', help="Run NPT molecular dynamics simulation with `so3lr npt --input geometry.xyz`. "
+                              "Box coupling is isotropic; set `npt_coupling: semi-isotropic` in a settings "
+                              "YAML for the EXPERIMENTAL semi-isotropic mode (anisotropic is unsupported).")
 @common_io_options
 @common_model_options
 @kspace_options
@@ -1523,6 +1523,8 @@ def npt_md(**kwargs) -> None:
     Run NPT (constant pressure and temperature) MD simulation using the Nose-Hoover chain thermostat and barostat.
 
     Note: NPT simulations require a periodic cell in the input structure.
+    Semi-isotropic coupling (YAML `npt_coupling`) is experimental; fully
+    anisotropic coupling is not supported.
 
     Example:
         so3lr npt --input geometry.xyz --temperature 300 --pressure 1

@@ -19,6 +19,7 @@ import logging
 import pathlib
 import stat
 import tempfile
+from numbers import Integral
 from pathlib import Path
 from functools import partial
 from logging.handlers import RotatingFileHandler
@@ -46,6 +47,7 @@ from so3lr.mlff.nn.observable.observable_sparse import (
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
 from so3lr.jaxmd_utils import to_jax_md as _to_jax_md
+from so3lr.pbc import is_fully_periodic
 from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
 
 import jaxpme
@@ -66,7 +68,6 @@ import h5py
 from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
-from ..md_settings_validation import validate_positive_md_settings
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -143,73 +144,28 @@ class HDF5Store(object):
                     chunks=(x.chunk_length,) + x.shape)
 
     def append(self, x: Dict):
-        """Append one or more frames after validating the complete batch.
+        """Append a batch of frames; each array is shaped (n_frames, *dataset_shape).
 
-        The old store appended a single fixed-size *buffer* as one HDF5 row.
-        That layout could not represent the final short buffer without either
-        dropping frames or broadcasting duplicates.  Dataset shapes are now
-        frame-major, and this method grows their leading frame axis by the
-        actual number of values supplied.
+        The whole batch is validated before any dataset is resized, so a bad
+        batch cannot leave datasets with different frame counts.
         """
-        if not x:
+        arrays = {k: np.asarray(v, dtype=self.dataset[k].dtype) for k, v in x.items()}
+        shapes = {k: a.shape for k, a in arrays.items()}
+        n_frames = {s[0] for s in shapes.values() if s}
+        if len(n_frames) > 1 or any(s[1:] != self.dataset[k].shape for k, s in shapes.items()):
+            raise ValueError(
+                f"HDF5 batch must be (n_frames, *dataset_shape) with the same "
+                f"n_frames for every dataset; received {shapes}."
+            )
+        n = n_frames.pop() if n_frames else 0
+        if n == 0:
             return
-
-        unknown = sorted(set(x) - set(self.dataset))
-        if unknown:
-            raise KeyError(f"Unknown HDF5 dataset(s): {unknown}")
-
-        prepared = {}
-        n_frames = None
-        for key, values in x.items():
-            entry = self.dataset[key]
-            array = np.asarray(values, dtype=entry.dtype)
-            expected_shape = entry.shape
-            if array.ndim != len(expected_shape) + 1 or array.shape[1:] != expected_shape:
-                raise ValueError(
-                    f"Dataset '{key}' expects a batch shaped "
-                    f"(n_frames, {', '.join(map(str, expected_shape))}), "
-                    f"received {array.shape}."
-                )
-            if n_frames is None:
-                n_frames = array.shape[0]
-            elif array.shape[0] != n_frames:
-                raise ValueError(
-                    f"All HDF5 arrays must contain the same number of frames; "
-                    f"'{key}' has {array.shape[0]}, expected {n_frames}."
-                )
-            prepared[key] = array
-
-        if not n_frames:
-            return
-
         with h5py.File(self.datapath, mode='a') as h5f:
-            # Check the on-disk state before resizing any dataset.  A failed
-            # partial write must never leave arrays with mismatched lengths.
-            for key in prepared:
-                if key not in h5f:
-                    raise KeyError(f"HDF5 dataset '{key}' does not exist")
-                if h5f[key].shape[0] != self.i:
-                    raise RuntimeError(
-                        f"HDF5 dataset '{key}' has {h5f[key].shape[0]} frames, "
-                        f"but the store expected {self.i}."
-                    )
-
-            new_i = self.i + n_frames
-            resized = []
-            try:
-                for key, array in prepared.items():
-                    dset = h5f[key]
-                    resized.append(dset)
-                    dset.resize((new_i,) + self.dataset[key].shape)
-                    dset[self.i:new_i] = array
-                h5f.flush()
-            except BaseException:
-                for dset in resized:
-                    dset.resize((self.i,) + dset.shape[1:])
-                h5f.flush()
-                raise
-
-        self.i = new_i
+            for key, array in arrays.items():
+                h5f[key].resize((self.i + n,) + self.dataset[key].shape)
+                h5f[key][self.i:] = array
+            h5f.flush()
+        self.i += n
 
 # Setup logging
 logger = logging.getLogger("SO3LR")
@@ -590,19 +546,8 @@ def init_hdf5_store(
             f'Set exist_ok=True to override file.'
         )
 
-    if isinstance(batch_size, bool) or not isinstance(batch_size, (int, np.integer)) or batch_size <= 0:
-        raise ValueError(
-            f"batch_size must be a positive integer (received {batch_size!r})."
-        )
-
     storage_dtype = np.dtype(dtype)
-    box_shape = (
-        (int(num_box_entries),)
-        if isinstance(num_box_entries, (int, np.integer))
-        else tuple(int(n) for n in num_box_entries)
-    )
-    if not box_shape or any(n <= 0 for n in box_shape):
-        raise ValueError(f"Invalid HDF5 box shape: {box_shape}")
+    box_shape = tuple(int(n) for n in np.atleast_1d(num_box_entries))
 
     # Dataset shapes exclude the resizable leading frame dimension.  The
     # configured save buffer controls HDF5 chunking only; it is not part of
@@ -706,104 +651,39 @@ def init_hdf5_store(
 
 def write_to_hdf5(
     hdf5_store: HDF5Store,
-    momenta: Optional[List[jnp.ndarray]],
+    momenta: List[jnp.ndarray],
     positions: List[jnp.ndarray],
-    boxes: Union[float, jnp.ndarray, List[jnp.ndarray], None],
+    boxes: List[jnp.ndarray],
     obs_dict: Optional[MutableMapping[str, list]] = None,
     indices: Optional[List[int]] = None,
-) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
-    """
-    Write trajectory data to an HDF5 file.
+) -> Tuple[list, list, list, MutableMapping[str, list]]:
+    """Append buffered frames (one list entry per frame) to the HDF5 store.
 
-    Writes the accumulated trajectory data to HDF5 storage.
+    ``indices`` selects the stored atoms for positions, momenta, and per-atom
+    observables (including the 'x' embeddings). The molecular dipole is stored
+    as (n_frames, 1, 3) and is never atom-indexed, even for a 3-atom system.
 
-    Args:
-        hdf5_store: HDF5 storage object.
-        momenta: List of momenta arrays for each frame, or None.
-        positions: List of position arrays for each frame.
-        boxes: Box vectors for each frame. Can be float, array, list of arrays, or None.
-        obs_dict: Dictionary of observables. Defaults to {}.
-    Returns:
-        Tuple of empty lists for momenta, positions, and boxes.
+    Returns empty buffers for momenta, positions, boxes, and observables.
     """
+    obs_dict = obs_dict or {}
+    if not positions:
+        return momenta, positions, boxes, obs_dict
+    atoms = slice(None) if indices is None else indices
     try:
-        if not positions:
-            return (
-                momenta if momenta is not None else [],
-                positions,
-                boxes,
-                obs_dict or {},
-            )
-
-        if obs_dict is None:
-            obs_dict = {}
-
-        n_frames = len(positions)
-        if indices is None:
-            indices = list(range(positions[0].shape[0]))
-
         step_data = {
-            'positions': np.stack(positions, axis=0)[:, indices],
+            'positions': np.stack(positions)[:, atoms],
+            'momenta': np.stack(momenta)[:, atoms],
+            'box': np.stack(boxes),
         }
-
-        if boxes is not None:
-            expected_box_shape = hdf5_store.dataset['box'].shape
-            box_array = np.asarray(boxes)
-            if box_array.ndim == 0:
-                box_array = np.full(
-                    (n_frames,) + expected_box_shape,
-                    box_array.item(),
-                )
-            elif box_array.shape == expected_box_shape:
-                box_array = np.repeat(box_array[None, ...], n_frames, axis=0)
-            elif box_array.shape != (n_frames,) + expected_box_shape:
-                raise ValueError(
-                    f"boxes must have shape {expected_box_shape} or "
-                    f"{(n_frames,) + expected_box_shape}; received {box_array.shape}"
-                )
-            step_data['box'] = box_array
-
-        if momenta is not None:
-            if len(momenta) != n_frames:
-                raise ValueError(
-                    f"momenta contains {len(momenta)} frames; expected {n_frames}"
-                )
-            step_data['momenta'] = np.stack(momenta, axis=0)[:, indices]
-
-        for o in obs_dict.keys():
-            if len(obs_dict[o]) != n_frames:
-                raise ValueError(
-                    f"Observable '{o}' contains {len(obs_dict[o])} frames; "
-                    f"expected {n_frames}"
-                )
-            # A molecular dipole has three components even for a three-atom
-            # system. Classify it by name before interpreting an axis as atoms.
-            # Embeddings have a second feature axis but need the same atom
-            # selection as positions and scalar per-atom observables.
-            if o != 'dipole_vec' and (
-                o == 'x'
-                or obs_dict[o][0].shape == (positions[0].shape[0],)
-            ):
-                step_data[o] = np.stack(obs_dict[o], axis=0)[:, indices]
-            else:
-                values = np.stack(obs_dict[o], axis=0)
-                expected_shape = hdf5_store.dataset[o].shape
-                if values.shape[1:] != expected_shape:
-                    # Model dipoles are commonly emitted as (3,), while the
-                    # HDF5 schema keeps the historical singleton molecular axis.
-                    if expected_shape == (1, 3) and values.shape[1:] == (3,):
-                        values = values[:, None, :]
-                step_data[o] = values
-        
+        for o, values in obs_dict.items():
+            values = np.stack(values)
+            step_data[o] = (values.reshape(len(values), 1, 3) if o == 'dipole_vec'
+                            else values[:, atoms])
         hdf5_store.append(step_data)
-        
-        obs_dict = {o: [] for o in obs_dict.keys()}
-
-        return [], [], [], obs_dict
-
     except Exception as e:
         logger.error(f"Failed to write to HDF5 file: {str(e)}")
         sys.exit(1)
+    return [], [], [], {o: [] for o in obs_dict}
 
 
 def write_to_extxyz(
@@ -1063,34 +943,19 @@ def cell_from_atoms_boundary_conditions(
     kspace_electrostatics: str,
     kspace_smearing: float = None,
 ) -> Optional[np.ndarray]:
-    """Return a periodic cell only when all three ASE PBC axes are enabled.
+    """Return the validated periodic cell, or None for a non-periodic system.
 
-    The current JAX-MD neighbor-list and reciprocal-space plumbing carries a
-    box but not a per-axis PBC mask, so mixed boundary conditions cannot be
-    represented faithfully.  A nonzero ASE cell with ``pbc=False`` is merely a
-    bounding cell and must not silently make a gas-phase system periodic.
+    Mixed-axis PBC raises. With ``pbc=False`` any ASE cell is only a bounding
+    box, so the system runs in vacuum.
     """
-    pbc = np.asarray(atoms.get_pbc(), dtype=bool)
-    if np.any(pbc) and not np.all(pbc):
-        raise ValueError(
-            f"Mixed-axis periodic boundary conditions {pbc.tolist()} are not "
-            f"supported by SO3LR MD. Use either pbc=[True, True, True] for "
-            f"three-dimensional periodicity or pbc=[False, False, False] for "
-            f"a nonperiodic system."
-        )
+    cell = np.asarray(atoms.get_cell())
+    if is_fully_periodic(atoms.get_pbc(), context='SO3LR MD'):
+        return check_cell(cell, lr_cutoff, kspace_electrostatics, kspace_smearing)
+    if np.any(cell):
+        logger.info('Input has a cell but pbc=False: ignoring the cell and running in vacuum.')
+    # Still run check_cell's cutoff validation.
+    return check_cell(np.zeros((3, 3)), lr_cutoff, kspace_electrostatics, kspace_smearing)
 
-    if not np.any(pbc):
-        # Preserve check_cell's cutoff validation without interpreting the
-        # (possibly non-orthogonal) bounding cell as a periodic simulation box.
-        return check_cell(
-            np.zeros((3, 3)), lr_cutoff, kspace_electrostatics,
-            kspace_smearing,
-        )
-
-    return check_cell(
-        np.asarray(atoms.get_cell()), lr_cutoff, kspace_electrostatics,
-        kspace_smearing,
-    )
 
 def _is_legacy_model(model_dir) -> bool:
     """Return True if the resolved model is the legacy v1 SO3LR (legacy_so3lr_bool)."""
@@ -1335,114 +1200,67 @@ def box_to_diag(box):
     return box
 
 
-SUPPORTED_NPT_COUPLINGS = ('isotropic', 'semi-isotropic')
-
-
 def normalize_npt_coupling(npt_coupling: str) -> str:
-    """Return the canonical, scientifically supported NPT coupling name.
+    """Return 'isotropic' or 'semi-isotropic' (spaces/underscores/hyphens accepted).
 
-    The forked JAX-MD integrator can evolve a fully flexible cell, but SO3LR's
-    MD plumbing cannot yet consume that cell consistently.  In particular,
-    JAX-MD's cell-list implementation requires an upper-triangular matrix,
-    while a flexible anisotropic step produces a general matrix, and the
-    neighbor-list reallocation, reciprocal-grid, and tail-correction paths
-    historically discarded all off-diagonal components.  Accepting that mode
-    would therefore simulate a different cell from the one the barostat
-    evolves.  Keep the safe orthorhombic modes available and fail before model
-    loading or integration for the unsupported mode.
+    Semi-isotropic coupling is experimental. Fully anisotropic coupling is
+    rejected: the integrator would evolve shear, but the neighbour-list,
+    reciprocal-space and dispersion-tail paths assume an orthorhombic cell.
     """
-    # JAX-MD historically accepted spaces and underscores as separators. Keep
-    # those public spellings while returning one stable SO3LR representation.
-    coupling = '-'.join(
-        str(npt_coupling).strip().lower().replace('_', ' ').replace('-', ' ').split()
-    )
+    coupling = '-'.join(str(npt_coupling).strip().lower().replace('_', ' ').replace('-', ' ').split())
     if coupling == 'anisotropic':
         raise ValueError(
-            "npt_coupling='anisotropic' is not currently supported by SO3LR MD. "
-            "The flexible-cell integrator evolves shear (off-diagonal cell "
-            "components), but SO3LR's neighbor-list, reciprocal-space, and "
-            "dispersion-tail paths are currently validated only for "
-            "orthorhombic cells. Continuing would silently use inconsistent "
-            "cells. Use npt_coupling='semi-isotropic' (coupled x/y and "
-            "independent z) or 'isotropic'."
+            "npt_coupling='anisotropic' is experimental and not supported by SO3LR MD: "
+            "the cell would shear, but the neighbour-list, reciprocal-space and "
+            "dispersion-tail paths assume an orthorhombic cell. Use 'isotropic' or "
+            "the experimental 'semi-isotropic' (coupled x/y, independent z)."
         )
-    if coupling not in SUPPORTED_NPT_COUPLINGS:
+    if coupling not in ('isotropic', 'semi-isotropic'):
         raise ValueError(
-            f"Unknown npt_coupling={npt_coupling!r}. Supported values: "
-            f"{', '.join(SUPPORTED_NPT_COUPLINGS)}."
+            f"Unknown npt_coupling={npt_coupling!r}. Supported values: isotropic, semi-isotropic."
         )
     return coupling
 
 
 def validate_orthorhombic_restart_box(box, label: str = 'box') -> None:
-    """Reject a sheared restart cell that the MD driver cannot represent."""
-    matrix = np.asarray(box)
-    if matrix.ndim != 2:
+    """Reject a sheared checkpoint cell (e.g. from a legacy anisotropic run)."""
+    m = np.asarray(box)
+    if m.ndim != 2:
         return
-    diagonal = np.diag(np.diag(matrix))
-    scale = max(1.0, float(np.max(np.abs(matrix))))
-    eps_dtype = matrix.dtype if np.issubdtype(matrix.dtype, np.floating) else np.float64
-    atol = 100 * np.finfo(eps_dtype).eps * scale
-    if not np.allclose(matrix, diagonal, rtol=0.0, atol=atol):
+    eps = np.finfo(m.dtype if np.issubdtype(m.dtype, np.floating) else np.float64).eps
+    if np.abs(m - np.diag(np.diag(m))).max() > 100 * eps * max(1.0, np.abs(m).max()):
         raise ValueError(
-            f"The checkpoint's {label} contains shear components, which SO3LR "
-            "MD cannot represent consistently. restart_reset cannot remove "
-            "cell shear without changing the physical geometry. Export the "
-            "checkpoint positions in Cartesian coordinates into a supported "
-            "orthorhombic cell, then start a fresh run."
+            f"The checkpoint's {label} is sheared, which SO3LR MD cannot represent; "
+            "restart_reset cannot remove cell shear. Start a fresh run from an "
+            "orthorhombic cell."
         )
 
 
 def validate_npt_restart_coupling(state, box, npt_coupling: str) -> None:
-    """Reject NPT checkpoints whose barostat/cell cannot match this run.
+    """Reject an NPT checkpoint whose barostat does not match ``npt_coupling``.
 
-    Older checkpoints did not store the coupling name. The state class
-    distinguishes the scalar isotropic barostat from the flexible one, and the
-    flexible barostat's degrees of freedom distinguish semi-isotropic (2) from
-    fully anisotropic (6). This closes the otherwise possible route of loading
-    an old anisotropic checkpoint under the now-safe semi-isotropic setting.
+    The state class separates the isotropic from the flexible barostat, and the
+    flexible barostat's degrees of freedom separate semi-isotropic (2) from
+    anisotropic (6), so an anisotropic checkpoint cannot resume as semi-isotropic.
     """
-    coupling = normalize_npt_coupling(npt_coupling)
     is_flex = isinstance(state, jax_md.simulate.NPTNoseHooverFlexState)
     validate_orthorhombic_restart_box(box)
+    if is_flex != (normalize_npt_coupling(npt_coupling) == 'semi-isotropic'):
+        raise ValueError(
+            f"The NPT checkpoint contains a {'flexible' if is_flex else 'isotropic'} "
+            f"barostat state, but npt_coupling={npt_coupling!r} was requested. Resume "
+            "with the matching coupling or set restart_reset: true."
+        )
     if is_flex:
         validate_orthorhombic_restart_box(state.box_position, 'box_position')
-
-    expected_flex = coupling == 'semi-isotropic'
-    if is_flex != expected_flex:
-        saved_kind = 'flexible' if is_flex else 'isotropic'
-        raise ValueError(
-            f"The NPT checkpoint contains a {saved_kind} barostat state, but "
-            f"npt_coupling={coupling!r} was requested. Resume with the matching "
-            f"coupling or set restart_reset: true to reinitialize the barostat."
-        )
-
-    if not is_flex:
-        return
-
-    barostat_dof = int(np.asarray(state.barostat.degrees_of_freedom))
-    if barostat_dof != 2:
-        raise ValueError(
-            "The NPT checkpoint contains a fully flexible/anisotropic barostat "
-            f"({barostat_dof} cell degrees of freedom). SO3LR can only resume "
-            "the 2-DOF semi-isotropic barostat safely. Set restart_reset: true "
-            "to retain the geometry while reinitializing the barostat."
-        )
-
-    # A valid semi-isotropic run's constrained box velocity remains diagonal.
-    # A malformed velocity can safely be discarded with restart_reset because
-    # the cell itself has already passed the stricter geometry check above.
-    matrix = np.asarray(state.box_velocity)
-    diagonal = np.diag(np.diag(matrix))
-    scale = max(1.0, float(np.max(np.abs(matrix))))
-    atol = 100 * np.finfo(matrix.dtype).eps * scale
-    if not np.allclose(matrix, diagonal, rtol=0.0, atol=atol):
-        raise ValueError(
-            "The NPT checkpoint's box_velocity contains shear components, "
-            "which cannot be resumed safely by SO3LR's orthorhombic "
-            "semi-isotropic path. Set restart_reset: true to retain the "
-            "geometry while reinitializing the barostat."
-        )
+        dof = int(np.asarray(state.barostat.degrees_of_freedom))
+        if dof != 2:
+            raise ValueError(
+                f"The NPT checkpoint contains an anisotropic barostat ({dof} cell "
+                "degrees of freedom); only the 2-DOF semi-isotropic barostat can be "
+                "resumed. Set restart_reset: true to keep the geometry and "
+                "reinitialize the barostat."
+            )
 
 
 def box_for_trajectory(box):
@@ -1845,10 +1663,7 @@ def create_npt_nhc_fn(
     lr,
     npt_coupling='isotropic'
 ):
-    # Validate here as well as in perform_md: this factory is imported by
-    # downstream Python callers, and no caller should be able to enter the
-    # inconsistent fully flexible-cell path by bypassing the CLI.
-    npt_coupling = normalize_npt_coupling(npt_coupling)
+    npt_coupling = normalize_npt_coupling(npt_coupling)  # also guards direct Python callers
     if npt_coupling == 'isotropic':
         init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
             energy_fn,
@@ -2549,6 +2364,14 @@ def save_restart_checkpoints(
         save_pysages_state(pysages_result, restart_pysages_save_path)
 
 
+def validate_md_counts(settings: Dict) -> None:
+    """Require positive integer MD counts (Click checks CLI flags; YAML/Python land here)."""
+    for name in ('md_cycles', 'md_steps', 'save_buffer', 'kspace_npt_cycles'):
+        value = settings.get(name)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, Integral) or value < 1):
+            raise ValueError(f"{name} must be a positive integer (received {value!r}).")
+
+
 def _validate_md_output_write_policy(
     *,
     output_file: Optional[Union[str, Path]],
@@ -2686,11 +2509,14 @@ def perform_md(
     nhc_baro = all_settings.get('nhc_baro')
     nhc_sy_steps = all_settings.get('nhc_sy_steps')
 
-    # Fully flexible anisotropic cells are deliberately rejected below: the
-    # remaining MD stack is currently valid only for orthorhombic cells.
     npt_coupling = all_settings.get('npt_coupling', 'isotropic')
     if str(ensemble).lower() == 'npt':
-        npt_coupling = normalize_npt_coupling(npt_coupling)
+        npt_coupling = normalize_npt_coupling(npt_coupling)  # rejects anisotropic
+        if npt_coupling == 'semi-isotropic':
+            logger.warning(
+                "npt_coupling='semi-isotropic' is experimental; validate the cell "
+                "dynamics against isotropic NPT or a reference before production use."
+            )
 
     # Langevin thermostat parameters
     langevin_removecmmotion = all_settings.get('langevin_removecmmotion')
@@ -2741,15 +2567,7 @@ def perform_md(
     restart_pysages_load_path = all_settings.get('restart_pysages_load_path')
     enforce_cartesian_coordinates = all_settings.get('enforce_cartesian_coordinates', False)
 
-    # This entry point is also a public Python API and may bypass Click/YAML
-    # parsing, so enforce the same count/frequency constraints here before any
-    # modulo, division, model loading, or output-file mutation occurs.
-    validate_positive_md_settings({
-        'md_cycles': md_cycles,
-        'md_steps': md_steps,
-        'save_buffer': save_buffer,
-        'kspace_npt_cycles': kspace_npt_cycles,
-    })
+    validate_md_counts(all_settings)
 
     if do_enhanced_sampling and not HAS_PYSAGES:
         raise ImportError(
@@ -4566,6 +4384,7 @@ def run(
     """
 
     relax_before_run = settings.get('relax_before_run', True)
+    validate_md_counts(settings)  # fail before the optional relaxation
 
     setup_jax_globals(
         precision=settings.get('precision', 'float32'),
