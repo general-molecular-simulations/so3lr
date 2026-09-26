@@ -46,6 +46,20 @@ telemetry clients. Optional extras are:
   when `training.use_wandb: true` is explicitly enabled.
 - `uv sync --locked --extra cuda12` — CUDA 12 JAX packages on Linux x86-64.
 
+### Installing into an existing environment (pip)
+
+On clusters with a working JAX install, install SO3LR into that environment
+with pip. The dependencies only cap JAX (`jax<0.11`, `flax<0.12.9`), so a
+compatible existing JAX/CUDA or ROCm stack is kept:
+
+```shell script
+git clone https://github.com/general-molecular-simulations/so3lr.git
+cd so3lr
+pip install .            # or: pip install ".[tfds,wandb]"
+```
+
+Without an existing JAX, install `jax` (CPU) or `"jax[cuda12]<0.11"` first.
+
 ## Models
 
 SO3LR ships in three sizes. All are bundled inside the package, so you select one **by name** — no download or path needed. They trade off speed against accuracy:
