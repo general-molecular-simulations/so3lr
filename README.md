@@ -30,8 +30,8 @@ does not identify an exact source version.
 
 This creates a CPU environment. For CUDA 12 on Linux x86-64, select the locked
 CUDA extra with `uv sync --locked --extra cuda12`. See
-[`REPRODUCIBILITY.md`](./REPRODUCIBILITY.md) for development, TFDS, PySAGES, and
-release environments. SO3LR runs significantly faster on a compatible GPU for
+[`DEVELOPERS.md`](./DEVELOPERS.md) for development environments and the
+lockfile policy. SO3LR runs significantly faster on a compatible GPU for
 large-scale simulations.
 
 ### Optional extras
@@ -105,17 +105,10 @@ Currently bundled:
 ### Verifying bundled model artifacts
 
 Every bundled checkpoint and its adjacent metadata file is covered by
-`so3lr/models/SHA256SUMS`. Verify the installed package without importing JAX:
+`so3lr/models/SHA256SUMS`:
 
 ```shell script
-python -m so3lr.verify_model_artifacts
-```
-
-From a source checkout, the same manifest can also be checked with the standard
-checksum utility available on macOS and many Unix systems:
-
-```shell script
-(cd so3lr/models && shasum -a 256 -c SHA256SUMS)
+cd so3lr/models && sha256sum -c SHA256SUMS   # macOS: shasum -a 256 -c SHA256SUMS
 ```
 
 The checksum proves byte identity with this release; it does not make an

@@ -8,13 +8,13 @@ identified by immutable dated names such as `so3lr-m-2606`.
 
 ### Added
 
-- Reproducible release environments managed by `uv`, with an audited lockfile,
-  immutable Git dependency revisions, Python 3.12/3.13 coverage, and archive
-  content verification (PR #55).
+- Locked environments managed by `uv`, with immutable Git dependency
+  revisions and Python 3.12/3.13 coverage, including a CI smoke test of the
+  built wheel (PR #55).
 - Machine-readable software and published SO3LR v1 citation metadata in
   `CITATION.cff`. No SO3LR-2 or software DOI is claimed before one is issued.
-- SHA-256 coverage for every bundled model artifact, with an installed-package
-  verifier available as `python -m so3lr.verify_model_artifacts`.
+- SHA-256 checksums for every bundled model artifact in
+  `so3lr/models/SHA256SUMS`, checkable with `sha256sum -c`.
 - The complete Apache License 2.0 and BSD 3-Clause texts and third-party
   notices for the vendored Google Research robust-loss implementation,
   JAX MD-derived masking code, and torch-pme-derived Ewald tuner.
@@ -74,9 +74,8 @@ identified by immutable dated names such as `so3lr-m-2606`.
   fine-tuning resumes weights and step from its existing target checkpoint
   instead of silently using the parent model; optimizer and data-order state
   still restart fresh on this path.
-- Verify the complete installed package payload against its source when
-  checking release archives, reject empty model manifests, and run CI for
-  stacked pull requests as well as requests targeting the main branch.
+- Run CI for stacked pull requests as well as requests targeting the main
+  branch.
 - Evaluation keeps reference C6 labels separate from physical model
   predictions, preventing a label/prediction mix-up in C6 metrics (PR #37).
 - Configuration unit expressions are parsed by a constrained unit parser

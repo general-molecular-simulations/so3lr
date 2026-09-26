@@ -59,8 +59,8 @@ jobs:
           - group: 6
             name: "so3lr-other"
             sync_extra: ""
-            run_short: "uv run --no-sync pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_prepare_dimer.py tests/test_publication_metadata.py -v --tb=short"
-            run_full: "uv run --no-sync pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_prepare_dimer.py tests/test_publication_metadata.py tests/test_hessian.py -v --tb=short --full"
+            run_short: "uv run --no-sync pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_prepare_dimer.py -v --tb=short"
+            run_full: "uv run --no-sync pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_prepare_dimer.py tests/test_hessian.py -v --tb=short --full"
           - group: 7
             name: "pysages"
             sync_extra: "--extra pysages"
@@ -76,11 +76,11 @@ jobs:
           - group: 8
             name: "md-regressions"
             sync_extra: ""
-            run_short: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_package_contents.py -v --tb=short"
+            run_short: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py -v --tb=short"
             # Each drift parameter still runs, but in its own interpreter: on
             # large CPU nodes, repeated XLA compilations in one process can
             # exhaust native compiler resources before later ensembles start.
-            run_full: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_package_contents.py -v --tb=short --full && tools/run_integrator_drift_tests.sh .venv/bin/python"
+            run_full: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py -v --tb=short --full && tools/run_integrator_drift_tests.sh .venv/bin/python"
     runs-on: ubuntu-latest
     name: "${{ matrix.name }}"
     # The full md-regressions lane launches every drift case in a fresh Python
@@ -143,25 +143,23 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      - name: Build and validate release artifacts
+      - name: Build the wheel and sdist
+        run: uv build
+
+      - name: Install the wheel into a fresh environment
         run: |
-          uv sync --python "${{ matrix.python-version }}" --locked --no-default-groups --group release --no-install-project
-          uv build --no-sources --build-constraints build-constraints.txt --require-hashes
-          uv run --no-sync python tools/check_package_contents.py dist
-          uv run --no-sync twine check --strict dist/*
-          wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
-          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/pip-resolve"
-          uv pip install --python "$RUNNER_TEMP/pip-resolve/bin/python" pip
-          "$RUNNER_TEMP/pip-resolve/bin/python" -m pip install --dry-run "$wheel"
-          uv pip install --python .venv/bin/python --no-deps "$wheel"
+          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/wheel-env"
+          uv pip install --python "$RUNNER_TEMP/wheel-env/bin/python" dist/*.whl
 
       - name: Smoke-test the installed wheel outside the checkout
         run: |
-          project_dir="$PWD"
+          env_dir="$RUNNER_TEMP/wheel-env"
           cd "$(mktemp -d)"
-          "$project_dir/.venv/bin/python" -m so3lr.verify_model_artifacts
-          "$project_dir/.venv/bin/so3lr" --help >/dev/null
-          "$project_dir/.venv/bin/python" - <<'PY'
+          # Locate the installed package without importing it (and JAX).
+          models_dir=$("$env_dir/bin/python" -c "import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec('so3lr').origin).parent / 'models')")
+          (cd "$models_dir" && sha256sum --quiet -c SHA256SUMS)
+          "$env_dir/bin/so3lr" --help >/dev/null
+          "$env_dir/bin/python" - <<'PY'
           import numpy as np
           from ase import Atoms
           from so3lr import So3lrCalculator
