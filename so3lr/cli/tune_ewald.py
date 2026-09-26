@@ -547,16 +547,14 @@ class EwaldErrorBounds(TuningErrorBounds):
         :param smearing: see :class:`torchpme.EwaldCalculator` for details
         :param spacing: see :class:`torchpme.EwaldCalculator` for details
         """
-        # torch-pme corrected this bound in
-        # e5a0aaee63972c03617ef4afcd5770b7d27592b8 and
-        # 83a8e69336758681159794e6cf78c440fb68c5f0; the final algebraic form is
-        # 1f612664e8e627143b19e8622bac9d2d81e85022. SO3LR's ``spacing`` is
-        # torch-pme's ``lr_wavelength``. Immutable upstream reference:
-        # https://github.com/lab-cosmo/torch-pme/blob/1f612664e8e627143b19e8622bac9d2d81e85022/src/torchpme/tuning/ewald.py#L174-L180
+        # Kolafa-Perram RMS force error (LAMMPS ``Ewald::rms``), written in
+        # torch-pme's smearing/wavelength convention. Like every Coulomb force
+        # error it is linear in ``prefac`` (i.e. q^2). torch-pme's
+        # ``prefac**0.5`` scales as |q| and underestimates the error 4-36x
+        # for typical systems.
         return (
-            self.prefac**0.5
-            / smearing
-            / np.pi
+            self.prefac
+            / (np.sqrt(2 * np.pi) * smearing)
             / np.sqrt(self.volume / spacing)
             * np.exp(-2 * (np.pi * smearing / spacing) ** 2)
         )
