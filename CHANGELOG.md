@@ -10,7 +10,7 @@ identified by immutable dated names such as `so3lr-m-2606`.
 
 - Reproducible release environments managed by `uv`, with an audited lockfile,
   immutable Git dependency revisions, Python 3.12/3.13 coverage, and archive
-  content verification (PR #42).
+  content verification (PR #55).
 - Machine-readable software and published SO3LR v1 citation metadata in
   `CITATION.cff`. No SO3LR-2 or software DOI is claimed before one is issued.
 - SHA-256 coverage for every bundled model artifact, with an installed-package
@@ -23,8 +23,11 @@ identified by immutable dated names such as `so3lr-m-2606`.
 
 - Weights & Biases telemetry is opt-in and installed through the optional
   `wandb` extra rather than the base runtime environment (PRs #44 and #45).
-- TFDS-backed training now uses finite, unit-consistent epochs and preserves
-  complete data trajectories across restarts (PR #41).
+- TFDS-backed training now uses finite, unit-consistent epochs and checkpoints
+  the full optimizer/EMA/control state (PR #41). A restart continues with the
+  next epoch instead of replaying consumed batches; changed data or loop
+  settings produce a warning, and params-only checkpoints from older versions
+  continue from their weights with a fresh optimizer.
 - Documentation and Colab examples now use the immutable
   `so3lr-{s,m,l}-2606` names for reproducible results and describe the actual
   pinned no-argument default, `so3lr-m-2606`.
@@ -35,15 +38,29 @@ identified by immutable dated names such as `so3lr-m-2606`.
 - The production HDF5 notebook documents the frame-major trajectory layout in
   which write buffering does not add a public array dimension.
 
+### Changed results and formats
+
+- `so3lr eval` energies and forces change on datasets that carry `c6_ratios`
+  labels: dispersion now uses the model's predicted C6, as the ASE calculator
+  and MD always did (PR #37).
+- TFDS `filter.min_distance` and the absolute `max_force` filter are now
+  applied; they were previously ignored or signed, so the selected training
+  data changes (PR #41). The `config.yaml` default is 0.5 A.
+- MD HDF5 trajectories are frame-major, `(n_frames, ...)` instead of
+  `(n_writes, save_buffer, ...)`; semi-isotropic boxes are stored as
+  `(n_frames, 3, 3)` (PR #43).
+- MD `dipole_vec` without k-space is the molecular dipole; it previously
+  reported the total charge (PR #43). A `pbc=False` input with a cell now runs
+  in vacuum instead of periodically.
+- Pre-MD relaxation frames go to `<output>_opt.xyz` instead of the start of the
+  MD trajectory (PR #54).
+
 ### Fixed
 
 - Evaluation overwrite replaces old predictions and embeddings instead of
   appending or silently overwriting; individual files are saved only after
   serialization succeeds, without a multi-file transaction guarantee.
 - SO3LR's NPZ restart preserves the previous checkpoint on serialization failure.
-- Fine-tuning restart fingerprints include the resolved parameter masks;
-  older TFDS fine-tuning checkpoints remain usable for inference but cannot
-  provide exact training continuation without that metadata.
 - Preserve molecular dipoles for three-atom systems, apply atom selections to
   HDF5 embeddings, and include requested embeddings in EXTXYZ output.
 - TFDS retains explicit periodic axes and empty periodic neighbor-offset
@@ -67,15 +84,22 @@ identified by immutable dated names such as `so3lr-m-2606`.
 - Periodic calculations reject unsupported mixed-axis periodicity, including
   mixed-periodicity batches, and dispersion PME uses a residual cutoff
   consistent with the configured damping split (PRs #39 and #40).
-- The Ewald tuner uses torch-pme's corrected reciprocal-space error estimate,
-  including the square-root prefactor scaling used by its reference formula.
+- The Ewald tuner's reciprocal-space error estimate uses the Kolafa-Perram
+  (LAMMPS) form, which matches the measured force error; torch-pme's
+  square-root prefactor underestimated it 4-36x.
 - MD trajectory output retains partially filled buffers and
   protects existing HDF5 trajectories during restart; flexible-cell NPT rejects
   unsafe configurations while retaining semi-isotropic coupling aliases
-  (PRs #43 and #46).
-- Loading user-supplied pickle artifacts emits an explicit security warning,
-  while checksum-covered artifacts bundled with the installed package remain
-  trusted (PR #44).
+  (PRs #43 and #46). Frames are written before the restart checkpoint, so a
+  failed write cannot leave the checkpoint ahead of the trajectory.
+- Output files are staged next to their destination and moved into place with
+  `os.replace`; symlinked outputs are written through the link.
+- The ASE calculator no longer minimum-images a `pbc=False` molecule that
+  carries a bounding cell (a pre-existing error for cells tighter than the
+  long-range cutoff). NPZ graphs record their periodic axes, so the
+  mixed-periodicity check also covers NPZ data.
+- Loading user-supplied pickle artifacts emits an explicit security warning;
+  artifacts inside the installed package do not (PR #44).
 - Dimer calculations validate the selected model's supported elements before
   evaluation (PR #47).
 - Replaced obsolete notebook imports from the removed top-level `mlff` package

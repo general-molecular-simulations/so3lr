@@ -272,6 +272,7 @@ def entry_to_jraph(
         "dipole_vec": dipole.reshape(1, 3),
         "total_charge": total_charge.reshape(-1),
         "num_unpaired_electrons": multiplicity.reshape(-1) - 1,
+        "pbc": np.asarray(mol.get_pbc(), dtype=bool).reshape(1, 3),
     }
 
     if cell is not None and pbc is not None and np.any(pbc):

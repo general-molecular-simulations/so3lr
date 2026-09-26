@@ -32,7 +32,7 @@ data:
   neighbors_lr_cutoff: null  # Cutoff distance in Angstrom for long-range neighbor list construction during data loading. Independent from the model's cutoff_lr.
   avg_num_neighbors: null  # Average number of (short-range) neighbors per atom. Auto-computed from data if null. Only needed when message_normalization is avg_num_neighbors.
   filter:
-    min_distance: 0.75  # Remove structures whose closest distinct-atom distance is smaller (Angstrom); TFDS uses the minimum image on configured PBC axes.
+    min_distance: 0.5  # Remove structures whose closest distinct-atom distance is smaller (Angstrom); TFDS uses the minimum image on configured PBC axes.
     max_force: 25.  # Remove structures with non-finite forces or any absolute force component above this value (eV/Angstrom).
 model:
   num_layers: 2  # Number of SO3krates message passing layers.

@@ -199,7 +199,7 @@ def calculate_metrics(
 
 
 def _check_output_destination(destination: Path, *, overwrite: bool) -> None:
-    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+    if destination.exists() and not destination.is_file():
         raise RuntimeError(f"Output destination is not a regular file: {destination}")
     if destination.exists() and not overwrite:
         raise RuntimeError(
@@ -211,20 +211,16 @@ def _check_output_destination(destination: Path, *, overwrite: bool) -> None:
 @contextmanager
 def _staged_output(destination: Path, *, overwrite: bool):
     """Replace one complete file; this is not a multi-file transaction."""
+    destination = Path(os.path.realpath(destination))
     _check_output_destination(destination, overwrite=overwrite)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.so3lr-eval-', dir=destination.parent) as folder:
         temporary = Path(folder) / destination.name
         yield temporary
         _check_output_destination(destination, overwrite=overwrite)
-        if overwrite:
-            if destination.exists():
-                temporary.chmod(stat.S_IMODE(destination.stat().st_mode))
-            os.replace(temporary, destination)
-        else:
-            # Exclusive creation remains enforced after a long evaluation;
-            # unlike a preflight existence check, this cannot clobber a rival job.
-            os.link(temporary, destination)
+        if destination.exists():
+            temporary.chmod(stat.S_IMODE(destination.stat().st_mode))
+        os.replace(temporary, destination)
 
 
 def save_to_file(
@@ -401,8 +397,6 @@ def evaluate_so3lr_on(
     # behave the same way: refuse to clobber by default, opt in explicitly.
     save_predictions_bool = save_to is not None
     if save_predictions_bool:
-        # Do not resolve the final component: that would hide a symlink from
-        # the output guard and redirect replacement to its target.
         save_to = Path(save_to).expanduser().absolute()
         _check_output_destination(save_to, overwrite=overwrite)
 

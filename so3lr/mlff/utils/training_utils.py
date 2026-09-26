@@ -1,5 +1,4 @@
 import hashlib
-import importlib.metadata
 import json
 import jraph
 import jax
@@ -56,13 +55,6 @@ def _canonical_sha256(payload):
         payload, sort_keys=True, separators=(',', ':'), ensure_ascii=True
     ).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _distribution_version(name):
-    try:
-        return importlib.metadata.version(name)
-    except importlib.metadata.PackageNotFoundError:
-        return 'unavailable'
 
 
 def _tfds_restart_fingerprint(
@@ -178,12 +170,11 @@ def _validate_tfds_training_state(state, *, step, restart_fingerprint):
             f'Checkpoint step {step} has an invalid restart fingerprint.'
         ) from exc
     if saved_fingerprint != restart_fingerprint:
-        raise RuntimeError(
-            f'TFDS restart fingerprint changed at checkpoint step {step} '
-            f'(saved {saved_fingerprint}, current {restart_fingerprint}). '
-            'Dataset identity, sampling/filter/unit/batch settings, runtime, or '
-            'trajectory-relevant training settings differ; refusing an '
-            'inexact restart.'
+        logger.warning(
+            'TFDS restart fingerprint changed at checkpoint step %s: dataset, '
+            'sampling/filter/unit/batch or loop settings differ from the run '
+            'that wrote the checkpoint. Continuing with the current settings.',
+            step,
         )
 
     for key in (
@@ -230,20 +221,20 @@ def _validate_tfds_training_state(state, *, step, restart_fingerprint):
 
 def _restore_tfds_training_state(
         checkpoint_manager, *, step, optimizer, restart_fingerprint):
-    """Restore training state while preserving Optax namedtuple structure."""
-    try:
-        untyped = checkpoint_manager.restore(
-            step,
-            args=ocp.args.Composite(
-                training_state=ocp.args.StandardRestore()
-            ),
-        )['training_state']
-    except Exception as exc:
-        raise RuntimeError(
-            f'Checkpoint step {step} is params-only or its TFDS training-state '
-            'item is unreadable. Inference can still load its params, but exact '
-            'TFDS training restart is impossible; start a new work directory.'
-        ) from exc
+    """Restore training state while preserving Optax namedtuple structure.
+
+    Returns ``None`` for a params-only checkpoint (written before the full
+    training state was saved); the caller then continues from its weights.
+    """
+    step_dir = Path(checkpoint_manager.directory) / f'ckpt_{step}'
+    if not (step_dir / 'training_state').exists():
+        return None
+    untyped = checkpoint_manager.restore(
+        step,
+        args=ocp.args.Composite(
+            training_state=ocp.args.StandardRestore()
+        ),
+    )['training_state']
 
     _validate_tfds_training_state(
         untyped, step=step, restart_fingerprint=restart_fingerprint
@@ -1753,18 +1744,6 @@ def fit_from_iterator(
         ),
         'has_stage_two_loss': stage_two_loss_fn is not None,
         'has_stage_two_validation': stage_two_val_fn is not None,
-        'runtime': {
-            'jax': _distribution_version('jax'),
-            'jaxlib': _distribution_version('jaxlib'),
-            'optax': _distribution_version('optax'),
-            'flax': _distribution_version('flax'),
-            'orbax_checkpoint': _distribution_version('orbax-checkpoint'),
-            'backend': jax.default_backend(),
-            'devices': [
-                {'platform': device.platform, 'kind': device.device_kind}
-                for device in jax.devices()
-            ],
-        },
     }
     restart_fingerprint = _tfds_restart_fingerprint(
         training_iterator, validation_iterator, loop_config
@@ -1805,7 +1784,6 @@ def fit_from_iterator(
     step = 0
     header_printed = False
     start_epoch = 0
-    resume_batches_consumed = 0
     opt_state = None
     # Shadow EMA copy of the parameters; see fit().
     ema_params = None
@@ -1842,12 +1820,11 @@ def fit_from_iterator(
         logger.info(f"Two-stage loss reweighting enabled (switch at epoch "
                     f"{stage_two_start_epoch}).")
 
-    # A TFDS checkpoint must identify the exact next update.  Restore the raw
-    # training weights (not the EMA/deployed copy), optimizer and all control
-    # state together with the iterator position.  Legacy params-only
-    # checkpoints remain loadable for inference, but are deliberately unsafe
-    # for continuation.
+    # Restore the raw training weights (not the EMA/deployed copy), optimizer
+    # and control state.  Params-only checkpoints from older versions continue
+    # from their weights with a fresh optimizer.
     latest_step = ckpt_mngr.latest_step()
+    training_state = None
     if latest_step is not None:
         if not allow_restart:
             raise RuntimeError(
@@ -1860,13 +1837,28 @@ def fit_from_iterator(
             optimizer=optimizer,
             restart_fingerprint=restart_fingerprint,
         )
+        if training_state is None:
+            logger.warning(
+                'Checkpoint step %s has no training state (written by an older '
+                'version). Continuing from its parameters with a fresh optimizer '
+                'and epoch counter.', latest_step,
+            )
+            params = expand_observables_to_theory_levels(
+                checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir)
+            )
+            step = int(latest_step)
+    if training_state is not None:
         params = training_state['raw_params']
         opt_state = training_state['optimizer_state']
         ema_params = training_state['ema_params']
         jax_rng = training_state['jax_rng']
         step = int(training_state['checkpoint_step'])
+        # Continue with the next epoch rather than replaying the batches this
+        # one already consumed: the replay runs the full input pipeline and
+        # costs about as long as training on them did (hours to days).
         start_epoch = int(training_state['epoch'])
-        resume_batches_consumed = int(training_state['batches_consumed'])
+        if int(training_state['batches_consumed']) > 0:
+            start_epoch += 1
         processed_graphs = int(training_state['processed_graphs'])
         processed_nodes = int(training_state['processed_nodes'])
         best_eval_loss = float(training_state['best_eval_loss'])
@@ -1899,12 +1891,11 @@ def fit_from_iterator(
             )
 
         logger.info(
-            'Restored exact TFDS training state from %s at step %s.',
+            'Restored TFDS training state from %s at step %s.',
             ckpt_dir, latest_step,
         )
         print(
-            f'Re-start training from step {latest_step}, epoch {start_epoch}, '
-            f'after {resume_batches_consumed} batch(es).'
+            f'Re-start training from step {latest_step} at epoch {start_epoch}.'
         )
 
     if on_training_ready is not None:
@@ -1938,17 +1929,13 @@ def fit_from_iterator(
         if use_wandb:
             _wandb_log({"epoch": epoch})
         print(f'Epoch {epoch} of {num_epochs}')
-        skipped_batches = (
-            resume_batches_consumed if epoch == start_epoch else 0
-        )
         training_iterator_loop = training_iterator.next_epoch(
             split='train',
             mode='train',
             epoch_index=epoch,
-            skip_batches=skipped_batches,
         )
         for batch_index, (graph_batch_training, lr_batch_training) in enumerate(
-                training_iterator_loop, start=skipped_batches):
+                training_iterator_loop):
             batches_consumed = batch_index + 1
             batch_training = graph_to_batch_fn(graph_batch_training, lr_batch_training)
             processed_graphs += batch_training['num_of_non_padded_graphs']

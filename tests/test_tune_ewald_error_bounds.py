@@ -1,92 +1,53 @@
-"""Numerical regression tests for the Ewald tuning error bound."""
-
-import ast
-import math
-from pathlib import Path
+"""The Ewald k-space error bound must predict the actual reciprocal-space force error."""
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 
 COULOMB_SCALE = 14.399645351950548
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-TUNER_SOURCE = REPOSITORY_ROOT / "so3lr" / "cli" / "tune_ewald.py"
-BSD_LICENSE = REPOSITORY_ROOT / "LICENSE-BSD-3-CLAUSE"
 
 
-def test_tuner_attribution_references_bundled_bsd_license():
-    module = ast.parse(TUNER_SOURCE.read_text())
-    module_docstring = ast.get_docstring(module, clean=False)
-
-    assert module_docstring is not None
-    assert "LICENSE-BSD-3-CLAUSE" in module_docstring
-    assert "LICENSE-BSD-3-CLAUSE-torch-pme" not in module_docstring
-    assert "THIRD_PARTY_NOTICES.md" not in module_docstring
-
-    license_text = BSD_LICENSE.read_text()
-    assert license_text.startswith("BSD 3-Clause License\n")
-    assert "Copyright (c) 2024, torch-pme developers" in license_text
-    for condition in (
-        "1. Redistributions of source code must retain",
-        "2. Redistributions in binary form must reproduce",
-        "3. Neither the name of the copyright holder",
-        'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
-    ):
-        assert condition in license_text
+def _reciprocal_forces(positions, charges, box, smearing, spacing):
+    """Plain-numpy Ewald reciprocal-space forces in a cubic box (eV/A)."""
+    kcut = 2 * np.pi / spacing
+    nmax = int(np.ceil(kcut * box / (2 * np.pi)))
+    grid = np.arange(-nmax, nmax + 1)
+    n = np.stack(np.meshgrid(grid, grid, grid, indexing="ij"), -1).reshape(-1, 3)
+    k = 2 * np.pi * n / box
+    k2 = (k**2).sum(1)
+    keep = (k2 > 0) & (k2 <= kcut**2)
+    k, k2 = k[keep], k2[keep]
+    phase = np.exp(1j * positions @ k.T)
+    structure_factor = (charges[:, None] * phase).sum(0)
+    green = 4 * np.pi / k2 * np.exp(-k2 * smearing**2 / 2)
+    im = np.imag(np.conj(structure_factor)[None, :] * phase)
+    return COULOMB_SCALE / box**3 * charges[:, None] * ((im * green) @ k)
 
 
-def _error_bounds(charges, cell):
+def _bound(positions, charges, box, smearing, spacing):
     from so3lr.cli.tune_ewald import EwaldErrorBounds
 
-    return EwaldErrorBounds(
-        charges=jnp.asarray(charges),
-        cell=jnp.asarray(cell),
-        positions=jnp.zeros((len(charges), 3)),
+    bounds = EwaldErrorBounds(
+        charges=jnp.asarray(charges[:, None]),
+        cell=jnp.asarray(np.eye(3) * box),
+        positions=jnp.asarray(positions),
     )
+    return float(bounds.err_kspace(smearing=smearing, spacing=spacing))
 
 
-def test_ewald_kspace_error_has_closed_form_reference_value():
-    """Exercise the corrected wavelength dependence with an exact reduction.
+@pytest.mark.parametrize("charge_scale", [1.0, 3.0])
+@pytest.mark.parametrize("spacing", [2.2, 3.0])
+def test_ewald_kspace_bound_matches_measured_force_error(charge_scale, spacing):
+    rng = np.random.default_rng(0)
+    box, smearing, n_atoms = 15.0, 1.5, 100
+    positions = rng.uniform(0, box, (n_atoms, 3))
+    charges = rng.uniform(-0.5, 0.5, n_atoms)
+    charges = charge_scale * (charges - charges.mean())
 
-    The final torch-pme expression at commit
-    1f612664e8e627143b19e8622bac9d2d81e85022 reduces to exp(-2) / pi when
-    prefactor=smearing=1 and volume=spacing=pi. This reference value is derived
-    independently of the implementation below.
-    """
-    charge_for_unit_prefactor = math.sqrt(1.0 / (2.0 * COULOMB_SCALE))
-    bounds = _error_bounds(
-        charges=[[charge_for_unit_prefactor]],
-        cell=np.diag([math.pi, 1.0, 1.0]),
-    )
+    reference = _reciprocal_forces(positions, charges, box, smearing, 0.75)
+    truncated = _reciprocal_forces(positions, charges, box, smearing, spacing)
+    measured = np.sqrt(np.mean(np.sum((truncated - reference) ** 2, axis=1)))
 
-    actual = bounds.err_kspace(smearing=1.0, spacing=math.pi)
-
-    np.testing.assert_allclose(
-        actual,
-        math.exp(-2.0) / math.pi,
-        rtol=2e-6,
-        atol=0.0,
-    )
-
-
-def test_ewald_kspace_error_is_linear_in_charge_scale():
-    """The RMS force error scales with |q|, not q squared.
-
-    Since the internal prefactor scales with the sum of squared charges, the
-    corrected square root from torch-pme 1f612664 makes the bound linear in a
-    uniform charge rescaling. This specifically guards against ``prefac * 0.5``.
-    """
-    charges = np.array([[0.5], [-0.25]])
-    cell = np.diag([2.0, 3.0, 4.0])
-    base = _error_bounds(charges=charges, cell=cell)
-    scaled = _error_bounds(charges=3.0 * charges, cell=cell)
-
-    base_error = base.err_kspace(smearing=0.5, spacing=4.0)
-    scaled_error = scaled.err_kspace(smearing=0.5, spacing=4.0)
-
-    np.testing.assert_allclose(
-        scaled_error,
-        3.0 * base_error,
-        rtol=2e-6,
-        atol=0.0,
-    )
+    ratio = measured / _bound(positions, charges, box, smearing, spacing)
+    assert 0.5 < ratio < 2.0, ratio

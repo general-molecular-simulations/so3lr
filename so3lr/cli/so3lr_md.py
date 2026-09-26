@@ -104,15 +104,13 @@ DataSetEntry = namedtuple('DataSetEntry', ('chunk_length', 'shape', 'dtype'))
 
 
 def _existing_regular_output_mode(path: Path) -> Optional[int]:
-    """Reject links/special files; return an existing regular file's mode."""
+    """Return an existing output file's mode (symlinks are followed)."""
     try:
-        metadata = path.lstat()
+        metadata = path.stat()
     except FileNotFoundError:
         return None
     if not stat.S_ISREG(metadata.st_mode):
-        raise RuntimeError(
-            f'Output must be a regular file, not a symlink or special file: {path}'
-        )
+        raise RuntimeError(f'Output must be a regular file: {path}')
     return stat.S_IMODE(metadata.st_mode)
 
 
@@ -856,8 +854,8 @@ def write_to_extxyz(
             obs_dict = {}
 
         # Ensure output_file is a Path object
-        output_path = Path(output_file) if isinstance(
-            output_file, str) else output_file
+        # Resolve symlinks so replacing the file keeps the link intact.
+        output_path = Path(os.path.realpath(output_file))
 
         # Create parent directory if it doesn't exist
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -956,14 +954,14 @@ def write_to_extxyz(
                 temporary_path = Path(temporary_dir) / output_path.name
                 with temporary_path.open('w', encoding='utf-8') as stream:
                     ase.io.write(stream, atoms_list, format='extxyz')
-                if overwrite:
-                    if output_mode is not None:
-                        temporary_path.chmod(output_mode)
-                    os.replace(temporary_path, output_path)
-                else:
-                    # Exclusive creation also protects a file another job
-                    # created after the initial output-path check.
-                    os.link(temporary_path, output_path)
+                if output_mode is not None:
+                    if not overwrite:
+                        raise RuntimeError(
+                            f'Output file already exists: {output_path}. '
+                            'Pass --overwrite or choose a different output path.'
+                        )
+                    temporary_path.chmod(output_mode)
+                os.replace(temporary_path, output_path)
 
         # Clear lists to free memory
         obs_dict = {o: [] for o in obs_dict.keys()}
@@ -3628,27 +3626,8 @@ def perform_md(
                     obs_dict[key].append(obs_data[1][key])
 
             if len(positions) >= save_buffer:
-                # Checkpoints track accepted simulation state, not successful
-                # trajectory I/O. Save them first so a disk/write failure does
-                # not erase the latest restartable state.
-                if create_restart or (
-                    do_enhanced_sampling and restart_pysages_save_path is not None
-                ):
-                    save_restart_checkpoints(
-                        state,
-                        box,
-                        current_cycle,
-                        ensemble=ensemble,
-                        fractional_coordinates=fractional_coordinates,
-                        restart_save_path=restart_save_path if create_restart else None,
-                        pysages_result=pysages_result if do_enhanced_sampling else None,
-                        restart_pysages_save_path=(
-                            restart_pysages_save_path if do_enhanced_sampling else None
-                        ),
-                    )
-                    last_checkpoint_cycle = current_cycle
-
-                # Saving the output
+                # Write frames first, then checkpoint: a failed write must
+                # not leave the restart file ahead of the trajectory.
                 if output_format == 'hdf5':
                     positions, momenta, boxes, obs_dict = write_to_hdf5(
                         hdf5_store,
@@ -3675,29 +3654,22 @@ def perform_md(
                     )
                     append_extxyz = True
 
-    # Always persist the accepted final state, even when the number of cycles
-    # is not a multiple of save_buffer.  This is intentionally independent of
-    # trajectory flushing: if the tail write fails, users can still restart
-    # from the last completed MD cycle.
-    if (
-        last_checkpoint_cycle != current_cycle
-        and (
-            create_restart
-            or (do_enhanced_sampling and restart_pysages_save_path is not None)
-        )
-    ):
-        save_restart_checkpoints(
-            state,
-            box,
-            current_cycle,
-            ensemble=ensemble,
-            fractional_coordinates=fractional_coordinates,
-            restart_save_path=restart_save_path if create_restart else None,
-            pysages_result=pysages_result if do_enhanced_sampling else None,
-            restart_pysages_save_path=(
-                restart_pysages_save_path if do_enhanced_sampling else None
-            ),
-        )
+                if create_restart or (
+                    do_enhanced_sampling and restart_pysages_save_path is not None
+                ):
+                    save_restart_checkpoints(
+                        state,
+                        box,
+                        current_cycle,
+                        ensemble=ensemble,
+                        fractional_coordinates=fractional_coordinates,
+                        restart_save_path=restart_save_path if create_restart else None,
+                        pysages_result=pysages_result if do_enhanced_sampling else None,
+                        restart_pysages_save_path=(
+                            restart_pysages_save_path if do_enhanced_sampling else None
+                        ),
+                    )
+                    last_checkpoint_cycle = current_cycle
 
     # A frame-major HDF5 layout and extxyz both support arbitrary batch sizes,
     # so flush the final short buffer instead of dropping or padding it.
@@ -3726,6 +3698,28 @@ def perform_md(
                 append=append_extxyz,
                 overwrite=overwrite,
             )
+
+    # Then persist the final state, even when the number of cycles is not a
+    # multiple of save_buffer.
+    if (
+        last_checkpoint_cycle != current_cycle
+        and (
+            create_restart
+            or (do_enhanced_sampling and restart_pysages_save_path is not None)
+        )
+    ):
+        save_restart_checkpoints(
+            state,
+            box,
+            current_cycle,
+            ensemble=ensemble,
+            fractional_coordinates=fractional_coordinates,
+            restart_save_path=restart_save_path if create_restart else None,
+            pysages_result=pysages_result if do_enhanced_sampling else None,
+            restart_pysages_save_path=(
+                restart_pysages_save_path if do_enhanced_sampling else None
+            ),
+        )
 
     logger.info('Results saved to: ' + output_file)
     # The first cycle is excluded from timing (it includes JIT compilation /
@@ -4259,6 +4253,7 @@ def save_state(
     destination = Path(path_to_save)
     if not str(destination).endswith('.npz'):
         destination = Path(str(destination) + '.npz')
+    destination = Path(os.path.realpath(destination))
     output_mode = _existing_regular_output_mode(destination)
     with tempfile.TemporaryDirectory(
         dir=destination.parent, prefix=f'.{destination.name}.',

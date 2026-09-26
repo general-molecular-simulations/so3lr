@@ -17,7 +17,6 @@ from ml_collections import config_dict
 
 from so3lr.mlff.data.dataloader_sparse_tfds import (
     QCMLDataLoaderSparseParallel,
-    _ClosePropagatingSkipIterator,
     _canonical_fingerprint,
     epoch_size_from_dataset_sizes,
     minimum_distance_is_valid_np,
@@ -113,44 +112,13 @@ def test_epoch_seed_progression_is_deterministic_and_probe_safe():
     assert loader.next_epoch('validation', 'validation', parallel=False) == 41
 
 
-def test_explicit_epoch_and_batch_skip_recreate_resume_position():
+def test_explicit_epoch_index_selects_the_epoch_seed():
     loader = QCMLDataLoaderSparseParallel.__new__(QCMLDataLoaderSparseParallel)
     loader.train_seed = 41
     loader._epoch_counters = {'train': 0, 'validation': 0}
-    loader._generator_sync = lambda split, mode, seed: iter(
-        (seed, batch) for batch in range(5)
-    )
+    loader._generator_sync = lambda split, mode, seed: seed
 
-    uninterrupted = list(loader.next_epoch(
-        'train', 'train', parallel=False, epoch_index=7
-    ))
-    resumed = list(loader.next_epoch(
-        'train', 'train', parallel=False, epoch_index=7, skip_batches=2
-    ))
-
-    assert resumed == uninterrupted[2:]
-    assert resumed[0] == (48, 2)
-
-
-def test_skip_iterator_is_lazy_and_closes_its_source():
-    events = []
-
-    def source():
-        try:
-            for value in range(5):
-                events.append(('yield', value))
-                yield value
-        finally:
-            events.append(('closed', None))
-
-    iterator = _ClosePropagatingSkipIterator(source(), 2)
-    assert events == []
-    assert next(iterator) == 2
-    assert events == [('yield', 0), ('yield', 1), ('yield', 2)]
-    iterator.close()
-    assert events[-1] == ('closed', None)
-    with pytest.raises(StopIteration):
-        next(iterator)
+    assert loader.next_epoch('train', 'train', parallel=False, epoch_index=7) == 48
 
 
 def test_loader_restart_fingerprint_changes_with_trajectory_settings():
@@ -269,7 +237,7 @@ def test_finetuning_selection_fingerprint_preserves_aliases_and_plain_training(
 
 @pytest.mark.parametrize('masked_sgd', [False, True])
 def test_atomic_training_state_round_trip_and_fingerprint_validation(
-        tmp_path, fingerprint_loader, masked_sgd):
+        tmp_path, fingerprint_loader, masked_sgd, caplog):
     params = {'w': jnp.array([1.0, -2.0])}
     optimizer = optax.adam(1e-3)
     if masked_sgd:
@@ -357,17 +325,19 @@ def test_atomic_training_state_round_trip_and_fingerprint_validation(
                 == jax.tree_util.tree_structure(optimizer_state))
         fingerprint_loader.finetuning_parameter_selection['trainable'] = []
         changed_fingerprint = fingerprint_loader.restart_fingerprint()
-    with pytest.raises(RuntimeError, match='restart fingerprint changed'):
-        _restore_tfds_training_state(
+    with caplog.at_level('WARNING', logger='SO3LR'):
+        restored = _restore_tfds_training_state(
             manager,
             step=120,
             optimizer=optimizer,
             restart_fingerprint=changed_fingerprint,
         )
+    assert 'restart fingerprint changed' in caplog.text
+    assert restored['checkpoint_step'] == 120
     manager.close()
 
 
-def test_params_only_checkpoint_is_rejected_for_training_restart(tmp_path):
+def test_params_only_checkpoint_has_no_training_state(tmp_path):
     manager = checkpoint_utils.make_checkpoint_manager(tmp_path)
     assert manager.save(
         4,
@@ -382,13 +352,12 @@ def test_params_only_checkpoint_is_rejected_for_training_restart(tmp_path):
     assert float(loaded['w']) == pytest.approx(1.0)
 
     training_manager = checkpoint_utils.make_training_checkpoint_manager(tmp_path)
-    with pytest.raises(RuntimeError, match='params-only'):
-        _restore_tfds_training_state(
-            training_manager,
-            step=4,
-            optimizer=optax.sgd(1e-2),
-            restart_fingerprint='ab' * 32,
-        )
+    assert _restore_tfds_training_state(
+        training_manager,
+        step=4,
+        optimizer=optax.sgd(1e-2),
+        restart_fingerprint='ab' * 32,
+    ) is None
     training_manager.close()
 
 
@@ -428,11 +397,10 @@ def test_fit_from_iterator_restart_matches_uninterrupted_updates(
         def restart_fingerprint(self):
             return self.fingerprint
 
-        def next_epoch(
-                self, split, mode, epoch_index=None, skip_batches=0, **kwargs):
-            self.calls.append((mode, epoch_index, skip_batches))
+        def next_epoch(self, split, mode, epoch_index=None, **kwargs):
+            self.calls.append((mode, epoch_index))
             values = self.values if mode == 'train' else [0.0]
-            return iter((value, None) for value in values[skip_batches:])
+            return iter((value, None) for value in values)
 
     class Model:
         @staticmethod
@@ -507,23 +475,14 @@ def test_fit_from_iterator_restart_matches_uninterrupted_updates(
     first_validation = FiniteIterator([])
     run(restarted_dir, 1, first_train, first_validation)
 
-    with pytest.raises(RuntimeError, match='restart fingerprint changed'):
-        run(
-            restarted_dir,
-            2,
-            FiniteIterator([1.0, 2.0], fingerprint='22' * 32),
-            first_validation,
-            allow_restart=True,
-        )
-
     resumed_train = FiniteIterator([1.0, 2.0])
     resumed_validation = FiniteIterator([])
     run(
         restarted_dir, 2, resumed_train, resumed_validation,
         allow_restart=True,
     )
-    assert ('train', 0, 2) in resumed_train.calls
-    assert ('train', 1, 0) in resumed_train.calls
+    # The checkpoint closed epoch 0, so the restart continues with epoch 1.
+    assert [c for c in resumed_train.calls if c[0] == 'train'] == [('train', 1)]
 
     def restored_state(path):
         manager = checkpoint_utils.make_training_checkpoint_manager(path)
@@ -563,6 +522,21 @@ def test_fit_from_iterator_restart_matches_uninterrupted_updates(
         npt.assert_allclose(expected, actual, rtol=0, atol=0)
     assert restarted_state['processed_graphs'] == 4
     assert restarted_state['processed_nodes'] == 40
+
+    # A params-only checkpoint (written before the full training state was
+    # saved) continues from its weights with a fresh optimizer.
+    legacy_dir = tmp_path / 'legacy'
+    legacy = checkpoint_utils.make_checkpoint_manager(legacy_dir)
+    assert legacy.save(
+        3,
+        args=ocp.args.Composite(params=ocp.args.StandardSave({'w': jnp.array(5.0)})),
+    )
+    legacy.wait_until_finished()
+    legacy.close()
+    run(legacy_dir, 1, FiniteIterator([1.0]), FiniteIterator([]), allow_restart=True)
+    legacy_step, legacy_state = restored_state(legacy_dir)
+    assert legacy_step == 4
+    npt.assert_allclose(legacy_state['raw_params']['w'], 5.0 - 0.1 * 1.0, rtol=1e-6)
 
 
 def test_safe_put_honours_worker_cancellation():

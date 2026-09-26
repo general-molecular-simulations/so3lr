@@ -647,28 +647,18 @@ def test_staged_outputs_preserve_file_permissions(tmp_path, kind, existing):
     assert stat.S_IMODE(path.stat().st_mode) == expected_mode
 
 
-@pytest.mark.parametrize('kind', ['extxyz-first', 'extxyz-append', 'hdf5', 'checkpoint', 'md-guard'])
+@pytest.mark.parametrize('kind', ['extxyz', 'checkpoint'])
 @pytest.mark.parametrize('dangling', [False, True])
-def test_output_writers_refuse_final_component_symlinks(tmp_path, kind, dangling):
-    target = tmp_path / 'target'
+def test_output_writers_write_through_symlinks(tmp_path, kind, dangling):
+    target = tmp_path / 'scratch' / 'output.npz'
+    target.parent.mkdir()
     if not dangling:
-        target.write_bytes(b'untouched target')
+        target.write_bytes(b'previous output')
     link = tmp_path / 'output.npz'
     link.symlink_to(target)
-    with pytest.raises(SystemExit if kind.startswith('extxyz') else RuntimeError):
-        if kind.startswith('extxyz'):
-            _write_extxyz_frame(link, 1., append=kind == 'extxyz-append', overwrite=True)
-        elif kind == 'hdf5':
-            init_hdf5_store(link, batch_size=1, num_atoms=1, num_box_entries=3, exist_ok=True)
-        elif kind == 'checkpoint':
-            save_state(_nve_state([[0., 0., 0.]]), np.ones(3), 1, str(link), ensemble='nve')
-        else:
-            _validate_md_output_write_policy(
-                output_file=link, output_format='extxyz', overwrite=True,
-                restart_load_path='restart.npz',
-            )
-    assert link.is_symlink()
-    if dangling:
-        assert not target.exists()
+    if kind == 'extxyz':
+        _write_extxyz_frame(link, 1., append=False, overwrite=True)
     else:
-        assert target.read_bytes() == b'untouched target'
+        save_state(_nve_state([[0., 0., 0.]]), np.ones(3), 1, str(link), ensemble='nve')
+    assert link.is_symlink()
+    assert target.read_bytes() not in (b'', b'previous output')
