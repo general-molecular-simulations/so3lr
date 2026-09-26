@@ -224,13 +224,14 @@ class TestSO3LRCLIOptions:
         dst = tmp_path / 'input.xyz'
         shutil.copy2(src, dst)
         return tmp_path
-    def test_nvt_with_relax(self, sample_molecule):
+    @pytest.mark.parametrize('output_file', ['trajectory.hdf5', 'trajectory.xyz'])
+    def test_nvt_with_relax(self, sample_molecule, output_file):
         workdir = sample_molecule
         result = subprocess.run(
             [
                 'so3lr', 'nvt',
                 '--input', 'input.xyz',
-                '--output', 'trajectory.hdf5',
+                '--output', output_file,
                 '--temperature', '300',
                 '--dt', '0.5',
                 '--md-cycles', '2',
@@ -245,6 +246,14 @@ class TestSO3LRCLIOptions:
             timeout=SUBPROCESS_TIMEOUT,
         )
         assert result.returncode == 0, f"nvt with relax failed: {result.stderr}"
+        assert (workdir / 'trajectory_opt.xyz').exists()
+        if output_file.endswith('.hdf5'):
+            import h5py
+            with h5py.File(workdir / output_file) as trajectory:
+                assert trajectory['positions'].shape[0] == 2
+        else:
+            from ase.io import read
+            assert len(read(workdir / output_file, index=':')) == 2
     def test_eval_with_targets(self, sample_molecule):
         workdir = sample_molecule
         result = subprocess.run(
