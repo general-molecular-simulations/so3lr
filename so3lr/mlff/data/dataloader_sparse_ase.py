@@ -358,6 +358,10 @@ def ASE_to_jraph(
         "dipole_vec": dipole.reshape(1, 3),
         "total_charge": total_charge.reshape(-1),
         "num_unpaired_electrons": multiplicity.reshape(-1) - 1,
+        # ASE already used these axis-specific flags to construct the neighbor
+        # offsets. Preserve them so reciprocal-space callers can reject mixed
+        # PBC rather than silently promoting it to three-dimensional PBC.
+        "pbc": np.asarray(mol.get_pbc(), dtype=bool).reshape(1, 3),
     }
 
     if cell is not None:
