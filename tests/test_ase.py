@@ -56,6 +56,29 @@ def test_molecules(name: str):
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
+def test_bounding_cell_does_not_change_free_molecule():
+    """A pbc=False molecule with a tight bounding cell is still free."""
+    package_dir = pathlib.Path(__file__).parent.parent.resolve()
+    atoms = read(package_dir / 'tests/test_data/dha.xyz')
+    atoms.cell = None
+    atoms.pbc = False
+    atoms.calc = AseCalculatorSparse.create_from_workdir(
+        workdir=MODEL_DIR, lr_cutoff=12., dispersion_energy_cutoff_lr_damping=2.,
+        from_file=True, dtype=np.float64,
+    )
+    energy, forces = atoms.get_potential_energy(), atoms.get_forces()
+
+    boxed = atoms.copy()
+    boxed.center(vacuum=1.0)
+    boxed.pbc = False
+    boxed.calc = atoms.calc
+
+    # Tolerances cover float32 when x64 is off; the minimum-image error this
+    # guards against is ~1e-2 eV and ~1e-2 eV/A.
+    npt.assert_allclose(boxed.get_potential_energy(), energy, atol=1e-4)
+    npt.assert_allclose(boxed.get_forces(), forces, atol=1e-3)
+
+
 def test_water():
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()

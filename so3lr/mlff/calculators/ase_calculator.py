@@ -717,6 +717,9 @@ class AseCalculatorSparse(Calculator):
             cell = jnp.array(np.array(atoms.get_cell()), dtype=self.dtype).T  # (3, 3)
         else:
             cell = None
+            # glp keeps any nonzero atoms.cell and would minimum-image the
+            # edges of a pbc=False molecule that carries a bounding box.
+            system = system._replace(cell=None)
 
         if self.spatial_partitioning is None:
             self.neighbors, self.spatial_partitioning = neighbor_list(

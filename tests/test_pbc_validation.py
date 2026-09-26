@@ -5,6 +5,7 @@ import pytest
 from ase import Atoms
 
 from so3lr.mlff.data.dataloader_sparse_ase import ASE_to_jraph
+from so3lr.mlff.data.dataloader_sparse_npz import entry_to_jraph
 from so3lr.mlff.utils.jraph_utils import graph_to_batch_fn
 from so3lr.pbc import is_fully_periodic
 
@@ -41,6 +42,20 @@ def test_ase_loader_preserves_axis_specific_pbc():
         pbc=[True, False, True],
     )
     graph, _ = ASE_to_jraph(atoms, cutoff=2.0, calculate_neighbors_lr=False)
+
+    np.testing.assert_array_equal(graph.globals["pbc"], [[True, False, True]])
+
+
+def test_npz_loader_records_pbc_flags():
+    entry = {
+        "atomic_numbers": [1, 1],
+        "positions": np.array([[0.0, 0.0, 0.0], [0.75, 0.0, 0.0]]),
+        "cell": np.diag([6.0, 7.0, 8.0]),
+        "pbc": [True, False, True],
+        "energy": np.array(0.0),
+    }
+    graph = entry_to_jraph(entry, cutoff=2.0)
+    graph = graph[0] if isinstance(graph, tuple) else graph
 
     np.testing.assert_array_equal(graph.globals["pbc"], [[True, False, True]])
 
