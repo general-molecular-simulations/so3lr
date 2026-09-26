@@ -1287,10 +1287,125 @@ def process_model(
 
 
 def box_to_diag(box):
-    """Extract diagonal from box matrix, or return as-is if already 1D."""
+    """Return orthorhombic lengths from a box vector or diagonal matrix.
+
+    This is intentionally not a conversion for general cells. Fully flexible
+    cells are rejected by :func:`normalize_npt_coupling` before they can reach
+    any caller of this helper.
+    """
     if box is not None and hasattr(box, 'ndim') and box.ndim == 2:
         return jnp.diag(box)
     return box
+
+
+SUPPORTED_NPT_COUPLINGS = ('isotropic', 'semi-isotropic')
+
+
+def normalize_npt_coupling(npt_coupling: str) -> str:
+    """Return the canonical, scientifically supported NPT coupling name.
+
+    The forked JAX-MD integrator can evolve a fully flexible cell, but SO3LR's
+    MD plumbing cannot yet consume that cell consistently.  In particular,
+    JAX-MD's cell-list implementation requires an upper-triangular matrix,
+    while a flexible anisotropic step produces a general matrix, and the
+    neighbor-list reallocation, reciprocal-grid, and tail-correction paths
+    historically discarded all off-diagonal components.  Accepting that mode
+    would therefore simulate a different cell from the one the barostat
+    evolves.  Keep the safe orthorhombic modes available and fail before model
+    loading or integration for the unsupported mode.
+    """
+    # JAX-MD historically accepted spaces and underscores as separators. Keep
+    # those public spellings while returning one stable SO3LR representation.
+    coupling = '-'.join(
+        str(npt_coupling).strip().lower().replace('_', ' ').replace('-', ' ').split()
+    )
+    if coupling == 'anisotropic':
+        raise ValueError(
+            "npt_coupling='anisotropic' is not currently supported by SO3LR MD. "
+            "The flexible-cell integrator evolves shear (off-diagonal cell "
+            "components), but SO3LR's neighbor-list, reciprocal-space, and "
+            "dispersion-tail paths are currently validated only for "
+            "orthorhombic cells. Continuing would silently use inconsistent "
+            "cells. Use npt_coupling='semi-isotropic' (coupled x/y and "
+            "independent z) or 'isotropic'."
+        )
+    if coupling not in SUPPORTED_NPT_COUPLINGS:
+        raise ValueError(
+            f"Unknown npt_coupling={npt_coupling!r}. Supported values: "
+            f"{', '.join(SUPPORTED_NPT_COUPLINGS)}."
+        )
+    return coupling
+
+
+def validate_orthorhombic_restart_box(box, label: str = 'box') -> None:
+    """Reject a sheared restart cell that the MD driver cannot represent."""
+    matrix = np.asarray(box)
+    if matrix.ndim != 2:
+        return
+    diagonal = np.diag(np.diag(matrix))
+    scale = max(1.0, float(np.max(np.abs(matrix))))
+    eps_dtype = matrix.dtype if np.issubdtype(matrix.dtype, np.floating) else np.float64
+    atol = 100 * np.finfo(eps_dtype).eps * scale
+    if not np.allclose(matrix, diagonal, rtol=0.0, atol=atol):
+        raise ValueError(
+            f"The checkpoint's {label} contains shear components, which SO3LR "
+            "MD cannot represent consistently. restart_reset cannot remove "
+            "cell shear without changing the physical geometry. Export the "
+            "checkpoint positions in Cartesian coordinates into a supported "
+            "orthorhombic cell, then start a fresh run."
+        )
+
+
+def validate_npt_restart_coupling(state, box, npt_coupling: str) -> None:
+    """Reject NPT checkpoints whose barostat/cell cannot match this run.
+
+    Older checkpoints did not store the coupling name. The state class
+    distinguishes the scalar isotropic barostat from the flexible one, and the
+    flexible barostat's degrees of freedom distinguish semi-isotropic (2) from
+    fully anisotropic (6). This closes the otherwise possible route of loading
+    an old anisotropic checkpoint under the now-safe semi-isotropic setting.
+    """
+    coupling = normalize_npt_coupling(npt_coupling)
+    is_flex = isinstance(state, jax_md.simulate.NPTNoseHooverFlexState)
+    validate_orthorhombic_restart_box(box)
+    if is_flex:
+        validate_orthorhombic_restart_box(state.box_position, 'box_position')
+
+    expected_flex = coupling == 'semi-isotropic'
+    if is_flex != expected_flex:
+        saved_kind = 'flexible' if is_flex else 'isotropic'
+        raise ValueError(
+            f"The NPT checkpoint contains a {saved_kind} barostat state, but "
+            f"npt_coupling={coupling!r} was requested. Resume with the matching "
+            f"coupling or set restart_reset: true to reinitialize the barostat."
+        )
+
+    if not is_flex:
+        return
+
+    barostat_dof = int(np.asarray(state.barostat.degrees_of_freedom))
+    if barostat_dof != 2:
+        raise ValueError(
+            "The NPT checkpoint contains a fully flexible/anisotropic barostat "
+            f"({barostat_dof} cell degrees of freedom). SO3LR can only resume "
+            "the 2-DOF semi-isotropic barostat safely. Set restart_reset: true "
+            "to retain the geometry while reinitializing the barostat."
+        )
+
+    # A valid semi-isotropic run's constrained box velocity remains diagonal.
+    # A malformed velocity can safely be discarded with restart_reset because
+    # the cell itself has already passed the stricter geometry check above.
+    matrix = np.asarray(state.box_velocity)
+    diagonal = np.diag(np.diag(matrix))
+    scale = max(1.0, float(np.max(np.abs(matrix))))
+    atol = 100 * np.finfo(matrix.dtype).eps * scale
+    if not np.allclose(matrix, diagonal, rtol=0.0, atol=atol):
+        raise ValueError(
+            "The NPT checkpoint's box_velocity contains shear components, "
+            "which cannot be resumed safely by SO3LR's orthorhombic "
+            "semi-isotropic path. Set restart_reset: true to retain the "
+            "geometry while reinitializing the barostat."
+        )
 
 
 def box_for_trajectory(box):
@@ -1693,6 +1808,10 @@ def create_npt_nhc_fn(
     lr,
     npt_coupling='isotropic'
 ):
+    # Validate here as well as in perform_md: this factory is imported by
+    # downstream Python callers, and no caller should be able to enter the
+    # inconsistent fully flexible-cell path by bypassing the CLI.
+    npt_coupling = normalize_npt_coupling(npt_coupling)
     if npt_coupling == 'isotropic':
         init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
             energy_fn,
@@ -1935,7 +2054,7 @@ def create_npt_flex_step_fn(
     P: float
 ) -> callable:
     """
-    Create the NPT step function for flexible cell (anisotropic/semi-isotropic).
+    Create the NPT step function for a diagonal semi-isotropic cell.
 
     Args:
         lr (bool): Whether to use long-range interactions.
@@ -2522,8 +2641,11 @@ def perform_md(
     nhc_baro = all_settings.get('nhc_baro')
     nhc_sy_steps = all_settings.get('nhc_sy_steps')
 
-    # NPT coupling mode: 'isotropic', 'semi-isotropic', or 'anisotropic'
+    # Fully flexible anisotropic cells are deliberately rejected below: the
+    # remaining MD stack is currently valid only for orthorhombic cells.
     npt_coupling = all_settings.get('npt_coupling', 'isotropic')
+    if str(ensemble).lower() == 'npt':
+        npt_coupling = normalize_npt_coupling(npt_coupling)
 
     # Langevin thermostat parameters
     langevin_removecmmotion = all_settings.get('langevin_removecmmotion')
@@ -2715,6 +2837,8 @@ def perform_md(
                 fractional_coordinates=fractional_coordinates,
                 precision=dtype
             )
+            if str(ensemble).lower() == 'npt':
+                validate_npt_restart_coupling(state, box, npt_coupling)
             position = state.position
         except RestartInNewEnsembleError as e:
             logger.warning(e)
@@ -2724,6 +2848,11 @@ def perform_md(
             box = e.loaded_state['box']
             if np.all(box == 0) or box is None:
                 box = jnp.array([0.0], dtype=jnp.float64 if precision == 'float64' else jnp.float32)
+            else:
+                # Resetting an integrator may discard thermostat/barostat
+                # history, but it must never smuggle a sheared legacy cell past
+                # the same orthorhombic restriction applied to input files.
+                validate_orthorhombic_restart_box(box)
             saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
             if saved_fractional and not fractional_coordinates:
                 logger.info('Converting restart positions from fractional to cartesian coordinates.')
@@ -3165,9 +3294,10 @@ def perform_md(
         else:
             pysages_result = None
 
-    # For npt_flex, the step function returns a [3,3] box matrix via npt_box_flex.
-    # Ensure the initial box matches this shape so fori_loop carry types are consistent.
-    if npt_coupling in ('semi-isotropic', 'anisotropic') and box.ndim == 1:
+    # For semi-isotropic NPT, the step function returns a diagonal [3,3] box
+    # matrix via npt_box_flex. Ensure the initial box matches this shape so the
+    # fori_loop carry types are consistent.
+    if npt_coupling == 'semi-isotropic' and box.ndim == 1:
         box = jnp.diag(box)
 
     # Initialize trajectory storage only after restart loading and flexible-cell
