@@ -2047,6 +2047,23 @@ class DispersionEnergySparse(nn.Module):
     neighborlist_format: str = 'sparse'  # or 'ordered_sparse'
     module_name = 'dispersion_energy'
 
+    def _switch_off(self, energy_ij, d_ij_lr):
+        """Smoothly switch pair energies to zero at cutoff_lr (no-op without cutoff_lr)."""
+        if self.cutoff_lr is None:
+            return energy_ij
+        if self.cutoff_lr_damping is None:
+            raise ValueError(
+                f"cutoff_lr is set but cutoff_lr_damping is not. "
+                f"Received {self.cutoff_lr=} and {self.cutoff_lr_damping=}."
+            )
+        w = safe_mask(
+            d_ij_lr > 0,
+            partial(switching_fn, x_on=self.cutoff_lr - self.cutoff_lr_damping, x_off=self.cutoff_lr),
+            d_ij_lr,
+            0.
+        )
+        return safe_scale(energy_ij, w, 0.)
+
     @nn.compact
     def __call__(self, inputs: Dict, *args, **kwargs) -> Dict[str, jnp.ndarray]:
         """Compute per-atom dispersion energy using Hirshfeld-scaled QDO model.
@@ -2168,23 +2185,7 @@ class DispersionEnergySparse(nn.Module):
             # pair, so switch C6 together with C8+C10.  switching_fn is flat at
             # both endpoints; multiplying the whole residual makes both its
             # value and radial derivative vanish at cutoff_lr.
-            V_real_space_residual = V_C6_residual + V_C8C10
-            if self.cutoff_lr is not None:
-                if self.cutoff_lr_damping is None:
-                    raise ValueError(
-                        f"cutoff_lr is but cutoff_lr_damping is not set. "
-                        f"received {self.cutoff_lr=} and {self.cutoff_lr_damping=}."
-                    )
-                w = safe_mask(
-                    d_ij_lr > 0,
-                    partial(switching_fn, x_on=self.cutoff_lr - self.cutoff_lr_damping, x_off=self.cutoff_lr),
-                    d_ij_lr,
-                    0.
-                )
-                V_real_space_residual = safe_scale(
-                    V_real_space_residual, w, 0.
-                )
-
+            V_real_space_residual = self._switch_off(V_C6_residual + V_C8C10, d_ij_lr)
             dispersion_energy_ij = c * V_real_space_residual * _Hartree
 
         else:
@@ -2208,22 +2209,7 @@ class DispersionEnergySparse(nn.Module):
                 self.neighborlist_format
                 )
 
-            # If long-range cutoff is given, damp dispersion smoothly to zero at cutoff_lr.
-            if self.cutoff_lr is not None:
-                if self.cutoff_lr_damping is None:
-                    raise ValueError(
-                        f"cutoff_lr is but cutoff_lr_damping is not set. "
-                        f"received {self.cutoff_lr=} and {self.cutoff_lr_damping=}."
-                    )
-
-                w = safe_mask(
-                    d_ij_lr > 0,
-                    partial(switching_fn, x_on=self.cutoff_lr - self.cutoff_lr_damping, x_off=self.cutoff_lr),
-                    d_ij_lr,
-                    0.
-                )
-
-                dispersion_energy_ij = safe_scale(dispersion_energy_ij, w, 0.)
+            dispersion_energy_ij = self._switch_off(dispersion_energy_ij, d_ij_lr)
 
         atomic_dispersion_energy = segment_sum(
             dispersion_energy_ij,
