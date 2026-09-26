@@ -137,6 +137,7 @@ training:
   # stage_two_loss_weights:  # Loss weights applied from stage_two_start_epoch onward. Same keys as loss_weights. Only used when stage_two_start_epoch is set.
   #   energy: 0.1
   #   forces: 0.9
+  # data_parallel: false  # Train on all local GPUs (TFDS datasets only). Each optimizer step takes one padded batch per device and averages the gradients, so the effective batch grows with the device count; consider scaling learning_rate, and note eval_every_num_steps counts optimizer steps. Set CUDA_VISIBLE_DEVICES to choose the devices.
   model_seed: 42  # Random seed for model parameter initialization.
   training_seed: 42  # Random seed for shuffling training batches each epoch.
   log_gradient_values: false  # Log the L2 norm of gradients for each parameter group to WandB. Useful for debugging training dynamics.

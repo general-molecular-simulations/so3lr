@@ -455,6 +455,9 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)
 
     logger.info('Training is starting!')
+    if config.training.get('data_parallel', False) and not tf_record_present:
+        logger.warning('training.data_parallel is only supported for TFDS datasets; '
+                       'training on a single device.')
     if not tf_record_present:
         training_utils.fit(
             model=net,
@@ -536,6 +539,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             stage_two_val_fn=stage_two_val_fn,
             # Dataset info for effective epoch tracking
             dataset_info=training_data.dataset_info() if hasattr(training_data, 'dataset_info') else None,
+            data_parallel=config.training.get('data_parallel', False),
         )
     logger.info('Training has finished!')
 
@@ -891,6 +895,9 @@ def run_fine_tuning(
 
     _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)
 
+    if config.training.get('data_parallel', False) and not tf_record_present:
+        logger.warning('training.data_parallel is only supported for TFDS datasets; '
+                       'training on a single device.')
     if tf_record_present is True:
         training_utils.fit_from_iterator(
             model=net,
@@ -922,6 +929,7 @@ def run_fine_tuning(
             # Dataset info for effective epoch tracking
             dataset_info=training_data.dataset_info() if hasattr(training_data, 'dataset_info') else None,
             **_reduce_lr_kwargs(config),
+            data_parallel=config.training.get('data_parallel', False),
         )
     else:
         training_utils.fit(
