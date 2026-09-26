@@ -88,7 +88,8 @@ def load_params_from_workdir(workdir):
 
 def make_checkpoint_manager(
         ckpt_dir,
-        ckpt_mngr_options: Optional[ocp.CheckpointManagerOptions] = None
+        ckpt_mngr_options: Optional[ocp.CheckpointManagerOptions] = None,
+        item_names=('params',),
 ):
     # Make the path absolute. First expanduser() then resolve().
     ckpt_dir_cleaned = Path(ckpt_dir).expanduser().resolve()
@@ -98,13 +99,14 @@ def make_checkpoint_manager(
     else:
         options = ckpt_mngr_options
 
-    ckpt_mngr = ocp.CheckpointManager(
+    return ocp.CheckpointManager(
         ckpt_dir_cleaned,
-        item_names=('params',),
-        item_handlers={'params': ocp.StandardCheckpointHandler()},
-        options=options
+        item_names=item_names,
+        item_handlers={
+            name: ocp.StandardCheckpointHandler() for name in item_names
+        },
+        options=options,
     )
-    return ckpt_mngr
 
 
 def make_training_checkpoint_manager(
@@ -114,23 +116,10 @@ def make_training_checkpoint_manager(
     """Create the atomic two-item manager used by iterator-based training.
 
     ``params`` remains the deployable/inference item.  ``training_state`` is a
-    versioned PyTree containing everything needed to reproduce the next update.
+    versioned PyTree with everything needed to continue training.
     CheckpointManager commits and prunes the two items as one checkpoint, so a
     retained params item can never point at a separately-pruned sidecar.
     """
-    ckpt_dir_cleaned = Path(ckpt_dir).expanduser().resolve()
-
-    if ckpt_mngr_options is None:
-        options = ocp.CheckpointManagerOptions(step_prefix='ckpt')
-    else:
-        options = ckpt_mngr_options
-
-    return ocp.CheckpointManager(
-        ckpt_dir_cleaned,
-        item_names=('params', 'training_state'),
-        item_handlers={
-            'params': ocp.StandardCheckpointHandler(),
-            'training_state': ocp.StandardCheckpointHandler(),
-        },
-        options=options,
+    return make_checkpoint_manager(
+        ckpt_dir, ckpt_mngr_options, item_names=('params', 'training_state')
     )

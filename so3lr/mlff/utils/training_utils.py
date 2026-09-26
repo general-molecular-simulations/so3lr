@@ -1,5 +1,3 @@
-import hashlib
-import json
 import jraph
 import jax
 import jax.numpy as jnp
@@ -38,9 +36,11 @@ def _wandb_log(*args, **kwargs):
 ROBUST_LOSS_DIST = robust_loss_dist.Distribution()
 
 _TFDS_TRAINING_STATE_VERSION = 1
-_TFDS_RESTART_FINGERPRINT_VERSION = 1
+# Checkpoints written before the fingerprint was dropped also carry a
+# ``restart_fingerprint`` leaf; the restore target is built from the saved
+# tree, so that extra leaf is restored and ignored.
 _TFDS_TRAINING_STATE_KEYS = frozenset({
-    'version', 'checkpoint_step', 'restart_fingerprint',
+    'version', 'checkpoint_step',
     'raw_params', 'optimizer_state', 'ema_params', 'jax_rng',
     'epoch', 'batches_consumed', 'processed_graphs', 'processed_nodes',
     'best_eval_loss', 'evals_without_improvement', 'stop_training',
@@ -50,68 +50,17 @@ _TFDS_TRAINING_STATE_KEYS = frozenset({
 })
 
 
-def _canonical_sha256(payload):
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(',', ':'), ensure_ascii=True
-    ).encode('utf-8')
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _tfds_restart_fingerprint(
-        training_iterator, validation_iterator, loop_config):
-    """Fingerprint data ordering plus trajectory-relevant loop settings."""
-    loader_fingerprints = []
-    fingerprint_cache = {}
-    for name, iterator in (
-            ('training', training_iterator), ('validation', validation_iterator)):
-        make_fingerprint = getattr(iterator, 'restart_fingerprint', None)
-        if make_fingerprint is None:
-            raise ValueError(
-                f'The {name} iterator does not provide restart_fingerprint(); '
-                'exact TFDS checkpoint restart cannot be guaranteed.'
-            )
-        iterator_identity = id(iterator)
-        if iterator_identity not in fingerprint_cache:
-            fingerprint_cache[iterator_identity] = make_fingerprint()
-        digest = fingerprint_cache[iterator_identity]
-        try:
-            digest_bytes = bytes.fromhex(digest)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f'The {name} iterator returned an invalid SHA-256 restart '
-                f'fingerprint: {digest!r}.'
-            ) from exc
-        if len(digest_bytes) != hashlib.sha256().digest_size:
-            raise ValueError(
-                f'The {name} iterator returned an invalid SHA-256 restart '
-                f'fingerprint: {digest!r}.'
-            )
-        loader_fingerprints.append(digest.lower())
-
-    return _canonical_sha256({
-        'version': _TFDS_RESTART_FINGERPRINT_VERSION,
-        'training_iterator': loader_fingerprints[0],
-        'validation_iterator': loader_fingerprints[1],
-        'loop': loop_config,
-    })
-
-
 def _make_tfds_training_state(
-        *, step, restart_fingerprint, raw_params, optimizer_state, ema_params,
+        *, step, raw_params, optimizer_state, ema_params,
         jax_rng, epoch, batches_consumed, processed_graphs, processed_nodes,
         best_eval_loss, evals_without_improvement, stop_training,
         plateau_best_loss, plateau_wait, plateau_cooldown_counter,
         plateau_scale, plateau_active, reduce_lr_enabled, stage_two_active,
         header_printed, use_ema):
-    """Build the versioned, Orbax-compatible exact-restart PyTree."""
+    """Build the versioned, Orbax-compatible restart PyTree."""
     return {
         'version': _TFDS_TRAINING_STATE_VERSION,
         'checkpoint_step': int(step),
-        # StandardCheckpointHandler does not support str leaves.  Store the
-        # digest losslessly as 32 bytes and format it as hex in diagnostics.
-        'restart_fingerprint': np.frombuffer(
-            bytes.fromhex(restart_fingerprint), dtype=np.uint8
-        ).copy(),
         'raw_params': raw_params,
         'optimizer_state': optimizer_state,
         'ema_params': ema_params,
@@ -135,92 +84,26 @@ def _make_tfds_training_state(
     }
 
 
-def _validate_tfds_training_state(state, *, step, restart_fingerprint):
-    """Fail closed if a checkpoint cannot identify the exact next update."""
-    if not isinstance(state, dict):
-        raise RuntimeError(
-            f'Checkpoint step {step} has no readable versioned TFDS training state.'
-        )
-    missing = sorted(_TFDS_TRAINING_STATE_KEYS.difference(state))
+def _validate_tfds_training_state(state, step):
+    """Reject a training state this version cannot resume from."""
+    missing = sorted(_TFDS_TRAINING_STATE_KEYS.difference(state or {}))
     if missing:
         raise RuntimeError(
-            f'Checkpoint step {step} has incomplete TFDS training state; '
-            f'missing {missing}. Exact restart is unsafe.'
+            f'Checkpoint step {step} has incomplete training state; missing {missing}.'
         )
     if state['version'] != _TFDS_TRAINING_STATE_VERSION:
         raise RuntimeError(
-            f'Checkpoint step {step} uses TFDS training-state version '
+            f'Checkpoint step {step} uses training-state version '
             f'{state["version"]!r}; expected {_TFDS_TRAINING_STATE_VERSION}.'
-        )
-    if state['checkpoint_step'] != int(step):
-        raise RuntimeError(
-            f'Checkpoint step {step} contains training state for step '
-            f'{state["checkpoint_step"]!r}.'
-        )
-
-    try:
-        fingerprint_array = np.asarray(
-            state['restart_fingerprint'], dtype=np.uint8
-        )
-        if fingerprint_array.shape != (hashlib.sha256().digest_size,):
-            raise ValueError(f'unexpected shape {fingerprint_array.shape}')
-        saved_fingerprint = fingerprint_array.tobytes().hex()
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f'Checkpoint step {step} has an invalid restart fingerprint.'
-        ) from exc
-    if saved_fingerprint != restart_fingerprint:
-        logger.warning(
-            'TFDS restart fingerprint changed at checkpoint step %s: dataset, '
-            'sampling/filter/unit/batch or loop settings differ from the run '
-            'that wrote the checkpoint. Continuing with the current settings.',
-            step,
-        )
-
-    for key in (
-            'epoch', 'batches_consumed', 'processed_graphs', 'processed_nodes',
-            'evals_without_improvement', 'plateau_wait',
-            'plateau_cooldown_counter'):
-        value = state[key]
-        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
-            raise RuntimeError(
-                f'Checkpoint step {step} has invalid {key}={value!r}.'
-            )
-    for key in (
-            'stop_training', 'plateau_active', 'reduce_lr_enabled',
-            'stage_two_active', 'header_printed', 'use_ema'):
-        if not isinstance(state[key], (bool, np.bool_)):
-            raise RuntimeError(
-                f'Checkpoint step {step} has invalid {key}={state[key]!r}.'
-            )
-    for key in ('best_eval_loss', 'plateau_best_loss'):
-        if np.isnan(float(state[key])):
-            raise RuntimeError(
-                f'Checkpoint step {step} has invalid {key}={state[key]!r}.'
-            )
-    if (not np.isfinite(float(state['plateau_scale']))
-            or float(state['plateau_scale']) < 0):
-        raise RuntimeError(
-            f'Checkpoint step {step} has invalid '
-            f'plateau_scale={state["plateau_scale"]!r}.'
         )
     if state['raw_params'] is None or state['optimizer_state'] is None:
         raise RuntimeError(
-            f'Checkpoint step {step} lacks raw parameters or optimizer state; '
-            'exact restart is unsafe.'
-        )
-    if state['use_ema'] and state['ema_params'] is None:
-        raise RuntimeError(
-            f'Checkpoint step {step} says EMA is active but lacks EMA state.'
-        )
-    if state['jax_rng'] is None:
-        raise RuntimeError(
-            f'Checkpoint step {step} lacks its JAX RNG state.'
+            f'Checkpoint step {step} lacks raw parameters or optimizer state.'
         )
 
 
 def _restore_tfds_training_state(
-        checkpoint_manager, *, step, optimizer, restart_fingerprint):
+        checkpoint_manager, *, step, optimizer):
     """Restore training state while preserving Optax namedtuple structure.
 
     Returns ``None`` for a params-only checkpoint (written before the full
@@ -236,9 +119,7 @@ def _restore_tfds_training_state(
         ),
     )['training_state']
 
-    _validate_tfds_training_state(
-        untyped, step=step, restart_fingerprint=restart_fingerprint
-    )
+    _validate_tfds_training_state(untyped, step)
 
     # Target-free Orbax restore turns Optax namedtuples into lists/dicts.  A
     # fresh optimizer state supplies the exact container structure, then Orbax
@@ -258,9 +139,6 @@ def _restore_tfds_training_state(
             f'Checkpoint step {step} training state is incompatible with the '
             'current optimizer or parameter structure; refusing an inexact restart.'
         ) from exc
-    _validate_tfds_training_state(
-        restored, step=step, restart_fingerprint=restart_fingerprint
-    )
     return restored
 
 
@@ -1707,48 +1585,6 @@ def fit_from_iterator(
     """
     jax_rng = jax.random.PRNGKey(seed=model_seed)
 
-    batch_n_proc = getattr(training_iterator, 'n_proc', None)
-    loop_config = {
-        'training_seed': int(training_seed),
-        'model_seed': int(model_seed),
-        'batch_n_proc': None if batch_n_proc is None else int(batch_n_proc),
-        'batch_max_num_nodes': int(batch_max_num_nodes),
-        'batch_max_num_edges': int(batch_max_num_edges),
-        'batch_max_num_graphs': int(batch_max_num_graphs),
-        'batch_max_num_pairs': int(batch_max_num_pairs),
-        'eval_every_num_steps': int(eval_every_num_steps),
-        'use_robust_loss_validation': bool(use_robust_loss_validation),
-        'robust_loss_alpha_validation': float(robust_loss_alpha_validation),
-        'use_adaptive_robust_loss': bool(use_adaptive_robust_loss),
-        'adaptive_robust_loss_targets': (
-            None if adaptive_robust_loss_targets is None
-            else list(adaptive_robust_loss_targets)
-        ),
-        'adaptive_robust_loss_init_alpha': float(adaptive_robust_loss_init_alpha),
-        'adaptive_robust_loss_init_scale': float(adaptive_robust_loss_init_scale),
-        'use_ema': bool(use_ema),
-        'ema_decay': float(ema_decay),
-        'early_stopping_patience': (
-            None if early_stopping_patience is None
-            else int(early_stopping_patience)
-        ),
-        'early_stopping_min_delta': float(early_stopping_min_delta),
-        'reduce_lr_on_plateau': bool(reduce_lr_on_plateau),
-        'reduce_lr_factor': float(reduce_lr_factor),
-        'reduce_lr_patience': int(reduce_lr_patience),
-        'reduce_lr_min_scale': float(reduce_lr_min_scale),
-        'reduce_lr_min_delta': float(reduce_lr_min_delta),
-        'reduce_lr_cooldown': int(reduce_lr_cooldown),
-        'stage_two_start_epoch': (
-            None if stage_two_start_epoch is None else int(stage_two_start_epoch)
-        ),
-        'has_stage_two_loss': stage_two_loss_fn is not None,
-        'has_stage_two_validation': stage_two_val_fn is not None,
-    }
-    restart_fingerprint = _tfds_restart_fingerprint(
-        training_iterator, validation_iterator, loop_config
-    )
-
     # Create checkpoint directory.
     ckpt_dir = Path(ckpt_dir).expanduser().resolve()
     ckpt_dir.mkdir(exist_ok=True)
@@ -1835,7 +1671,6 @@ def fit_from_iterator(
             ckpt_mngr,
             step=latest_step,
             optimizer=optimizer,
-            restart_fingerprint=restart_fingerprint,
         )
         if training_state is None:
             logger.warning(
@@ -2079,7 +1914,6 @@ def fit_from_iterator(
                 if jnp.isfinite(eval_loss):
                     training_state = _make_tfds_training_state(
                         step=step,
-                        restart_fingerprint=restart_fingerprint,
                         raw_params=params,
                         optimizer_state=opt_state,
                         ema_params=ema_params,

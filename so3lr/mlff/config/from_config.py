@@ -82,10 +82,9 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
     # Get a cell from the first periodic structure in training data.
     if tf_record_present:
         # For TFDS, peek synchronously so a one-batch metadata read does not
-        # start the multiprocessing pipeline.  Do not advance the epoch seed:
-        # this batch is inspected, not used for an optimizer update.
+        # start the multiprocessing pipeline.
         first_iter = training_data.next_epoch(
-            split='train', mode='train', parallel=False, advance_epoch=False
+            split='train', mode='train', parallel=False
         )
         # Also release the probe when invalid boundary flags raise an error.
         with closing(first_iter):
@@ -956,13 +955,7 @@ def run_fine_tuning(
     data_filepath = data_path_from_config(config=config)
 
     # Create a loader and check if tf records are present.
-    loader, tf_record_present = data_loader_from_config(
-        config=config,
-        finetuning_parameter_selection={
-            'trainable': trainable_subset_keys,
-            'frozen': frozen_subset_keys,
-        },
-    )
+    loader, tf_record_present = data_loader_from_config(config=config)
 
     # Prepare training and validation data and load the data set statistics.
     training_data, validation_data, data_stats = prepare_training_and_validation_data(
@@ -1153,13 +1146,11 @@ def run_fine_tuning(
     logger.info('Training has finished!')
 
 
-def data_loader_from_config(config, finetuning_parameter_selection=None):
+def data_loader_from_config(config):
     """Create a data loader from config.
     
     Args:
         config: Configuration object
-        finetuning_parameter_selection: Optional resolved trainable/frozen
-            keys included in TFDS restart validation.
         
     Returns:
         DataLoader instance and tf_record_present flag
@@ -1200,7 +1191,6 @@ def data_loader_from_config(config, finetuning_parameter_selection=None):
             length_unit=length_unit,
             energy_unit=energy_unit,
             dipole_vec_unit=dipole_vec_unit,
-            finetuning_parameter_selection=finetuning_parameter_selection,
         )
     else:
         # config.data.filter.min_distance / max_force are honoured only by the TFDS loader.
