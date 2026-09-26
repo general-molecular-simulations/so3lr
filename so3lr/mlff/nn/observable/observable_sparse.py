@@ -125,18 +125,6 @@ def _batched_kspace_electrostatic(kspace_module, inputs):
     )
 
 
-def _predicted_c6_ratios(c6_head, inputs):
-    """Return C6 ratios from the model head, never from dataset targets.
-
-    ``inputs['c6_ratios']`` is a ground-truth value carried by the data loaders
-    for loss and metric calculation.  Using it in the dispersion calculation
-    would make energy and forces depend on a label that is unavailable during
-    inference.  Keep the target in ``inputs`` for the caller, but deliberately
-    ignore it in the physical forward pass.
-    """
-    return c6_head(inputs)['c6_ratios']
-
-
 def _effective_atomic_c6(atomic_numbers, c6_ratios, legacy=False, dtype=None):
     """Return per-atom C6 values from the model generation's reference table.
 
@@ -210,7 +198,7 @@ def _batched_kspace_dispersion(kspace_module, inputs):
             hirshfeld_ratios = kspace_module.hirshfeld_ratios(inputs)['hirshfeld_ratios']
         c6_ratios = hirshfeld_ratios ** 2
     else:
-        c6_ratios = _predicted_c6_ratios(kspace_module.c6_ratios, inputs)
+        c6_ratios = kspace_module.c6_ratios(inputs)['c6_ratios']
 
     return _vmap_kspace_per_graph(
         _solve_single, inputs,
@@ -1997,7 +1985,8 @@ class DispersionEnergyKspace(BaseSubModule):
                 hirshfeld_ratios = self.hirshfeld_ratios(inputs)['hirshfeld_ratios']
             c6_ratios = hirshfeld_ratios ** 2
         else:
-            c6_ratios = _predicted_c6_ratios(self.c6_ratios, inputs)
+            # Always the head's prediction: inputs['c6_ratios'] is a dataset label.
+            c6_ratios = self.c6_ratios(inputs)['c6_ratios']
 
         # Dispersion charges use the same generation-specific free-atom C6
         # table as the real-space mixing rule and PME subtraction.
@@ -2105,7 +2094,8 @@ class DispersionEnergySparse(nn.Module):
             # mixing rule reproduces the original C6 = C6_free * h^2 exactly.
             c6_ratios = hirshfeld_ratios ** 2
         else:
-            c6_ratios = _predicted_c6_ratios(self.c6_ratios, inputs)
+            # Always the head's prediction: inputs['c6_ratios'] is a dataset label.
+            c6_ratios = self.c6_ratios(inputs)['c6_ratios']
 
         # Get atomic numbers (needed to link to the free-atom reference values)
         atomic_numbers = inputs['atomic_numbers']  # (num_nodes)

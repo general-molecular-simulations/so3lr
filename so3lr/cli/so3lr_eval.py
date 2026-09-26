@@ -64,16 +64,6 @@ NORMALIZE_TARGET = {
 }
 
 
-def _model_inputs_for_evaluation(inputs: Dict[str, Any]) -> Dict[str, Any]:
-    """Return model inputs with target-only C6 values removed.
-
-    The batched dictionary also supplies ground-truth values to the metric
-    code.  ``c6_ratios`` must stay in that dictionary for scoring, but it is
-    not an inference feature and must never reach the physical forward pass.
-    """
-    return {key: value for key, value in inputs.items() if key != 'c6_ratios'}
-
-
 def process_predictions(
     save_to: Optional[str],
     graph_batch: Tuple[jraph.GraphsTuple, jraph.GraphsTuple],
@@ -631,11 +621,9 @@ def evaluate_so3lr_on(
 
         try:
             dummy_batch = next(dummy_batched_graphs)
-            dummy_inputs = jraph_utils.graph_to_batch_fn(
-                *dummy_batch, kspace_constants=groups[0][1]
-            )
             _compile_out = jax.block_until_ready(
-                so3lr_calc(_model_inputs_for_evaluation(dummy_inputs))
+                so3lr_calc(jraph_utils.graph_to_batch_fn(
+                    *dummy_batch, kspace_constants=groups[0][1]))
             )
             compile_end = time.time()
             compile_time = compile_end - compile_start
@@ -671,9 +659,7 @@ def evaluate_so3lr_on(
 
             # Run the model
             start = time.time()
-            output_prediction = jax.block_until_ready(
-                so3lr_calc(_model_inputs_for_evaluation(inputs))
-            )
+            output_prediction = jax.block_until_ready(so3lr_calc(inputs))
             end = time.time()
             total_time += end - start
 
