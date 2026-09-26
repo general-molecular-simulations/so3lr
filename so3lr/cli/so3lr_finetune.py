@@ -65,7 +65,7 @@ def finetune_so3lr(
         logger.info(f"Using config for finetuning from: {config_path}")
     
     with open(config_path, mode='r') as fp:
-        finetune_cfg = config_dict.ConfigDict(yaml.load(fp, Loader=yaml.FullLoader))
+        finetune_cfg = config_dict.ConfigDict(yaml.safe_load(fp))
     
     finetune_cfg.workdir = workdir
     finetune_cfg.data.filepath = datafile

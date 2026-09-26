@@ -27,7 +27,7 @@ def train_so3lr(config_path: str, log_file: Optional[str] = None):
             cfg = config_dict.ConfigDict(json.load(fp=fp))
     elif config.suffix == '.yaml':
         with open(config, mode='r') as fp:
-            cfg = config_dict.ConfigDict(yaml.load(fp, Loader=yaml.FullLoader))
+            cfg = config_dict.ConfigDict(yaml.safe_load(fp))
     else:
         raise ValueError(f"Config file must be .json or .yaml, got: {config.suffix}")
 
