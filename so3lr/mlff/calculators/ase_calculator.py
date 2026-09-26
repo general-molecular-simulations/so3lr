@@ -10,6 +10,9 @@ from typing import Any, Optional, Sequence
 from ase.calculators.calculator import Calculator
 
 from so3lr.mlff.utils.structures import Graph
+from so3lr.graph import Graph as So3lrGraph
+from so3lr.mlff.calculators.exact_neighbors import ExactNeighbors
+from so3lr.mlff.geometric.cutoff import add_cell_offsets_sparse
 from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
 from so3lr.pbc import is_fully_periodic
@@ -71,6 +74,10 @@ def matrix_to_voigt(matrix):
 
 class AseCalculatorSparse(Calculator):
     implemented_properties = ['energy', 'forces', 'stress', 'free_energy', 'hessian']
+    # Class-level defaults so an instance assembled without __init__ (as tests do,
+    # with a stub calculate_fn) keeps the glp path it was written against.
+    neighbor_backend = 'glp'
+    _exact_nb = None
 
     @classmethod
     def create_from_workdir(
@@ -215,7 +222,7 @@ class AseCalculatorSparse(Calculator):
         if calculate_stress:
             def energy_fn(system, strain: jnp.ndarray, neighbors):
                 system = strain_system(system, strain)
-                graph = system_to_graph(system, neighbors)
+                graph = _system_to_graph(system, neighbors)
                 
                 out = potential(graph, has_aux=has_aux)
                 if isinstance(out, tuple):
@@ -257,7 +264,7 @@ class AseCalculatorSparse(Calculator):
 
                 def energy_fn(R, system, neighbors):
                     local_system = System(R, system.Z, system.cell, system.total_charge, system.num_unpaired_electrons, system.k_grid, system.k_smearing, system.theory_mask)
-                    graph = system_to_graph(local_system, neighbors)
+                    graph = _system_to_graph(local_system, neighbors)
                     out = potential(graph, has_aux=has_aux)
                     if isinstance(out, tuple):
                         if not has_aux:
@@ -433,7 +440,7 @@ class AseCalculatorSparse(Calculator):
 
             def energy_fn(R, system, neighbors, has_aux=False):
                 local_system = System(R, system.Z, system.cell, system.total_charge, system.num_unpaired_electrons, system.k_grid, system.k_smearing, system.theory_mask)
-                graph = system_to_graph(local_system, neighbors)
+                graph = _system_to_graph(local_system, neighbors)
                 out = potential(graph, has_aux=has_aux)
                 if isinstance(out, tuple):
                     if not has_aux:
@@ -563,7 +570,7 @@ class AseCalculatorSparse(Calculator):
         else:
 
                 def energy_fn(system, neighbors):
-                    graph = system_to_graph(system, neighbors)
+                    graph = _system_to_graph(system, neighbors)
                     out = potential(graph, has_aux=has_aux)
                     if isinstance(out, tuple):
                         if not has_aux:
@@ -597,9 +604,6 @@ class AseCalculatorSparse(Calculator):
                         return {'energy': out, 'forces': forces}
 
         self.calculate_fn = calculate_fn
-        self._exact_supported = not (calculate_hessian or calculate_obs_grads or has_aux)
-        self._exact_fn = _make_exact_calculate_fn(potential, calculate_stress, has_aux)
-        self._exact_caps = (None, None)
         self.neighbors = None
         self.spatial_partitioning = None
         self.capacity_multiplier = capacity_multiplier
@@ -743,9 +747,23 @@ class AseCalculatorSparse(Calculator):
             system = system._replace(cell=None)
 
         if pbc_any and self._use_exact(atoms):
-            self._calculate_exact(atoms, system)
-            return
+            neighbors = self._exact_neighbors(atoms)
+        else:
+            neighbors = self._glp_neighbors(system, cell)
 
+        if self.hessian_slice is True and 'hessian' in self.implemented_properties:
+            assert hessian_slice_index is not None, "Hessian slice requested, please provide hessian_slice_index keyword argument."
+            output = self.calculate_fn(system, neighbors, hessian_slice_index=hessian_slice_index)
+        else:
+            output = self.calculate_fn(system, neighbors)
+        def _to_numpy(x):
+            arr = np.array(x, self.dtype)
+            return arr.item() if arr.ndim == 0 else arr
+        self.results = jax.tree_util.tree_map(_to_numpy, output)
+
+
+    def _glp_neighbors(self, system, cell):
+        """glp's minimum-image neighbour list, (re)allocated on overflow."""
         if self.spatial_partitioning is None:
             self.neighbors, self.spatial_partitioning = neighbor_list(
                 positions=system.R,
@@ -787,96 +805,62 @@ class AseCalculatorSparse(Calculator):
                     buffer_size_multiplier=self.buffer_size_multiplier,
                     lr_cutoff=self.lr_cutoff
                 )
-        if self.hessian_slice is True and 'hessian' in self.implemented_properties:
-            assert hessian_slice_index is not None, "Hessian slice requested, please provide hessian_slice_index keyword argument."
-            output = self.calculate_fn(system, neighbors, hessian_slice_index=hessian_slice_index)
-        else:
-            output = self.calculate_fn(system, neighbors)
-        def _to_numpy(x):
-            arr = np.array(x, self.dtype)
-            return arr.item() if arr.ndim == 0 else arr
-        self.results = jax.tree_util.tree_map(_to_numpy, output)
-
+        return neighbors
 
     # ------------------------------------------------------------------ exact PBC
+    def _long_range_cutoff(self):
+        """The long-range cutoff for the exact list; None for a local model."""
+        if self.lr_cutoff <= 0:
+            return None
+        if self.lr_cutoff >= 1e5:
+            raise ValueError(
+                'This long-range model has no explicit long-range cutoff, which is only '
+                'defined in vacuum; a periodic system needs a finite lr_cutoff.')
+        return self.lr_cutoff
+
     def _use_exact(self, atoms):
         from so3lr.mlff.calculators.exact_neighbors import needs_exact
-        # An instance assembled without __init__ (as some tests do, with a stub
-        # calculate_fn) predates the option; keep the glp path it was built for.
-        backend = getattr(self, 'neighbor_backend', 'glp')
-        if backend == 'glp':
+        if self.neighbor_backend == 'glp' or not (
+                self.neighbor_backend == 'exact'
+                or needs_exact(np.array(atoms.get_cell()), self.cutoff,
+                               self._long_range_cutoff(), self.skin)):
             return False
-        if backend == 'exact':
-            use = True
-        else:
-            use = needs_exact(np.array(atoms.get_cell()), self.cutoff, self.lr_cutoff,
-                              self.skin, atoms.get_pbc())
-        if use and not self._exact_supported:
-            raise NotImplementedError(
-                'The exact periodic neighbour list supports energy, forces and stress '
-                'only (no hessian, observables or aux). This cell needs it: it is '
-                'non-orthorhombic or narrower than twice the cutoff, where glp\'s '
-                'minimum-image list is wrong. Use a supercell, or neighbor_backend="glp" '
-                'if you accept that error.')
-        if use and not np.all(atoms.get_pbc()):
+        if not np.all(atoms.get_pbc()):
             raise ValueError('Mixed-axis periodicity is not supported.')
-        return use
+        return True
 
-    def _calculate_exact(self, atoms, system):
+    def _exact_neighbors(self, atoms):
         from so3lr.mlff.calculators import exact_neighbors as xn
-        nb, cap, cap_lr = xn.build(atoms, self.cutoff, self.lr_cutoff,
-                                   *self._exact_caps, multiplier=self.capacity_multiplier)
-        self._exact_caps = (cap, cap_lr)
-        cell_rows = jnp.asarray(np.array(atoms.get_cell()), dtype=self.dtype)
-        output = self._exact_fn(
-            system, cell_rows,
-            jnp.asarray(nb.centers), jnp.asarray(nb.others), jnp.asarray(nb.shifts, self.dtype),
-            jnp.asarray(nb.idx_i_lr), jnp.asarray(nb.idx_j_lr), jnp.asarray(nb.shifts_lr, self.dtype))
-
-        def _to_numpy(x):
-            arr = np.array(x, self.dtype)
-            return arr.item() if arr.ndim == 0 else arr
-        self.results = jax.tree_util.tree_map(_to_numpy, output)
+        prev = self._exact_nb if (self._exact_nb is not None
+                                  and self._exact_nb_natoms == len(atoms)) else None
+        self._exact_nb = xn.build(atoms, self.cutoff, self._long_range_cutoff(), prev,
+                                  multiplier=self.capacity_multiplier)
+        self._exact_nb_natoms = len(atoms)
+        return ExactNeighbors(*(jnp.asarray(x) for x in self._exact_nb))
 
 
-def _make_exact_calculate_fn(potential, calculate_stress, has_aux):
-    """Energy/forces(/stress) from explicit (i, j, S) pairs.
+def _system_to_graph(system, neighbors):
+    """glp's minimum-image graph, or explicit images for ExactNeighbors.
 
-    r_ij = R_j - R_i + S @ cell_rows, so an atom may meet several images of the same
-    partner, or its own image. Under a homogeneous strain eps both the positions and
-    the lattice rows deform (R -> R + R eps^T, rows -> rows + rows eps^T), so the
-    integer shifts are unchanged and dE/d(eps) / V is the virial stress, exactly as
-    in the glp path (strain_system).
+    With explicit images r_ij = R_j - R_i + S @ cell_rows, so an atom may meet
+    several images of one partner, or its own image. glp's System carries the
+    lattice as columns; under strain_system both R and the cell deform together,
+    so the integer shifts stay valid and every calculate_fn variant (stress,
+    hessian, observables) works unchanged on either neighbour type.
     """
-    from so3lr.graph import Graph as So3lrGraph
-
-    def energy_fn(system, strain, cell_rows, ci, cj, S, ci_lr, cj_lr, S_lr):
-        system = strain_system(system, strain)
-        rows = cell_rows + jnp.einsum('ib,ab->ia', cell_rows, strain)
-        R = system.R
-        edges = R[cj] - R[ci] + S @ rows
-        edges_lr = R[cj_lr] - R[ci_lr] + S_lr @ rows
-        graph = So3lrGraph(
-            positions=R, edges=edges, nodes=system.Z, centers=ci, others=cj,
-            mask=ci != R.shape[0], total_charge=system.total_charge,
-            num_unpaired_electrons=system.num_unpaired_electrons,
-            edges_lr=edges_lr, idx_i_lr=ci_lr, idx_j_lr=cj_lr, cell=system.cell,
-            k_grid=system.k_grid, k_smearing=system.k_smearing,
-            theory_mask=system.theory_mask)
-        return potential(graph, has_aux=False).sum()
-
-    @jax.jit
-    def calculate_fn(system, cell_rows, ci, cj, S, ci_lr, cj_lr, S_lr):
-        strain = get_strain(dtype=system.R.dtype)
-        e, grads = jax.value_and_grad(energy_fn, argnums=(0, 1), allow_int=True)(
-            system, strain, cell_rows, ci, cj, S, ci_lr, cj_lr, S_lr)
-        out = {'energy': e, 'forces': -grads[0].R}
-        if calculate_stress:
-            volume = jnp.abs(jnp.linalg.det(system.cell))
-            out['stress'] = matrix_to_voigt(grads[1] / volume)
-        return out
-
-    return calculate_fn
+    if not isinstance(neighbors, ExactNeighbors):
+        return system_to_graph(system, neighbors)
+    R, rows = system.R, system.cell.T
+    ci, cj, ci_lr, cj_lr = neighbors.centers, neighbors.others, neighbors.idx_i_lr, neighbors.idx_j_lr
+    edges = add_cell_offsets_sparse(R[cj] - R[ci], rows, neighbors.shifts.astype(R.dtype))
+    edges_lr = add_cell_offsets_sparse(R[cj_lr] - R[ci_lr], rows, neighbors.shifts_lr.astype(R.dtype))
+    return So3lrGraph(
+        positions=R, edges=edges, nodes=system.Z, centers=ci, others=cj,
+        mask=ci != R.shape[0], total_charge=system.total_charge,
+        num_unpaired_electrons=system.num_unpaired_electrons,
+        edges_lr=edges_lr, idx_i_lr=ci_lr, idx_j_lr=cj_lr, cell=system.cell,
+        k_grid=system.k_grid, k_smearing=system.k_smearing,
+        theory_mask=system.theory_mask)
 
 
 def to_displacement(cell):

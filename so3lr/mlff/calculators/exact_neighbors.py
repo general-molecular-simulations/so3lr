@@ -3,94 +3,98 @@
 glp's neighbour list, like jax-md's, keeps one image per atom pair (minimum-image
 convention). That is only correct when every perpendicular cell height exceeds
 twice the cutoff; SO3LR's 12 Ang long-range cutoff therefore silently drops pairs
-in any cell narrower than 24 Ang, and on a skewed cell a fractional-rounding
-minimum image can pick the wrong image even inside that bound. For a 6.5 Ang
-CoMOF-74 cell the result is off by 20 meV/atom and 0.5 eV/Ang.
+in any cell narrower than 24 Ang. For a 6.5 Ang CoMOF-74 cell the result is off
+by 20 meV/atom and 0.5 eV/Ang.
 
-This module lists every image explicitly: ``neighbor_list('ijS')`` from matscipy
-(or ASE as a fallback) returns each pair (i, j, S) with integer lattice shift S
+This module lists every image explicitly: ``neighbour_list('ijSd')`` (matscipy,
+or ASE as a fallback) returns each pair (i, j, S) with integer lattice shift S
 such that r_ij = R_j - R_i + S @ cell lies within the cutoff. A small cell simply
-yields many shifts per pair, and i == j with S != 0 (an atom and its own image) is
-included. The arrays are padded to a fixed capacity so jit does not retrace every
-step; padded entries point at index N, the same convention glp uses, so the model
-masks them identically.
+yields many shifts per pair, including an atom and its own image (i == j, S != 0).
+Arrays are padded to a fixed capacity so jit does not retrace every step; padded
+entries point at index N, the convention glp uses, so the model masks them alike.
 """
 from __future__ import annotations
 
-from typing import NamedTuple
+import logging
+from typing import NamedTuple, Optional
 
 import numpy as np
 
-try:  # matscipy is ~10x faster than ASE's pure-numpy implementation
-    from matscipy.neighbours import neighbour_list as _nl
-    BACKEND = 'matscipy'
+from so3lr.mlff.indexing.indices import pad_index_list, pad_shift
+
+try:  # matscipy's C implementation is ~25x faster than ASE's pure-numpy one
+    from matscipy.neighbours import neighbour_list as _neighbour_list
+    _SLOW_FALLBACK = False
 except ImportError:  # pragma: no cover - exercised only without matscipy
-    from ase.neighborlist import neighbor_list as _nl
-    BACKEND = 'ase'
+    from ase.neighborlist import neighbor_list as _neighbour_list
+    _SLOW_FALLBACK = True
 
 
 class ExactNeighbors(NamedTuple):
+    """Explicit-image pair lists (a jax pytree). Shifts are integer lattice vectors."""
     centers: np.ndarray    # (P,)  int32, padded with N
     others: np.ndarray     # (P,)  int32, padded with N
-    shifts: np.ndarray     # (P, 3) float, integer lattice shifts, 0 when padded
+    shifts: np.ndarray     # (P, 3) int32, zero where padded
     idx_i_lr: np.ndarray   # (P_lr,)
     idx_j_lr: np.ndarray   # (P_lr,)
     shifts_lr: np.ndarray  # (P_lr, 3)
-    n_pairs: int
-    n_pairs_lr: int
 
 
-def _pairs(atoms, cutoff):
-    i, j, S = _nl('ijS', atoms, float(cutoff))
-    return i.astype(np.int32), j.astype(np.int32), S.astype(np.float64)
+def _padded(i, j, S, cap, n):
+    return (pad_index_list(i, cap, pad_value=n), pad_index_list(j, cap, pad_value=n),
+            pad_shift(S, cap))
 
 
-def _pad(i, j, S, cap, n):
-    k = len(i)
-    ii = np.full(cap, n, np.int32); jj = np.full(cap, n, np.int32)
-    ss = np.zeros((cap, 3), np.float64)
-    ii[:k], jj[:k], ss[:k] = i, j, S
-    return ii, jj, ss
-
-
-def capacity(n_pairs, multiplier):
-    """Next capacity: headroom so small geometry changes do not force a retrace."""
+def _capacity(n_pairs, previous, multiplier):
+    """Reuse the previous capacity while it fits, else grow with headroom (one retrace)."""
+    if previous is not None and n_pairs <= previous:
+        return previous
     return max(8, int(np.ceil(n_pairs * multiplier)))
 
 
-def build(atoms, cutoff, lr_cutoff, cap=None, cap_lr=None, multiplier=1.25):
+def build(atoms, cutoff: float, lr_cutoff: Optional[float],
+          prev: Optional[ExactNeighbors] = None, multiplier: float = 1.25) -> ExactNeighbors:
     """All pairs within ``cutoff`` and ``lr_cutoff``, every periodic image included.
 
-    Returns (ExactNeighbors, cap, cap_lr). ``cap``/``cap_lr`` are reused while the
-    pair count fits and grown (forcing one retrace) when it does not.
+    One neighbour search at the larger cutoff; the short-range list is its subset
+    with d < cutoff. ``lr_cutoff=None`` means a local model (long-range lists equal
+    the short-range ones). ``prev`` supplies the capacities to reuse, and is ignored
+    when the atom count changed so a small system does not inherit a large padding.
     """
+    global _SLOW_FALLBACK
+    if _SLOW_FALLBACK:  # warn once, on first use rather than on import
+        logging.getLogger("SO3LR").warning(
+            'matscipy not installed: the exact periodic neighbour list falls back to '
+            'ASE, which is ~25x slower. `pip install matscipy` for small-cell runs.')
+        _SLOW_FALLBACK = False
     n = len(atoms)
-    i, j, S = _pairs(atoms, cutoff)
-    if lr_cutoff is not None and lr_cutoff > 0:
-        il, jl, Sl = _pairs(atoms, lr_cutoff)
-    else:  # local model: long-range indices equal the local ones
-        il, jl, Sl = i, j, S
-    if cap is None or len(i) > cap:
-        cap = capacity(len(i), multiplier)
-    if cap_lr is None or len(il) > cap_lr:
-        cap_lr = capacity(len(il), multiplier)
-    c, o, s = _pad(i, j, S, cap, n)
-    cl, ol, sl = _pad(il, jl, Sl, cap_lr, n)
-    return ExactNeighbors(c, o, s, cl, ol, sl, len(i), len(il)), cap, cap_lr
+    i, j, S, d = _neighbour_list('ijSd', atoms, float(max(cutoff, lr_cutoff or 0.0)))
+    i, j, S = i.astype(np.int32), j.astype(np.int32), S.astype(np.int32)
+    sr = d < cutoff
+    cap = _capacity(int(sr.sum()), None if prev is None else len(prev.centers), multiplier)
+    lr = (i, j, S) if lr_cutoff is not None else (i[sr], j[sr], S[sr])
+    cap_lr = _capacity(len(lr[0]), None if prev is None else len(prev.idx_i_lr), multiplier)
+    return ExactNeighbors(*_padded(i[sr], j[sr], S[sr], cap, n), *_padded(*lr, cap_lr, n))
 
 
-def needs_exact(cell, cutoff, lr_cutoff, skin=0.0, pbc=(True, True, True)):
-    """True when a minimum-image neighbour list would be wrong for this cell.
+def cell_heights(cell) -> np.ndarray:
+    """Perpendicular distance between opposite faces, per lattice direction (rows)."""
+    return 1.0 / np.linalg.norm(np.linalg.inv(np.asarray(cell, float)).T, axis=1)
 
-    A minimum-image list is exact only if the cell is orthorhombic and every
-    height exceeds 2 * (cutoff + skin) for the largest cutoff in use.
+
+def needs_exact(cell, cutoff: float, lr_cutoff: Optional[float], skin: float = 0.0) -> bool:
+    """True when glp's neighbour list would be wrong for this periodic cell.
+
+    glp keeps one image per pair and bins with a cell list, which it switches on
+    for all three axes as soon as ONE height exceeds 3 * rc (so3lr always requests
+    it). It is therefore exact only for an orthorhombic cell whose heights all
+    exceed 2 * rc (minimum image) and are either all below 3 * rc (no cell list)
+    or all above it (>= 3 bins per axis). Anything else takes the exact path.
     """
-    if not np.any(pbc):
-        return False
     cell = np.asarray(cell, float)
-    vol = abs(np.linalg.det(cell))
-    heights = [vol / np.linalg.norm(np.cross(cell[(k + 1) % 3], cell[(k + 2) % 3]))
-               for k in range(3)]
-    rc = max(cutoff, lr_cutoff if (lr_cutoff is not None and lr_cutoff < 1e5) else 0.0) + skin
-    orthorhombic = np.allclose(cell - np.diag(np.diag(cell)), 0.0, atol=1e-8)
-    return (not orthorhombic) or (min(heights) <= 2.0 * rc)
+    if not np.allclose(cell, np.diag(np.diag(cell)), atol=1e-8):
+        return True
+    rc = max(cutoff, lr_cutoff or 0.0) + skin
+    h = cell_heights(cell)
+    cell_list_on = bool(np.any(h > 3.0 * rc))
+    return bool(h.min() <= 2.0 * rc or (cell_list_on and h.min() <= 3.0 * rc))

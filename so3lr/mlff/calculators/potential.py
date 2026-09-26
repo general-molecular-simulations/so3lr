@@ -345,9 +345,9 @@ class PotentialSparse(MachineLearningPotential):
             # unchanged evaluated PME on the transposed lattice -- a different
             # crystal for any non-orthogonal cell (0.03-0.09 eV/Ang on triclinic
             # MOFs), invisible for orthogonal ones where the transpose is a no-op.
-            if cell is None or getattr(cell, 'ndim', 0) != 2:
+            if cell is None or getattr(cell, 'ndim', 0) < 2:
                 return cell
-            return cell.T
+            return jnp.swapaxes(cell, -1, -2)  # also for batched (n, 3, 3) cells
 
         def graph_to_mlff_input(graph: Graph):
             # Enhanced graph conversion with advanced field support
