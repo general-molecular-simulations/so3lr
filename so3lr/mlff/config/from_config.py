@@ -1439,56 +1439,20 @@ def data_path_from_config(config):
 
 
 def dipole_vec_unit_from_config(config):
-    dipole_vec_unit = config.data.dipole_vec_unit
-    try:
-        return parse_unit_expression(
-            dipole_vec_unit, field_name="data.dipole_vec_unit")
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {dipole_vec_unit!r} for data.dipole_vec_unit. "
-            f"Use ASE.units expressions like 'e * Angstrom' or 'Debye' "
-            f"(note the spaces around operators)."
-        ) from exc
+    return parse_unit_expression(config.data.dipole_vec_unit, 'data.dipole_vec_unit')
 
 
 def charge_unit_from_config(config):
-    electric_charge_unit = config.data.electric_charge_unit
-    try:
-        return parse_unit_expression(
-            electric_charge_unit, field_name="data.electric_charge_unit")
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {electric_charge_unit!r} for data.electric_charge_unit. "
-            f"Use ASE.units expressions like 'e' or '1.0' "
-            f"(note the spaces around operators)."
-        ) from exc
+    return parse_unit_expression(config.data.electric_charge_unit, 'data.electric_charge_unit')
+
 
 def energy_unit_from_config(config):
-    energy_unit_str = config.data.energy_unit
-    try:
-        energy_unit = parse_unit_expression(
-            energy_unit_str, field_name="data.energy_unit")
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {energy_unit_str!r} for data.energy_unit. "
-            f"Use ASE.units expressions like 'kcal / mol' or 'eV' "
-            f"(note the spaces around operators)."
-        ) from exc
-    return energy_unit
+    return parse_unit_expression(config.data.energy_unit, 'data.energy_unit')
 
 
 def length_unit_from_config(config):
-    length_unit_str = config.data.length_unit
-    try:
-        length_unit = parse_unit_expression(
-            length_unit_str, field_name="data.length_unit")
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {length_unit_str!r} for data.length_unit. "
-            f"Use ASE.units expressions like 'Angstrom' or 'Bohr' "
-            f"(note the spaces around operators)."
-        ) from exc
-    return length_unit
+    return parse_unit_expression(config.data.length_unit, 'data.length_unit')
+
 
 def check_config(config):
     neighbors_lr_cutoff = config.data.neighbors_lr_cutoff
