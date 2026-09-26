@@ -1,3 +1,6 @@
+# The JAX MD-derived safe_mask portion is Copyright 2019 Google LLC and
+# licensed under Apache-2.0 (see LICENSE-APACHE-2.0). Modified for SO3LR with
+# local typing/documentation; the additional masking helpers are original code.
 import jax.numpy as jnp
 from typing import Callable
 

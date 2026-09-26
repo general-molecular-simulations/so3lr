@@ -1,6 +1,7 @@
 from ase import units
 import jax
 import pytest
+from pathlib import Path
 from so3lr.mlff.nn import SO3kratesSparse
 from so3lr.mlff import training_utils
 from so3lr.mlff import jraph_utils
@@ -9,7 +10,9 @@ from so3lr.mlff.data import NpzDataLoaderSparse
 from so3lr.mlff.data import transformations
 import numpy as np
 import optax
-import pkg_resources
+
+
+TEST_DIR = Path(__file__).parent
 
 
 @pytest.mark.parametrize("use_ema", [False, True])
@@ -19,7 +22,7 @@ def test_fit(tmp_path, use_ema, disable_jit: bool = False):
         config.update('jax_disable_jit', True)
 
     filename = 'test_data/ethanol.npz'
-    f = pkg_resources.resource_filename(__name__, filename)
+    f = TEST_DIR / filename
 
     loader = NpzDataLoaderSparse(input_file=f)
     all_data, data_stats = loader.load(cutoff=5.)
@@ -113,7 +116,7 @@ def test_fit_early_stopping(tmp_path, caplog):
     """
     import logging
 
-    f = pkg_resources.resource_filename(__name__, 'test_data/ethanol.npz')
+    f = TEST_DIR / 'test_data/ethanol.npz'
     loader = NpzDataLoaderSparse(input_file=f)
     all_data, _ = loader.load(cutoff=5.)
 
@@ -184,7 +187,7 @@ def test_fit_reduce_lr_on_plateau(tmp_path, caplog):
     """
     import logging
 
-    f = pkg_resources.resource_filename(__name__, 'test_data/ethanol.npz')
+    f = TEST_DIR / 'test_data/ethanol.npz'
     loader = NpzDataLoaderSparse(input_file=f)
     all_data, _ = loader.load(cutoff=5.)
 
@@ -238,7 +241,7 @@ def test_fit_two_stage_loss(tmp_path, caplog):
     epoch and logs the switch."""
     import logging
 
-    f = pkg_resources.resource_filename(__name__, 'test_data/ethanol.npz')
+    f = TEST_DIR / 'test_data/ethanol.npz'
     loader = NpzDataLoaderSparse(input_file=f)
     all_data, _ = loader.load(cutoff=5.)
 

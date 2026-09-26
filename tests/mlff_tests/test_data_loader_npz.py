@@ -1,18 +1,21 @@
 import shutil
+from pathlib import Path
 
 import numpy as np
 import jraph
 import numpy.testing as npt
 from so3lr.mlff.data import NpzDataLoaderSparse
 from so3lr.mlff.utils.jraph_utils import dynamically_batch_with_lr
-import pkg_resources
 import pytest
+
+
+TEST_DIR = Path(__file__).parent
 
 
 @pytest.mark.parametrize("calculate_neighbors_lr", [True, False])
 def test_data_load(calculate_neighbors_lr: bool):
     filename = 'test_data/ethanol.npz'
-    f = pkg_resources.resource_filename(__name__, filename)
+    f = TEST_DIR / filename
 
     loader = NpzDataLoaderSparse(input_file=f)
     all_data, data_stats = loader.load(
@@ -111,7 +114,7 @@ def test_data_load(calculate_neighbors_lr: bool):
 @pytest.mark.parametrize("calculate_neighbors_lr", [True, False])
 def test_data_load_with_pbc(calculate_neighbors_lr: bool):
     filename = 'test_data/data_set_pbc.npz'
-    f = pkg_resources.resource_filename(__name__, filename)
+    f = TEST_DIR / filename
     loader = NpzDataLoaderSparse(input_file=f)
     if calculate_neighbors_lr:
         # PBC long-range is now supported, so we just load and check
@@ -196,7 +199,7 @@ def test_jraph_dynamically_batch(calculate_neighbors_lr: bool):
 
     """
     filename = 'test_data/ethanol.npz'
-    f = pkg_resources.resource_filename(__name__, filename)
+    f = TEST_DIR / filename
 
     loader = NpzDataLoaderSparse(input_file=f)
     all_data, data_stats = loader.load(
@@ -248,7 +251,7 @@ def test_data_load_input_folder_aggregates(tmp_path):
     input_folder mode (used by from_config.data_loader_from_config for
     directory inputs) crashed with `self.input_file is None`.
     """
-    src = pkg_resources.resource_filename(__name__, 'test_data/ethanol.npz')
+    src = TEST_DIR / 'test_data/ethanol.npz'
     # Two copies (2000 frames each) -> aggregated dataset of 4000 frames.
     shutil.copy(src, tmp_path / 'a.npz')
     shutil.copy(src, tmp_path / 'b.npz')

@@ -1,0 +1,64 @@
+cff-version: 1.2.0
+message: >-
+  If you use SO3LR, cite this software version and the canonical dated model
+  name, together with the preferred paper below.
+title: >-
+  SO3LR: SO3krates Universal Pairwise Force Field with Long Range
+  Interactions
+type: software
+version: 0.2.0
+authors:
+  - family-names: Kabylda
+    given-names: Adil
+  - family-names: Frank
+    given-names: J. Thorben
+repository-code: https://github.com/general-molecular-simulations/so3lr
+url: https://so3lr.github.io/
+preferred-citation:
+  type: article
+  title: >-
+    Molecular Simulations with a Pretrained Neural Network and Universal
+    Pairwise Force Fields
+  authors:
+    - family-names: Kabylda
+      given-names: Adil
+    - family-names: Frank
+      given-names: J. Thorben
+    - family-names: Suárez-Dou
+      given-names: Sergio
+    - family-names: Khabibrakhmanov
+      given-names: Almaz
+    - family-names: Medrano Sandonas
+      given-names: Leonardo
+    - family-names: Unke
+      given-names: Oliver T.
+    - family-names: Chmiela
+      given-names: Stefan
+    - family-names: Müller
+      given-names: Klaus-Robert
+    - family-names: Tkatchenko
+      given-names: Alexandre
+  journal: Journal of the American Chemical Society
+  volume: "147"
+  issue: "37"
+  start: "33723"
+  year: 2025
+  doi: 10.1021/jacs.5c09558
+references:
+  - type: article
+    title: A Euclidean transformer for fast and stable machine learned force fields
+    authors:
+      - family-names: Frank
+        given-names: Thorben
+      - family-names: Unke
+        given-names: Oliver
+      - family-names: Müller
+        given-names: Klaus-Robert
+      - family-names: Chmiela
+        given-names: Stefan
+    journal: Nature Communications
+    volume: "15"
+    issue: "1"
+    start: "6539"
+    year: 2024
+    doi: 10.1038/s41467-024-50620-6
