@@ -107,19 +107,16 @@ def _batched_kspace_electrostatic(kspace_module, inputs):
     )
 
 
-def _c6_ratios_from_labels_or_head(c6_head, inputs):
-    """Per-atom C6 ratios: prefer the dataloader's labels, else the model's head.
+def _predicted_c6_ratios(c6_head, inputs):
+    """Return C6 ratios from the model head, never from dataset targets.
 
-    ``c6_ratios`` supplied via ``inputs`` is a training *label*; the loaders pad
-    it with NaN when the input file has no c6_ratios column. Those NaNs must not
-    leak into the dispersion forward (C6 -> NaN -> NaN energy/forces), so fall
-    back to the model's own predicted c6_ratios wherever the provided value is
-    non-finite.
+    ``inputs['c6_ratios']`` is a ground-truth value carried by the data loaders
+    for loss and metric calculation.  Using it in the dispersion calculation
+    would make energy and forces depend on a label that is unavailable during
+    inference.  Keep the target in ``inputs`` for the caller, but deliberately
+    ignore it in the physical forward pass.
     """
-    provided = inputs.get('c6_ratios')
-    if provided is None:
-        return c6_head(inputs)['c6_ratios']
-    return jnp.where(jnp.isnan(provided), c6_head(inputs)['c6_ratios'], provided)
+    return c6_head(inputs)['c6_ratios']
 
 
 def _batched_kspace_dispersion(kspace_module, inputs):
@@ -166,7 +163,7 @@ def _batched_kspace_dispersion(kspace_module, inputs):
             hirshfeld_ratios = kspace_module.hirshfeld_ratios(inputs)['hirshfeld_ratios']
         c6_ratios = hirshfeld_ratios ** 2
     else:
-        c6_ratios = _c6_ratios_from_labels_or_head(kspace_module.c6_ratios, inputs)
+        c6_ratios = _predicted_c6_ratios(kspace_module.c6_ratios, inputs)
 
     return _vmap_kspace_per_graph(
         _solve_single, inputs,
@@ -1954,7 +1951,7 @@ class DispersionEnergyKspace(BaseSubModule):
                 hirshfeld_ratios = self.hirshfeld_ratios(inputs)['hirshfeld_ratios']
             c6_ratios = hirshfeld_ratios ** 2
         else:
-            c6_ratios = _c6_ratios_from_labels_or_head(self.c6_ratios, inputs)
+            c6_ratios = _predicted_c6_ratios(self.c6_ratios, inputs)
 
         # Dispersion charges: q_i = sqrt(C6_free[Z_i] * c6_ratio_i)
         # C6_coef is indexed from 0, atomic_numbers from 1
@@ -2059,7 +2056,7 @@ class DispersionEnergySparse(nn.Module):
             # mixing rule reproduces the original C6 = C6_free * h^2 exactly.
             c6_ratios = hirshfeld_ratios ** 2
         else:
-            c6_ratios = _c6_ratios_from_labels_or_head(self.c6_ratios, inputs)
+            c6_ratios = _predicted_c6_ratios(self.c6_ratios, inputs)
 
         # Get atomic numbers (needed to link to the free-atom reference values)
         atomic_numbers = inputs['atomic_numbers']  # (num_nodes)
