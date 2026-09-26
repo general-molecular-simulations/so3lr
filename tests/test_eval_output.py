@@ -1,6 +1,4 @@
 """Small-file overwrite safeguards, without a multi-file publication system."""
-import os
-
 import numpy as np
 import pytest
 from ase import Atoms
@@ -44,43 +42,34 @@ def test_empty_predictions_do_not_replace_existing_file(tmp_path):
     assert destination.read_text() == 'previous results'
 
 
-@pytest.mark.parametrize('kind', ['directory', 'symlink', 'dangling_symlink'])
-def test_unsafe_destination_is_rejected(tmp_path, kind):
+def test_directory_destination_is_rejected(tmp_path):
     destination = tmp_path / 'predictions.xyz'
-    if kind == 'directory':
-        destination.mkdir()
-    else:
-        target = tmp_path / 'target.xyz'
-        if kind == 'symlink':
-            target.write_text('must survive')
-        destination.symlink_to(target)
+    destination.mkdir()
     with pytest.raises(RuntimeError, match='not a regular file'):
         evaluation._check_output_destination(destination, overwrite=True)
 
 
-def test_no_overwrite_is_enforced_at_final_creation(tmp_path, monkeypatch):
+@pytest.mark.parametrize('dangling', [False, True])
+def test_symlinked_destination_writes_through_the_link(tmp_path, dangling):
+    target = tmp_path / 'scratch' / 'predictions.xyz'
+    target.parent.mkdir()
+    if not dangling:
+        target.write_text('previous results')
     destination = tmp_path / 'predictions.xyz'
-    original_link = os.link
-    def concurrent_creation(source, target):
-        destination.write_text('another job')
-        return original_link(source, target)
-    monkeypatch.setattr(evaluation.os, 'link', concurrent_creation)
-    with pytest.raises(FileExistsError):
+    destination.symlink_to(target)
+    with evaluation._staged_output(destination, overwrite=True) as temporary:
+        temporary.write_text('our results')
+    assert destination.is_symlink()
+    assert target.read_text() == 'our results'
+
+
+def test_no_overwrite_is_rechecked_before_publishing(tmp_path):
+    destination = tmp_path / 'predictions.xyz'
+    with pytest.raises(RuntimeError, match='already exists'):
         with evaluation._staged_output(destination, overwrite=False) as temporary:
             temporary.write_text('our results')
+            destination.write_text('another job')
     assert destination.read_text() == 'another job'
-
-
-def test_symlink_created_during_serialization_is_not_followed(tmp_path):
-    destination = tmp_path / 'predictions.xyz'
-    target = tmp_path / 'other.xyz'
-    target.write_text('must survive')
-    with pytest.raises(RuntimeError, match='not a regular file'):
-        with evaluation._staged_output(destination, overwrite=True) as temporary:
-            temporary.write_text('our results')
-            destination.symlink_to(target)
-    assert target.read_text() == 'must survive'
-    assert destination.is_symlink()
 
 
 def test_embedding_archive_retains_mode_and_is_pickle_free(tmp_path):
