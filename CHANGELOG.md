@@ -28,6 +28,8 @@ identified by immutable dated names such as `so3lr-m-2606`.
   next epoch instead of replaying consumed batches, and params-only
   checkpoints from older versions continue from their weights with a fresh
   optimizer.
+- Semi-isotropic NPT is marked experimental (a warning is logged once per
+  run); fully anisotropic coupling remains unsupported.
 - Documentation and Colab examples now use the immutable
   `so3lr-{s,m,l}-2606` names for reproducible results and describe the actual
   pinned no-argument default, `so3lr-m-2606`.
