@@ -32,7 +32,10 @@ def test_wandb_opt_in_logs_config(monkeypatch):
     monkeypatch.setitem(sys.modules, 'wandb', SimpleNamespace(init=lambda **kw: calls.append(kw)))
     config = {'workdir': 'run', 'training': {'use_wandb': True, 'wandb_init_args': {'project': 'p'}}}
     assert initialize_wandb(config) is True
-    assert calls == [{'config': config, 'project': 'p'}]
+    assert calls == [{
+        'config': {'workdir': 'run', 'training': {'use_wandb': True}},
+        'project': 'p',
+    }]
 
 
 def test_wandb_opt_in_without_client_is_actionable(monkeypatch):

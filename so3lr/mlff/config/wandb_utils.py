@@ -18,5 +18,10 @@ def initialize_wandb(config) -> bool:
             "training.use_wandb is true but wandb is not installed; install "
             "the optional extra with `pip install 'so3lr[wandb]'`."
         ) from exc
-    wandb.init(config=config, **(training.get('wandb_init_args') or {}))
+    init_args = dict(training.get('wandb_init_args') or {})
+    # Log the run configuration, but not the W&B client arguments themselves
+    # (they may carry entity/project settings or credentials).
+    logged = {**config, 'training': {k: v for k, v in training.items()
+                                     if k != 'wandb_init_args'}}
+    wandb.init(config=logged, **init_args)
     return True
