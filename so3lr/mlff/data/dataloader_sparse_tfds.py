@@ -7,7 +7,6 @@ import numpy as np
 import queue
 import sys
 import traceback
-import wandb
 from ase import Atoms
 from ase.neighborlist import neighbor_list
 from collections.abc import Mapping
