@@ -25,9 +25,9 @@ identified by immutable dated names such as `so3lr-m-2606`.
   `wandb` extra rather than the base runtime environment (PRs #44 and #45).
 - TFDS-backed training now uses finite, unit-consistent epochs and checkpoints
   the full optimizer/EMA/control state (PR #41). A restart continues with the
-  next epoch instead of replaying consumed batches; changed data or loop
-  settings produce a warning, and params-only checkpoints from older versions
-  continue from their weights with a fresh optimizer.
+  next epoch instead of replaying consumed batches, and params-only
+  checkpoints from older versions continue from their weights with a fresh
+  optimizer.
 - Documentation and Colab examples now use the immutable
   `so3lr-{s,m,l}-2606` names for reproducible results and describe the actual
   pinned no-argument default, `so3lr-m-2606`.

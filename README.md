@@ -470,19 +470,11 @@ parameters are evaluated on identical batches. Each new TFDS checkpoint
 atomically stores deployable `params` and a versioned training-state item. The
 latter contains raw parameters, optimizer/EMA state, logical epoch and batch
 position, counters, early-stop/plateau/two-stage state, and the JAX RNG key.
-Restart rebuilds the seeded epoch and skips the recorded prefix. A SHA-256
-fingerprint rejects changes to TFDS builder identity metadata, shard names and
-sizes, dataset weights/caps, batch budgets, neighbor/filter/unit settings,
-seeds, process count, model/optimizer/objective configuration, relevant runtime
-versions, and trajectory-control settings. Metadata fingerprinting does not
-hash every TFRecord payload and cannot prove that Python model/loss/optimizer
-code is semantically unchanged despite identical configuration;
-keep data directories immutable and use source/environment provenance for that.
-Fine-tuning fingerprints also include the resolved trainable/frozen parameter
-masks. Older TFDS fine-tuning checkpoints without that fingerprint are rejected
-for exact training continuation; inference from their parameters is unchanged.
-Legacy params-only checkpoints remain loadable for inference but are rejected
-for TFDS training restart because their exact trajectory cannot be recovered.
+A restart continues with the next epoch rather than replaying the batches the
+interrupted epoch had already consumed. Dataset and loader settings are not
+checked on restart, so keep data directories immutable while a run is resumable.
+Params-only checkpoints from older versions continue from their weights with a
+fresh optimizer and epoch counter.
 ASE/NPZ restarts remain weights-only continuations: they load the target
 checkpoint's parameters and step, but reinitialize the optimizer, EMA, and
 data-order state. They do not provide TFDS's exact full-state continuation.
