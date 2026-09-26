@@ -1,11 +1,9 @@
 import hashlib
-import importlib.metadata
 import json
 import jraph
 import logging
 import numpy as np
 import queue
-import sys
 import traceback
 from ase import Atoms
 from ase.neighborlist import neighbor_list
@@ -51,13 +49,6 @@ def _canonical_fingerprint(payload):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _installed_version(distribution, fallback='unavailable'):
-    try:
-        return importlib.metadata.version(distribution)
-    except importlib.metadata.PackageNotFoundError:
-        return fallback
-
-
 def _json_compatible(value):
     """Normalize ConfigDict/NumPy/Path values for canonical JSON hashing."""
     if hasattr(value, 'to_dict'):
@@ -75,48 +66,6 @@ def _json_compatible(value):
     raise TypeError(
         f'Cannot fingerprint configuration value of type {type(value).__name__}.'
     )
-
-
-class _ClosePropagatingSkipIterator:
-    """Lazily skip a prefix and forward ``close`` to the source iterator."""
-
-    def __init__(self, iterable, count):
-        self._iterator = iter(iterable)
-        self._remaining = count
-        self._closed = False
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        if self._closed:
-            raise StopIteration
-        try:
-            while self._remaining:
-                next(self._iterator)
-                self._remaining -= 1
-            return next(self._iterator)
-        except StopIteration:
-            self.close()
-            raise
-        except BaseException:
-            self.close()
-            raise
-
-    def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        close = getattr(self._iterator, 'close', None)
-        if close is not None:
-            close()
-
-    def __del__(self):
-        # Best-effort cleanup if consumer code exits its loop by exception.
-        try:
-            self.close()
-        except Exception:
-            pass
 
 
 def convert_dataset_units_tf(element, energy_unit, length_unit, dipole_vec_unit):
@@ -943,19 +892,6 @@ class QCMLDataLoaderSparseParallel:
                 'shuffle_buffer_size': 10_000,
             },
             'trajectory_config': trajectory_config,
-            'runtime': {
-                'python': '.'.join(map(str, sys.version_info[:3])),
-                'numpy': np.__version__,
-                'tensorflow': _installed_version(
-                    'tensorflow', getattr(tf, '__version__', 'unavailable')
-                ),
-                'tensorflow_datasets': _installed_version(
-                    'tensorflow-datasets',
-                    getattr(tfds, '__version__', 'unavailable'),
-                ),
-                'ase': _installed_version('ase'),
-                'jraph': _installed_version('jraph'),
-            },
         }
         selection = getattr(self, 'finetuning_parameter_selection', None)
         if selection is not None:
@@ -1288,8 +1224,7 @@ class QCMLDataLoaderSparseParallel:
             cancellation_event.set()
 
     def next_epoch(self, split, mode, parallel: bool = True,
-                   advance_epoch: bool = True, epoch_index: Optional[int] = None,
-                   skip_batches: int = 0):
+                   advance_epoch: bool = True, epoch_index: Optional[int] = None):
         """Loads the data for ONE epoch.
 
         Args:
@@ -1302,19 +1237,11 @@ class QCMLDataLoaderSparseParallel:
             advance_epoch: Increment the deterministic seed counter. Internal
                 metadata probes pass ``False`` so they do not alter the first
                 real training epoch.
-            epoch_index: Explicit logical training epoch. Checkpoint restart
-                uses this to rebuild the same seeded stream before skipping
-                batches already represented by the checkpoint.
-            skip_batches: Number of deterministic batches to discard from the
-                start of the selected epoch.
+            epoch_index: Explicit logical training epoch; selects the seed.
 
         Returns:
             Generator yielding batches of data
         """
-        if isinstance(skip_batches, bool) or int(skip_batches) != skip_batches or skip_batches < 0:
-            raise ValueError(f'skip_batches must be a non-negative integer, got {skip_batches!r}.')
-        skip_batches = int(skip_batches)
-
         if mode not in self._epoch_counters:
             self._epoch_counters[mode] = 0
         # Validation must be a stable measurement of unchanged parameters.
@@ -1344,13 +1271,8 @@ class QCMLDataLoaderSparseParallel:
         epoch_seed = (int(self.train_seed) + selected_epoch_index) % (2**31 - 1)
 
         if mode == 'train' and parallel: # use multiprocessing for training batches
-            iterator = self._generator(split, mode, epoch_seed)
-        else:
-            iterator = self._generator_sync(split, mode, epoch_seed)
-        return (
-            _ClosePropagatingSkipIterator(iterator, skip_batches)
-            if skip_batches else iterator
-        )
+            return self._generator(split, mode, epoch_seed)
+        return self._generator_sync(split, mode, epoch_seed)
 
     def _generator_sync(self, split, mode, epoch_seed):
         """Synchronous data generator for single-process operation.
