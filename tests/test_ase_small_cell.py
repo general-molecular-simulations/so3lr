@@ -19,9 +19,9 @@ LR = 12.0
 PME = dict(kspace_electrostatics='pme', kspace_smearing=4.0, kspace_spacing=0.5)
 
 
-def _small_triclinic_water():
-    """Three water molecules in a skewed ~7 A cell (angles 80/95/100 deg)."""
-    cell = cellpar_to_cell([7.2, 7.8, 8.1, 80.0, 95.0, 100.0])
+def _small_triclinic_water(angles=(80.0, 95.0, 100.0)):
+    """Three water molecules in a ~7 A cell, skewed unless angles are all 90."""
+    cell = cellpar_to_cell([7.2, 7.8, 8.1, *angles])
     mol = np.array([[0.0, 0.0, 0.0], [0.757, 0.586, 0.0], [-0.757, 0.586, 0.0]])
     frac = np.array([[0.15, 0.20, 0.25], [0.55, 0.60, 0.30], [0.35, 0.75, 0.75]])
     pos = np.concatenate([frac[k] @ cell + mol for k in range(3)])
@@ -71,8 +71,12 @@ def test_unit_cell_matches_supercell(kspace, exact_supercell):
     npt.assert_allclose(s_u, s_s, rtol=0, atol=1e-7)
 
 
-def test_exact_matches_glp_where_minimum_image_is_valid(kspace, exact_supercell):
-    sup, (e_x, f_x, s_x) = exact_supercell
+def test_exact_matches_glp_where_auto_keeps_glp(kspace):
+    """On the cells 'auto' still sends to glp, both backends must agree exactly:
+    orthorhombic, heights between 2 and 3 x cutoff (minimum image, no cell list)."""
+    sup = _supercell(_small_triclinic_water(angles=(90.0, 90.0, 90.0)))
+    assert not needs_exact(sup.get_cell(), 4.5, LR)
+    e_x, f_x, s_x = _efs(sup, _calc('exact', kspace, calculate_stress=True))
     e_g, f_g, s_g = _efs(sup, _calc('glp', kspace, calculate_stress=True))
     npt.assert_allclose(e_x, e_g, rtol=1e-10)
     npt.assert_allclose(f_x, f_g, rtol=0, atol=1e-8)
@@ -131,3 +135,15 @@ def test_auto_selects_exact_when_glp_would_be_wrong():
     assert not needs_exact(np.diag([40.0, 40.0, 40.0]), 4.5, LR)        # cell list, >=3 bins
     assert needs_exact(np.diag([26.0, 26.0, 80.0]), 4.5, LR)            # glp cell list, <3 bins
     assert not needs_exact(np.diag([30.0, 30.0, 30.0]), 4.5, None)      # local model
+    noisy = np.diag([30.0, 30.0, 30.0]); noisy[0, 1] = 1e-7
+    assert not needs_exact(noisy, 4.5, LR)                              # CIF round-off
+
+
+def test_mixed_pbc_keeps_glp_under_auto():
+    """Slabs ran on glp before this backend existed; 'auto' must not change that."""
+    slab = _small_triclinic_water(angles=(90.0, 90.0, 90.0))
+    slab.pbc = (True, True, False)
+    calc = _calc('auto', False)
+    assert not calc._use_exact(slab)
+    with pytest.raises(ValueError):
+        _calc('exact', False)._use_exact(slab)

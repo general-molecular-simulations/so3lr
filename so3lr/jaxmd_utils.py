@@ -80,7 +80,10 @@ def neighbor_list_featurizer(
             if positions is not None:
                 positions = transform(pert, positions)
             if box is not None:
-                box = transform(pert, box)
+                # box holds the lattice vectors as COLUMNS (Graph.cell convention);
+                # transform() would act on its rows (box @ pert.T), which deforms
+                # the transposed lattice once PotentialSparse hands rows to PME.
+                box = pert @ box
 
         d = jax.vmap(partial(displacement_fn, **kwargs))
         dR = d(Ra, Rb)

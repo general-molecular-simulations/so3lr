@@ -49,6 +49,7 @@ def make_stub_ase_calculator():
         'forces': np.zeros((len(system.R), 3)),
     }
     calc.neighbors = None
+    calc.neighbor_backend = 'glp'
     calc.spatial_partitioning = None
     calc.capacity_multiplier = 1.25
     calc.buffer_size_multiplier = 1.25
@@ -572,6 +573,54 @@ class TestPMEJaxMD:
         print(f"  Energy: {float(energy):.6f} eV")
         
         assert np.isfinite(energy), "Energy is not finite"
+
+    def test_jaxmd_pme_shear_derivative_matches_finite_difference(self, pme_case):
+        """The strain perturbation used for the NPT-flex stress deforms the lattice
+        the model's PME sees in the right direction.
+
+        jax_md.quantity.stress differentiates the energy through
+        ``perturbation = I + eps``. The box holds the lattice as columns, so it must
+        deform as ``pert @ box``; applying the perturbation to its rows gives the
+        transposed deformation once the potential hands PME the lattice as rows,
+        and the off-diagonal k-space stress comes out scaled by the wrong box length.
+        """
+        from jaxpme.kspace import get_kgrid_mesh
+
+        atoms, smearing, lr_cutoff = pme_case
+        # Stretch one axis so the box is not cubic: a cubic box hides the error.
+        atoms = atoms.copy()
+        atoms.set_cell(np.diag(np.diag(atoms.get_cell().array) * [1.0, 1.25, 1.0]),
+                       scale_atoms=True)
+        cell = np.array(atoms.get_cell().array, dtype=np.float64)
+        box = jnp.array(cell.T)
+        species = jnp.array(atoms.get_atomic_numbers())
+        masses = jnp.array(atoms.get_masses())
+        k_grid = get_kgrid_mesh(jnp.array(cell), jnp.array([smearing / 8]))
+        k_smearing = jnp.array([smearing])
+
+        displacement, shift = jax_md.space.periodic_general(box=box, fractional_coordinates=True)
+        frac = jnp.array(atoms.get_scaled_positions(), dtype=DTYPE)
+        neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
+            potential=So3lrPotential(dtype=DTYPE, lr_cutoff=lr_cutoff, coulomb_kspace_method='pme'),
+            displacement_or_metric=displacement, shift_fn=shift, box_size=box,
+            species=species, capacity_multiplier=1.5, buffer_size_multiplier_sr=1.5,
+            buffer_size_multiplier_lr=1.5, minimum_cell_size_multiplier_sr=1.0,
+            disable_cell_list=True, fractional_coordinates=True)
+        nbrs = neighbor_fn.allocate(frac, box=box)
+        nbrs_lr = neighbor_fn_lr.allocate(frac, box=box)
+
+        def energy(bx, **kw):
+            return energy_fn(frac, nbrs.idx, nbrs_lr.idx, box=bx, species=species,
+                             masses=masses, k_grid=k_grid, k_smearing=k_smearing,
+                             has_aux=False, **kw)
+
+        # d E / d eps_xy through the perturbation path (what quantity.stress uses)
+        e01 = jnp.zeros((3, 3), dtype=DTYPE).at[0, 1].set(1.0)
+        analytic = jax.grad(lambda t: energy(box, perturbation=jnp.eye(3, dtype=DTYPE) + t * e01))(0.0)
+        # ... and by finite differences of the deformed box itself
+        h = 1e-5
+        numeric = (energy((jnp.eye(3) + h * e01) @ box) - energy((jnp.eye(3) - h * e01) @ box)) / (2 * h)
+        npt.assert_allclose(float(analytic), float(numeric), rtol=1e-4, atol=1e-6)
 
 
 class TestKspaceMethodPropagation:

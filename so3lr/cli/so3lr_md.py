@@ -2078,6 +2078,11 @@ def create_obs_fn(
 
     return obs_fn, obs_dict
 
+def _lattice_rows(box):
+    """jax-md boxes hold lattice vectors as columns; jaxpme sizes meshes from rows."""
+    return box.T if getattr(box, 'ndim', 0) == 2 else box
+
+
 def setup_kspace_grid(
     kspace_electrostatics: str,
     kspace_smearing: float,
@@ -2086,14 +2091,14 @@ def setup_kspace_grid(
     k_grid: jnp.ndarray = None
     )-> Tuple[jnp.ndarray, jnp.ndarray]:
     """
-    Setup the k-space grid for Ewald summation.
-    Delegates to so3lr.mlff.utils.kspace_utils.setup_kspace_grid.
+    Setup the k-space grid for Ewald summation from a jax-md box (columns).
+    Delegates to so3lr.mlff.utils.kspace_utils.setup_kspace_grid, which takes rows.
     """
     return _setup_kspace_grid(
         kspace_electrostatics=kspace_electrostatics,
         kspace_smearing=kspace_smearing,
         kspace_spacing=kspace_spacing,
-        box=box,
+        box=_lattice_rows(box),
         k_grid=k_grid,
     )
 
@@ -2123,12 +2128,12 @@ def check_kspace_grid(
         k_spacing = jnp.array([kspace_spacing], dtype=jnp.float32)
         k_smearing = jnp.array([kspace_smearing], dtype=jnp.float32)
         if kspace_electrostatics == 'ewald':
-            if k_grid.shape != jaxpme.kspace.get_kgrid_ewald_shape(box,lr_wavelength=k_spacing):
+            if k_grid.shape != jaxpme.kspace.get_kgrid_ewald_shape(_lattice_rows(box),lr_wavelength=k_spacing):
                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
                 logger.info(f'k-grid shape: {k_grid.shape}')
                 return k_grid
         elif kspace_electrostatics == 'pme' or kspace_electrostatics == 'p3m':
-            if k_grid.shape != jaxpme.kspace.get_kgrid_mesh_shape(box,mesh_spacing=k_spacing):
+            if k_grid.shape != jaxpme.kspace.get_kgrid_mesh_shape(_lattice_rows(box),mesh_spacing=k_spacing):
                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
                 logger.info(f'k-grid shape: {k_grid.shape}')
                 return k_grid

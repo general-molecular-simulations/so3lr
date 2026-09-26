@@ -92,7 +92,9 @@ def needs_exact(cell, cutoff: float, lr_cutoff: Optional[float], skin: float = 0
     or all above it (>= 3 bins per axis). Anything else takes the exact path.
     """
     cell = np.asarray(cell, float)
-    if not np.allclose(cell, np.diag(np.diag(cell)), atol=1e-8):
+    # Off-diagonals at file/round-off level (e.g. 1e-7 A from a CIF) are not a
+    # skewed cell; anything larger is, and glp's cell list bins it wrongly.
+    if not np.allclose(cell, np.diag(np.diag(cell)), atol=1e-6):
         return True
     rc = max(cutoff, lr_cutoff or 0.0) + skin
     h = cell_heights(cell)

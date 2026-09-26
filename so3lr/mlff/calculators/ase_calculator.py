@@ -11,6 +11,7 @@ from ase.calculators.calculator import Calculator
 
 from so3lr.mlff.utils.structures import Graph
 from so3lr.graph import Graph as So3lrGraph
+from so3lr.mlff.calculators import exact_neighbors
 from so3lr.mlff.calculators.exact_neighbors import ExactNeighbors
 from so3lr.mlff.geometric.cutoff import add_cell_offsets_sparse
 from so3lr.mlff.calculators.potential import PotentialSparse
@@ -74,10 +75,6 @@ def matrix_to_voigt(matrix):
 
 class AseCalculatorSparse(Calculator):
     implemented_properties = ['energy', 'forces', 'stress', 'free_energy', 'hessian']
-    # Class-level defaults so an instance assembled without __init__ (as tests do,
-    # with a stub calculate_fn) keeps the glp path it was written against.
-    neighbor_backend = 'glp'
-    _exact_nb = None
 
     @classmethod
     def create_from_workdir(
@@ -204,6 +201,8 @@ class AseCalculatorSparse(Calculator):
         if neighbor_backend not in ('auto', 'glp', 'exact'):
             raise ValueError(f"neighbor_backend must be 'auto', 'glp' or 'exact', got {neighbor_backend!r}.")
         self.neighbor_backend = neighbor_backend
+        self._exact_nb = None
+        self._exact_nb_natoms = None
 
         super(AseCalculatorSparse, self).__init__(*args, **kwargs)
 
@@ -819,22 +818,21 @@ class AseCalculatorSparse(Calculator):
         return self.lr_cutoff
 
     def _use_exact(self, atoms):
-        from so3lr.mlff.calculators.exact_neighbors import needs_exact
-        if self.neighbor_backend == 'glp' or not (
-                self.neighbor_backend == 'exact'
-                or needs_exact(np.array(atoms.get_cell()), self.cutoff,
-                               self._long_range_cutoff(), self.skin)):
+        if self.neighbor_backend == 'glp':
             return False
         if not np.all(atoms.get_pbc()):
-            raise ValueError('Mixed-axis periodicity is not supported.')
-        return True
+            # Slabs/wires keep the behaviour they had before this backend existed
+            # (glp); forcing 'exact' on them is an error rather than a silent change.
+            if self.neighbor_backend == 'exact':
+                raise ValueError('neighbor_backend="exact" needs pbc on all three axes.')
+            return False
+        return self.neighbor_backend == 'exact' or exact_neighbors.needs_exact(
+            np.array(atoms.get_cell()), self.cutoff, self._long_range_cutoff(), self.skin)
 
     def _exact_neighbors(self, atoms):
-        from so3lr.mlff.calculators import exact_neighbors as xn
-        prev = self._exact_nb if (self._exact_nb is not None
-                                  and self._exact_nb_natoms == len(atoms)) else None
-        self._exact_nb = xn.build(atoms, self.cutoff, self._long_range_cutoff(), prev,
-                                  multiplier=self.capacity_multiplier)
+        prev = self._exact_nb if self._exact_nb_natoms == len(atoms) else None
+        self._exact_nb = exact_neighbors.build(atoms, self.cutoff, self._long_range_cutoff(),
+                                               prev, multiplier=self.capacity_multiplier)
         self._exact_nb_natoms = len(atoms)
         return ExactNeighbors(*(jnp.asarray(x) for x in self._exact_nb))
 
