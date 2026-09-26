@@ -10,28 +10,30 @@ Human contributors: see `DEVELOPERS.md` and
 
 ## Setup
 
-Python **3.12+** is mandatory (`pyproject.toml` pins `python = ">=3.12"`); older
-interpreters fail at install with a resolver error. Install JAX first, then the
-package:
+Python **3.12 or 3.13** is supported. Create the exact locked development
+environment with uv:
 
 ```sh
-pip install jax          # or "jax[cuda12]" on a GPU box
-pip install -e .
-pip install pytest
+uv sync --locked --group dev
+uv run python -c "import so3lr, jax"
 ```
 
-Installing pulls four git forks (`jraph`, `jax-md`, `glp`, `jax-pme`), so it
-needs network access to GitHub and is not fast. Do not assume a working
-environment — check `python -c "import so3lr, jax"` before concluding that a
-failure is a code bug.
+Use `--extra cuda12`, `--extra tfds`, `--extra pysages`, or `--extra wandb` when
+the task needs those optional stacks. `REPRODUCIBILITY.md` documents the
+supported commands.
+`uv sync --locked` pulls Git dependencies at immutable commits, so first-time
+setup still needs network access and is not fast. A plain pip install remains
+supported, but GLP's own metadata names its `comms` dependency by branch; only
+the uv lock and override pin that transitive dependency exactly. Do not assume
+a working environment before concluding that a failure is a code bug.
 
 ## Tests
 
 ```sh
-pytest tests/                                # short suite (the default)
-pytest tests/ --full                         # everything, incl. slow tests
-pytest tests/test_potential.py -v            # one file
-pytest tests/test_integration.py --shard 1/3 # how CI splits the slow ones
+uv run pytest tests/                                # short suite (the default)
+uv run pytest tests/ --full                         # everything, incl. slow tests
+uv run pytest tests/test_potential.py -v            # one file
+uv run pytest tests/test_integration.py --shard 1/3 # how CI splits the slow ones
 ```
 
 By default, tests marked `@pytest.mark.slow` are skipped and the parametrised

@@ -1,14 +1,11 @@
-import pkg_resources
 from pathlib import Path
 
 
 def load_data(filename):
-    p_filename = Path(filename)
+    p_filename = Path(__file__).parent / filename
     if p_filename.suffix == '.npz':
         import numpy as np
-        stream = pkg_resources.resource_stream(__name__, filename)
-        return np.load(stream)
+        return np.load(p_filename)
     else:
         from ase.io import iread
-        f = pkg_resources.resource_filename(__name__, filename)
-        return iread(f, ':')
+        return iread(p_filename, ':')

@@ -13,37 +13,38 @@ SO3LR - pronounced *Solar* - is a pretrained machine-learned force field for (bi
 Try SO3LR without any local installation using our [Colab notebook](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb)!
 
 ## Installation
-SO3LR can be either used with CPU or with GPU. If you want to use SO3LR on GPU, you have to install the 
-corresponding JAX installation via 
-```shell script
-# SO3LR on GPU
-pip install --upgrade pip
-pip install "jax[cuda12]"
-```
-> **Note**: SO3LR runs significantly faster on GPU, making it the preferred choice for large-scale simulations. More details about JAX installation can be found [here](https://jax.readthedocs.io/en/latest/installation.html). Also, we recommend installing with [uv](https://docs.astral.sh/uv/), it's magical.
+SO3LR supports Python 3.12 and 3.13. For a locked installation from a
+repository checkout, use [uv](https://docs.astral.sh/uv/) with the committed
+lockfile:
 
-If you want to use SO3LR on CPU, e.g. for testing on your local machine which does not have a GPU, you can do
-```shell script
-# SO3LR on CPU
-pip install --upgrade pip
-pip install jax
-```
-Next clone the repository and install by doing 
 ```shell script
 git clone https://github.com/general-molecular-simulations/so3lr.git
 cd so3lr
-pip install .
+uv sync --locked
+uv run so3lr --help
 ```
 
-> **Requires Python 3.12+.** The package is pinned to `python = ">=3.12"` in `pyproject.toml`; older interpreters (e.g. 3.10 / 3.11 on some clusters) will fail at `pip install` with a resolver error. Use `python3.12 -m venv` (or `uv venv --python 3.12`) before installing.
+For paper reproduction, check out a published release tag or an immutable
+40-character commit before `uv sync --locked`; cloning a moving default branch
+does not identify an exact source version.
+
+This creates a CPU environment. For CUDA 12 on Linux x86-64, select the locked
+CUDA extra with `uv sync --locked --extra cuda12`. See
+[`REPRODUCIBILITY.md`](./REPRODUCIBILITY.md) for development, TFDS, PySAGES, and
+release environments. SO3LR runs significantly faster on a compatible GPU for
+large-scale simulations.
 
 ### Optional extras
 
-The base install is JAX-only and lightweight. Three extras are available:
+The base install uses JAX and the scientific Python stack, but does not install
+telemetry clients. Optional extras are:
 
-- `pip install .[pysages]` — installs PySAGES for enhanced-sampling MD (collective variables, ABF, metadynamics, harmonic bias).
-- `pip install .[tfds]` — installs `tensorflow-cpu` + `tensorflow-datasets` for the fast TFDS-based data loader used by training/fine-tuning (needed only if you want to point `--datafile` at a TFDS dataset or run `tests/mlff_tests/test_data_loader_tfds.py`).
-- `pip install .[wandb]` — installs the optional Weights & Biases client used only when `training.use_wandb: true` is explicitly enabled.
+- `uv sync --locked --extra pysages` — PySAGES enhanced-sampling MD.
+- `uv sync --locked --extra tfds` — the TFDS training and fine-tuning loader;
+  this selects the platform-appropriate TensorFlow package.
+- `uv sync --locked --extra wandb` — the Weights & Biases client, used only
+  when `training.use_wandb: true` is explicitly enabled.
+- `uv sync --locked --extra cuda12` — CUDA 12 JAX packages on Linux x86-64.
 
 ## Models
 
@@ -51,12 +52,15 @@ SO3LR ships in three sizes. All are bundled inside the package, so you select on
 
 | Model | Layers | Features | Heads | Cutoff (Å) |
 |-------|--------|----------|-------|-----------|
-| `so3lr-s` | 2 | 128 | 4 | 4.5 |
-| `so3lr-m` *(default)* | 3 | 128 | 4 | 4.5 |
-| `so3lr-l` | 3 | 256 | 8 | 5.0 |
-| `so3lr-o` | 3 | 128 | 4 | 4.5 |
+| `so3lr-s-2606` (`so3lr-s`) | 2 | 128 | 4 | 4.5 |
+| `so3lr-m-2606` (`so3lr-m`) *(default)* | 3 | 128 | 4 | 4.5 |
+| `so3lr-l-2606` (`so3lr-l`) | 3 | 256 | 8 | 5.0 |
+| `so3lr` (`so3lr-o`) | 3 | 128 | 4 | 4.5 |
 
-If you do not specify a model, **`so3lr-m`** is used. `so3lr-o` (also reachable as `so3lr`) is the original SO3LR v1, kept for backward compatibility and for reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558).
+If you do not specify a model, the pinned canonical model
+**`so3lr-m-2606`** is used. `so3lr-o` (also reachable as `so3lr`) is the
+original SO3LR v1, kept for backward compatibility and for reproducing the
+[JACS paper](https://doi.org/10.1021/jacs.5c09558).
 
 ### Model names and versions
 
@@ -84,6 +88,26 @@ Currently bundled:
 `so3lr.model_registry.canonical_models()` lists the canonical names and
 `model_aliases()` the alias → target mapping.
 
+### Verifying bundled model artifacts
+
+Every bundled checkpoint and its adjacent metadata file is covered by
+`so3lr/models/SHA256SUMS`. Verify the installed package without importing JAX:
+
+```shell script
+python -m so3lr.verify_model_artifacts
+```
+
+From a source checkout, the same manifest can also be checked with the standard
+checksum utility available on macOS and many Unix systems:
+
+```shell script
+(cd so3lr/models && shasum -a 256 -c SHA256SUMS)
+```
+
+The checksum proves byte identity with this release; it does not make an
+untrusted pickle safe to load. Only load checkpoints obtained from a trusted
+SO3LR release.
+
 ### Selecting a model
 
 The same names work across every interface:
@@ -91,17 +115,17 @@ The same names work across every interface:
 ```python
 # Python / ASE
 from so3lr import So3lrCalculator
-calc = So3lrCalculator(model="so3lr-m")          # also "so3lr-s" / "so3lr-l"
+calc = So3lrCalculator(model="so3lr-m-2606")
 ```
 
 ```shell script
 # CLI (works with opt / nvt / npt / nve / eval)
-so3lr nvt --input geometry.xyz --model so3lr-m
+so3lr nvt --input geometry.xyz --model so3lr-m-2606
 ```
 
 ```yaml
 # In an MD settings YAML (model: is an alias of model_path:)
-model: so3lr-m
+model: so3lr-m-2606
 ```
 
 Custom and fine-tuned models still work — just pass a path instead of a name:
@@ -110,7 +134,7 @@ Custom and fine-tuned models still work — just pass a path instead of a name:
 So3lrCalculator(model="/path/to/finetuned")      # or  --model /path/to/finetuned  on the CLI
 ```
 
-> **Backward compatibility:** The no-arg default is now `so3lr-m`. To reproduce the **original SO3LR v1** model from the [JACS paper](https://doi.org/10.1021/jacs.5c09558), pass `model="so3lr"` (alias `"so3lr-o"`).
+> **Backward compatibility:** The no-arg default is `so3lr-m-2606`. To reproduce the **original SO3LR v1** model from the [JACS paper](https://doi.org/10.1021/jacs.5c09558), pass `model="so3lr"` (alias `"so3lr-o"`).
 
 ## Command Line Interface (CLI)
 
@@ -180,6 +204,14 @@ isotropic orthorhombic cell or `(n_frames, 3, 3)` for a semi-isotropic cell. The
 attributes describe how to interpret these arrays. The write buffer controls
 I/O chunking only; a final partial buffer is always written.
 
+When `--relax` is enabled, relaxation frames are written to a separate
+`<output-stem>_opt.xyz` file. The requested MD trajectory contains accepted MD
+frames only. Standalone `so3lr opt` continues to use its requested EXTXYZ path.
+With `--overwrite`, EXTXYZ replaces an existing trajectory after the first
+batch is serialized, whereas HDF5 initializes its replacement container before
+integration. Use a new output path if a failed run must leave an old HDF5 file
+untouched. Later EXTXYZ batches use normal streaming appends.
+
 Example with additional parameters for NVT:
 
 ```shell script
@@ -201,6 +233,10 @@ so3lr nvt --input geometry.xyz --output trajectory.xyz --temperature 300 --md-cy
 ```
 
 The restart will continue the simulation from the exact state where it was saved, preserving atom positions, velocities, thermostat/barostat state, and simulation timestep.
+SO3LR's NPZ checkpoint is written to a same-directory temporary file and replaces
+the previous checkpoint only after serialization succeeds. PySAGES saves its
+restart separately; the two files are not a crash-atomic pair. Keep matching
+checkpoint generations when restarting enhanced sampling.
 
 SO3LR's own `.npz` restart format contains only numeric arrays and strings and
 is loaded with NumPy object unpickling disabled. This does **not** make other
@@ -226,8 +262,9 @@ The `.npz` written by `--restart-save` is produced by `save_state()` in `so3lr/c
 - the initial JAX/NumPy setup key; the active Langevin-thermostat key is part of the saved integrator state
 - elapsed wall-clock time (the wall-time log resets to zero for the restarted process)
 - neighbor-list allocations and JIT-compiled functions (rebuilt on launch from current geometry and buffer multipliers)
-- output/log file buffers (use a new output path for a continued run; extxyz
-  appends on restart, while HDF5 initializes a new trajectory file)
+- output/log file buffers (EXTXYZ appends on restart unless `--overwrite` is
+  requested; use a new output path to keep runs separate. HDF5 requires a new
+  trajectory path unless replacement is explicitly requested with `--overwrite`.)
 
 The deterministic NVT/NPT Nose-Hoover and NVE integrators, and the saved
 Langevin integrator state including its active RNG key, are reproducible across
@@ -241,7 +278,7 @@ A subset of atoms can be held fixed during any MD run (`nve` / `nvt` / `npt`). F
 # settings.yaml
 ensemble: nvt
 input_file: geometry.xyz
-model: so3lr-m
+model: so3lr-m-2606
 md_T: 300
 md_cycles: 100
 md_steps: 100
@@ -280,12 +317,20 @@ Evaluate the SO3LR model on a dataset:
 so3lr eval --datafile dataset.extxyz --batch-size 1 --lr-cutoff 100 --save-to predictions.extxyz
 ```
 
-Add `--model so3lr-s` (or `so3lr-l`, or a canonical name such as `so3lr-s-2602`) to evaluate a different bundled model; without it, `so3lr-m` is used.
+Add `--model so3lr-s-2606` (or `so3lr-l-2606`) to evaluate a different
+bundled model; without it, the pinned `so3lr-m-2606` default is used. Floating
+aliases such as `so3lr-s` are convenient for exploration but should not appear
+in publication scripts.
 
 The input can be any file that is digestible by [`ase.io.iread`](https://wiki.fysik.dtu.dk/ase/ase/io/io.html#ase.io.iread).
 
 > [!IMPORTANT]
-> SO3LR was not trained on energies, so only relative energies are meaningful. Labels are assumed to be in `eV` and `Ångström`. For gas-phase simulations, we suggest using `--lr-cutoff 100`.
+> The legacy `so3lr` checkpoint was not trained with an energy loss, so only
+> relative energies are meaningful for that checkpoint. The dated v2
+> `so3lr-{s,m,l}-2602` and `-2606` checkpoints include energy supervision.
+> Always report the exact canonical checkpoint used. Labels are assumed to be
+> in `eV` and `Ångström`. For gas-phase simulations, we suggest using
+> `--lr-cutoff 100`.
 
 The command will collect and print metrics on the dataset and save the predictions to the specified output file. The predicted properties are `energy`, `forces`, `dipole_vec` and the per-atom ratio head. The ratio head is named `a0_ratios` for the new `so3lr-s/m/l` models (polarizability volume ratios) and `hirshfeld_ratios` for the legacy `so3lr` model -- you can pass either name to `--targets` and the CLI will normalize it to whatever the chosen model actually outputs (and accept dataset labels stored under either key). The new `so3lr-s/m/l` models additionally predict `c6_ratios` (per-atom C6-coefficient ratios used by the dispersion term); pass `c6_ratios` to `--targets` to score it against dataset labels stored under the same key. Energy and forces are assumed to be present in the datafile, while dipole vectors, `a0_ratios`/`hirshfeld_ratios`, and `c6_ratios` labels are optional. If they are not present in the data, the metrics will simply be `NaN`.
 
@@ -315,6 +360,9 @@ n_atoms    = data['n_atoms']     # shape: (n_structures,)
 # Split back into per-structure arrays
 per_structure = np.split(embeddings, np.cumsum(n_atoms[:-1]))
 ```
+
+Evaluation outputs are replaced only when `--overwrite` is requested. Prediction
+and embedding files are saved independently, not as a multi-file transaction.
 
 The predictions can be analyzed in Python:
 
@@ -375,7 +423,7 @@ so3lr train --config config.yaml
 Weights & Biases logging is disabled by default for both training and
 fine-tuning. SO3LR does not initialize W&B or send metrics when
 `training.use_wandb` is absent or `false`, and the base installation does not
-include the W&B client. Install it with `pip install .[wandb]`, then opt in
+include the W&B client. Install it with `uv sync --locked --extra wandb`, then opt in
 explicitly:
 
 ```yaml
@@ -410,7 +458,7 @@ data:
 ```
 
 Multi-dataset sampling currently requires the **TFDS** dataloader; install it
-via `pip install .[tfds]` (see *Optional extras*). `num_train` caps each source's
+via `uv sync --locked --extra tfds` (see *Optional extras*). `num_train` caps each source's
 training split before its weight is applied.
 
 For TFDS mixtures, one training epoch makes a finite number of weighted draws
@@ -431,6 +479,9 @@ versions, and trajectory-control settings. Metadata fingerprinting does not
 hash every TFRecord payload and cannot prove that Python model/loss/optimizer
 code is semantically unchanged despite identical configuration;
 keep data directories immutable and use source/environment provenance for that.
+Fine-tuning fingerprints also include the resolved trainable/frozen parameter
+masks. Older TFDS fine-tuning checkpoints without that fingerprint are rejected
+for exact training continuation; inference from their parameters is unchanged.
 Legacy params-only checkpoints remain loadable for inference but are rejected
 for TFDS training restart because their exact trajectory cannot be recovered.
 ASE/NPZ restarts remain weights-only continuations: they load the target
@@ -495,6 +546,11 @@ bind_energy = [energy[i]-energy[i+1] for i in range(0, len(energy), 2)]
 ## Atomic Simulation Environment
 To obtain an Atomic Simulation Environment (ASE) calculator that predicts energies and forces using SO3LR, simply run: 
 ```python
+from jax import config
+
+# JAX disables 64-bit arrays by default. This must run before SO3LR is imported.
+config.update("jax_enable_x64", True)
+
 import numpy as np
 
 from so3lr import So3lrCalculator
@@ -504,7 +560,7 @@ atoms = Atoms('H2', positions=[(0, 0, 0), (0, 0, 0.74)])
 atoms.info['charge'] = 0.0
 
 calc = So3lrCalculator(
-    model="so3lr-m",         # bundled model; also "so3lr-s" / "so3lr-l" or a path. Default: so3lr-m
+    model="so3lr-m-2606",    # canonical dated name for reproducible results
     calculate_stress=False,
     lr_cutoff=100, # for gas-phase systems
     dtype=np.float64
@@ -529,6 +585,11 @@ The SO3LR calculator provides access to individual energy components, their grad
 You can extract individual energy components and other observables from the model by enabling `has_aux=True` and specifying which observables to output:
 
 ```python
+from jax import config
+
+# Enable this before importing SO3LR whenever dtype=np.float64 is requested.
+config.update("jax_enable_x64", True)
+
 import numpy as np
 from so3lr import So3lrCalculator
 from ase import Atoms
@@ -537,6 +598,7 @@ atoms = Atoms('OH2', positions=[(0, 0, 0), (0.96, 0, 0), (-0.24, 0.93, 0)])
 atoms.info['charge'] = 0.0
 
 calc = So3lrCalculator(
+    model="so3lr-m-2606",
     lr_cutoff=12.0,
     dtype=np.float64,
     has_aux=True,
@@ -546,7 +608,7 @@ calc = So3lrCalculator(
         'dispersion_energy',      # Dispersion energy
         'zbl_repulsion',          # ZBL repulsion energy
         'partial_charges',        # Atomic partial charges
-        'hirshfeld_ratios'        # Hirshfeld volume ratios
+        'a0_ratios'               # Polarizability volume ratios (v2 models)
     ]
 )
 
@@ -564,7 +626,7 @@ zbl_repulsion = np.sum(aux['zbl_repulsion'])
 
 # Atomic properties
 partial_charges = aux['partial_charges']      # shape: (n_atoms,)
-hirshfeld_ratios = aux['hirshfeld_ratios']    # shape: (n_atoms,)
+a0_ratios = aux['a0_ratios']                  # shape: (n_atoms,)
 
 print(f"Total energy: {energy:.6f} eV")
 print(f"  NN energy: {nn_energy:.6f} eV")
@@ -572,6 +634,7 @@ print(f"  Electrostatic: {electrostatic_energy:.6f} eV")
 print(f"  Dispersion: {dispersion_energy:.6f} eV")
 print(f"  ZBL repulsion: {zbl_repulsion:.6f} eV")
 print(f"Partial charges: {partial_charges}")
+print(f"Polarizability volume ratios: {a0_ratios}")
 ```
 
 > **Note:** All energy-related observables (`nn_energy`, `electrostatic_energy`, `dispersion_energy`, `zbl_repulsion`, `electrostatic_energy_undamped`, `dispersion_energy_undamped`) are returned as **per-atom arrays**. Sum over atoms to obtain the total contribution: `np.sum(aux['nn_energy'])`.
@@ -585,7 +648,8 @@ print(f"Partial charges: {partial_charges}")
 | `zbl_repulsion` | Short-range repulsion (NLH for so3lr-s/m/l, ZBL for legacy `so3lr`) | `(n_atoms,)` |
 | `nlh_repulsion` | NLH short-range repulsion (so3lr-s/m/l; alias of `zbl_repulsion`) | `(n_atoms,)` |
 | `partial_charges` | Atomic partial charges | `(n_atoms,)` |
-| `hirshfeld_ratios` | Hirshfeld volume ratios | `(n_atoms,)` |
+| `a0_ratios` | Polarizability volume ratios (`so3lr-s/m/l`) | `(n_atoms,)` |
+| `hirshfeld_ratios` | Hirshfeld volume ratios (legacy `so3lr`) | `(n_atoms,)` |
 | `electrostatic_energy_undamped` | Undamped electrostatic energy | `(n_atoms,)` |
 | `dispersion_energy_undamped` | Undamped dispersion energy | `(n_atoms,)` |
 | `x` | Final-layer per-atom embeddings | `(n_atoms, features)` |
@@ -600,6 +664,7 @@ To compute gradients of observables with respect to atomic positions, append `_g
 
 ```python
 calc = So3lrCalculator(
+    model="so3lr-m-2606",
     lr_cutoff=12.0,
     dtype=np.float64,
     has_aux=True,
@@ -633,7 +698,7 @@ for idx in [0, 1, 2]:
 
 **Gradient/Jacobian suffixes:**
 - `_grad`: For scalar observables (energies). Returns gradient of shape `(3,)`.
-- `_jac`: For vector observables (charges, Hirshfeld ratios). Returns Jacobian of shape `(n_atoms, 3)`.
+- `_jac`: For vector observables (charges and per-atom ratio heads). Returns Jacobian of shape `(n_atoms, 3)`.
 
 > **Note:** The `_grad` and `_jac` suffixes are only supported through the ASE calculator (`So3lrCalculator`) and are **not currently supported** via the `so3lr eval` CLI or `make_so3lr`.
 
@@ -643,6 +708,7 @@ The Hessian matrix (second derivatives of energy with respect to positions) can 
 
 ```python
 calc = So3lrCalculator(
+    model="so3lr-m-2606",
     lr_cutoff=12.0,
     dtype=np.float64,
     calculate_hessian=True
@@ -669,6 +735,7 @@ print(f"Hessian eigenvalues: {eigenvalues}")
 ```python
 # Compute Hessian block only for atoms 0-9 (must be contiguous)
 calc = So3lrCalculator(
+    model="so3lr-m-2606",
     lr_cutoff=12.0,
     dtype=np.float64,
     calculate_hessian=True,
@@ -714,7 +781,7 @@ displacement, shift = space.free()
 
 # Initialize SO3LR with JAX-MD
 neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
-    potential=So3lrPotential(),
+    potential=So3lrPotential(model="so3lr-m-2606"),
     displacement_or_metric=displacement,
     box_size=box,
     species=atomic_numbers,
@@ -768,7 +835,7 @@ from so3lr import Graph
 
 graph = Graph(...)
 
-so3lr_potential = So3lrPotential()
+so3lr_potential = So3lrPotential(model="so3lr-m-2606")
 
 energy = so3lr_potential(graph)
 ```
@@ -800,6 +867,11 @@ For **gas-phase/molecular systems**, use `lr_cutoff=100` instead (no k-space nee
 ### ASE Calculator with K-Space Electrostatics
 
 ```python
+from jax import config
+
+# Enable this before importing SO3LR whenever dtype=np.float64 is requested.
+config.update("jax_enable_x64", True)
+
 import numpy as np
 from ase import Atoms
 from ase.io import read
@@ -827,6 +899,7 @@ atoms.info['k_smearing'] = np.array([smearing])
 
 # Create calculator with PME
 calc = So3lrCalculator(
+    model="so3lr-m-2606",
     lr_cutoff=12.0,
     dtype=np.float64,
     coulomb_kspace_method='pme',  # Options: 'ewald', 'pme', 'p3m'
@@ -843,6 +916,7 @@ print(f"Energy: {energy:.6f} eV")
 
 ```python
 calc = So3lrCalculator(
+    model="so3lr-m-2606",
     lr_cutoff=12.0,
     dtype=np.float64,
     coulomb_kspace_method='pme',
@@ -952,7 +1026,7 @@ PySAGES is an optional dependency. To install SO3LR with PySAGES support:
 
 ```shell script
 cd so3lr
-pip install .[pysages]
+uv sync --locked --extra pysages
 ```
 
 SO3LR runs normally without PySAGES installed. The enhanced sampling features are only activated when `do_enhanced_sampling: true` is set in the settings file.
@@ -1084,7 +1158,7 @@ restart_pysages_save_path: "./restart_pysages_2.pkl"
 - General robust loss
 - Multi-head fine-tuning
 
-(The previously listed *Fast TFDS dataloader* now ships — install via `pip install .[tfds]`; see the *Optional extras* note in the Installation section.)
+(The previously listed *Fast TFDS dataloader* now ships — install via `uv sync --locked --extra tfds`; see the *Optional extras* note in the Installation section.)
 
 If you would like to see new features, add your own functionality, or share ideas, please reach out or open an issue. We are always happy to collaborate and hear your thoughts!
 
@@ -1096,7 +1170,17 @@ The quantum mechanical datasets used for training and testing SO3LR are availabl
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14779793.svg)](https://doi.org/10.5281/zenodo.14779793)
 
 ## Citation
-If you use parts of the code please cite
+Machine-readable software and preferred-paper metadata are available in
+[`CITATION.cff`](./CITATION.cff). If you use parts of the code, cite the exact
+software version and canonical dated checkpoint together with the relevant
+papers below. The SO3LR-2 citation will be added only after its bibliographic
+record is public; no DOI is claimed by this repository yet.
+
+```text
+SO3LR software, version 0.2.0, model so3lr-m-2606
+https://github.com/general-molecular-simulations/so3lr
+```
+
 ```
 @article{kabylda2025molecular,
   title={Molecular Simulations with a Pretrained Neural Network and Universal Pairwise Force Fields},
@@ -1120,3 +1204,14 @@ If you use parts of the code please cite
   doi={10.1038/s41467-024-50620-6}
 }
 ```
+
+## License and third-party code
+
+Original SO3LR code is distributed under the MIT License. Portions derived
+from Google Research and JAX MD remain under Apache-2.0, and the Ewald tuning
+code derived from torch-pme remains under BSD-3-Clause. See
+[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) and the accompanying
+license files for the exact scope and notices. Checkpoint and dataset licenses
+must be confirmed separately before the SO3LR-2 release. An archive-wide license
+expression is deliberately left unspecified until that review; the source
+licenses do not relicense checkpoints, datasets, or scientific reference data.

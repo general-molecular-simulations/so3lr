@@ -57,7 +57,7 @@ restart_save_path: null                    # Path to save simulation state for r
 restart_load_path: null                    # Path to load simulation state from a previous run [Default: null]
 restart_reset: false                       # Reset accumulated thermostat/barostat state on restart [Default: false]
 
-## Enhanced Sampling (PySAGES) — optional, requires pip install so3lr[pysages]
+## Enhanced Sampling (PySAGES) — optional, requires: uv sync --locked --extra pysages
 do_enhanced_sampling: false                # Enable enhanced sampling via PySAGES [Default: false]
 pysages_input: "./pysages_input.yaml"      # Path to PySAGES settings file (CVs, method, grid) [Default: "./pysages_input.yaml"]
 enforce_cartesian_coordinates: false       # Integrator coordinate system: use Cartesian (not fractional) coordinates for periodic systems. Auto-enabled when do_enhanced_sampling is true. (NOT the trajectory output format — see output_cartesian_positions below.) [Default: false]
@@ -65,7 +65,7 @@ restart_pysages_save_path: null            # Path to save PySAGES state for rest
 restart_pysages_load_path: null            # Path to load PySAGES state from a previous run [Default: null]
 
 ## Model Settings
-model_path: null                           # Model: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) or a path to a custom MLFF model directory. If null, uses so3lr-m. [Default: so3lr-m]
+model_path: null                           # Model: a canonical bundled name (for example so3lr-m-2606), a floating alias (so3lr-s/m/l), or a custom MLFF directory. If null, uses the pinned so3lr-m-2606 default. [Default: null -> so3lr-m-2606]
 lr_cutoff: 12.0                            # Long-range cutoff distance in Å [Default: 12.0]  (CLI: --lr-cutoff)
 dispersion_damping: 2.0                    # Dispersion interactions start damping at (lr_cutoff - dispersion_damping) Å [Default: 2.0]  (CLI: --dispersion-damping)
 buffer_size_multiplier_sr: 1.25           # Buffer size multiplier for short-range neighbor list [Default: 1.25]  (CLI: --buffer-sr)

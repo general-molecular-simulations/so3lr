@@ -11,10 +11,18 @@ This document is for developers contributing to the SO3LR project. It covers rep
 - `pyproject.toml` — Python dependencies and build system
 
 ## Running Tests
-  ```sh
-  pytest -n 16
-  ```
-Setting the number of workers -n can be useful to speed up tests but might require a big machine.
+
+Create the locked development environment and run the short suite with:
+
+```sh
+uv sync --locked --group dev
+uv run pytest tests/
+```
+
+For a sufficiently large machine, `uv run pytest tests/ -n 16` runs tests in
+parallel. The locked development group includes `pytest-xdist`, which provides
+the `-n` option. See `REPRODUCIBILITY.md` for TFDS, PySAGES, CUDA, and release
+environments.
 
 ## Adding Features or Fixes
 1. Create a new branch for your feature or bugfix.

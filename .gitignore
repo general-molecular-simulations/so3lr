@@ -3,6 +3,9 @@
 .ipynb_checkpoints
 build
 .pytest_cache
+.venv/
+.uv-cache/
+dist/
 .idea/
 *.pyc
 hdf5

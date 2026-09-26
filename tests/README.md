@@ -5,13 +5,18 @@
 Run the short (default) test suite:
 
 ```bash
-pytest tests/
+uv sync --locked --group dev --extra tfds
+uv run --no-sync pytest tests/
 ```
+
+Without the TFDS extra, its data-loader tests are skipped. Add `--extra pysages`
+to exercise the enhanced-sampling tests as well. Focused non-TFDS test files can
+use the base locked environment.
 
 Run the full test suite (includes slow tests and all molecule parametrizations):
 
 ```bash
-pytest tests/ --full
+uv run --no-sync pytest tests/ --full
 ```
 
 ### Short vs Full
@@ -25,8 +30,8 @@ With `--full`, everything runs including slow tests and all molecule parametriza
 ### Run a specific test file or test case
 
 ```bash
-pytest tests/test_potential.py -v
-pytest tests/test_integration.py -v -k "nve_ensemble"
+uv run --no-sync pytest tests/test_potential.py -v
+uv run --no-sync pytest tests/test_integration.py -v -k "nve_ensemble"
 ```
 
 ## Test Files
