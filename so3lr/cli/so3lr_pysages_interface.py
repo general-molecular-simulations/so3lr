@@ -544,6 +544,7 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
             species_nn=arguments.get('species'),
             cn_exponents=arguments.get('cn_exps'),
             indices_nn=arguments.get('indices_nn'),
+            r0_multiplier=arguments.get('r0_multiplier'),
         )
     elif name_lower == 'ringphase':
         return pysages.colvars.angles.RingPhaseAngle(indices=arguments['indices'])
