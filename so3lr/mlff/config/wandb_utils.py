@@ -13,7 +13,9 @@ def initialize_wandb(config) -> bool:
         return False
     try:
         import wandb
-    except ImportError as exc:
+    except ModuleNotFoundError as exc:
+        if exc.name != 'wandb':
+            raise
         raise ImportError(
             "training.use_wandb is true but wandb is not installed; install "
             "the optional extra with `pip install 'so3lr[wandb]'`."
@@ -23,5 +25,6 @@ def initialize_wandb(config) -> bool:
     # (they may carry entity/project settings or credentials).
     logged = {**config, 'training': {k: v for k, v in training.items()
                                      if k != 'wandb_init_args'}}
+    logged.update(init_args.pop('config', None) or {})
     wandb.init(config=logged, **init_args)
     return True

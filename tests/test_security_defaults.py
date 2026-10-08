@@ -38,6 +38,29 @@ def test_wandb_opt_in_logs_config(monkeypatch):
     }]
 
 
+def test_wandb_init_args_config_is_merged_not_duplicated(monkeypatch):
+    calls = []
+    monkeypatch.setitem(sys.modules, 'wandb', SimpleNamespace(init=lambda **kw: calls.append(kw)))
+    config = {'training': {'use_wandb': True, 'wandb_init_args': {'config': {'tag': 'x'}}}}
+    assert initialize_wandb(config) is True
+    assert calls == [{'config': {'training': {'use_wandb': True}, 'tag': 'x'}}]
+
+
+def test_wandb_broken_dependency_is_not_reported_as_missing(monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == 'wandb':
+            raise ModuleNotFoundError("No module named 'protobuf'", name='protobuf')
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, 'wandb', raising=False)
+    monkeypatch.setattr(builtins, '__import__', fake_import)
+    with pytest.raises(ModuleNotFoundError, match='protobuf'):
+        initialize_wandb({'training': {'use_wandb': True}})
+
+
 def test_wandb_opt_in_without_client_is_actionable(monkeypatch):
     monkeypatch.setitem(sys.modules, 'wandb', None)
     with pytest.raises(ImportError, match=r'so3lr\[wandb\]'):

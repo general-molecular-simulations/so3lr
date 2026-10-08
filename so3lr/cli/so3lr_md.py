@@ -19,7 +19,6 @@ import logging
 import pathlib
 import stat
 import tempfile
-from numbers import Integral
 from pathlib import Path
 from functools import partial
 from logging.handlers import RotatingFileHandler
@@ -68,6 +67,7 @@ import h5py
 from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
+from ..md_settings_validation import validate_md_counts
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -146,8 +146,8 @@ class HDF5Store(object):
     def append(self, x: Dict):
         """Append a batch of frames; each array is shaped (n_frames, *dataset_shape).
 
-        The whole batch is validated before any dataset is resized, so a bad
-        batch cannot leave datasets with different frame counts.
+        The whole batch is validated before any dataset is resized, and a failed
+        write is rolled back, so datasets never end with different frame counts.
         """
         arrays = {k: np.asarray(v, dtype=self.dataset[k].dtype) for k, v in x.items()}
         shapes = {k: a.shape for k, a in arrays.items()}
@@ -161,10 +161,17 @@ class HDF5Store(object):
         if n == 0:
             return
         with h5py.File(self.datapath, mode='a') as h5f:
-            for key, array in arrays.items():
-                h5f[key].resize((self.i + n,) + self.dataset[key].shape)
-                h5f[key][self.i:] = array
-            h5f.flush()
+            try:
+                for key, array in arrays.items():
+                    h5f[key].resize((self.i + n,) + self.dataset[key].shape)
+                    h5f[key][self.i:] = array
+            except BaseException:
+                # Keep every dataset at the same frame count if a write fails.
+                for key in arrays:
+                    h5f[key].resize((self.i,) + self.dataset[key].shape)
+                raise
+            finally:
+                h5f.flush()
         self.i += n
 
 # Setup logging
@@ -1228,7 +1235,7 @@ def validate_orthorhombic_restart_box(box, label: str = 'box') -> None:
     if m.ndim != 2:
         return
     eps = np.finfo(m.dtype if np.issubdtype(m.dtype, np.floating) else np.float64).eps
-    if np.abs(m - np.diag(np.diag(m))).max() > 100 * eps * max(1.0, np.abs(m).max()):
+    if not np.allclose(m, np.diag(np.diag(m)), rtol=0, atol=100 * eps * max(1.0, np.abs(m).max())):
         raise ValueError(
             f"The checkpoint's {label} is sheared, which SO3LR MD cannot represent; "
             "restart_reset cannot remove cell shear. Start a fresh run from an "
@@ -2362,14 +2369,6 @@ def save_restart_checkpoints(
         )
     if restart_pysages_save_path is not None:
         save_pysages_state(pysages_result, restart_pysages_save_path)
-
-
-def validate_md_counts(settings: Dict) -> None:
-    """Require positive integer MD counts (Click checks CLI flags; YAML/Python land here)."""
-    for name in ('md_cycles', 'md_steps', 'save_buffer', 'kspace_npt_cycles'):
-        value = settings.get(name)
-        if value is not None and (isinstance(value, bool) or not isinstance(value, Integral) or value < 1):
-            raise ValueError(f"{name} must be a positive integer (received {value!r}).")
 
 
 def _validate_md_output_write_policy(
