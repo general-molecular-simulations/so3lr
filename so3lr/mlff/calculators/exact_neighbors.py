@@ -15,10 +15,12 @@ entries point at index N, the convention glp uses, so the model masks them alike
 """
 from __future__ import annotations
 
+import functools
 import logging
 from typing import NamedTuple, Optional
 
 import numpy as np
+from ase.cell import Cell
 
 from so3lr.mlff.indexing.indices import pad_index_list, pad_shift
 
@@ -28,6 +30,14 @@ try:  # matscipy's C implementation is ~25x faster than ASE's pure-numpy one
 except ImportError:  # pragma: no cover - exercised only without matscipy
     from ase.neighborlist import neighbor_list as _neighbour_list
     _SLOW_FALLBACK = True
+
+
+@functools.cache
+def _warn_slow_fallback():
+    logging.getLogger("SO3LR").warning(
+        'matscipy not installed: the exact periodic neighbour list falls back to '
+        'ASE, which is ~25x slower. Install the `matscipy` extra '
+        '(`pip install "so3lr[matscipy]"`) for small-cell runs.')
 
 
 class ExactNeighbors(NamedTuple):
@@ -58,16 +68,11 @@ def build(atoms, cutoff: float, lr_cutoff: Optional[float],
 
     One neighbour search at the larger cutoff; the short-range list is its subset
     with d < cutoff. ``lr_cutoff=None`` means a local model (long-range lists equal
-    the short-range ones). ``prev`` supplies the capacities to reuse, and is ignored
-    when the atom count changed so a small system does not inherit a large padding.
+    the short-range ones). ``prev`` supplies the capacities to reuse (the caller
+    drops it when the atom count changes).
     """
-    global _SLOW_FALLBACK
-    if _SLOW_FALLBACK:  # warn once, on first use rather than on import
-        logging.getLogger("SO3LR").warning(
-            'matscipy not installed: the exact periodic neighbour list falls back to '
-            'ASE, which is ~25x slower. Install the `matscipy` extra '
-            '(`pip install "so3lr[matscipy]"`) for small-cell runs.')
-        _SLOW_FALLBACK = False
+    if _SLOW_FALLBACK:
+        _warn_slow_fallback()
     n = len(atoms)
     i, j, S, d = _neighbour_list('ijSd', atoms, float(max(cutoff, lr_cutoff or 0.0)))
     i, j, S = i.astype(np.int32), j.astype(np.int32), S.astype(np.int32)
@@ -80,7 +85,7 @@ def build(atoms, cutoff: float, lr_cutoff: Optional[float],
 
 def cell_heights(cell) -> np.ndarray:
     """Perpendicular distance between opposite faces, per lattice direction (rows)."""
-    return 1.0 / np.linalg.norm(np.linalg.inv(np.asarray(cell, float)).T, axis=1)
+    return 1.0 / np.linalg.norm(Cell(np.asarray(cell, float)).reciprocal(), axis=1)
 
 
 def needs_exact(cell, cutoff: float, lr_cutoff: Optional[float], skin: float = 0.0) -> bool:

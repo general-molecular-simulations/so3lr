@@ -10,9 +10,9 @@ from jax_md import simulate
 
 from so3lr.cli import so3lr_md
 from so3lr.md_settings_validation import validate_md_counts
+from so3lr.pbc import lattice_rows
 from so3lr.cli.so3lr_md import (
     _validate_md_output_write_policy,
-    lattice_rows,
     cell_from_atoms_boundary_conditions,
     init_hdf5_store,
     load_state,

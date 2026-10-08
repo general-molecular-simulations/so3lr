@@ -80,10 +80,8 @@ def neighbor_list_featurizer(
             if positions is not None:
                 positions = transform(pert, positions)
             if box is not None:
-                # box holds the lattice vectors as COLUMNS (Graph.cell convention);
-                # transform() would act on its rows (box @ pert.T), which deforms
-                # the transposed lattice once PotentialSparse hands rows to PME.
-                # Isotropic NPT passes a scalar perturbation (1 + eps).
+                # box is columns, so strain acts from the left; isotropic NPT
+                # passes a scalar perturbation.
                 box = pert * box if jnp.ndim(pert) == 0 else pert @ box
 
         d = jax.vmap(partial(displacement_fn, **kwargs))

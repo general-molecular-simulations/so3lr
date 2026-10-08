@@ -348,9 +348,7 @@ class PotentialSparse(MachineLearningPotential):
                 'idx_j': graph.others,
                 'total_charge': graph.total_charge,
                 'num_unpaired_electrons': graph.num_unpaired_electrons,
-                # Graphs carry the lattice as columns; jaxpme and the training data use
-                # rows. Passing columns evaluated PME on the transposed lattice -- a
-                # different crystal for any non-orthogonal cell.
+                # Graph.cell is columns; the model's k-space solvers take rows.
                 'cell': lattice_rows(getattr(graph, 'cell', None)),
                 'theory_mask': getattr(graph, 'theory_mask', None),
                 'k_grid': getattr(graph, 'k_grid', None),

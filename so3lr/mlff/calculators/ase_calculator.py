@@ -12,7 +12,6 @@ from ase.calculators.calculator import Calculator
 from so3lr.mlff.utils.structures import Graph
 from so3lr.graph import Graph as So3lrGraph
 from so3lr.mlff.calculators import exact_neighbors
-from so3lr.mlff.calculators.exact_neighbors import ExactNeighbors
 from so3lr.mlff.geometric.cutoff import add_cell_offsets_sparse
 from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
@@ -75,10 +74,6 @@ def matrix_to_voigt(matrix):
 
 class AseCalculatorSparse(Calculator):
     implemented_properties = ['energy', 'forces', 'stress', 'free_energy', 'hessian']
-    # Defaults for instances that bypass __init__ (e.g. test stubs, subclasses).
-    neighbor_backend = 'auto'
-    _exact_nb = None
-    _exact_nb_natoms = None
 
     @classmethod
     def create_from_workdir(
@@ -727,9 +722,7 @@ class AseCalculatorSparse(Calculator):
                 import jaxpme
                 k_smearing = jnp.array([self.kspace_smearing], dtype=self.dtype)
                 k_spacing = jnp.array([self.kspace_spacing])
-                # jaxpme sizes the mesh from the lattice vectors as ROWS (see
-                # so3lr.pbc.lattice_rows); the transpose used here before gave
-                # the wrong mesh shape for non-orthogonal cells.
+                # jaxpme takes the lattice vectors as rows, as ASE stores them.
                 cell = jnp.array(np.array(atoms.get_cell()), dtype=self.dtype)
                 if self.kspace_electrostatics == 'ewald':
                     k_grid = jaxpme.kspace.get_kgrid_ewald(cell, lr_wavelength=k_spacing)
@@ -833,7 +826,7 @@ class AseCalculatorSparse(Calculator):
         self._exact_nb = exact_neighbors.build(atoms, self.cutoff, self._long_range_cutoff(),
                                                prev, multiplier=self.capacity_multiplier)
         self._exact_nb_natoms = len(atoms)
-        return ExactNeighbors(*(jnp.asarray(x) for x in self._exact_nb))
+        return jax.device_put(self._exact_nb)
 
 
 def _system_to_graph(system, neighbors):
@@ -845,7 +838,7 @@ def _system_to_graph(system, neighbors):
     so the integer shifts stay valid and every calculate_fn variant (stress,
     hessian, observables) works unchanged on either neighbour type.
     """
-    if not isinstance(neighbors, ExactNeighbors):
+    if not isinstance(neighbors, exact_neighbors.ExactNeighbors):
         return system_to_graph(system, neighbors)
     R, rows = system.R, lattice_rows(system.cell)
     ci, cj, ci_lr, cj_lr = neighbors.centers, neighbors.others, neighbors.idx_i_lr, neighbors.idx_j_lr
