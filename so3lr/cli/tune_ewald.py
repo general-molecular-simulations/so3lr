@@ -36,6 +36,7 @@ from ase.io import read
 from ase.units import Bohr
 
 from so3lr import So3lrPotential
+from so3lr.pbc import lattice_rows
 from so3lr.cli.so3lr_md import handle_box, load_model, atoms_to_jnp, process_model, load_state
 from .so3lr_md import setup_logger
 
@@ -1262,7 +1263,7 @@ def tune(
     c6_ratios = obs_data[1]['c6_ratios']
 
     if box.shape == (3, 3):
-        cell = box
+        cell = lattice_rows(box)  # error bounds and jaxpme k-grids use rows
     elif box.shape == (3, ):
         cell = jnp.diag(box)
     elif box.shape == (1,):

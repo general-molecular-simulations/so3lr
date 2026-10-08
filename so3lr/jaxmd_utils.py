@@ -80,7 +80,9 @@ def neighbor_list_featurizer(
             if positions is not None:
                 positions = transform(pert, positions)
             if box is not None:
-                box = transform(pert, box)
+                # box is columns, so strain acts from the left; isotropic NPT
+                # passes a scalar perturbation.
+                box = pert * box if jnp.ndim(pert) == 0 else pert @ box
 
         d = jax.vmap(partial(displacement_fn, **kwargs))
         dR = d(Ra, Rb)

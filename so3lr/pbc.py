@@ -25,3 +25,17 @@ def is_fully_periodic(pbc, *, context: str) -> bool:
             f"pbc=True in all three axes for a 3-D periodic system."
         )
     return bool(np.all(flags))
+
+
+def lattice_rows(cell):
+    """Lattice vectors as rows (ASE, HDF5, jaxpme) from a column-convention cell.
+
+    glp's ``System.cell`` is ``atoms.cell.T`` and a jax-md box maps fractional
+    to Cartesian as ``box @ s``, so both hold the lattice vectors as columns.
+    Scalars and diagonal vectors have no ambiguity and are returned unchanged;
+    batched ``(n, 3, 3)`` cells are transposed per cell.
+    """
+    if cell is None or getattr(cell, 'ndim', 0) < 2:
+        return cell
+    import jax.numpy as jnp
+    return jnp.swapaxes(cell, -1, -2)

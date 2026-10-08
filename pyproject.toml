@@ -70,6 +70,11 @@ tfds = [
 wandb = [
     "wandb>=0.29,<0.30",
 ]
+# Fast neighbour search for the ASE calculator's exact periodic images
+# (small or skewed cells); without it the slower ASE search is used.
+matscipy = [
+    "matscipy>=1.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/general-molecular-simulations/so3lr"

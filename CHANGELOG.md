@@ -42,6 +42,13 @@ identified by immutable dated names such as `so3lr-m-2606`.
 
 ### Changed results and formats
 
+- PME/P3M on non-orthogonal cells now uses the lattice vectors as rows, as
+  jaxpme expects; results on triclinic cells change (0.03-0.09 eV/A in forces
+  on triclinic MOFs). `Graph.cell` must hold the lattice as columns
+  (`atoms.cell.T`), as glp and jax-md already do (PR #53).
+- The ASE calculator uses explicit periodic images when the minimum image is
+  wrong (non-orthorhombic cells or heights within twice the cutoff); install the
+  `matscipy` extra for a fast neighbour search (PR #53).
 - `so3lr eval` energies and forces change on datasets that carry `c6_ratios`
   labels: dispersion now uses the model's predicted C6, as the ASE calculator
   and MD always did (PR #37).

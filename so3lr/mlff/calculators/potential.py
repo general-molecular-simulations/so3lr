@@ -13,6 +13,7 @@ from typing import Any, Callable, Type, Dict, Sequence, Optional
 from glp.graph import Graph
 
 from ..utils import calculator_utils
+from ...pbc import lattice_rows
 from ..utils.checkpoint_utils import load_params_pkl
 from ..utils.training_utils import expand_observables_to_theory_levels
 from .base_calculator import make_base_calculator
@@ -347,7 +348,8 @@ class PotentialSparse(MachineLearningPotential):
                 'idx_j': graph.others,
                 'total_charge': graph.total_charge,
                 'num_unpaired_electrons': graph.num_unpaired_electrons,
-                'cell': getattr(graph, 'cell', None),
+                # Graph.cell is columns; the model's k-space solvers take rows.
+                'cell': lattice_rows(getattr(graph, 'cell', None)),
                 'theory_mask': getattr(graph, 'theory_mask', None),
                 'k_grid': getattr(graph, 'k_grid', None),
                 'k_smearing': getattr(graph, 'k_smearing', None),

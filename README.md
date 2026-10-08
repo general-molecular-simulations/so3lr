@@ -829,6 +829,8 @@ so3lr_potential = So3lrPotential(model="so3lr-m-2606")
 
 energy = so3lr_potential(graph)
 ```
+For periodic systems, `Graph.cell` holds the lattice vectors as **columns** (`atoms.cell.T`), the same
+convention as glp's `System.cell` and a jax-md box.
 The `Graph` object is a `collections.namedtuple` which abstracts the molecule as a graph, common practice in the 
 context of message passing neural networks. The `So3lrPotential` is a pure `python` function which takes a graph as 
 an input and returns a potential energy. It is compatible with common `jax` transformations as `jax.jit`, `jax.vmap`, 
