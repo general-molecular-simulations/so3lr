@@ -31,7 +31,7 @@ HANDLED = {
     "kspace_smearing", "kspace_spacing", "kspace_interp_nodes", "kspace_dispersion",
     "kspace_dispersion_smearing", "kspace_dispersion_spacing", "kspace_dispersion_interp_nodes",
     "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
-    "engine", "flash_mode", "flash_mixed",
+    "engine", "flash_mode", "flash_mixed", "flash_devices",
 }
 # settings that only concern the neighbour-list engine, other commands sharing a settings
 # file (eval, tune-ewald), or act only together with a declined setting below (the
@@ -90,6 +90,9 @@ def validate_options(settings):
             raise ValueError(f"{key} must be one of {', '.join(allowed)} (received {settings[key]!r})")
     if settings.get("flash_mixed") is not None and not isinstance(settings["flash_mixed"], bool):
         raise ValueError(f"flash_mixed must be true or false (received {settings['flash_mixed']!r})")
+    n = settings.get("flash_devices")
+    if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
+        raise ValueError(f"flash_devices must be a positive integer (received {n!r})")
 
 
 def reserve_gpu(settings):
@@ -98,7 +101,9 @@ def reserve_gpu(settings):
     the structure is read: a run that falls back for its structure still reserves it."""
     if ((settings.get("engine") or "auto") != "standard" and settings_problem(settings) is None
             and model_problem(settings.get("model_path")) is None):
-        os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.97")
+        # several GPUs: room outside XLA's pool for NCCL's buffers
+        several = int(settings.get("flash_devices") or 1) > 1
+        os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90" if several else "0.97")
 
 
 def settings_problem(settings):
