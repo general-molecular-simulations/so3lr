@@ -32,10 +32,7 @@ def test_training_entry_point_keeps_metadata_when_loop_rejects_restart(
             'use_adaptive_robust_loss': fine_tune,
         },
     })
-    loader_calls = []
-
     def make_loader(**kwargs):
-        loader_calls.append(kwargs)
         return object(), tfds
 
     monkeypatch.setattr(from_config, 'data_loader_from_config', make_loader)
@@ -85,12 +82,6 @@ def test_training_entry_point_keeps_metadata_when_loop_rejects_restart(
         else:
             from_config.run_training(config)
     assert len(calls) == 1
-    if fine_tune:
-        assert loader_calls[0]['finetuning_parameter_selection'] == {
-            'trainable': ['w', 'adaptive_robust_loss'], 'frozen': None,
-        }
-    else:
-        assert 'finetuning_parameter_selection' not in loader_calls[0]
     for name in names:
         assert (tmp_path / name).read_text() == 'original checkpoint metadata'
 
@@ -162,7 +153,6 @@ def test_ase_restart_checks_checkpoint_even_with_supplied_parent_params(
 
 def test_tfds_rejected_checkpoint_does_not_publish_metadata(tmp_path, monkeypatch):
     ready = []
-    monkeypatch.setattr(training_utils, '_tfds_restart_fingerprint', lambda *args: 'ab' * 32)
     monkeypatch.setattr(
         training_utils.checkpoint_utils, 'make_training_checkpoint_manager',
         lambda **kwargs: SimpleNamespace(latest_step=lambda: 1),
@@ -171,10 +161,10 @@ def test_tfds_rejected_checkpoint_does_not_publish_metadata(tmp_path, monkeypatc
     monkeypatch.setattr(training_utils, 'make_validation_step_fn', lambda *args: None)
 
     def refuse_restore(*args, **kwargs):
-        raise RuntimeError('TFDS restart fingerprint changed')
+        raise RuntimeError('incomplete training state')
 
     monkeypatch.setattr(training_utils, '_restore_tfds_training_state', refuse_restore)
-    with pytest.raises(RuntimeError, match='restart fingerprint changed'):
+    with pytest.raises(RuntimeError, match='incomplete training state'):
         training_utils.fit_from_iterator(
             model=None, optimizer=None, loss_fn=None, graph_to_batch_fn=None,
             training_iterator=None, validation_iterator=None,

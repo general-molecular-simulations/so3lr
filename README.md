@@ -30,8 +30,8 @@ does not identify an exact source version.
 
 This creates a CPU environment. For CUDA 12 on Linux x86-64, select the locked
 CUDA extra with `uv sync --locked --extra cuda12`. See
-[`REPRODUCIBILITY.md`](./REPRODUCIBILITY.md) for development, TFDS, PySAGES, and
-release environments. SO3LR runs significantly faster on a compatible GPU for
+[`DEVELOPERS.md`](./DEVELOPERS.md) for development environments and the
+lockfile policy. SO3LR runs significantly faster on a compatible GPU for
 large-scale simulations.
 
 ### Optional extras
@@ -105,17 +105,10 @@ Currently bundled:
 ### Verifying bundled model artifacts
 
 Every bundled checkpoint and its adjacent metadata file is covered by
-`so3lr/models/SHA256SUMS`. Verify the installed package without importing JAX:
+`so3lr/models/SHA256SUMS`:
 
 ```shell script
-python -m so3lr.verify_model_artifacts
-```
-
-From a source checkout, the same manifest can also be checked with the standard
-checksum utility available on macOS and many Unix systems:
-
-```shell script
-(cd so3lr/models && shasum -a 256 -c SHA256SUMS)
+cd so3lr/models && sha256sum -c SHA256SUMS   # macOS: shasum -a 256 -c SHA256SUMS
 ```
 
 The checksum proves byte identity with this release; it does not make an
@@ -204,12 +197,11 @@ so3lr nve --input geometry.xyz --temperature 300 --dt 0.5 --md-cycles 100 --md-s
 
 Both NVT and NPT ensembles are supported using the Nosé–Hoover chain thermostat and barostat. The trajectories can be saved in `.hdf5` or `.xyz` format. In addition, checkpoints can be saved as `.npz` files throughout the simulation to restart if needed.
 
-NPT settings support `npt_coupling: isotropic` and
-`npt_coupling: semi-isotropic` (the x/y dimensions scale together while z
-changes independently). Fully flexible `anisotropic` coupling is currently
-rejected: its shear components are not yet represented consistently by every
-neighbor-list, reciprocal-space, and dispersion-tail path, so accepting it
-could silently produce incorrect dynamics.
+NPT uses `npt_coupling: isotropic` by default. `npt_coupling: semi-isotropic`
+(x/y scale together, z independently) is **experimental** and logs a warning;
+validate it before production use. Fully flexible `anisotropic` coupling is
+experimental and rejected with an error, because the neighbor-list,
+reciprocal-space, and dispersion-tail paths assume an orthorhombic cell.
 
 HDF5 trajectories use a frame-major layout: `positions` and `momenta` have
 shape `(n_frames, n_atoms, 3)`, while `box` has shape `(n_frames, 3)` for an
@@ -253,12 +245,9 @@ restart separately; the two files are not a crash-atomic pair. Keep matching
 checkpoint generations when restarting enhanced sampling.
 
 SO3LR's own `.npz` restart format contains only numeric arrays and strings and
-is loaded with NumPy object unpickling disabled. This does **not** make other
-serialization formats safe: legacy/custom model `params.pkl` files and
-PySAGES `.pkl` restart files are pickle-compatible and can execute code while
-being loaded. SO3LR emits a runtime security warning before loading either
-format. Only use them from a trusted source after verifying a published or
-out-of-band checksum; do not load an arbitrary downloaded pickle.
+is loaded with NumPy object unpickling disabled. Model `params.pkl` files and
+PySAGES `.pkl` restart files are pickles and can execute code while being
+loaded; only load them from a trusted source.
 
 #### What restart_save preserves (and what it doesn't)
 
@@ -432,7 +421,7 @@ Basic training command:
 so3lr train --config config.yaml
 ```
 
-### Optional W&B telemetry and configuration privacy
+### Optional W&B logging
 
 Weights & Biases logging is disabled by default for both training and
 fine-tuning. SO3LR does not initialize W&B or send metrics when
@@ -447,14 +436,9 @@ training:
     project: my-project
 ```
 
-Enabling it sends training metrics and a copy of the effective SO3LR
-configuration to Weights & Biases. Before `wandb.init`, SO3LR replaces obvious
-credential-like configuration values and absolute local data/work paths with
-redaction markers. Keep credentials in the W&B login/environment rather than
-the YAML file, and review the remaining configuration before enabling
-telemetry. The W&B client may collect additional runtime, system, repository,
-or environment metadata under its own settings and privacy policy; SO3LR's
-redaction applies to the configuration payload it supplies.
+Enabling it sends training metrics and the full effective SO3LR configuration
+(including paths) to Weights & Biases. Keep credentials in the W&B
+login/environment rather than the YAML file.
 
 ### Training on multiple datasets
 
@@ -485,19 +469,11 @@ parameters are evaluated on identical batches. Each new TFDS checkpoint
 atomically stores deployable `params` and a versioned training-state item. The
 latter contains raw parameters, optimizer/EMA state, logical epoch and batch
 position, counters, early-stop/plateau/two-stage state, and the JAX RNG key.
-Restart rebuilds the seeded epoch and skips the recorded prefix. A SHA-256
-fingerprint rejects changes to TFDS builder identity metadata, shard names and
-sizes, dataset weights/caps, batch budgets, neighbor/filter/unit settings,
-seeds, process count, model/optimizer/objective configuration, relevant runtime
-versions, and trajectory-control settings. Metadata fingerprinting does not
-hash every TFRecord payload and cannot prove that Python model/loss/optimizer
-code is semantically unchanged despite identical configuration;
-keep data directories immutable and use source/environment provenance for that.
-Fine-tuning fingerprints also include the resolved trainable/frozen parameter
-masks. Older TFDS fine-tuning checkpoints without that fingerprint are rejected
-for exact training continuation; inference from their parameters is unchanged.
-Legacy params-only checkpoints remain loadable for inference but are rejected
-for TFDS training restart because their exact trajectory cannot be recovered.
+A restart continues with the next epoch rather than replaying the batches the
+interrupted epoch had already consumed. Dataset and loader settings are not
+checked on restart, so keep data directories immutable while a run is resumable.
+Params-only checkpoints from older versions continue from their weights with a
+fresh optimizer and epoch counter.
 ASE/NPZ restarts remain weights-only continuations: they load the target
 checkpoint's parameters and step, but reinitialize the optimizer, EMA, and
 data-order state. They do not provide TFDS's exact full-state continuation.
@@ -1146,10 +1122,8 @@ so3lr --settings md_settings.yaml
 
 PySAGES state (bias potential, histograms, etc.) can be saved and restored independently of the SO3LR MD state:
 
-> **Security warning:** PySAGES restart files are pickle-compatible and may
-> execute arbitrary code when loaded. Only load a restart you trust and whose
-> checksum you have verified. SO3LR warns at runtime but cannot make this
-> third-party serialization format safe.
+> **Note:** PySAGES restart files are pickles and can execute code when
+> loaded. Only load restarts you trust.
 
 ```yaml
 # First run — save both states

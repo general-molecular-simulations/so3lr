@@ -1,5 +1,0 @@
-# poetry-core 2.2.1 artifacts published by PyPI. Keep both the universal wheel
-# and sdist hashes so uv can verify whichever supported artifact it selects.
-poetry-core==2.2.1 \
-    --hash=sha256:bdfce710edc10bfcf9ab35041605c480829be4ab23f5bc01202cfe5db8f125ab \
-    --hash=sha256:97e50d8593c8729d3f49364b428583e044087ee3def1e010c6496db76bd65ac5

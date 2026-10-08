@@ -17,10 +17,8 @@ from ml_collections import config_dict
 
 from so3lr.mlff.data.dataloader_sparse_tfds import (
     QCMLDataLoaderSparseParallel,
-    _canonical_fingerprint,
     epoch_size_from_dataset_sizes,
     minimum_distance_is_valid_np,
-    minimum_distance_np,
 )
 from so3lr.mlff.data.transformations import unit_conversion
 from so3lr.mlff.config import from_config
@@ -99,159 +97,28 @@ def test_kspace_batch_conversion_validates_later_training_records(monkeypatch):
     assert converted == [periodic]
 
 
-def test_epoch_seed_progression_is_deterministic_and_probe_safe():
+def test_epoch_index_selects_train_seed_and_validation_is_fixed():
     loader = QCMLDataLoaderSparseParallel.__new__(QCMLDataLoaderSparseParallel)
     loader.train_seed = 41
-    loader._epoch_counters = {'train': 0, 'validation': 0}
     loader._generator_sync = lambda split, mode, seed: seed
 
-    assert loader.next_epoch('train', 'train', parallel=False, advance_epoch=False) == 41
     assert loader.next_epoch('train', 'train', parallel=False) == 41
-    assert loader.next_epoch('train', 'train', parallel=False) == 42
-    assert loader.next_epoch('validation', 'validation', parallel=False) == 41
-    assert loader.next_epoch('validation', 'validation', parallel=False) == 41
-
-
-def test_explicit_epoch_index_selects_the_epoch_seed():
-    loader = QCMLDataLoaderSparseParallel.__new__(QCMLDataLoaderSparseParallel)
-    loader.train_seed = 41
-    loader._epoch_counters = {'train': 0, 'validation': 0}
-    loader._generator_sync = lambda split, mode, seed: seed
-
     assert loader.next_epoch('train', 'train', parallel=False, epoch_index=7) == 48
+    assert loader.next_epoch('validation', 'validation', epoch_index=7) == 41
 
 
-def test_loader_restart_fingerprint_changes_with_trajectory_settings():
-    base = {
-        'datasets': [{'full_name': 'sample/1.0.0', 'record_shards': [
-            {'name': 'sample-train.tfrecord-00000-of-00001', 'size_bytes': 80}
-        ]}],
-        'weights': [1.0],
-        'num_train': [10],
-        'batch_budgets': {'nodes': 100, 'edges': 200},
-        'cutoff': 5.0,
-        'units': {'length': 1.0, 'energy': 1.0},
-        'seed': 7,
-        'n_proc': 2,
-        'runtime': {'tensorflow': '2.20.0'},
-    }
-    changed = dict(base)
-    changed['n_proc'] = 4
-
-    assert _canonical_fingerprint(base) == _canonical_fingerprint(dict(base))
-    assert _canonical_fingerprint(base) != _canonical_fingerprint(changed)
-
-
-@pytest.fixture
-def fingerprint_loader():
-    loader = QCMLDataLoaderSparseParallel.__new__(QCMLDataLoaderSparseParallel)
-    loader.input_folders = ['/dataset/version']
-    loader.dataset_weights = [3.0]
-    loader.num_train = [17]
-    loader.num_valid = [5]
-    loader.batch_max_num_nodes = 100
-    loader.batch_max_num_edges = 200
-    loader.batch_max_num_graphs = 8
-    loader.batch_max_num_pairs = 300
-    loader.cutoff = 5.0
-    loader.calculate_neighbors_lr = True
-    loader.cutoff_lr = 20.0
-    loader.max_force_filter = 25.0
-    loader.min_distance_filter = 0.5
-    loader.energy_unit = 2.0
-    loader.length_unit = 0.5
-    loader.dipole_vec_unit = 3.0
-    loader.train_seed = 7
-    loader.n_proc = 2
-    loader.config = {
-        'data': {'shift_mode': 'per_atom'},
-        'model': {'num_layers': 2},
-        'optimizer': {'name': 'adam', 'learning_rate': 1e-3},
-        'training': {
-            'num_epochs': 100,
-            'allow_restart': True,
-            'loss_weights': {'energy': 0.1, 'forces': 0.9},
-        },
-        'neighborlist_format_lr': 'sparse',
-    }
-    loader._dataset_identity_metadata = lambda: [{
-        'path': '/dataset/version',
-        'full_name': 'sample/1.0.0',
-        'metadata_sha256': {'dataset_info.json': 'aa' * 32},
-        'record_shards': [{'name': 'train.tfrecord-00000', 'size_bytes': 80}],
-    }]
-    loader._dataset_sizes = lambda mode: [17 if mode == 'train' else 5]
-    return loader
-
-
-def test_loader_restart_fingerprint_payload_covers_data_and_graph_config(
-        fingerprint_loader):
-    loader = fingerprint_loader
-
-    payload = loader.restart_fingerprint_payload()
-    assert payload['selected_train_sizes'] == [17]
-    assert payload['selected_validation_sizes'] == [5]
-    assert payload['dataset_weights'] == [3.0]
-    assert payload['batch_budgets'] == {
-        'nodes': 100, 'edges': 200, 'graphs': 8, 'pairs': 300,
-    }
-    assert payload['neighbors'] == {
-        'cutoff': 5.0, 'calculate_lr': True, 'cutoff_lr': 20.0,
-    }
-    assert payload['filters'] == {
-        'max_force': 25.0, 'min_distance': 0.5,
-    }
-    assert payload['unit_factors'] == {
-        'energy': 2.0, 'length': 0.5, 'dipole_vec': 3.0,
-    }
-    assert payload['trajectory_config']['optimizer']['learning_rate'] == 1e-3
-    assert payload['trajectory_config']['training']['loss_weights'] == {
-        'energy': 0.1, 'forces': 0.9,
-    }
-    assert 'num_epochs' not in payload['trajectory_config']['training']
-    first = loader.restart_fingerprint()
-    loader.n_proc = 4
-    assert loader.restart_fingerprint() != first
-
-
-def test_finetuning_selection_fingerprint_preserves_aliases_and_plain_training(
-        fingerprint_loader):
-    loader = fingerprint_loader
-    plain = loader.restart_fingerprint()
-    assert 'finetuning_parameter_selection' not in loader.restart_fingerprint_payload()
-    fingerprints = []
-    for strategy in ('final_mlp', 'freeze_all_but_final_mlp'):
-        trainable, frozen = from_config.resolve_finetuning_strategy(strategy, 2)
-        loader.finetuning_parameter_selection = {
-            'trainable': trainable, 'frozen': frozen,
-        }
-        fingerprints.append(loader.restart_fingerprint())
-    assert fingerprints[0] == fingerprints[1] != plain
-    loader.finetuning_parameter_selection['trainable'] = list(reversed(trainable)) + trainable
-    assert loader.restart_fingerprint() == fingerprints[0]
-    loader.finetuning_parameter_selection['trainable'].append('adaptive_robust_loss')
-    assert loader.restart_fingerprint() != fingerprints[0]
-    loader.finetuning_parameter_selection = None
-    assert loader.restart_fingerprint() == plain
-
-
+@pytest.mark.parametrize('legacy_fingerprint', [False, True])
 @pytest.mark.parametrize('masked_sgd', [False, True])
-def test_atomic_training_state_round_trip_and_fingerprint_validation(
-        tmp_path, fingerprint_loader, masked_sgd, caplog):
+def test_atomic_training_state_round_trip(tmp_path, masked_sgd, legacy_fingerprint):
     params = {'w': jnp.array([1.0, -2.0])}
     optimizer = optax.adam(1e-3)
     if masked_sgd:
         optimizer = training_utils.freeze_parameters(
             optax.sgd(1e-3), trainable_subset_keys=['w']
         )
-        fingerprint_loader.finetuning_parameter_selection = {
-            'trainable': ['w'], 'frozen': None,
-        }
     optimizer_state = optimizer.init(params)
-    fingerprint = fingerprint_loader.restart_fingerprint()
     state = _make_tfds_training_state(
         step=120,
-        restart_fingerprint=fingerprint,
         raw_params=params,
         optimizer_state=optimizer_state,
         ema_params={'w': jnp.array([0.9, -1.8])},
@@ -273,6 +140,9 @@ def test_atomic_training_state_round_trip_and_fingerprint_validation(
         header_printed=True,
         use_ema=True,
     )
+    if legacy_fingerprint:
+        # Checkpoints written by earlier versions carry a 32-byte digest leaf.
+        state['restart_fingerprint'] = np.arange(32, dtype=np.uint8)
     manager = checkpoint_utils.make_training_checkpoint_manager(tmp_path)
     assert manager.save(
         120,
@@ -284,11 +154,9 @@ def test_atomic_training_state_round_trip_and_fingerprint_validation(
     manager.wait_until_finished()
 
     restored = _restore_tfds_training_state(
-        manager,
-        step=120,
-        optimizer=optimizer,
-        restart_fingerprint=fingerprint,
+        manager, step=120, optimizer=optimizer
     )
+    assert restored['checkpoint_step'] == 120
     npt.assert_allclose(restored['raw_params']['w'], params['w'])
     npt.assert_allclose(restored['ema_params']['w'], [0.9, -1.8])
     assert type(restored['optimizer_state']) is type(optimizer_state)
@@ -313,29 +181,6 @@ def test_atomic_training_state_round_trip_and_fingerprint_validation(
     deployed = checkpoint_utils.load_params_from_checkpoint(tmp_path)
     npt.assert_allclose(deployed['w'], [0.9, -1.8])
 
-    manager = checkpoint_utils.make_training_checkpoint_manager(tmp_path)
-    changed_fingerprint = 'cd' * 32
-    if masked_sgd:
-        # Neither stateless SGD nor zero_grads stores the mask in its state.
-        # A different selection must fail even when the restore tree matches.
-        optimizer = training_utils.freeze_parameters(
-            optax.sgd(1e-3), trainable_subset_keys=[]
-        )
-        assert (jax.tree_util.tree_structure(optimizer.init(params))
-                == jax.tree_util.tree_structure(optimizer_state))
-        fingerprint_loader.finetuning_parameter_selection['trainable'] = []
-        changed_fingerprint = fingerprint_loader.restart_fingerprint()
-    with caplog.at_level('WARNING', logger='SO3LR'):
-        restored = _restore_tfds_training_state(
-            manager,
-            step=120,
-            optimizer=optimizer,
-            restart_fingerprint=changed_fingerprint,
-        )
-    assert 'restart fingerprint changed' in caplog.text
-    assert restored['checkpoint_step'] == 120
-    manager.close()
-
 
 def test_params_only_checkpoint_has_no_training_state(tmp_path):
     manager = checkpoint_utils.make_checkpoint_manager(tmp_path)
@@ -353,10 +198,7 @@ def test_params_only_checkpoint_has_no_training_state(tmp_path):
 
     training_manager = checkpoint_utils.make_training_checkpoint_manager(tmp_path)
     assert _restore_tfds_training_state(
-        training_manager,
-        step=4,
-        optimizer=optax.sgd(1e-2),
-        restart_fingerprint='ab' * 32,
+        training_manager, step=4, optimizer=optax.sgd(1e-2)
     ) is None
     training_manager.close()
 
@@ -387,15 +229,9 @@ def test_fit_from_iterator_restart_matches_uninterrupted_updates(
     """A stop at an epoch checkpoint must not alter the next optimizer step."""
 
     class FiniteIterator:
-        n_proc = 1
-
-        def __init__(self, values, fingerprint='11' * 32):
+        def __init__(self, values):
             self.values = list(values)
-            self.fingerprint = fingerprint
             self.calls = []
-
-        def restart_fingerprint(self):
-            return self.fingerprint
 
         def next_epoch(self, split, mode, epoch_index=None, **kwargs):
             self.calls.append((mode, epoch_index))
@@ -609,17 +445,6 @@ def test_parallel_generator_surfaces_worker_process_failure():
     with pytest.raises(RuntimeError, match='worker process disappeared'):
         list(loader._generator('train', 'train', epoch_seed=3))
     assert event.cancelled
-
-
-def test_minimum_distance_respects_exact_pbc_axes():
-    positions = np.array([[0.1, 0.0, 0.0], [9.9, 0.0, 0.0]])
-    cell = np.diag([10.0, 10.0, 10.0])
-
-    assert minimum_distance_np(positions, cell, [False, False, False]) == pytest.approx(9.8)
-    assert minimum_distance_np(positions, cell, [True, False, False]) == pytest.approx(0.2)
-    assert minimum_distance_np(positions, cell, [False, True, True]) == pytest.approx(9.8)
-    assert minimum_distance_np(positions[:1], cell, [True, True, True]) == np.inf
-    assert np.isnan(minimum_distance_np([[np.nan, 0.0, 0.0], [1.0, 0.0, 0.0]], cell, [False] * 3))
 
 
 def test_minimum_distance_filter_uses_neighbor_search(monkeypatch):

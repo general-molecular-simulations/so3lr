@@ -1,96 +1,39 @@
-"""Safe parsing for unit expressions used in training configuration files."""
-
-from __future__ import annotations
+"""Evaluate ASE unit expressions from config files (e.g. 'kcal / mol') without eval()."""
 
 import ast
 import math
 import numbers
 import operator
 
-from ase import units as ase_units
+from ase import units
+
+_OPS = {ast.Mult: operator.mul, ast.Div: operator.truediv, ast.Pow: operator.pow,
+        ast.USub: operator.neg, ast.UAdd: operator.pos}
+_NAMES = {k: float(v) for k, v in vars(units).items()
+          if not k.startswith('_') and isinstance(v, numbers.Real) and not isinstance(v, bool)}
+_NAMES['e'] = 1.0  # elementary charge, the charge unit SO3LR uses (not in ase.units)
 
 
-_BINARY_OPERATORS = {
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.Pow: operator.pow,
-}
-_UNARY_OPERATORS = {
-    ast.UAdd: operator.pos,
-    ast.USub: operator.neg,
-}
-
-# ASE exposes a few non-unit helpers alongside its numerical constants. Only
-# immutable real-valued constants are made visible to the expression evaluator.
-_UNIT_NAMES = {
-    name: float(value)
-    for name in dir(ase_units)
-    if not name.startswith("_")
-    and isinstance((value := getattr(ase_units, name)), numbers.Real)
-    and not isinstance(value, bool)
-}
-_UNIT_NAMES["e"] = 1.0  # charge labels are expressed in elementary-charge units
+def _eval(node):
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return float(node.value)  # float, so huge powers overflow instead of hanging
+    if isinstance(node, ast.Name) and node.id in _NAMES:
+        return _NAMES[node.id]
+    if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
+        return _OPS[type(node.op)](_eval(node.left), _eval(node.right))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
+        return _OPS[type(node.op)](_eval(node.operand))
+    raise ValueError(f'unsupported syntax: {ast.unparse(node)!r}')
 
 
-def _evaluate(node: ast.AST) -> float:
-    if isinstance(node, ast.Expression):
-        return _evaluate(node.body)
-
-    if isinstance(node, ast.Constant):
-        if isinstance(node.value, bool) or not isinstance(node.value, numbers.Real):
-            raise ValueError("only real numeric constants are allowed")
-        return float(node.value)
-
-    if isinstance(node, ast.Name):
-        try:
-            return _UNIT_NAMES[node.id]
-        except KeyError as exc:
-            raise ValueError(f"unknown unit name {node.id!r}") from exc
-
-    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPERATORS:
-        return _UNARY_OPERATORS[type(node.op)](_evaluate(node.operand))
-
-    if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPERATORS:
-        left = _evaluate(node.left)
-        right = _evaluate(node.right)
-        if isinstance(node.op, ast.Pow) and (not float(right).is_integer() or abs(right) > 12):
-            raise ValueError("unit exponents must be integers between -12 and 12")
-        return _BINARY_OPERATORS[type(node.op)](left, right)
-
-    raise ValueError(
-        "only unit names, real numbers, parentheses, multiplication, division, "
-        "and small integer powers are allowed"
-    )
-
-
-def parse_unit_expression(value, *, field_name: str) -> float:
-    """Return a finite, positive conversion factor without executing code.
-
-    Expressions may contain numerical constants and real-valued names exported
-    by :mod:`ase.units`, plus ``e`` for the elementary-charge convention used by
-    SO3LR. Function calls, attribute access, indexing, and other Python syntax
-    are deliberately rejected.
-    """
-    if isinstance(value, bool) or not isinstance(value, (str, numbers.Real)):
-        raise ValueError(f"{field_name} must be a unit expression or real number")
-
-    expression = str(value).strip()
-    if not expression or len(expression) > 256:
-        raise ValueError(f"{field_name} must be a non-empty unit expression of at most 256 characters")
-
+def parse_unit_expression(value, field_name: str) -> float:
+    """Return the conversion factor for ``value``, e.g. 'e * Angstrom' or 'kcal / mol'."""
     try:
-        parsed = ast.parse(expression, mode="eval")
-    except (SyntaxError, ValueError) as exc:
-        raise ValueError(f"Could not parse unit string {expression!r} for {field_name}") from exc
-
-    if sum(1 for _ in ast.walk(parsed)) > 64:
-        raise ValueError(f"Unit expression for {field_name} is too complex")
-
-    try:
-        result = float(_evaluate(parsed))
-    except (ArithmeticError, OverflowError, TypeError, ValueError) as exc:
-        raise ValueError(f"Could not parse unit string {expression!r} for {field_name}: {exc}") from exc
-
-    if not math.isfinite(result) or result <= 0:
-        raise ValueError(f"Unit expression for {field_name} must evaluate to a finite positive number")
+        result = _eval(ast.parse(str(value).strip(), mode='eval').body)
+        if not (math.isfinite(result) and result > 0):
+            raise ValueError(f'must be finite and positive, got {result}')
+    except (SyntaxError, TypeError, ValueError, ArithmeticError) as exc:
+        raise ValueError(
+            f"Could not parse unit string {value!r} for {field_name} ({exc}). Use ASE unit "
+            f"names, numbers, *, / and **, e.g. 'eV', 'kcal / mol', 'e * Angstrom'.") from exc
     return result

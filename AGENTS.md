@@ -19,7 +19,7 @@ uv run python -c "import so3lr, jax"
 ```
 
 Use `--extra cuda12`, `--extra tfds`, `--extra pysages`, or `--extra wandb` when
-the task needs those optional stacks. `REPRODUCIBILITY.md` documents the
+the task needs those optional stacks. `DEVELOPERS.md` documents the
 supported commands.
 `uv sync --locked` pulls Git dependencies at immutable commits, so first-time
 setup still needs network access and is not fast. A plain pip install remains

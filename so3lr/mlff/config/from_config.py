@@ -82,10 +82,9 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
     # Get a cell from the first periodic structure in training data.
     if tf_record_present:
         # For TFDS, peek synchronously so a one-batch metadata read does not
-        # start the multiprocessing pipeline.  Do not advance the epoch seed:
-        # this batch is inspected, not used for an optimizer update.
+        # start the multiprocessing pipeline.
         first_iter = training_data.next_epoch(
-            split='train', mode='train', parallel=False, advance_epoch=False
+            split='train', mode='train', parallel=False
         )
         # Also release the probe when invalid boundary flags raise an error.
         with closing(first_iter):
@@ -431,8 +430,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
         _publish_training_metadata, workdir, pending_metadata
     )
 
-    # W&B is a strict opt-in. The helper returns before importing W&B when the
-    # setting is absent/false and redacts the effective config when enabled.
+    # Initialize wandb only if training.use_wandb is explicitly true.
     use_wandb = initialize_wandb(config)
 
     # Adaptive robust loss settings
@@ -957,13 +955,7 @@ def run_fine_tuning(
     data_filepath = data_path_from_config(config=config)
 
     # Create a loader and check if tf records are present.
-    loader, tf_record_present = data_loader_from_config(
-        config=config,
-        finetuning_parameter_selection={
-            'trainable': trainable_subset_keys,
-            'frozen': frozen_subset_keys,
-        },
-    )
+    loader, tf_record_present = data_loader_from_config(config=config)
 
     # Prepare training and validation data and load the data set statistics.
     training_data, validation_data, data_stats = prepare_training_and_validation_data(
@@ -1074,7 +1066,7 @@ def run_fine_tuning(
         _publish_training_metadata, workdir, pending_metadata
     )
 
-    # Fine-tuning follows the same opt-in and redaction path as training.
+    # Initialize wandb only if training.use_wandb is explicitly true.
     use_wandb = initialize_wandb(config)
 
     logger.info(
@@ -1154,13 +1146,11 @@ def run_fine_tuning(
     logger.info('Training has finished!')
 
 
-def data_loader_from_config(config, finetuning_parameter_selection=None):
+def data_loader_from_config(config):
     """Create a data loader from config.
     
     Args:
         config: Configuration object
-        finetuning_parameter_selection: Optional resolved trainable/frozen
-            keys included in TFDS restart validation.
         
     Returns:
         DataLoader instance and tf_record_present flag
@@ -1201,7 +1191,6 @@ def data_loader_from_config(config, finetuning_parameter_selection=None):
             length_unit=length_unit,
             energy_unit=energy_unit,
             dipole_vec_unit=dipole_vec_unit,
-            finetuning_parameter_selection=finetuning_parameter_selection,
         )
     else:
         # config.data.filter.min_distance / max_force are honoured only by the TFDS loader.
@@ -1450,56 +1439,20 @@ def data_path_from_config(config):
 
 
 def dipole_vec_unit_from_config(config):
-    dipole_vec_unit = config.data.dipole_vec_unit
-    try:
-        return parse_unit_expression(
-            dipole_vec_unit, field_name="data.dipole_vec_unit")
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {dipole_vec_unit!r} for data.dipole_vec_unit. "
-            f"Use ASE.units expressions like 'e * Angstrom' or 'Debye' "
-            f"(note the spaces around operators)."
-        ) from exc
+    return parse_unit_expression(config.data.dipole_vec_unit, 'data.dipole_vec_unit')
 
 
 def charge_unit_from_config(config):
-    electric_charge_unit = config.data.electric_charge_unit
-    try:
-        return parse_unit_expression(
-            electric_charge_unit, field_name="data.electric_charge_unit")
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {electric_charge_unit!r} for data.electric_charge_unit. "
-            f"Use ASE.units expressions like 'e' or '1.0' "
-            f"(note the spaces around operators)."
-        ) from exc
+    return parse_unit_expression(config.data.electric_charge_unit, 'data.electric_charge_unit')
+
 
 def energy_unit_from_config(config):
-    energy_unit_str = config.data.energy_unit
-    try:
-        energy_unit = parse_unit_expression(
-            energy_unit_str, field_name="data.energy_unit")
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {energy_unit_str!r} for data.energy_unit. "
-            f"Use ASE.units expressions like 'kcal / mol' or 'eV' "
-            f"(note the spaces around operators)."
-        ) from exc
-    return energy_unit
+    return parse_unit_expression(config.data.energy_unit, 'data.energy_unit')
 
 
 def length_unit_from_config(config):
-    length_unit_str = config.data.length_unit
-    try:
-        length_unit = parse_unit_expression(
-            length_unit_str, field_name="data.length_unit")
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {length_unit_str!r} for data.length_unit. "
-            f"Use ASE.units expressions like 'Angstrom' or 'Bohr' "
-            f"(note the spaces around operators)."
-        ) from exc
-    return length_unit
+    return parse_unit_expression(config.data.length_unit, 'data.length_unit')
+
 
 def check_config(config):
     neighbors_lr_cutoff = config.data.neighbors_lr_cutoff

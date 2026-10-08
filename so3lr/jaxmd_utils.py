@@ -59,11 +59,8 @@ def neighbor_list_featurizer(
             else:
                 raise ValueError(f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
 
-        # Real-space molecular observables (most visibly dipole_vec) need
-        # Cartesian positions even when no reciprocal-space solver is active.
-        # Leaving this as None made DipoleVecSparse fall back to summing charge
-        # scalars and emit shape (num_graphs, 1), which the old HDF5 writer then
-        # silently broadcast into three identical components.
+        # Cartesian positions are needed by real-space observables (dipole_vec)
+        # too, not only by the k-space solvers.
         if fractional_coordinates and box is not None:
             positions = transform(box, R)
         else:

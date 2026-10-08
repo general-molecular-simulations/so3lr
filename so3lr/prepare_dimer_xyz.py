@@ -18,62 +18,27 @@ from ase.io import read, write
 from ase import Atoms
 import logging
 from tqdm import tqdm
-import yaml
 
 from so3lr.model_registry import DEFAULT_MODEL, resolve_model
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
-    supported_atomic_numbers as _supported_atomic_numbers,
+    supported_atomic_numbers_for_config,
 )
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-# Default v2 models were trained on Z=1..85. Keep this compatibility constant
-# for callers that imported it, but source it from the same implementation used
-# by inference rather than maintaining a second, stale element list.
-SUPPORTED_ATOMIC_NUMBERS = _supported_atomic_numbers(legacy=False)
-
 
 def supported_elements_for_model(model=None):
-    """Return the element coverage for a bundled or custom model directory."""
-    spec = resolve_model(model)
-    legacy = spec.family == "vanilla"
-    dispersion = True
-
-    config = None
-    for filename in ("hyperparameters.json", "hyperparameters.yaml"):
-        config_path = spec.dir / filename
-        if not config_path.is_file():
-            continue
-        with config_path.open() as stream:
-            config = (
-                json.load(stream)
-                if config_path.suffix == ".json"
-                else yaml.safe_load(stream)
-            )
-        break
-
-    if isinstance(config, dict) and isinstance(config.get("model"), dict):
-        model_config = config["model"]
-        legacy = bool(model_config.get("legacy_so3lr_bool", legacy))
-        dispersion = bool(model_config.get("dispersion_energy_bool", True))
-    elif spec.family == "custom":
-        raise ValueError(
-            f"Cannot determine element coverage for custom model {spec.dir}: "
-            "missing a readable hyperparameters.json or hyperparameters.yaml "
-            "with a model section."
-        )
-
-    return _supported_atomic_numbers(legacy=legacy, dispersion=dispersion)
+    """Return the element coverage of a bundled model name or custom model directory."""
+    with open(resolve_model(model).dir / "hyperparameters.json") as fp:
+        return supported_atomic_numbers_for_config(json.load(fp)["model"])
 
 
-def check_supported_elements(atoms, supported=None):
+def check_supported_elements(atoms, supported):
     """
     Check if all atoms in the structure have supported atomic numbers.
     Returns (is_supported, unsupported_elements).
     """
-    if supported is None:
-        supported = SUPPORTED_ATOMIC_NUMBERS
     atomic_numbers = set(atoms.get_atomic_numbers())
     unsupported = atomic_numbers - set(supported)
     return len(unsupported) == 0, unsupported

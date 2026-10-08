@@ -6,7 +6,6 @@ import jax.numpy as jnp
 import numpy as np
 import numpy.testing as npt
 
-from so3lr.cli.so3lr_eval import calculate_metrics, _model_inputs_for_evaluation
 from so3lr.mlff.nn.observable.observable_sparse import DispersionEnergySparse
 
 
@@ -74,23 +73,3 @@ def test_energy_and_forces_ignore_present_or_permuted_c6_targets():
         forces_with_permuted_labels, forces_without_labels, rtol=0, atol=0
     )
 
-
-def test_c6_targets_remain_available_for_evaluation_metrics():
-    """Isolation from the forward pass must not discard C6 scoring labels."""
-    labels = np.array([0.2, 3.0])
-    inputs = {
-        'c6_ratios': labels,
-        'node_mask': np.array([True, True]),
-        'graph_mask': np.array([True]),
-    }
-    outputs = {'c6_ratios': np.asarray(_PREDICTED_C6_RATIOS)}
-
-    model_inputs = _model_inputs_for_evaluation(inputs)
-    metrics = calculate_metrics(outputs, inputs, ['c6_ratios'])
-
-    assert 'c6_ratios' not in model_inputs
-    npt.assert_array_equal(inputs['c6_ratios'], labels)
-    expected_diff = outputs['c6_ratios'] - labels
-    assert metrics['c6_ratios_count'] == 2
-    npt.assert_allclose(metrics['c6_ratios_abs_sum'], np.abs(expected_diff).sum())
-    npt.assert_allclose(metrics['c6_ratios_sq_sum'], np.square(expected_diff).sum())

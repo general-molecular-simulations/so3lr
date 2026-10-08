@@ -8,13 +8,13 @@ identified by immutable dated names such as `so3lr-m-2606`.
 
 ### Added
 
-- Reproducible release environments managed by `uv`, with an audited lockfile,
-  immutable Git dependency revisions, Python 3.12/3.13 coverage, and archive
-  content verification (PR #55).
+- Locked environments managed by `uv`, with immutable Git dependency
+  revisions and Python 3.12/3.13 coverage, including a CI smoke test of the
+  built wheel (PR #55).
 - Machine-readable software and published SO3LR v1 citation metadata in
   `CITATION.cff`. No SO3LR-2 or software DOI is claimed before one is issued.
-- SHA-256 coverage for every bundled model artifact, with an installed-package
-  verifier available as `python -m so3lr.verify_model_artifacts`.
+- SHA-256 checksums for every bundled model artifact in
+  `so3lr/models/SHA256SUMS`, checkable with `sha256sum -c`.
 - The complete Apache License 2.0 and BSD 3-Clause texts and third-party
   notices for the vendored Google Research robust-loss implementation,
   JAX MD-derived masking code, and torch-pme-derived Ewald tuner.
@@ -25,9 +25,11 @@ identified by immutable dated names such as `so3lr-m-2606`.
   `wandb` extra rather than the base runtime environment (PRs #44 and #45).
 - TFDS-backed training now uses finite, unit-consistent epochs and checkpoints
   the full optimizer/EMA/control state (PR #41). A restart continues with the
-  next epoch instead of replaying consumed batches; changed data or loop
-  settings produce a warning, and params-only checkpoints from older versions
-  continue from their weights with a fresh optimizer.
+  next epoch instead of replaying consumed batches, and params-only
+  checkpoints from older versions continue from their weights with a fresh
+  optimizer.
+- Semi-isotropic NPT is marked experimental (a warning is logged once per
+  run); fully anisotropic coupling remains unsupported.
 - Documentation and Colab examples now use the immutable
   `so3lr-{s,m,l}-2606` names for reproducible results and describe the actual
   pinned no-argument default, `so3lr-m-2606`.
@@ -74,9 +76,8 @@ identified by immutable dated names such as `so3lr-m-2606`.
   fine-tuning resumes weights and step from its existing target checkpoint
   instead of silently using the parent model; optimizer and data-order state
   still restart fresh on this path.
-- Verify the complete installed package payload against its source when
-  checking release archives, reject empty model manifests, and run CI for
-  stacked pull requests as well as requests targeting the main branch.
+- Run CI for stacked pull requests as well as requests targeting the main
+  branch.
 - Evaluation keeps reference C6 labels separate from physical model
   predictions, preventing a label/prediction mix-up in C6 metrics (PR #37).
 - Configuration unit expressions are parsed by a constrained unit parser
@@ -98,8 +99,7 @@ identified by immutable dated names such as `so3lr-m-2606`.
   carries a bounding cell (a pre-existing error for cells tighter than the
   long-range cutoff). NPZ graphs record their periodic axes, so the
   mixed-periodicity check also covers NPZ data.
-- Loading user-supplied pickle artifacts emits an explicit security warning;
-  artifacts inside the installed package do not (PR #44).
+- SO3LR `.npz` MD restart files are loaded with `allow_pickle=False` (PR #44).
 - Dimer calculations validate the selected model's supported elements before
   evaluation (PR #47).
 - Replaced obsolete notebook imports from the removed top-level `mlff` package

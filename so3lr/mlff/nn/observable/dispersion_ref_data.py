@@ -17276,6 +17276,14 @@ def supported_atomic_numbers(legacy: bool = False, dispersion: bool = True):
     return frozenset(range(1, min(MAX_Z_TRAINED, table_limit) + 1))
 
 
+def supported_atomic_numbers_for_config(model_cfg):
+    """Element coverage for a model's ``hyperparameters['model']`` section."""
+    return supported_atomic_numbers(
+        legacy=model_cfg.get('legacy_so3lr_bool', False) is True,
+        dispersion=model_cfg.get('dispersion_energy_bool', True) is True,
+    )
+
+
 def check_atomic_numbers_supported(atomic_numbers, supported, *, context=None):
     """Raise ``ValueError`` if any atomic number is outside ``supported``.
 

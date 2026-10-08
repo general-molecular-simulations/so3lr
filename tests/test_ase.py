@@ -102,10 +102,12 @@ def test_water():
     energy = atoms.get_potential_energy()
     forces = atoms.get_forces()
 
+    # The reference is float64; without x64 the run is float32 (~1e-6 relative),
+    # so the tolerance must not depend on whether an earlier test enabled x64.
     npt.assert_allclose(
         target_predictions['energy'],
         energy,
-        rtol=1e-6,
+        rtol=5e-6,
     )
 
     npt.assert_allclose(

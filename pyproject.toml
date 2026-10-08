@@ -85,9 +85,6 @@ dev = [
     "pytest>=8.4,<10",
     "pytest-xdist>=3.8,<4",
 ]
-release = [
-    "twine>=6.2,<7",
-]
 notebooks = [
     "ipykernel>=7.3,<8",
     "nbclient>=0.11,<0.12",
@@ -103,10 +100,7 @@ include = [
     { path = "CITATION.cff", format = "sdist" },
     { path = "CHANGELOG.md", format = "sdist" },
     { path = "DEVELOPERS.md", format = "sdist" },
-    { path = "REPRODUCIBILITY.md", format = "sdist" },
-    { path = "build-constraints.txt", format = "sdist" },
     { path = "logo.png", format = "sdist" },
-    { path = "tools/check_package_contents.py", format = "sdist" },
     # Keep non-Python runtime inputs explicit even though Poetry currently
     # discovers files located inside the package automatically.
     { path = "so3lr/cli/*.yaml", format = ["sdist", "wheel"] },

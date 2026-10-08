@@ -29,7 +29,7 @@ from ..jraph_utils import jraph_to_ase_atoms
 from ..base_calculator import make_so3lr
 from ..mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported,
-    supported_atomic_numbers,
+    supported_atomic_numbers_for_config,
 )
 from .so3lr_md import load_model, setup_logger
 from ..pbc import is_fully_periodic
@@ -62,16 +62,6 @@ NORMALIZE_TARGET = {
     # so a missing-from-prediction key is still handled gracefully; we do
     # not collapse them here.
 }
-
-
-def _model_inputs_for_evaluation(inputs: Dict[str, Any]) -> Dict[str, Any]:
-    """Return model inputs with target-only C6 values removed.
-
-    The batched dictionary also supplies ground-truth values to the metric
-    code.  ``c6_ratios`` must stay in that dictionary for scoring, but it is
-    not an inference feature and must never reach the physical forward pass.
-    """
-    return {key: value for key, value in inputs.items() if key != 'c6_ratios'}
 
 
 def process_predictions(
@@ -478,10 +468,7 @@ def evaluate_so3lr_on(
     # 'a0_ratios' for the new so3lr-s/m/l models. Normalize the requested target
     # to the model's output key so metric names (e.g. a0_ratios_rmse) match.
     legacy_model = bool(cfg['model'].get('legacy_so3lr_bool', False))
-    supported_z = supported_atomic_numbers(
-        legacy=legacy_model,
-        dispersion=bool(cfg['model'].get('dispersion_energy_bool', True)),
-    )
+    supported_z = supported_atomic_numbers_for_config(cfg['model'])
     ratio_key = 'hirshfeld_ratios' if legacy_model else 'a0_ratios'
     _other_ratio = 'a0_ratios' if ratio_key == 'hirshfeld_ratios' else 'hirshfeld_ratios'
     if _other_ratio in target_list:
@@ -631,11 +618,9 @@ def evaluate_so3lr_on(
 
         try:
             dummy_batch = next(dummy_batched_graphs)
-            dummy_inputs = jraph_utils.graph_to_batch_fn(
-                *dummy_batch, kspace_constants=groups[0][1]
-            )
             _compile_out = jax.block_until_ready(
-                so3lr_calc(_model_inputs_for_evaluation(dummy_inputs))
+                so3lr_calc(jraph_utils.graph_to_batch_fn(
+                    *dummy_batch, kspace_constants=groups[0][1]))
             )
             compile_end = time.time()
             compile_time = compile_end - compile_start
@@ -671,9 +656,7 @@ def evaluate_so3lr_on(
 
             # Run the model
             start = time.time()
-            output_prediction = jax.block_until_ready(
-                so3lr_calc(_model_inputs_for_evaluation(inputs))
-            )
+            output_prediction = jax.block_until_ready(so3lr_calc(inputs))
             end = time.time()
             total_time += end - start
 
