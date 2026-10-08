@@ -4375,6 +4375,25 @@ def run(
     else:
         restart = False
 
+    # The engine: SO3LR-Flash wherever it computes what the settings ask for, else the
+    # neighbour-list potential below (--engine flash / standard forces one). Flash relaxes
+    # with its own force (perform_min would build the full model).
+    engine = settings.get('engine') or 'auto'
+    if engine != 'standard' and input_file_path is not None:
+        try:
+            from so3lr.flash.md import perform_md_flash, flash_problem
+        except Exception as exc:        # e.g. a JAX build without Pallas-Triton
+            problem = f"it does not import here ({type(exc).__name__}: {exc})"
+        else:
+            problem = flash_problem(settings, initial_geometry)
+        if problem is None:
+            logger.info(f"Engine: flash ({'--engine flash' if engine == 'flash' else 'auto'})")
+            perform_md_flash(settings, restart, atoms=initial_geometry)
+            return
+        if engine == 'flash':
+            raise ValueError(f"--engine flash: {problem}")
+        logger.info(f"Engine: neighbour-list potential (flash cannot: {problem})")
+
     # Relax the geometry
     if relax_before_run:
         if restart:

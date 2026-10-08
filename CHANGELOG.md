@@ -8,6 +8,12 @@ identified by immutable dated names such as `so3lr-m-2606`.
 
 ### Added
 
+- The flash MD engine (`so3lr/flash`): Pallas GPU kernels that evaluate so3lr-s/m
+  with no per-edge arrays, the same energy and forces as the neighbour-list potential
+  in a few KiB per atom. `so3lr nve|nvt|nvt-langevin|npt` use it by default
+  (`--engine auto`) wherever it applies, with real-space long range or PME and
+  isotropic NPT, and say in the log which engine runs and why; `--engine standard`
+  keeps the neighbour-list potential. `python -m so3lr.flash.verify` compares the two.
 - Locked environments managed by `uv`, with immutable Git dependency
   revisions and Python 3.12/3.13 coverage, including a CI smoke test of the
   built wheel (PR #55).

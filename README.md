@@ -273,6 +273,47 @@ The deterministic NVT/NPT Nose-Hoover and NVE integrators, and the saved
 Langevin integrator state including its active RNG key, are reproducible across
 a restart up to numerical and backend differences.
 
+### MD engines: flash and the neighbour-list potential
+
+`so3lr nve`, `nvt`, `nvt-langevin` and `npt` (and `so3lr --settings`) run one of two
+engines that compute the same energy and forces:
+
+- **flash**: GPU kernels (JAX Pallas) that find neighbours on a cell grid, run the
+  attention and compute forces in one pass, storing nothing per edge, so memory grows
+  by a few KiB per atom. On one NVIDIA H200, NVT water with PME runs 2.5x faster than
+  the neighbour-list engine (17.7 against 44.7 ms per step on 12,288 atoms) and up to
+  33.7 million atoms (the neighbour-list engine stops at about 110,000).
+- **standard**: the jax-md neighbour-list potential.
+
+`--engine auto` (the default) runs flash whenever it computes what the other settings
+ask for, and the neighbour-list potential otherwise. The log names the engine and why,
+e.g. `Engine: flash (auto)` or `Engine: neighbour-list potential (flash cannot: its NPT
+is isotropic, not semi-isotropic)`. `--engine flash` or `--engine standard` (or
+`engine:` in a settings file) forces one.
+
+Flash runs on an NVIDIA GPU, for so3lr-s and so3lr-m, in a periodic orthorhombic box at
+least twice `lr_cutoff` and seven 4.5 A cells across (about 31.5 A at `lr_cutoff` 10),
+for nve, nvt, nvt-langevin and isotropic npt, with the long range in real space or by
+PME (`--kspace-electrostatics pme`, `kspace_dispersion: pme`). Semi-isotropic NPT, the
+dispersion tail correction, Ewald and P3M, fixed atoms, observables, enhanced sampling,
+so3lr-l and the legacy so3lr run on the neighbour-list potential.
+
+- `--flash-mode` sets what flash keeps between the forward and backward pass: `fast`,
+  `default`, `lean`, `leanest`, `minimal` (less memory, more recomputation). `auto`
+  picks the fastest that fits.
+- `--flash-mixed` (on by default) keeps positions and momenta in float64 around the
+  float32 model.
+- Unless set, `XLA_PYTHON_CLIENT_MEM_FRACTION` is raised to 0.97 so flash can use
+  nearly all of the GPU.
+
+To compare flash with the neighbour-list potential on a structure (energy, forces and
+the NPT strain derivative; on a GPU):
+
+```shell script
+python -m so3lr.flash.verify --input water.xyz --precision float64 --lr-cutoff 10 \
+    --pme electrostatics,dispersion
+```
+
 ### Freezing atoms during MD
 
 A subset of atoms can be held fixed during any MD run (`nve` / `nvt` / `npt`). Frozen atoms keep their reference positions while their momenta and forces are zeroed every step, so the rest of the system evolves around them (useful e.g. for holding a surface, a binding pocket, or a substrate rigid). Constraints are configured through the MD **settings YAML** (run with `so3lr --settings settings.yaml`):
