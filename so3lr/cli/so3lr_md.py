@@ -1276,8 +1276,8 @@ def validate_npt_restart_coupling(state, box, npt_coupling: str) -> None:
             )
 
 
-def box_for_trajectory(box):
-    """Convert a JAX-MD box to the row-vector convention used by ASE/HDF5.
+def lattice_rows(box):
+    """Convert a JAX-MD box to lattice vectors as rows (ASE, HDF5 and jaxpme).
 
     JAX-MD represents a general cell as the affine transform ``x = box @ s``
     for column-vector fractional coordinates.  ASE stores lattice vectors as
@@ -2078,11 +2078,6 @@ def create_obs_fn(
 
     return obs_fn, obs_dict
 
-def _lattice_rows(box):
-    """jax-md boxes hold lattice vectors as columns; jaxpme sizes meshes from rows."""
-    return box.T if getattr(box, 'ndim', 0) == 2 else box
-
-
 def setup_kspace_grid(
     kspace_electrostatics: str,
     kspace_smearing: float,
@@ -2098,7 +2093,7 @@ def setup_kspace_grid(
         kspace_electrostatics=kspace_electrostatics,
         kspace_smearing=kspace_smearing,
         kspace_spacing=kspace_spacing,
-        box=_lattice_rows(box),
+        box=lattice_rows(box),
         k_grid=k_grid,
     )
 
@@ -2128,12 +2123,12 @@ def check_kspace_grid(
         k_spacing = jnp.array([kspace_spacing], dtype=jnp.float32)
         k_smearing = jnp.array([kspace_smearing], dtype=jnp.float32)
         if kspace_electrostatics == 'ewald':
-            if k_grid.shape != jaxpme.kspace.get_kgrid_ewald_shape(_lattice_rows(box),lr_wavelength=k_spacing):
+            if k_grid.shape != jaxpme.kspace.get_kgrid_ewald_shape(lattice_rows(box),lr_wavelength=k_spacing):
                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
                 logger.info(f'k-grid shape: {k_grid.shape}')
                 return k_grid
         elif kspace_electrostatics == 'pme' or kspace_electrostatics == 'p3m':
-            if k_grid.shape != jaxpme.kspace.get_kgrid_mesh_shape(_lattice_rows(box),mesh_spacing=k_spacing):
+            if k_grid.shape != jaxpme.kspace.get_kgrid_mesh_shape(lattice_rows(box),mesh_spacing=k_spacing):
                 k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
                 logger.info(f'k-grid shape: {k_grid.shape}')
                 return k_grid
@@ -3182,7 +3177,7 @@ def perform_md(
         else:
             num_atoms = len(output_atom_indices)
 
-        trajectory_box = np.asarray(box_for_trajectory(box), dtype=np.dtype(dtype))
+        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(dtype))
         if not np.any(trajectory_box):
             _cell_a0 = np.zeros((3, 3), dtype=np.dtype(dtype))
         elif trajectory_box.ndim == 1 and trajectory_box.shape == (3,):
@@ -3445,7 +3440,7 @@ def perform_md(
             positions.append(np.array(out_pos))
             momenta.append(np.array(state.momentum))
             if box is not None:
-                boxes.append(np.array(box_for_trajectory(box)))
+                boxes.append(np.array(lattice_rows(box)))
 
             # Calculate observables
             if len(observables)>0:

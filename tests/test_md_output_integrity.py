@@ -12,7 +12,7 @@ from so3lr.cli import so3lr_md
 from so3lr.md_settings_validation import validate_md_counts
 from so3lr.cli.so3lr_md import (
     _validate_md_output_write_policy,
-    box_for_trajectory,
+    lattice_rows,
     cell_from_atoms_boundary_conditions,
     init_hdf5_store,
     load_state,
@@ -129,7 +129,7 @@ def test_embedding_output_keeps_features_and_atom_selection(tmp_path, output_for
 def test_hdf5_preserves_full_sheared_cell_matrix(tmp_path):
     path = tmp_path / 'trajectory.hdf5'
     store = init_hdf5_store(path, batch_size=4, num_atoms=1, num_box_entries=(3, 3))
-    expected = np.asarray(box_for_trajectory(SHEARED_BOX))
+    expected = np.asarray(lattice_rows(SHEARED_BOX))
     write_to_hdf5(store, [np.zeros((1, 3))], [np.zeros((1, 3))], [expected])
     with h5py.File(path, 'r') as h5f:
         assert h5f['box'].shape == (1, 3, 3)
@@ -147,7 +147,7 @@ def test_cartesian_extxyz_output_is_not_scaled_twice(tmp_path):
     )
     path = tmp_path / 'cartesian.extxyz'
     template = Atoms('H', positions=[[0.0, 0.0, 0.0]], cell=np.diag(box), pbc=True)
-    write_to_extxyz(path, template, boxes=[np.asarray(box_for_trajectory(box))],
+    write_to_extxyz(path, template, boxes=[np.asarray(lattice_rows(box))],
                     momenta=[], positions=[np.asarray(cartesian)],
                     fractional_coordinates=False)
     frame = read(path)
@@ -157,7 +157,7 @@ def test_cartesian_extxyz_output_is_not_scaled_twice(tmp_path):
 
 def test_sheared_cell_round_trips_through_extxyz(tmp_path):
     fractional = jnp.array([[0.2, 0.3, 0.4]])
-    ase_cell = np.asarray(box_for_trajectory(SHEARED_BOX))
+    ase_cell = np.asarray(lattice_rows(SHEARED_BOX))
     path = tmp_path / 'sheared.extxyz'
     template = Atoms('H', positions=[[0.0, 0.0, 0.0]], cell=ase_cell, pbc=True)
     write_to_extxyz(path, template, boxes=[ase_cell], momenta=[],

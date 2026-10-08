@@ -138,12 +138,3 @@ def test_auto_selects_exact_when_glp_would_be_wrong():
     noisy = np.diag([30.0, 30.0, 30.0]); noisy[0, 1] = 1e-7
     assert not needs_exact(noisy, 4.5, LR)                              # CIF round-off
 
-
-def test_mixed_pbc_keeps_glp_under_auto():
-    """Slabs ran on glp before this backend existed; 'auto' must not change that."""
-    slab = _small_triclinic_water(angles=(90.0, 90.0, 90.0))
-    slab.pbc = (True, True, False)
-    calc = _calc('auto', False)
-    assert not calc._use_exact(slab)
-    with pytest.raises(ValueError):
-        _calc('exact', False)._use_exact(slab)

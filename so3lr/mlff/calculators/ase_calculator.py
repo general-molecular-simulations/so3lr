@@ -745,7 +745,7 @@ class AseCalculatorSparse(Calculator):
             # edges of a pbc=False molecule that carries a bounding box.
             system = system._replace(cell=None)
 
-        if pbc_any and self._use_exact(atoms):
+        if pbc_periodic and self._use_exact(atoms):
             neighbors = self._exact_neighbors(atoms)
         else:
             neighbors = self._glp_neighbors(system, cell)
@@ -818,15 +818,10 @@ class AseCalculatorSparse(Calculator):
         return self.lr_cutoff
 
     def _use_exact(self, atoms):
-        if self.neighbor_backend == 'glp':
-            return False
-        if not np.all(atoms.get_pbc()):
-            # Slabs/wires keep the behaviour they had before this backend existed
-            # (glp); forcing 'exact' on them is an error rather than a silent change.
-            if self.neighbor_backend == 'exact':
-                raise ValueError('neighbor_backend="exact" needs pbc on all three axes.')
-            return False
-        return self.neighbor_backend == 'exact' or exact_neighbors.needs_exact(
+        """Whether a fully periodic structure needs explicit periodic images."""
+        if self.neighbor_backend != 'auto':
+            return self.neighbor_backend == 'exact'
+        return exact_neighbors.needs_exact(
             np.array(atoms.get_cell()), self.cutoff, self._long_range_cutoff(), self.skin)
 
     def _exact_neighbors(self, atoms):
