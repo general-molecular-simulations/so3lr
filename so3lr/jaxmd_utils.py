@@ -83,7 +83,8 @@ def neighbor_list_featurizer(
                 # box holds the lattice vectors as COLUMNS (Graph.cell convention);
                 # transform() would act on its rows (box @ pert.T), which deforms
                 # the transposed lattice once PotentialSparse hands rows to PME.
-                box = pert @ box
+                # Isotropic NPT passes a scalar perturbation (1 + eps).
+                box = pert * box if jnp.ndim(pert) == 0 else pert @ box
 
         d = jax.vmap(partial(displacement_fn, **kwargs))
         dR = d(Ra, Rb)

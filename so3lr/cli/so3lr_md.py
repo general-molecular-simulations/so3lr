@@ -46,7 +46,7 @@ from so3lr.mlff.nn.observable.observable_sparse import (
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
 from so3lr.jaxmd_utils import to_jax_md as _to_jax_md
-from so3lr.pbc import is_fully_periodic
+from so3lr.pbc import is_fully_periodic, lattice_rows
 from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
 
 import jaxpme
@@ -1276,19 +1276,6 @@ def validate_npt_restart_coupling(state, box, npt_coupling: str) -> None:
             )
 
 
-def lattice_rows(box):
-    """Convert a JAX-MD box to lattice vectors as rows (ASE, HDF5 and jaxpme).
-
-    JAX-MD represents a general cell as the affine transform ``x = box @ s``
-    for column-vector fractional coordinates.  ASE stores lattice vectors as
-    rows, so the corresponding cell is ``box.T``.  Vectors and scalars have no
-    convention ambiguity and are returned unchanged.
-    """
-    if box is not None and hasattr(box, 'ndim') and box.ndim == 2:
-        return jnp.swapaxes(box, -1, -2)
-    return box
-
-
 def format_pressure_tensor(state, npt_coupling, pressure_unit):
     """Format instantaneous pressure tensor for logging.
 
@@ -2096,48 +2083,6 @@ def setup_kspace_grid(
         box=lattice_rows(box),
         k_grid=k_grid,
     )
-
-def check_kspace_grid(
-    k_grid: jnp.array,
-    kspace_electrostatics: str,
-    kspace_smearing: float,
-    kspace_spacing: float,
-    box: jnp.ndarray,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Check and setup the k-space grid for Ewald summation.
-
-    Args:
-        kspace_electrostatics (str): Type of k-space electrostatics (None or 'ewald' or 'pme').
-        kspace_smearing (float): Smearing value for the k-space grid.
-        kspace_spacing (float): Spacing for the k-space grid.
-        box (jnp.ndarray): Box of the system.
-
-    Returns:
-        Tuple[jnp.ndarray, jnp.ndarray]: k-space grid and smearing values.
-    """
-
-    if kspace_electrostatics is None:
-        return None
-    else:
-        k_spacing = jnp.array([kspace_spacing], dtype=jnp.float32)
-        k_smearing = jnp.array([kspace_smearing], dtype=jnp.float32)
-        if kspace_electrostatics == 'ewald':
-            if k_grid.shape != jaxpme.kspace.get_kgrid_ewald_shape(lattice_rows(box),lr_wavelength=k_spacing):
-                k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
-                logger.info(f'k-grid shape: {k_grid.shape}')
-                return k_grid
-        elif kspace_electrostatics == 'pme' or kspace_electrostatics == 'p3m':
-            if k_grid.shape != jaxpme.kspace.get_kgrid_mesh_shape(lattice_rows(box),mesh_spacing=k_spacing):
-                k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
-                logger.info(f'k-grid shape: {k_grid.shape}')
-                return k_grid
-        else:
-            raise ValueError(
-                f'Invalid kspace_electrostatics value: {kspace_electrostatics}. '
-                'Expected None, "ewald", "pme", or "p3m".'
-            )
-
 
 def validate_and_log_input(initial_geometry, input_file_path,
                            total_charge=None, num_unpaired_electrons=None,

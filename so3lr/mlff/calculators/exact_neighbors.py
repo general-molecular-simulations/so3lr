@@ -65,7 +65,8 @@ def build(atoms, cutoff: float, lr_cutoff: Optional[float],
     if _SLOW_FALLBACK:  # warn once, on first use rather than on import
         logging.getLogger("SO3LR").warning(
             'matscipy not installed: the exact periodic neighbour list falls back to '
-            'ASE, which is ~25x slower. `pip install matscipy` for small-cell runs.')
+            'ASE, which is ~25x slower. Install the `matscipy` extra '
+            '(`pip install "so3lr[matscipy]"`) for small-cell runs.')
         _SLOW_FALLBACK = False
     n = len(atoms)
     i, j, S, d = _neighbour_list('ijSd', atoms, float(max(cutoff, lr_cutoff or 0.0)))

@@ -16,7 +16,7 @@ from so3lr.mlff.calculators.exact_neighbors import ExactNeighbors
 from so3lr.mlff.geometric.cutoff import add_cell_offsets_sparse
 from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
-from so3lr.pbc import is_fully_periodic
+from so3lr.pbc import is_fully_periodic, lattice_rows
 
 try:
     from glp.calculators.utils import strain_graph, get_strain, strain_system
@@ -75,6 +75,10 @@ def matrix_to_voigt(matrix):
 
 class AseCalculatorSparse(Calculator):
     implemented_properties = ['energy', 'forces', 'stress', 'free_energy', 'hessian']
+    # Defaults for instances that bypass __init__ (e.g. test stubs, subclasses).
+    neighbor_backend = 'auto'
+    _exact_nb = None
+    _exact_nb_natoms = None
 
     @classmethod
     def create_from_workdir(
@@ -724,7 +728,7 @@ class AseCalculatorSparse(Calculator):
                 k_smearing = jnp.array([self.kspace_smearing], dtype=self.dtype)
                 k_spacing = jnp.array([self.kspace_spacing])
                 # jaxpme sizes the mesh from the lattice vectors as ROWS (see
-                # PotentialSparse._cell_rows); the transpose used here before gave
+                # so3lr.pbc.lattice_rows); the transpose used here before gave
                 # the wrong mesh shape for non-orthogonal cells.
                 cell = jnp.array(np.array(atoms.get_cell()), dtype=self.dtype)
                 if self.kspace_electrostatics == 'ewald':
@@ -843,7 +847,7 @@ def _system_to_graph(system, neighbors):
     """
     if not isinstance(neighbors, ExactNeighbors):
         return system_to_graph(system, neighbors)
-    R, rows = system.R, system.cell.T
+    R, rows = system.R, lattice_rows(system.cell)
     ci, cj, ci_lr, cj_lr = neighbors.centers, neighbors.others, neighbors.idx_i_lr, neighbors.idx_j_lr
     edges = add_cell_offsets_sparse(R[cj] - R[ci], rows, neighbors.shifts.astype(R.dtype))
     edges_lr = add_cell_offsets_sparse(R[cj_lr] - R[ci_lr], rows, neighbors.shifts_lr.astype(R.dtype))
