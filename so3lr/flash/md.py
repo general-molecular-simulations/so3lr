@@ -39,7 +39,6 @@ from so3lr.cli.so3lr_md import (
     _existing_regular_output_mode,
     _validate_md_output_write_policy,
     atoms_to_jnp,
-    box_for_trajectory,
     box_to_diag,
     cell_from_atoms_boundary_conditions,
     handle_units,
@@ -455,7 +454,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         R, L1 = cartesian(state)
         positions.append(np.asarray(R / L1 if frac_out else R, odt))
         momenta.append(np.asarray(state.momentum, odt))
-        boxes.append(np.asarray(box_for_trajectory(L1), odt))
+        boxes.append(np.asarray(L1, odt))            # orthorhombic: the box is its sides
         if len(positions) >= save_buffer or cycle == md_cycles - 1:
             if output_format == "hdf5":
                 positions, momenta, boxes, obs = write_to_hdf5(hdf5_store, momenta, positions, boxes, obs, out_idx)
