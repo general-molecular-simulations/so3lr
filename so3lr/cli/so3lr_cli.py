@@ -1066,6 +1066,9 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     logger.info(f"Loading settings from {settings}")
 
     log_simulation_settings(settings_dict)
+    if (settings_dict.get('engine') or 'auto') != 'standard':
+        # as run_md_simulation: the flash engine's largest systems need nearly all of the GPU
+        os.environ.setdefault('XLA_PYTHON_CLIENT_MEM_FRACTION', '0.97')
     get_hardware_info()
 
     time_start = time.time()

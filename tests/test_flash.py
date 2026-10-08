@@ -2,11 +2,13 @@
 the engine against the neighbour-list potential.
 
 Without a GPU: PME's mesh part and its strain derivative against jaxpme, the real-space
-tables against so3lr_dev's pair functions, the reasons the engine choice gives, and
-``so3lr nvt`` falling back to the neighbour-list potential. With one:
+tables against so3lr_dev's pair functions, the reasons the engine choice gives (every
+settings key and model hyperparameter classified), and ``so3lr nvt`` falling back to
+the neighbour-list potential. With one:
 ``python -m so3lr.flash.verify`` on 12,288 waters (energy, forces, dE/d(strain), with and
 without PME).
 """
+import json
 import pathlib
 import subprocess
 import sys
@@ -18,9 +20,10 @@ import pytest
 jax.config.update("jax_enable_x64", True)     # as setup_jax_globals does for every MD run
 import jax.numpy as jnp  # noqa: E402
 
+from so3lr.flash import check  # noqa: E402
+
 try:
     from so3lr.flash import engine as E
-    from so3lr.flash import md as flash_md
 except Exception as exc:                       # a JAX without Pallas-Triton
     pytest.skip(f"so3lr.flash does not import: {exc}", allow_module_level=True)
 
@@ -155,22 +158,66 @@ SETTINGS = dict(ensemble="nvt", model_path=None, lr_cutoff=12.0)
     (dict(kspace_electrostatics="ewald"), "PME but not ewald"),
     (dict(kspace_dispersion="pme", kspace_dispersion_interp_nodes=6), "4 nodes"),
     (dict(observables=["dipole"]), "observables"),
-    (dict(model_path="so3lr-l-2606"), "4 heads"),
+    (dict(observables=[]), None),
+    (dict(fixed_atom_indices=[0, 1]), "fixed atoms"),
+    (dict(kspace_npt_cycles=10), None),
+    (dict(ensemble="npt", kspace_npt_cycles=10), None),
+    (dict(ensemble="npt", kspace_npt_cycles=10, kspace_electrostatics="pme"), "kspace_npt_cycles"),
+    (dict(fixed_atom_constraint="cartesian_anchor", pysages_input="p.yaml"), None),
+    (dict(buffer_size_multiplier_sr=1.5), None),
+    (dict(some_new_setting=True), "does not know the setting 'some_new_setting'"),
+    (dict(some_new_setting=None), None),
+    (dict(model_path="so3lr-s-2602"), None),
+    (dict(model_path="so3lr-l-2606"), "its kernels are written for"),
     (dict(model_path="so3lr"), "legacy"),
 ])
 def test_engine_choice(monkeypatch, change, reason):
     """What auto picks for a GPU, given the settings (37 A of water)."""
-    monkeypatch.setattr(flash_md, "_device_problem", lambda: None)
-    problem = flash_md.flash_problem(dict(SETTINGS, **change), _water((3, 3, 3)))
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    problem = check.flash_problem(dict(SETTINGS, **change), _water((3, 3, 3)))
     assert (problem is None) if reason is None else (reason in problem), problem
 
 
 def test_engine_choice_small_box(monkeypatch):
-    monkeypatch.setattr(flash_md, "_device_problem", lambda: None)
-    assert "narrower than twice the cutoff" in flash_md.flash_problem(SETTINGS, _water((1, 1, 1)))
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    assert "narrower than twice the cutoff" in check.flash_problem(SETTINGS, _water((1, 1, 1)))
 
 
-@pytest.mark.skipif(flash_md._device_problem() is None, reason="this test is for machines without an NVIDIA GPU")
+def test_every_settings_key_classified():
+    """A settings key added to the CLI must be sorted into what flash handles, ignores
+    or declines; until then auto declines whenever it is set."""
+    from so3lr.cli.so3lr_cli import known_yaml_keys
+    known = check.HANDLED | check.IRRELEVANT | set(check.UNSUPPORTED)
+    assert not known_yaml_keys() - known, sorted(known_yaml_keys() - known)
+
+
+@pytest.mark.parametrize("edit,reason", [
+    (None, None),
+    (("num_heads", 8), "num_heads"),
+    (("activation_fn", "gelu"), "activation_fn"),
+    (("some_new_hyperparameter", True), "does not know the model hyperparameter"),
+    (("qk_norm", None), "does not set 'qk_norm'"),
+])
+def test_model_architecture_check(tmp_path, edit, reason):
+    """so3lr-m with one hyperparameter changed (None: removed) is declined."""
+    from so3lr.model_registry import resolve_model
+    src = resolve_model("so3lr-m-2606").dir
+    for f in src.iterdir():
+        if f.name != "hyperparameters.json":
+            (tmp_path / f.name).symlink_to(f)
+    cfg = json.loads((src / "hyperparameters.json").read_text())
+    if edit is not None:
+        key, value = edit
+        if value is None:
+            del cfg["model"][key]
+        else:
+            cfg["model"][key] = value
+    (tmp_path / "hyperparameters.json").write_text(json.dumps(cfg))
+    problem = check.model_problem(str(tmp_path))
+    assert (problem is None) if reason is None else (reason in problem), problem
+
+
+@pytest.mark.skipif(check.device_problem() is None, reason="this test is for machines without an NVIDIA GPU")
 def test_auto_falls_back_without_gpu(tmp_path):
     """Without an NVIDIA GPU, `so3lr nvt` runs the neighbour-list potential and says why."""
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -185,7 +232,7 @@ def test_auto_falls_back_without_gpu(tmp_path):
     assert "Engine: neighbour-list potential (flash cannot:" in log, log[-2000:]
 
 
-@pytest.mark.skipif(flash_md._device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA GPU")
+@pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA GPU")
 @pytest.mark.parametrize("pme", ["", "electrostatics,dispersion"])
 def test_flash_matches_neighbour_lists(tmp_path, pme):
     """Energy, forces and dE/d(strain) on 12,288 waters (49.6 A), float64."""

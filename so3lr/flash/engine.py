@@ -45,14 +45,19 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plgpu
 
+import jaxpme
+
 from so3lr.flash import blocks
+from so3lr.flash.check import box_problem
+from so3lr.mlff.nn.embed.embed_sparse import PAIR_FLOOR_WIDTH, nlh_reference_distance
+from so3lr.mlff.nn.observable.observable_sparse import c6_raw_potential
+from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
 
 BE = 16              # edges per chunk in the pair kernels
 NUM_WARPS = 2
 # attention kernels: (edges per chunk, warps)
 ATT_LAUNCH = {"fwd": (16, 2), "bwd_heads": (16, 2), "bwd_degrees": (16, 2)}
 BL = 64              # candidates per chunk in the long-range kernel
-PAIR_FLOOR_WIDTH = 0.05
 
 
 def _cp(num_warps):
@@ -306,7 +311,7 @@ def _row(acc, h):
 # =========================================================================== #
 def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, nbr, count, *, NX, NY, NZ, K, BLE):
     a = _i32(pl.program_id(0))
-    Lx, Ly, Lz, rc2 = boxl[0], boxl[1], boxl[2], geo[3]
+    Lx, Ly, Lz, rc2 = boxl[0], boxl[1], boxl[2], geo[0]
     ax, ay, az = px[a], py[a], pz[a]
     c = cell_of[a]
     cx = _rem(c, NX)
@@ -342,7 +347,7 @@ def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, nbr, count, *
 # =========================================================================== #
 def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
                     t1v, t1d, t2v, t2d, wa1, ba1, wb1, bb1, wa2, ba2, wb2, bb2, mdeg, cdeg, scal,
-                    x_in, ev_in, boxl, x_out, ev_out, *, NG, G, ND, M, MP, K, ZMAX, FLOOR, CH=0, BE=BE, H0=0, NH=4):
+                    x_in, ev_in, boxl, x_out, ev_out, *, G, ND, MP, ZMAX, CH=0, BE=BE, H0=0, NH=4):
     # CH 0: both channels; 1: heads only (x_out); 2: degrees only (ev_out). The outputs
     # alias the inputs, so a channel not run leaves its output as it was.
     a = _i32(pl.program_id(0))
@@ -363,7 +368,7 @@ def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
         emask = oe < n_a
         jj = plgpu.load(nbr.at[a, oe], mask=emask, other=0)
         ux, uy, uz, r, ce, _ = _geometry(px, py, pz, jj, emask, ax, ay, az, Lx, Ly, Lz, rc)
-        rt = _floor(r, za, jj, emask, z, rmin, ZMAX)[0] if FLOOR else r
+        rt = _floor(r, za, jj, emask, z, rmin, ZMAX)[0]
         nz = ce != 0.0
         i0, u = _table_coords(rt, spacing, n_int)
         diff = _ev_diff(ev, ev_a, jj, mo, valid, emask)
@@ -412,8 +417,7 @@ def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
 # =========================================================================== #
 def _att_bwd_heads_kernel(q1, k1, v1, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, wa, ba, wb, bb,
                           mdeg, cdeg, gdx, scal, a0, gev_in, fx_in, fy_in, fz_in, fw_in, boxl,
-                          gq, gk, gv, gev, fx_o, fy_o, fz_o, fw_o, *, NG, G, ND, M, MP, K, ZMAX, FLOOR, BE=BE, H0=0,
-                          NH=4):
+                          gq, gk, gv, gev, fx_o, fy_o, fz_o, fw_o, *, G, ND, MP, ZMAX, BE=BE, H0=0, NH=4):
     t = _i32(pl.program_id(0))
     a = a0[0] + t
 
@@ -436,10 +440,7 @@ def _att_bwd_heads_kernel(q1, k1, v1, ev, px, py, pz, nbr, cnt, z, rmin, tv, td,
             emask = oe < n_a
             jj = plgpu.load(nbr.at[a, oe], mask=emask, other=0)
             ux, uy, uz, r, ce, dce = _geometry(px, py, pz, jj, emask, ax, ay, az, Lx, Ly, Lz, rc)
-            if FLOOR:
-                rt, drt = _floor(r, za, jj, emask, z, rmin, ZMAX)
-            else:
-                rt, drt = r, 1.0
+            rt, drt = _floor(r, za, jj, emask, z, rmin, ZMAX)
             nz = ce != 0.0
             i0, u = _table_coords(rt, spacing, n_int)
             diff = _ev_diff(ev, ev_a, jj, mo, valid, emask)
@@ -499,8 +500,7 @@ def _att_bwd_heads_kernel(q1, k1, v1, ev, px, py, pz, nbr, cnt, z, rmin, tv, td,
 
 def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, wa, ba, wb, bb,
                             mdeg, cdeg, par, gdev, scal, a0, gev_in, fx_in, fy_in, fz_in, fw_in, boxl,
-                            gq, gk, gev, fx_o, fy_o, fz_o, fw_o, *, NG, G, ND, M, MP, K, ZMAX, FLOOR, BE=BE,
-                            H0=0, NH=4):
+                            gq, gk, gev, fx_o, fy_o, fz_o, fw_o, *, G, ND, MP, ZMAX, BE=BE, H0=0, NH=4):
     t = _i32(pl.program_id(0))
     a = a0[0] + t
 
@@ -525,10 +525,7 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
             emask = oe < n_a
             jj = plgpu.load(nbr.at[a, oe], mask=emask, other=0)
             ux, uy, uz, r, ce, dce = _geometry(px, py, pz, jj, emask, ax, ay, az, Lx, Ly, Lz, rc)
-            if FLOOR:
-                rt, drt = _floor(r, za, jj, emask, z, rmin, ZMAX)
-            else:
-                rt, drt = r, 1.0
+            rt, drt = _floor(r, za, jj, emask, z, rmin, ZMAX)
             nz = ce != 0.0
             i0, u = _table_coords(rt, spacing, n_int)
             diff = _ev_diff(ev, ev_a, jj, mo, valid, emask)
@@ -598,12 +595,11 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
 
 
 # =========================================================================== #
-# short-range pairs: NLH repulsion (per-atom energy, forces) and the clash gate
+# short-range pairs: the NLH repulsion (per-atom energy, forces)
 # =========================================================================== #
-def _sr_kernel(px, py, pz, z, nbr, cnt, nlh_a, nlh_b, g_clash, scal, fx_in, fy_in, fz_in, fw_in, boxl,
-               energy, clash, fx_o, fy_o, fz_o, fw_o, *, ZMAX, NK, NKP, K, MODE):
-    """MODE 0: per-atom NLH energy (half of each pair), its forces and the clash sum;
-    MODE 1: the gate's forces from dE/dclash per atom."""
+def _sr_kernel(px, py, pz, z, nbr, cnt, nlh_a, nlh_b, scal, fx_in, fy_in, fz_in, fw_in, boxl,
+               energy, fx_o, fy_o, fz_o, fw_o, *, ZMAX, NK, NKP):
+    """Per-atom NLH energy (half of each pair) and its forces."""
     a = _i32(pl.program_id(0))
     n_a = cnt[a]
     ke, rc = scal[0], scal[3]
@@ -614,41 +610,33 @@ def _sr_kernel(px, py, pz, z, nbr, cnt, nlh_a, nlh_b, g_clash, scal, fx_in, fy_i
     kk = jnp.arange(NKP)
 
     def chunk(c, carry):
-        e_a, cl_a, fx, fy, fz, fw = carry
+        e_a, fx, fy, fz, fw = carry
         oe = c * BE + jnp.arange(BE)
         emask = oe < n_a
         jj = plgpu.load(nbr.at[a, oe], mask=emask, other=0)
         ux, uy, uz, r, ce, dce = _geometry(px, py, pz, jj, emask, ax, ay, az, Lx, Ly, Lz, rc)
-        if MODE == 0:
-            zb = plgpu.load(z.at[jj], mask=emask, other=1)
-            lo = jnp.minimum(za, zb) - 1
-            hi = jnp.maximum(za, zb) - 1
-            tab = (lo * ZMAX + hi)[:, None] * NK + kk[None, :]
-            tm = emask[:, None] & (kk < NK)[None, :]
-            ca = plgpu.load(nlh_a.at[tab], mask=tm, other=0.0)
-            cb = plgpu.load(nlh_b.at[tab], mask=tm, other=0.0)
-            ex = ca * jnp.exp(-cb * r[:, None])
-            yv = jnp.sum(ex, axis=1)
-            dyv = -jnp.sum(cb * ex, axis=1)
-            w, dw = _switch(r, 0.0, 1.5)
-            x = ke * (za * zb).astype(dt) / r
-            e_pair = w * ce * x * yv
-            de = dw * ce * x * yv + w * dce * x * yv - w * ce * x / r * yv + w * ce * x * dyv
-            e_a = e_a + 0.5 * jnp.sum(jnp.where(emask, e_pair, 0.0))
-            fr = jnp.where(emask, de, 0.0)
-            sw, _ = _switch(r, 0.4, 0.8)
-            cl_a = cl_a + jnp.sum(jnp.where(emask, sw, 0.0))
-        else:
-            gb = plgpu.load(g_clash.at[jj], mask=emask, other=0.0)
-            _, dsw = _switch(r, 0.4, 0.8)
-            fr = jnp.where(emask, (g_clash[a] + gb) * dsw, 0.0)
-        return (e_a, cl_a, fx + jnp.sum(fr * ux), fy + jnp.sum(fr * uy), fz + jnp.sum(fr * uz),
+        zb = plgpu.load(z.at[jj], mask=emask, other=1)
+        lo = jnp.minimum(za, zb) - 1
+        hi = jnp.maximum(za, zb) - 1
+        tab = (lo * ZMAX + hi)[:, None] * NK + kk[None, :]
+        tm = emask[:, None] & (kk < NK)[None, :]
+        ca = plgpu.load(nlh_a.at[tab], mask=tm, other=0.0)
+        cb = plgpu.load(nlh_b.at[tab], mask=tm, other=0.0)
+        ex = ca * jnp.exp(-cb * r[:, None])
+        yv = jnp.sum(ex, axis=1)
+        dyv = -jnp.sum(cb * ex, axis=1)
+        w, dw = _switch(r, 0.0, 1.5)
+        x = ke * (za * zb).astype(dt) / r
+        e_pair = w * ce * x * yv
+        de = dw * ce * x * yv + w * dce * x * yv - w * ce * x / r * yv + w * ce * x * dyv
+        e_a = e_a + 0.5 * jnp.sum(jnp.where(emask, e_pair, 0.0))
+        fr = jnp.where(emask, de, 0.0)
+        return (e_a, fx + jnp.sum(fr * ux), fy + jnp.sum(fr * uy), fz + jnp.sum(fr * uz),
                 fw + jnp.sum(fr * r))
 
     s0 = jnp.zeros((), dt)
-    e_a, cl_a, fx, fy, fz, fw = lax.fori_loop(0, _cdiv(n_a, BE), chunk, (s0, s0, s0, s0, s0, s0))
+    e_a, fx, fy, fz, fw = lax.fori_loop(0, _cdiv(n_a, BE), chunk, (s0, s0, s0, s0, s0))
     energy[a] = e_a
-    clash[a] = cl_a
     fx_o[a] = fx_in[a] + fx
     fy_o[a] = fy_in[a] + fy
     fz_o[a] = fz_in[a] + fz
@@ -664,12 +652,12 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
                *, N, NX, NY, NZ, KC, MAXH, ELEC, DISP, DPME):
     pid = _i32(pl.program_id(0))
     nprog = _i32(pl.num_programs(0))
-    # [rc, phi spacing, phi intervals, ke, damping start, gamma_scale, fs^(-4/21), Lx, Ly, Lz,
-    #  hartree, bohr]
+    # [rc, phi spacing, phi intervals, ke, damping start, gamma_scale, fs^(-4/21), hartree,
+    #  bohr]; the box comes in boxl
     rc, phs, phn, ke = lrs[0], lrs[1], lrs[2], lrs[3]
     dstart, gsc, fs = lrs[4], lrs[5], lrs[6]
     Lx, Ly, Lz = boxl[0], boxl[1], boxl[2]
-    hartree, bohr = lrs[10], lrs[11]
+    hartree, bohr = lrs[7], lrs[8]
     dt = rc.dtype
     rc2 = rc * rc
     sxd, syd, szd = Lx / NX, Ly / NY, Lz / NZ                   # positions' dtype
@@ -944,30 +932,15 @@ def _c6_lr_table(rc, smearing_bohr, n, bohr):
 # --kspace-electrostatics pme and --kspace-dispersion pme use it)
 # =========================================================================== #
 def pme_mesh_shape(L, spacing):
-    """jaxpme.kspace.get_kgrid_mesh_shape for an orthorhombic box: 2 ceil(L / spacing) + 1
-    points per side, rounded up to a power of two."""
-    return tuple(int(2 ** math.ceil(math.log2(2 * math.ceil(v / spacing) + 1))) for v in L)
+    """The PME mesh so3lr_dev builds for an orthorhombic box of sides L."""
+    return kspace_grid_shape("pme", spacing, np.diag(np.asarray(L, np.float64)))
 
 
-def _coulomb_k2(smearing, k2):
-    """jaxpme coulomb lr_k2 (0 at k = 0)."""
-    m = k2 == 0.0
-    k2 = jnp.where(m, 1e-6, k2)
-    return jnp.where(m, 0.0, 4.0 * jnp.pi * jnp.exp(-0.5 * smearing ** 2 * k2) / k2)
-
-
-def _c6_k2(smearing, k2):
-    """lr_k2 of so3lr_dev's c6_raw_potential (Gamma(-3/2, x) by recursion; 0 at k = 0)."""
-    m = k2 == 0.0
-    k2 = jnp.where(m, 1e-6, k2)
-    t = 2.0 * smearing ** 2
-    x = smearing ** 2 * k2 / 2.0
-    sx = jnp.sqrt(jnp.maximum(x, 1e-30))
-    ex = jnp.exp(-x)
-    g12 = jnp.sqrt(jnp.pi) * lax.erfc(sx)
-    gm12 = -2.0 * (g12 - ex / sx)
-    gm32 = -2.0 / 3.0 * (gm12 - ex / (x * sx))
-    return jnp.where(m, 0.0, jnp.pi ** 1.5 / 2.0 * t ** -1.5 * gm32 * x ** 1.5)
+def _pme_potential(kind):
+    """jaxpme's potential (lr, with k = 0 masked) and raw potential (the self and
+    background corrections) for Coulomb or so3lr_dev's C6 dispersion."""
+    raw = jaxpme.potentials.coulomb() if kind == "coulomb" else c6_raw_potential()
+    return jaxpme.potentials.potential(custom_potential=raw), raw
 
 
 def _lagrange4(u, n, dt):
@@ -1047,62 +1020,32 @@ def _pme_mesh(pos3, w, L, shape, Lk, kernel, dt, chunk):
     return lax.fori_loop(0, nch, gather, (zero, zero + 0.0, zero + 0.0, zero + 0.0)) + (vir,)
 
 
+def _pme_part(pos3, w, L, mesh, Lk, smearing, kind, sign, dt, chunk):
+    """The mesh part of PME as so3lr_dev adds it (jaxpme's pme kspace with its self and
+    background corrections) for weights w (charges, or sqrt(C6)), smearing and Lk in the
+    potential's unit: E = sign sum_i w_i pot_i, pot = (phi + c) / 2,
+    c = -w self - 2 bg sum(w) / V. The per-atom energy, dE/dw, forces (three arrays) and
+    dE/d(strain), to which the background energy -sign bg W^2 / V adds as 1/V."""
+    pot, raw = _pme_potential(kind)
+    phi, gx, gy, gz, vir = _pme_mesh(pos3, w, L, mesh, Lk, partial(pot.lr, smearing), dt, chunk)
+    bg = raw.correction_background(smearing)
+    inv_v = (1.0 / (jnp.asarray(Lk[0]) * Lk[1] * Lk[2])).astype(dt)
+    W = w.sum()
+    pot2 = phi - raw.correction_self(smearing) * w - 2.0 * bg * W * inv_v
+    dstrain = 0.5 * sign * vir + 3.0 * sign * bg * W * W * inv_v
+    return 0.5 * sign * w * pot2, sign * pot2, tuple(-sign * w * g for g in (gx, gy, gz)), dstrain
+
+
 def pme_electrostatics(pos3, q, L, mesh, smearing, ke, dt, chunk=1 << 20):
-    """The mesh part of Coulomb PME as so3lr_dev adds it (jaxpme pme kspace with its self
-    and background corrections; positions, L, smearing in A): per-atom energy, dE/dq,
-    forces (three arrays), dE/d(strain). E = ke sum_i q_i pot_i, pot = (phi + c) / 2,
-    c = -q sqrt(2/pi)/s - 2 pi s^2 Q / V."""
-    phi, gx, gy, gz, vir = _pme_mesh(pos3, q, L, mesh, L, partial(_coulomb_k2, smearing), dt, chunk)
-    self_c = math.sqrt(2.0 / math.pi) / smearing
-    inv_v = (1.0 / (jnp.asarray(L[0]) * L[1] * L[2])).astype(dt)
-    Q = q.sum()
-    back = 2.0 * math.pi * smearing ** 2 * Q * inv_v
-    pot2 = phi - self_c * q - back
-    # the background energy -ke pi s^2 Q^2 / V goes as 1/V
-    dstrain = 0.5 * ke * vir + 3.0 * ke * math.pi * smearing ** 2 * Q * Q * inv_v
-    return 0.5 * ke * q * pot2, ke * pot2, (-ke * q * gx, -ke * q * gy, -ke * q * gz), dstrain
+    """The mesh part of Coulomb PME (positions, L, smearing in A): per-atom energy, dE/dq,
+    forces, dE/d(strain)."""
+    return _pme_part(pos3, q, L, mesh, L, smearing, "coulomb", ke, dt, chunk)
 
 
 def pme_dispersion(pos3, qd, L, mesh, smearing, bohr, hartree, dt, chunk=1 << 20):
-    """The mesh part of C6 dispersion PME as so3lr_dev adds it (jaxpme pme kspace with
-    c6_raw_potential, in atomic units; positions, L, smearing in A, qd = sqrt(C6)):
-    per-atom energy, dE/dqd, forces, dE/d(strain). E = -hartree sum_i qd_i pot_i,
-    pot = (phi + c) / 2, c = -qd / (6 t^3) - 2 bg sum(qd) / V, t = 2 s^2,
-    bg = -pi^1.5 t^-1.5 / 6."""
-    s = smearing / bohr
-    Lb = [v / bohr for v in L]
-    phi, gx, gy, gz, vir = _pme_mesh(pos3, qd, L, mesh, Lb, partial(_c6_k2, s), dt, chunk)
-    t = 2.0 * s * s
-    self_c = 1.0 / (6.0 * t ** 3)
-    bg = math.pi ** 1.5 * t ** -1.5 / -6.0
-    inv_v = (1.0 / (jnp.asarray(Lb[0]) * Lb[1] * Lb[2])).astype(dt)
-    S = qd.sum()
-    back = 2.0 * bg * S * inv_v
-    pot2 = phi - self_c * qd - back
-    # the background energy hartree bg S^2 / V goes as 1/V
-    dstrain = -0.5 * hartree * vir - 3.0 * hartree * bg * S * S * inv_v
-    return (-0.5 * hartree * qd * pot2, -hartree * pot2,
-            (hartree * qd * gx, hartree * qd * gy, hartree * qd * gz), dstrain)
-
-
-def nlh_reference_distance(nlh_aa, nlh_bb, ke=14.399645351950548, target=3.0):
-    """[Z, Z] distance where the switched NLH repulsion reaches 3 eV (so3lr_dev's)."""
-    a, b = np.asarray(nlh_aa, np.float64), np.asarray(nlh_bb, np.float64)
-    n = a.shape[0]
-    z = np.arange(1, n + 1, dtype=np.float64)
-    zz = z[:, None] * z[None, :]
-    lo, hi = np.full((n, n), 0.02), np.full((n, n), 1.5)
-
-    def sig(x):
-        return np.where(x > 0, np.exp(-1.0 / np.where(x > 0, x, 1.0)), 0.0)
-    for _ in range(60):
-        mid = 0.5 * (lo + hi)
-        c = mid / 1.5
-        with np.errstate(over="ignore", invalid="ignore"):
-            e = sig(1 - c) / (sig(1 - c) + sig(c)) * ke * zz / mid * np.sum(a * np.exp(-b * mid[..., None]), -1)
-        above = np.nan_to_num(e, nan=0.0) > target
-        lo, hi = np.where(above, mid, lo), np.where(above, hi, mid)
-    return 0.5 * (lo + hi)
+    """The mesh part of C6 dispersion PME, in atomic units (qd = sqrt(C6); positions, L,
+    smearing in A): per-atom energy, dE/dqd, forces, dE/d(strain)."""
+    return _pme_part(pos3, qd, L, mesh, [v / bohr for v in L], smearing / bohr, "c6", -hartree, dt, chunk)
 
 
 # =========================================================================== #
@@ -1110,6 +1053,9 @@ def nlh_reference_distance(nlh_aa, nlh_bb, ke=14.399645351950548, target=3.0):
 # =========================================================================== #
 # the constants so3lr_dev uses (ase.units)
 ASE_UNITS = dict(ke=14.399645351950548, hartree=27.211386024367243, bohr=0.5291772105638411)
+TABLE_INTERVALS = 4096       # radial filter tables on [0, 1.05 cutoff]
+PAIR_INTERVALS = 16384       # long-range pair tables on [0, lr cutoff]
+PME_CHUNK = 1 << 20          # atoms spread or gathered at a time in the PME mesh
 
 
 # memory modes, fastest first: (engine options, staged, peak KiB per atom on an H100 in
@@ -1137,18 +1083,6 @@ def pick_mode(n, free_bytes):
     return name
 
 
-def box_problem(L, rc, rc_lr):
-    """Why the engine cannot take an orthorhombic box of sides L (None if it can): the
-    minimum image needs 2 x the cutoffs, the cell grid 2 kc + 1 cells per side."""
-    if min(L) < 2.0 * max(rc, rc_lr):
-        return f"box {[round(v, 2) for v in L]} A narrower than twice the cutoff {max(rc, rc_lr)} A"
-    nc = [max(int(math.floor(v / rc)), 1) for v in L]
-    kc = max(int(math.ceil(rc_lr / (v / k))) for v, k in zip(L, nc))
-    if min(nc) < 2 * kc + 1:
-        return f"box too small for the cell grid: {nc} cells, need {2 * kc + 1} per side"
-    return None
-
-
 def pme_bytes(L, pme, itemsize):
     """Memory the mesh part of PME holds at its peak, for (smearing, spacing) pairs pme:
     the charges, their transform, the filtered transform, the potential and the FFT's
@@ -1159,23 +1093,17 @@ def pme_bytes(L, pme, itemsize):
 
 class FlashSO3LR:
     """Energy and forces of SO3LR (params, statics from ``loader.load_params``) for atoms
-    ``z`` in an orthorhombic periodic ``box``. ``clash_guard``: so3lr_dev's descriptor
-    floor ("floor") or the older clash gate ("gate")."""
+    ``z`` in an orthorhombic periodic ``box``, with so3lr_dev's descriptor floor at
+    contacts. The memory options are those of ``MODES``."""
 
-    def __init__(self, params, statics, z, box, *, clash_guard="floor", total_charge=0.0,
-                 total_spin=0.0, tile=1 << 17, max_neighbours=64, keep_layer_inputs=True,
-                 qkv_dtype=None, units=ASE_UNITS, lr_programs=None, lr_scratch=1024,
-                 keep_attention=False, split_channels=False, split_blocks=False,
-                 table_intervals=4096, fine_structure=None, equilibration_charge=None,
-                 pme_electrostatics=None, pme_dispersion=None, pme_chunk=1 << 20,
-                 box_margin=0.0):
-        if clash_guard not in ("gate", "floor"):
-            raise ValueError(f"clash_guard must be 'gate' or 'floor', got {clash_guard!r}")
+    def __init__(self, params, statics, z, box, *, total_charge=0.0, total_spin=0.0,
+                 equilibration_charge=None, tile=1 << 17, max_neighbours=64, lr_scratch=1024,
+                 keep_layer_inputs=True, keep_attention=False, split_channels=False,
+                 split_blocks=False, pme_electrostatics=None, pme_dispersion=None, box_margin=0.0):
         if tuple(statics["degrees"]) != (1, 2, 3, 4) or statics["num_heads"] != 4:
             raise ValueError("written for degrees (1, 2, 3, 4) and 4 heads")
         self.params, self.statics = params, statics
         self.dtype = statics.get("dtype", jnp.float32)
-        self.floor = clash_guard == "floor"
         z = np.asarray(z).astype(np.int32)
         self.n = n = int(z.shape[0])
         box = np.asarray(box, np.float64).reshape(3, 3)
@@ -1194,7 +1122,6 @@ class FlashSO3LR:
         self.keep_attention = bool(keep_attention) and self.keep
         self.split = bool(split_channels)
         self.blocks = bool(split_blocks)
-        self.qkv_dtype = self.dtype if qkv_dtype is None else qkv_dtype
         # the charge embedding sees total_charge, the charge equilibration conserves
         # equilibration_charge (so3lr_dev's two overrides; both follow total_charge by default)
         self.total_charge = float(total_charge if equilibration_charge is None else equilibration_charge)
@@ -1214,7 +1141,7 @@ class FlashSO3LR:
         self.x0_table = self._embed_table(jnp.asarray(zu), counts, total_charge, total_spin)
         # radial tables per layer, both filters
         r_max = 1.05 * self.rc
-        grid = np.linspace(0.0, r_max, table_intervals + 1)
+        grid = np.linspace(0.0, r_max, TABLE_INTERVALS + 1)
         self.tables = []
         for li in range(statics["num_layers"]):
             p = params[f"layers_{li}"]["attention_block"]
@@ -1223,44 +1150,41 @@ class FlashSO3LR:
                 v, d = _radial_table(p, (f + "_layer_1", f + "_layer_2"), statics["num_radial_basis_fn"], grid)
                 t += [jnp.asarray(v, dt), jnp.asarray(d, dt)]
             self.tables.append(t)
-        self.scal = jnp.asarray([1.0 / statics["avg_num_neighbors"], r_max / table_intervals,
-                                 table_intervals, self.rc], dt)
-        self.sr_scal = self.scal.at[0].set(units["ke"])
-        self.geo = jnp.asarray([0.0, 0.0, 0.0, self.rc ** 2], dt)
+        self.scal = jnp.asarray([1.0 / statics["avg_num_neighbors"], r_max / TABLE_INTERVALS,
+                                 TABLE_INTERVALS, self.rc], dt)
+        self.sr_scal = self.scal.at[0].set(ASE_UNITS["ke"])
+        self.geo = jnp.asarray([self.rc ** 2], dt)
         self.nlh_a = jnp.asarray(params["nlh_aa"], dt).reshape(-1)
         self.nlh_b = jnp.asarray(params["nlh_bb"], dt).reshape(-1)
         self.zmax = int(params["nlh_aa"].shape[0])
         self.nk = int(params["nlh_aa"].shape[-1])
-        self.rmin = jnp.asarray(nlh_reference_distance(params["nlh_aa"], params["nlh_bb"]), dt).reshape(-1)
+        self.rmin = jnp.asarray(nlh_reference_distance(), dt).reshape(-1)     # so3lr_dev's floor
         # long range
         sig = float(statics["electrostatic_energy_scale"])
         self.elec = sig != 0.0
         self.disp = float(statics["dispersion_energy_scale"]) != 0.0
-        self.units = units
         # particle-mesh Ewald, (smearing, spacing) in A each: the real-space pair terms
         # lose what the mesh adds back (_pme_terms)
         self.pme_el = tuple(float(v) for v in pme_electrostatics) if pme_electrostatics and self.elec else None
         self.pme_disp = tuple(float(v) for v in pme_dispersion) if pme_dispersion and self.disp else None
-        self.pme_chunk = int(pme_chunk)
         self._layout([float(v) for v in np.diag(box)])
-        phi, dphi, phs = _phi_table(self.rc_lr, sig if self.elec else 1.0, 16384,
+        phi, dphi, phs = _phi_table(self.rc_lr, sig if self.elec else 1.0, PAIR_INTERVALS,
                                     smearing=self.pme_el[0] if self.pme_el else None)
         self.phi_v, self.phi_d = jnp.asarray(phi, dt), jnp.asarray(dphi, dt)
         if self.pme_disp:
-            lr6, dlr6 = _c6_lr_table(self.rc_lr, self.pme_disp[0] / units["bohr"], 16384, units["bohr"])
+            lr6, dlr6 = _c6_lr_table(self.rc_lr, self.pme_disp[0] / ASE_UNITS["bohr"], PAIR_INTERVALS,
+                                     ASE_UNITS["bohr"])
             self.c6lr_v, self.c6lr_d = jnp.asarray(lr6, dt), jnp.asarray(dlr6, dt)
         else:
             self.c6lr_v = self.c6lr_d = jnp.zeros((2,), dt)
-        fsc = float(statics["fine_structure"] if fine_structure is None else fine_structure)
-        self.lrs = jnp.asarray([self.rc_lr, phs, 16384, units["ke"],
+        self.lrs = jnp.asarray([self.rc_lr, phs, PAIR_INTERVALS, ASE_UNITS["ke"],
                                 self.rc_lr - statics["dispersion_energy_cutoff_lr_damping"],
-                                statics["dispersion_energy_scale"], fsc ** (-4.0 / 21.0), 0.0, 0.0, 0.0,
-                                units["hartree"], units["bohr"]], dt)
+                                statics["dispersion_energy_scale"], float(statics["fine_structure"]) ** (-4.0 / 21.0),
+                                ASE_UNITS["hartree"], ASE_UNITS["bohr"]], dt)
         self.alphas = jnp.asarray(statics["dispersion_alphas"], dt)
         self.c6tab = jnp.asarray(statics["dispersion_c6"], dt)
-        dev = jax.devices()[0]
-        sms = getattr(dev, "core_count", None) or 132
-        self.lr_programs = int(lr_programs or sms * 16)
+        # the long-range kernel's resident programs: 16 per streaming multiprocessor
+        self.lr_programs = 16 * (getattr(jax.devices()[0], "core_count", None) or 132)
         self.maxh = int(lr_scratch)
         self._build_jit()
 
@@ -1346,17 +1270,17 @@ class FlashSO3LR:
             x = blocks.functional_rms_norm(x)
         return x, ev
 
-    def _heads(self, x, z, gate):
+    def _heads(self, x, z):
         p = self.params
         ep = p["observables_0"]
-        e_loc = blocks.local_node_energy(ep, x, z, gate, head_index=self.statics["head_index"])
+        e_loc = blocks.local_node_energy(ep, x, z, head_index=self.statics["head_index"])
         pc = ep["electrostatic_energy"]["partial_charges"]
         raw_q = (blocks.mlp(pc, ("charge_dense_regression_vec", "charge_dense_final_vec"), x).squeeze(-1)
                  + pc["Embed_0"]["embedding"][z].squeeze(-1))
         a0 = blocks.ratio_head(p["observables_2"], ("hirshfeld_ratios_dense_regression",
-                                                "hirshfeld_ratios_dense_final"), x, z, gate)
+                                                "hirshfeld_ratios_dense_final"), x, z)
         c6 = blocks.ratio_head(p["observables_3"], ("c6_ratios_dense_regression",
-                                                "c6_ratios_dense_final"), x, z, gate)
+                                                "c6_ratios_dense_final"), x, z)
         return e_loc, raw_q, a0, c6
 
     # ---- tiles --------------------------------------------------------------------
@@ -1404,7 +1328,7 @@ class FlashSO3LR:
             return [(1, (0, 1, 2), 0, 4), (2, (3, 4), 0, 4)]
         return [(0, (0, 1, 2, 3, 4), 0, 4)]
 
-    def _projections(self, li, x_l, which, with_x_in=False, block=None):
+    def _projections(self, li, x_l, which, block=None):
         """Layer li's projections in ``which`` (None elsewhere), on whole arrays: without an
         autograd tape XLA fuses them with bounded temporaries. (Tile loops writing into
         zero-initialised outputs were worse: XLA hoists every zeros() to the start.) With
@@ -1415,8 +1339,7 @@ class FlashSO3LR:
         else:
             G = self.F // 4
             out = self._project_block(li, xi[:, block * G:(block + 1) * G], block)
-        qkv = [out[k].astype(self.qkv_dtype) if k in which else None for k in range(5)]
-        return (xi, qkv) if with_x_in else qkv
+        return [out[k] if k in which else None for k in range(5)]
 
     def _attend(self, li, x_l, ev_l, pos3, nbr, cnt):
         """(x_in + dx, ev + dev) for layer li."""
@@ -1439,9 +1362,8 @@ class FlashSO3LR:
                 x_l, x1, ev1 = lax.optimization_barrier((x_l, x1, ev1))
                 qkv = self._projections(li, x_l, which, block=blk)
             ref = qkv[which[0]]
-            kern = partial(_att_fwd_kernel, NG=4, G=F // 4, ND=4, M=self.M, MP=self.MP, K=self.K,
-                           ZMAX=self.zmax, FLOOR=self.floor, CH=ch, BE=ATT_LAUNCH["fwd"][0],
-                           H0=h0, NH=nh)
+            kern = partial(_att_fwd_kernel, G=F // 4, ND=4, MP=self.MP, ZMAX=self.zmax, CH=ch,
+                           BE=ATT_LAUNCH["fwd"][0], H0=h0, NH=nh)
             x1, ev1 = pl.pallas_call(
                 kern, grid=(n,), compiler_params=_cp(ATT_LAUNCH["fwd"][1]),
                 out_shape=(jax.ShapeDtypeStruct((n, F), dt), jax.ShapeDtypeStruct((n, self.M), dt)),
@@ -1487,7 +1409,7 @@ class FlashSO3LR:
         t1v, t1d, t2v, t2d = self.tables[li]
         sf = lambda name, k: p[f"{name}_layer_{k}"]
         px, py, pz = pos3
-        meta = dict(NG=4, G=F // 4, ND=4, M=self.M, MP=self.MP, K=self.K, ZMAX=self.zmax, FLOOR=self.floor)
+        meta = dict(G=F // 4, ND=4, MP=self.MP, ZMAX=self.zmax)
         shp = jax.ShapeDtypeStruct
         inplace = self._inplace(li)
         ch, which, h0, nh = self._passes()[pi]
@@ -1595,7 +1517,7 @@ class FlashSO3LR:
     def _head(self, x, pos3, nb):
         """Repulsion, heads, long range and the heads' backward: (energy, dE/dx, forces so
         far, most long-range partners of any atom)."""
-        e_atom, raw_q, a0, c6, gate, clash, f3 = self._head_local(x, pos3, nb)
+        e_atom, raw_q, a0, c6, f3 = self._head_local(x, pos3, nb)
         q = raw_q + (self.total_charge - raw_q.sum()) / self.n
         e_atom, gq, ga0, gc6, f3, most = self._long_range(pos3, nb[:3], q, a0, c6, e_atom, f3)
         if self.pme_el or self.pme_disp:
@@ -1603,33 +1525,32 @@ class FlashSO3LR:
         px = pos3[0]
         # summed in float64 with float64 positions (a float32 total of 10^7 atoms rounds to eV)
         energy = e_atom.astype(jnp.promote_types(e_atom.dtype, px.dtype)).sum()
-        g_x, f3 = self._head_backward(x, pos3, nb, gate, clash, None, gq - gq.mean(), ga0, gc6, f3)
+        g_x = self._head_backward(x, gq - gq.mean(), ga0, gc6)
         return energy, g_x, f3, most
 
     def _head_local(self, x, pos3, nb):
         """Repulsion and heads: per-atom energy without the long range, raw charge, a0 and
-        c6 ratios, the gate, the clash sum, and the repulsion's forces."""
+        c6 ratios, and the repulsion's forces."""
         n, dt = self.n, self.dtype
-        order, cell_start, cell_of, nbr, cnt = nb
+        nbr, cnt = nb[3], nb[4]
         px, py, pz = pos3
         zero = jnp.zeros((n,), dt)
         shp = jax.ShapeDtypeStruct
         nkp = int(2 ** math.ceil(math.log2(self.nk)))
-        e_atom, clash, fx, fy, fz, fw = pl.pallas_call(
-            partial(_sr_kernel, ZMAX=self.zmax, NK=self.nk, NKP=nkp, K=self.K, MODE=0),
+        e_atom, fx, fy, fz, fw = pl.pallas_call(
+            partial(_sr_kernel, ZMAX=self.zmax, NK=self.nk, NKP=nkp),
             grid=(n,), compiler_params=_cp(NUM_WARPS),
-            out_shape=(shp((n,), dt),) * 6,
-            input_output_aliases={10: 2, 11: 3, 12: 4, 13: 5},
-        )(px, py, pz, self.z, nbr, cnt, self.nlh_a, self.nlh_b, zero, self.sr_scal, zero, zero + 0.0, zero + 0.0,
+            out_shape=(shp((n,), dt),) * 5,
+            input_output_aliases={9: 1, 10: 2, 11: 3, 12: 4},
+        )(px, py, pz, self.z, nbr, cnt, self.nlh_a, self.nlh_b, self.sr_scal, zero, zero + 0.0, zero + 0.0,
           zero + 0.0, self._box(px))
-        gate = jnp.ones((n,), dt) if self.floor else jnp.clip(1.0 - clash, 0.0, 1.0)
-        e_loc, raw_q, a0, c6 = self._heads(x, self.z, gate)
-        return e_atom + e_loc, raw_q, a0, c6, gate, clash, (fx, fy, fz, fw)
+        e_loc, raw_q, a0, c6 = self._heads(x, self.z)
+        return e_atom + e_loc, raw_q, a0, c6, (fx, fy, fz, fw)
 
     def _long_range(self, pos3, grid, q, a0, c6, e_atom, f3):
         """Electrostatics and dispersion over the cell grid: e_atom and forces added to,
         dE/d(q, a0, c6) per atom, the most partners of any atom."""
-        n, dt = q.shape[0], self.dtype
+        n, dt = self.n, self.dtype
         order, cell_start, cell_of = grid
         px, py, pz = pos3
         shp = jax.ShapeDtypeStruct
@@ -1657,8 +1578,8 @@ class FlashSO3LR:
             # which counts half (the pair terms count every pair from both ends)
             return [a + b for a, b in zip(f3[:3], f)] + [f3[3].at[0].add(2.0 * w.astype(dt))]
         if self.pme_el:
-            e, g, f, w = pme_electrostatics(pos3, q, L, self.mesh_el, self.pme_el[0], self.units["ke"],
-                                            dt, self.pme_chunk)
+            e, g, f, w = pme_electrostatics(pos3, q, L, self.mesh_el, self.pme_el[0], ASE_UNITS["ke"], dt,
+                                            PME_CHUNK)
             e_atom, gq = e_atom + e, gq + g
             f3 = add(f3, f, w)
             if self.pme_disp:
@@ -1669,44 +1590,27 @@ class FlashSO3LR:
             # dispersion charges sqrt(C6_i), C6_i = C6_free(Z_i) c6_ratio_i (atomic units)
             c6f = self.c6tab[self.z - 1]
             qd = jnp.sqrt(jnp.maximum(c6f * c6, 0.0))
-            e, g, f, w = pme_dispersion(pos3, qd, L, self.mesh_disp, self.pme_disp[0], self.units["bohr"],
-                                        self.units["hartree"], dt, self.pme_chunk)
+            e, g, f, w = pme_dispersion(pos3, qd, L, self.mesh_disp, self.pme_disp[0], ASE_UNITS["bohr"],
+                                        ASE_UNITS["hartree"], dt, PME_CHUNK)
             e_atom = e_atom + e
             gc6 = gc6 + g * jnp.where(qd > 0.0, c6f / (2.0 * jnp.where(qd > 0.0, qd, 1.0)), 0.0)
             f3 = add(f3, f, w)
         return e_atom, gq, gc6, tuple(f3)
 
-    def _head_backward(self, x, pos3, nb, gate, clash, w_e, g_raw, ga0, gc6, f3):
-        """dE/dx of sum_i w_e[i] e_local[i] + g_raw[i] raw_q[i] + ga0[i] a0[i] + gc6[i] c6[i]
-        (w_e None: all ones), and the gate's forces added to f3."""
-        n, dt = self.n, self.dtype
-        order, cell_start, cell_of, nbr, cnt = nb
-        px, py, pz = pos3
-        shp = jax.ShapeDtypeStruct
-        nkp = int(2 ** math.ceil(math.log2(self.nk)))
-        w_e = jnp.ones((n,), dt) if w_e is None else w_e
-
-        def heads_bwd(start, x_t, g_t, w_t, gr_t, ga_t, gc_t):
+    def _head_backward(self, x, g_raw, ga0, gc6):
+        """dE/dx of sum_i e_local[i] + g_raw[i] raw_q[i] + ga0[i] a0[i] + gc6[i] c6[i], written
+        over x (dead after)."""
+        def heads_bwd(start, x_t, gr_t, ga_t, gc_t):
             zt = lax.dynamic_slice_in_dim(self.z, start, self.tile)
 
-            def f(xx, gg):
-                e_l, rq, a, c = self._heads(xx, zt, gg)
-                s = (w_t * e_l).sum() + (gr_t * rq).sum()
+            def f(xx):
+                e_l, rq, a, c = self._heads(xx, zt)
+                s = e_l.sum() + (gr_t * rq).sum()
                 if self.disp:
                     s = s + (ga_t * a).sum() + (gc_t * c).sum()
                 return s
-            return jax.grad(f, argnums=(0, 1))(x_t, g_t)
-        # in place: x's rows become dE/dx (x is dead after), gate's become dE/dgate
-        g_x, g_gate = self._map_rows(heads_bwd, [x, gate, w_e, g_raw, ga0, gc6], [x, gate + 0.0])
-        if not self.floor:
-            g_clash = jnp.where((clash > 0.0) & (clash < 1.0), -g_gate, 0.0)
-            _, _, *f3 = pl.pallas_call(
-                partial(_sr_kernel, ZMAX=self.zmax, NK=self.nk, NKP=nkp, K=self.K, MODE=1),
-                grid=(n,), compiler_params=_cp(NUM_WARPS),
-                out_shape=(shp((n,), dt),) * 6,
-                input_output_aliases={10: 2, 11: 3, 12: 4, 13: 5},
-            )(px, py, pz, self.z, nbr, cnt, self.nlh_a, self.nlh_b, g_clash, self.sr_scal, *f3, self._box(px))
-        return g_x, tuple(f3)
+            return (jax.grad(f)(x_t),)
+        return self._map_rows(heads_bwd, [x, g_raw, ga0, gc6], [x])[0]
 
     def _post_backward(self, li, x_l, ev_l, kept, g_x, g_ev, pos3, nbr, cnt):
         """dE/d(layer li's attention output), from dE/d(its output); the attention output
@@ -1806,10 +1710,6 @@ class FlashSO3LR:
                                                              gdx, gdev, carry)
                     c["att", li, pi] = jit(att, donate_argnums=(4,))
             c["head"] = jit(lambda x, R, nb: self._head(x, self._pos3(R), nb), donate_argnums=(0,))
-            c["head_local"] = jit(lambda x, R, nb: self._head_local(x, self._pos3(R), nb))
-            c["head_bwd"] = jit(
-                lambda x, R, nb, gate, clash, w, gr, ga, gc, f3: self._head_backward(
-                    x, self._pos3(R), nb, gate, clash, w, gr, ga, gc, f3), donate_argnums=(0,))
             self._stage_cache = c
         return self._stage_cache
 
@@ -1817,11 +1717,7 @@ class FlashSO3LR:
         """(energy, forces) as a sequence of jitted stages driven from Python: between
         stages only the arrays held here are alive. Not traceable inside a jitted jax-md
         step; for the largest systems."""
-        return self._staged(R, lambda c, x, R, nb: c["head"](x, R, nb))[:2]
-
-    def energy_forces_strain_staged(self, R):
-        """energy_forces_staged and dE/d(strain) (box and positions scaled together)."""
-        return self._staged(R, lambda c, x, R, nb: c["head"](x, R, nb))
+        return self.energy_forces_strain_staged(R)[:2]
 
     def _forward_staged(self, R):
         """The neighbour table and the layers' forward: {"nb", "x", "saved"}."""
@@ -1840,13 +1736,14 @@ class FlashSO3LR:
             del out
         return {"nb": nb, "x": x, "saved": saved}
 
-    def _backward_staged(self, R, st, head):
-        """The heads (``head``) and the layers' backward from a forward's state (consumed):
-        energy, forces (three arrays), the most long-range partners of any atom."""
+    def _backward_staged(self, R, st):
+        """The heads and the layers' backward from a forward's state (consumed): energy,
+        forces and the strain derivative's per-atom terms, the most long-range partners
+        of any atom."""
         c = self._stages()
         nb, x, saved = st.pop("nb"), st.pop("x"), st.pop("saved")
         nbr, cnt = nb[3], nb[4]
-        energy, g_x, f3, most = head(c, x, R, nb)
+        energy, g_x, f3, most = c["head"](x, R, nb)
         del x
         g_ev = jnp.zeros((self.n, self.M), self.dtype)
         for li in reversed(range(self.statics["num_layers"])):
@@ -1873,18 +1770,23 @@ class FlashSO3LR:
             del g_xin
         return energy, f3, most
 
-    def _staged(self, R, head):
+    def energy_forces_strain_staged(self, R):
+        """energy_forces_staged and dE/d(strain) (box and positions scaled together)."""
         R = jnp.asarray(R)
         R = R if R.dtype == jnp.float64 else R.astype(self.dtype)
         while True:
             st = self._forward_staged(R)
             cnt = st["nb"][4]
-            energy, f3, most = self._backward_staged(R, st, head)
+            energy, f3, most = self._backward_staged(R, st)
             if int(jnp.max(cnt)) <= self.K and int(most) <= self.maxh:
-                return energy, jnp.stack(f3[:3], -1), (None if energy is None else self._strain(f3[3], R))
-            self.K = int(math.ceil(self.K * 1.25 / 16) * 16)
-            self.maxh = int(self.maxh * 1.5)
-            self._build_jit()
+                return energy, jnp.stack(f3[:3], -1), self._strain(f3[3], R)
+            self.widen()
+
+    def widen(self):
+        """Wider neighbour rows and long-range scratch after an overflow; recompiles."""
+        self.K = int(math.ceil(self.K * 1.25 / 16) * 16)
+        self.maxh = int(self.maxh * 1.5)
+        self._build_jit()
 
     def _build_jit(self):
         def ef(R, L):
@@ -1903,26 +1805,11 @@ class FlashSO3LR:
             e, f, over, w = self._jit(R, self.box)
             if not bool(over):
                 return e, f, w
-            self.K = int(math.ceil(self.K * 1.25 / 16) * 16)
-            self.maxh = int(self.maxh * 1.5)
-            self._build_jit()
+            self.widen()
 
     def energy_forces(self, R):
         """(energy, forces). Rebuilds with wider tables if a row or scratch overflowed."""
         return self.energy_forces_strain(R)[:2]
-
-    def _energy_forces_in_box(self, R):
-        """_energy_forces in the current box, traceable inside a jitted step."""
-        keep, self._Lt = self._Lt, self.box
-        try:
-            return self._energy_forces(R)
-        finally:
-            self._Lt = keep
-
-    def force_fn(self, R, **kwargs):
-        """Forces only, jittable inside a jax-md step (no overflow handling: check
-        ``self.check(R)`` between chunks of steps)."""
-        return self._energy_forces_in_box(R)[1]
 
     def set_box(self, L):
         """A new orthorhombic box (sides L) for the next calls, e.g. an NPT step. Within
@@ -1932,7 +1819,6 @@ class FlashSO3LR:
         lo, hi = (1.0 - self.box_margin), (1.0 + self.box_margin)
         if all(lo * b <= v <= hi * b for v, b in zip(L, self.L)):
             self.box = jnp.asarray(L, jnp.float64 if jax.config.jax_enable_x64 else self.dtype)
-            return False
+            return
         self._layout(L)
         self._build_jit()
-        return True

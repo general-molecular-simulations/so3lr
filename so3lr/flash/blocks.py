@@ -32,12 +32,13 @@ def linear(p, x, *, use_bias=True):
     return y
 
 
-def mlp(p, names, x, *, use_bias=True, final_use_bias=True, last_linear=True):
+def mlp(p, names, x, *, use_bias=True, final_use_bias=True):
+    """Dense layers with silu between them (none after the last)."""
     n = len(names)
     for i, name in enumerate(names):
         is_last = i == n - 1
         x = linear(p[name], x, use_bias=final_use_bias if is_last else use_bias)
-        if not is_last or not last_linear:
+        if not is_last:
             x = jax.nn.silu(x)
     return x
 
@@ -45,23 +46,18 @@ def mlp(p, names, x, *, use_bias=True, final_use_bias=True, last_linear=True):
 def scalar_equivariant_exchange(p, scalar_features, equivariant_features, *, degrees):
     repeats, total = degree_repeats(degrees)
     features = jnp.concatenate([scalar_features, l0_contraction(equivariant_features, degrees)], axis=-1)
-    updates = mlp(p, ("mlp_layer_2",), features, last_linear=True)  # a single linear layer
+    updates = linear(p["mlp_layer_2"], features)
     scalar_update, equivariant_update = jnp.split(updates, [scalar_features.shape[-1]], axis=-1)
     equivariant_update = jnp.repeat(equivariant_update, repeats=repeats, axis=-1, total_repeat_length=total)
     return scalar_update, equivariant_update * equivariant_features
 
 
-def local_node_energy(p, x, atomic_numbers, gate, *, head_index):
-    energy_offset = p["energy_offset"][atomic_numbers]
-    atomic_scales = p["atomic_scales"][atomic_numbers]
+def local_node_energy(p, x, atomic_numbers, *, head_index):
     atomic_energy = mlp(p, ("energy_dense_regression", "energy_dense_final"), x, final_use_bias=False)
-    atomic_energy = atomic_energy * atomic_scales
-    atomic_energy = atomic_energy * gate[:, None]
-    atomic_energy = atomic_energy + energy_offset
+    atomic_energy = atomic_energy * p["atomic_scales"][atomic_numbers] + p["energy_offset"][atomic_numbers]
     return atomic_energy[:, head_index]
 
 
-def ratio_head(p, names, x, atomic_numbers, gate):
+def ratio_head(p, names, x, atomic_numbers):
     shift = p["Embed_0"]["embedding"][atomic_numbers].squeeze(axis=-1)
-    ratio = jnp.abs(mlp(p, names, x).squeeze(axis=-1) + shift)
-    return gate * ratio + (1.0 - gate)
+    return jnp.abs(mlp(p, names, x).squeeze(axis=-1) + shift)

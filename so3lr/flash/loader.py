@@ -6,26 +6,23 @@ import jax.numpy as jnp
 import numpy as np
 from ase.units import alpha as FINE_STRUCTURE
 
-from so3lr._serialization import load_pickle_with_warning
 from so3lr.mlff.nn.observable.dispersion_ref_data import C6_coef, NLH_AA, NLH_BB, alphas
+from so3lr.mlff.utils.checkpoint_utils import load_params_from_workdir
 from so3lr.mlff.utils.training_utils import expand_observables_to_theory_levels
 from so3lr.model_registry import resolve_model
 
 
 def load_params(model=None, *, precision="float32", lr_cutoff=12.0, dispersion_damping=2.0):
     """(params, statics) for ``FlashSO3LR``, read the way ``load_model`` reads them:
-    params.pkl expanded to all theory levels, the energy from ``spec.head_index``, the
-    NLH and free-atom dispersion tables of ``dispersion_ref_data``."""
+    params.pkl (or the checkpoint) expanded to all theory levels, the energy from
+    ``spec.head_index``, the NLH and free-atom dispersion tables of ``dispersion_ref_data``."""
     spec = resolve_model(model)
     with open(spec.dir / "hyperparameters.json") as fp:
         cfg = json.load(fp)
     m = cfg["model"]
     if m.get("legacy_so3lr_bool", False):
         raise ValueError("the flash engine runs the v2 models (so3lr-s/m), not the legacy so3lr")
-    if not spec.from_file:
-        raise ValueError(f"the flash engine reads params.pkl, which {spec.dir} does not have")
-    raw = load_pickle_with_warning(spec.dir / "params.pkl", artifact="params.pkl model parameters")
-    raw = expand_observables_to_theory_levels(raw)["params"]
+    raw = expand_observables_to_theory_levels(load_params_from_workdir(spec.dir))["params"]
     dt = jnp.float64 if precision == "float64" else jnp.float32
 
     def cast(x):

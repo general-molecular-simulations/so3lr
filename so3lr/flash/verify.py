@@ -54,7 +54,7 @@ def main(argv=None):
     clash.set_positions(pos)
     clash.wrap()
 
-    potential = load_model(args.model or "so3lr-m-2606", precision=dtype, lr_cutoff=args.lr_cutoff,
+    potential = load_model(args.model, precision=dtype, lr_cutoff=args.lr_cutoff,
                            dispersion_damping=2.0, kspace_electrostatics=kel, kspace_dispersion=kdi)
     settings = dict(model_path=args.model, lr_cutoff=args.lr_cutoff, dispersion_damping=2.0,
                     flash_mode=args.flash_mode, total_charge=0, num_unpaired_electrons=0,
@@ -62,7 +62,8 @@ def main(argv=None):
                     kspace_spacing=args.kspace_spacing, kspace_dispersion=kdi,
                     kspace_dispersion_smearing=args.kspace_smearing,
                     kspace_dispersion_spacing=args.kspace_spacing)
-    eng = build_engine(atoms, settings, dtype)[0]
+    eng, staged = build_engine(atoms, settings, dtype)
+    strain = eng.energy_forces_strain_staged if staged else eng.energy_forces_strain
     ok = True
     for name, at in (("as given", atoms), ("with contacts", clash)):
         geo = atoms_to_jnp(at, precision=dtype)
@@ -87,7 +88,7 @@ def main(argv=None):
         # dE/d(strain): box and positions scaled together, as jax-md's NPT takes it
         w_ref = float(jax.jit(jax.grad(lambda eps: energy_fn(position, perturbation=1.0 + eps, **kw)))(
             jnp.asarray(0.0, dtype)))
-        e, f, w = eng.energy_forces_strain(jnp.asarray(at.get_positions(), dtype))
+        e, f, w = strain(jnp.asarray(at.get_positions(), dtype))
         de = abs(float(e) - e_ref) / len(at)
         df = float(np.abs(np.asarray(f, np.float64) - f_ref).max())
         dw = abs(float(w) - w_ref) / max(abs(w_ref), 1.0)

@@ -292,11 +292,14 @@ is isotropic, not semi-isotropic)`. `--engine flash` or `--engine standard` (or
 `engine:` in a settings file) forces one.
 
 Flash runs on an NVIDIA GPU, for so3lr-s and so3lr-m, in a periodic orthorhombic box at
-least twice `lr_cutoff` and seven 4.5 A cells across (about 31.5 A at `lr_cutoff` 10),
+least twice `lr_cutoff` and wide enough for its cell grid (31.5 A at the default
+`lr_cutoff` of 12 A, 30 A at 10 A),
 for nve, nvt, nvt-langevin and isotropic npt, with the long range in real space or by
 PME (`--kspace-electrostatics pme`, `kspace_dispersion: pme`). Semi-isotropic NPT, the
-dispersion tail correction, Ewald and P3M, fixed atoms, observables, enhanced sampling,
-so3lr-l and the legacy so3lr run on the neighbour-list potential.
+dispersion tail correction, re-tuning the PME mesh during NPT (`kspace_npt_cycles`),
+Ewald and P3M, fixed atoms, observables, enhanced sampling, so3lr-l and the legacy so3lr
+run on the neighbour-list potential, as does any run with a setting or a model
+hyperparameter flash does not know.
 
 - `--flash-mode` sets what flash keeps between the forward and backward pass: `fast`,
   `default`, `lean`, `leanest`, `minimal` (less memory, more recomputation). `auto`

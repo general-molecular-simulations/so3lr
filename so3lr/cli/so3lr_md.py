@@ -4380,12 +4380,13 @@ def run(
     # with its own force (perform_min would build the full model).
     engine = settings.get('engine') or 'auto'
     if engine != 'standard' and input_file_path is not None:
-        try:
-            from so3lr.flash.md import perform_md_flash, flash_problem
-        except Exception as exc:        # e.g. a JAX build without Pallas-Triton
-            problem = f"it does not import here ({type(exc).__name__}: {exc})"
-        else:
-            problem = flash_problem(settings, initial_geometry)
+        from so3lr.flash.check import flash_problem
+        problem = flash_problem(settings, initial_geometry)
+        if problem is None:
+            try:
+                from so3lr.flash.md import perform_md_flash
+            except Exception as exc:    # e.g. a JAX build without Pallas-Triton
+                problem = f"it does not import here ({type(exc).__name__}: {exc})"
         if problem is None:
             logger.info(f"Engine: flash ({'--engine flash' if engine == 'flash' else 'auto'})")
             perform_md_flash(settings, restart, atoms=initial_geometry)
