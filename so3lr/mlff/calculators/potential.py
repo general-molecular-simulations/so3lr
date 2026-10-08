@@ -13,10 +13,11 @@ from typing import Any, Callable, Type, Dict, Sequence, Optional
 from glp.graph import Graph
 
 from ..utils import calculator_utils
+from ..utils.checkpoint_utils import load_params_pkl
 from ..utils.training_utils import expand_observables_to_theory_levels
 from .base_calculator import make_base_calculator
 from ..nn.stacknet.observable_function_sparse import get_observable_fn_sparse
-from ..nn.observable.dispersion_ref_data import supported_atomic_numbers
+from ..nn.observable.dispersion_ref_data import supported_atomic_numbers_for_config
 from ml_collections import config_dict
 from ..config import from_config
 from orbax import checkpoint
@@ -128,10 +129,7 @@ def load_model_from_workdir(
             cfg.model.dispersion_energy_cutoff_lr_damping = dispersion_energy_cutoff_lr_damping
 
     if from_file is True:
-        import pickle
-
-        with open(pathlib.Path(workdir) / 'params.pkl', 'rb') as f:
-            params = pickle.load(f)
+        params = load_params_pkl(pathlib.Path(workdir) / 'params.pkl')
     else:
         loaded_mngr = checkpoint.CheckpointManager(
             pathlib.Path(workdir) / "checkpoints",
@@ -318,10 +316,7 @@ class PotentialSparse(MachineLearningPotential):
         # Which elements this model may be asked about: the reference tables it
         # indexes intersected with what it was trained on (v1 SO3LR: the eight
         # biomolecular elements; v2: Z = 1..85).
-        supported_z = supported_atomic_numbers(
-            legacy=cfg.model.get('legacy_so3lr_bool', False) is True,
-            dispersion=cfg.model.dispersion_energy_bool is True,
-        )
+        supported_z = supported_atomic_numbers_for_config(cfg.model)
 
         cutoff = cfg.model.cutoff
         steps = cfg.model.num_layers

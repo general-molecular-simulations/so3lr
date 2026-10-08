@@ -1525,8 +1525,6 @@ def npt_md(**kwargs) -> None:
     Run NPT (constant pressure and temperature) MD simulation using the Nose-Hoover chain thermostat and barostat.
 
     Note: NPT simulations require a periodic cell in the input structure.
-    Semi-isotropic coupling (YAML `npt_coupling`) is experimental; fully
-    anisotropic coupling is not supported.
 
     Example:
         so3lr npt --input geometry.xyz --temperature 300 --pressure 1

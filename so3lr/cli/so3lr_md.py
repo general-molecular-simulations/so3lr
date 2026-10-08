@@ -101,7 +101,9 @@ def intermediate_quantity_kwargs(observables) -> Dict[str, Any]:
     return {}
 
 # HDF5 wrapper to replace mlff.mdx.hdfdict
-DataSetEntry = namedtuple('DataSetEntry', ('chunk_length', 'shape', 'dtype'))
+# per_atom: the leading dataset axis is atoms, so atom selections apply to it.
+DataSetEntry = namedtuple('DataSetEntry', ('chunk_length', 'shape', 'dtype', 'per_atom'),
+                          defaults=(False,))
 
 
 def _existing_regular_output_mode(path: Path) -> Optional[int]:
@@ -163,8 +165,9 @@ class HDF5Store(object):
         with h5py.File(self.datapath, mode='a') as h5f:
             try:
                 for key, array in arrays.items():
-                    h5f[key].resize((self.i + n,) + self.dataset[key].shape)
-                    h5f[key][self.i:] = array
+                    dset = h5f[key]
+                    dset.resize((self.i + n,) + self.dataset[key].shape)
+                    dset[self.i:] = array
             except BaseException:
                 # Keep every dataset at the same frame count if a write fails.
                 for key in arrays:
@@ -563,12 +566,14 @@ def init_hdf5_store(
         'positions': DataSetEntry(
             chunk_length=batch_size,
             shape=(num_atoms, 3),
-            dtype=storage_dtype
+            dtype=storage_dtype,
+            per_atom=True,
         ),
         'momenta': DataSetEntry(
             chunk_length=batch_size,
             shape=(num_atoms, 3),
-            dtype=storage_dtype
+            dtype=storage_dtype,
+            per_atom=True,
         ),
         'box': DataSetEntry(
             chunk_length=batch_size,
@@ -598,7 +603,8 @@ def init_hdf5_store(
             dataset['x'] = DataSetEntry(
                 chunk_length=batch_size,
                 shape=(num_atoms, num_features),
-                dtype=storage_dtype
+                dtype=storage_dtype,
+                per_atom=True,
             )
         elif is_per_atom_observable(o) or o in ('hirshfeld_ratios', 'c6_ratios',
                                                'electrostatic_energy_kspace'):
@@ -610,7 +616,8 @@ def init_hdf5_store(
             dataset[o] = DataSetEntry(
                 chunk_length=batch_size,
                 shape=(num_atoms,),
-                dtype=storage_dtype
+                dtype=storage_dtype,
+                per_atom=True,
             )
         else:
             logger.warning(
@@ -666,9 +673,9 @@ def write_to_hdf5(
 ) -> Tuple[list, list, list, MutableMapping[str, list]]:
     """Append buffered frames (one list entry per frame) to the HDF5 store.
 
-    ``indices`` selects the stored atoms for positions, momenta, and per-atom
-    observables (including the 'x' embeddings). The molecular dipole is stored
-    as (n_frames, 1, 3) and is never atom-indexed, even for a 3-atom system.
+    ``indices`` selects the stored atoms for every dataset whose schema entry
+    is ``per_atom``; molecular datasets (e.g. the dipole) are reshaped to their
+    stored shape instead.
 
     Returns empty buffers for momenta, positions, boxes, and observables.
     """
@@ -677,15 +684,14 @@ def write_to_hdf5(
         return momenta, positions, boxes, obs_dict
     atoms = slice(None) if indices is None else indices
     try:
-        step_data = {
-            'positions': np.stack(positions)[:, atoms],
-            'momenta': np.stack(momenta)[:, atoms],
-            'box': np.stack(boxes),
-        }
-        for o, values in obs_dict.items():
-            values = np.stack(values)
-            step_data[o] = (values.reshape(len(values), 1, 3) if o == 'dipole_vec'
-                            else values[:, atoms])
+        frames = {'positions': positions, 'momenta': momenta, 'box': boxes, **obs_dict}
+        step_data = {}
+        for key, values in frames.items():
+            if key not in hdf5_store.dataset:  # skipped (with a warning) at init
+                continue
+            values, entry = np.stack(values), hdf5_store.dataset[key]
+            step_data[key] = (values[:, atoms] if entry.per_atom
+                              else values.reshape((len(values),) + entry.shape))
         hdf5_store.append(step_data)
     except Exception as e:
         logger.error(f"Failed to write to HDF5 file: {str(e)}")

@@ -170,30 +170,29 @@ def _heteronuclear_kspace_case(*, do_ewald, grid_size):
     return module, variables, inputs
 
 
-def _single_energy_and_forces(module, variables, inputs):
-    """Per-atom energies and forces of the single-graph reciprocal module."""
-    def per_atom(positions):
-        return module.apply(
-            variables, {**inputs, 'positions': positions}
-        )['dispersion_energy_kspace']
-
-    energies = jax.jit(per_atom)(inputs['positions'])
-    forces = jax.jit(jax.grad(lambda p: -jnp.sum(per_atom(p))))(inputs['positions'])
+def _energy_and_forces(per_atom, positions):
+    """Per-atom energies and forces of a positions -> per-atom-energy function."""
+    energies = jax.jit(per_atom)(positions)
+    forces = jax.jit(jax.grad(lambda p: -jnp.sum(per_atom(p))))(positions)
     return energies, forces
+
+
+def _single_energy_and_forces(module, variables, inputs):
+    """Single-graph reciprocal module."""
+    return _energy_and_forces(
+        lambda p: module.apply(variables, {**inputs, 'positions': p})['dispersion_energy_kspace'],
+        inputs['positions'],
+    )
 
 
 def _batched_energy_and_forces(module, variables, inputs):
-    """Per-atom energies and forces of the batched (vmapped) reciprocal path."""
+    """Batched (vmapped) reciprocal path."""
     bound_module = module.bind(variables)
-
-    def per_atom(positions):
-        return _batched_kspace_dispersion(
-            bound_module, {**inputs, 'positions': positions}
-        )['dispersion_energy_kspace']
-
-    energies = jax.jit(per_atom)(inputs['positions'])
-    forces = jax.jit(jax.grad(lambda p: -jnp.sum(per_atom(p))))(inputs['positions'])
-    return energies, forces
+    return _energy_and_forces(
+        lambda p: _batched_kspace_dispersion(
+            bound_module, {**inputs, 'positions': p})['dispersion_energy_kspace'],
+        inputs['positions'],
+    )
 
 
 def test_pme_matches_ewald_reference_for_heteronuclear_cell():

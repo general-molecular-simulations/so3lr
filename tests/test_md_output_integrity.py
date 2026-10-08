@@ -9,6 +9,7 @@ from ase.io import read
 from jax_md import simulate
 
 from so3lr.cli import so3lr_md
+from so3lr.md_settings_validation import validate_md_counts
 from so3lr.cli.so3lr_md import (
     _validate_md_output_write_policy,
     box_for_trajectory,
@@ -19,7 +20,6 @@ from so3lr.cli.so3lr_md import (
     positions_to_cartesian,
     save_restart_checkpoints,
     save_state,
-    validate_md_counts,
     write_to_extxyz,
     write_to_hdf5,
 )

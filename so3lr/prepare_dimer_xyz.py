@@ -21,33 +21,24 @@ from tqdm import tqdm
 
 from so3lr.model_registry import DEFAULT_MODEL, resolve_model
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
-    supported_atomic_numbers as _supported_atomic_numbers,
+    supported_atomic_numbers_for_config,
 )
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-# Coverage of the default (v2) models, Z=1..85; kept for callers that import it.
-SUPPORTED_ATOMIC_NUMBERS = _supported_atomic_numbers(legacy=False)
-
 
 def supported_elements_for_model(model=None):
     """Return the element coverage of a bundled model name or custom model directory."""
     with open(resolve_model(model).dir / "hyperparameters.json") as fp:
-        cfg = json.load(fp)["model"]
-    return _supported_atomic_numbers(
-        legacy=bool(cfg.get("legacy_so3lr_bool", False)),
-        dispersion=bool(cfg.get("dispersion_energy_bool", True)),
-    )
+        return supported_atomic_numbers_for_config(json.load(fp)["model"])
 
 
-def check_supported_elements(atoms, supported=None):
+def check_supported_elements(atoms, supported):
     """
     Check if all atoms in the structure have supported atomic numbers.
     Returns (is_supported, unsupported_elements).
     """
-    if supported is None:
-        supported = SUPPORTED_ATOMIC_NUMBERS
     atomic_numbers = set(atoms.get_atomic_numbers())
     unsupported = atomic_numbers - set(supported)
     return len(unsupported) == 0, unsupported

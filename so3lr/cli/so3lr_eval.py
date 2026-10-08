@@ -29,7 +29,7 @@ from ..jraph_utils import jraph_to_ase_atoms
 from ..base_calculator import make_so3lr
 from ..mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported,
-    supported_atomic_numbers,
+    supported_atomic_numbers_for_config,
 )
 from .so3lr_md import load_model, setup_logger
 from ..pbc import is_fully_periodic
@@ -468,10 +468,7 @@ def evaluate_so3lr_on(
     # 'a0_ratios' for the new so3lr-s/m/l models. Normalize the requested target
     # to the model's output key so metric names (e.g. a0_ratios_rmse) match.
     legacy_model = bool(cfg['model'].get('legacy_so3lr_bool', False))
-    supported_z = supported_atomic_numbers(
-        legacy=legacy_model,
-        dispersion=bool(cfg['model'].get('dispersion_energy_bool', True)),
-    )
+    supported_z = supported_atomic_numbers_for_config(cfg['model'])
     ratio_key = 'hirshfeld_ratios' if legacy_model else 'a0_ratios'
     _other_ratio = 'a0_ratios' if ratio_key == 'hirshfeld_ratios' else 'hirshfeld_ratios'
     if _other_ratio in target_list:

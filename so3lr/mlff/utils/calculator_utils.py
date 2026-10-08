@@ -6,7 +6,7 @@ from ml_collections import config_dict
 from typing import Any, Dict, Optional, Sequence
 
 from ..config import from_config
-from .checkpoint_utils import load_params_from_workdir
+from .checkpoint_utils import load_params_from_workdir, load_params_pkl
 
 
 def load_hyperparameters(workdir: str):
@@ -90,10 +90,7 @@ def load_model_from_workdir(
             cfg.model.dispersion_energy_cutoff_lr_damping = dispersion_energy_cutoff_lr_damping
 
     if from_file is True:
-        import pickle
-
-        with open(cleaned_workdir / 'params.pkl', 'rb') as f:
-            params = pickle.load(f)
+        params = load_params_pkl(cleaned_workdir / 'params.pkl')
     else:
         params = load_params_from_workdir(
             workdir=cleaned_workdir

@@ -27,23 +27,17 @@ def test_bundled_configs_disable_wandb():
             assert yaml.safe_load(f)['training']['use_wandb'] is False
 
 
-def test_wandb_opt_in_logs_config(monkeypatch):
+@pytest.mark.parametrize('init_args, expected', [
+    ({'project': 'p'}, {'config': {'workdir': 'run', 'training': {'use_wandb': True}}, 'project': 'p'}),
+    # A 'config' entry is merged into the logged config, not passed twice.
+    ({'config': {'tag': 'x'}}, {'config': {'workdir': 'run', 'training': {'use_wandb': True}, 'tag': 'x'}}),
+])
+def test_wandb_opt_in_logs_config(monkeypatch, init_args, expected):
     calls = []
     monkeypatch.setitem(sys.modules, 'wandb', SimpleNamespace(init=lambda **kw: calls.append(kw)))
-    config = {'workdir': 'run', 'training': {'use_wandb': True, 'wandb_init_args': {'project': 'p'}}}
+    config = {'workdir': 'run', 'training': {'use_wandb': True, 'wandb_init_args': init_args}}
     assert initialize_wandb(config) is True
-    assert calls == [{
-        'config': {'workdir': 'run', 'training': {'use_wandb': True}},
-        'project': 'p',
-    }]
-
-
-def test_wandb_init_args_config_is_merged_not_duplicated(monkeypatch):
-    calls = []
-    monkeypatch.setitem(sys.modules, 'wandb', SimpleNamespace(init=lambda **kw: calls.append(kw)))
-    config = {'training': {'use_wandb': True, 'wandb_init_args': {'config': {'tag': 'x'}}}}
-    assert initialize_wandb(config) is True
-    assert calls == [{'config': {'training': {'use_wandb': True}, 'tag': 'x'}}]
+    assert calls == [expected]
 
 
 def test_wandb_broken_dependency_is_not_reported_as_missing(monkeypatch):

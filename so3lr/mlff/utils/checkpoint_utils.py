@@ -56,6 +56,12 @@ def load_params_from_checkpoint(
     return params
 
 
+def load_params_pkl(path):
+    """Load a ``params.pkl`` parameter tree."""
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
+
 def load_params_from_workdir(workdir):
     """Load parameters from workdir.
 
@@ -75,9 +81,7 @@ def load_params_from_workdir(workdir):
     # Try loading from params.pkl first (faster, more portable)
     pkl_path = workdir_path / "params.pkl"
     if pkl_path.exists():
-        with open(pkl_path, 'rb') as f:
-            params = pickle.load(f)
-        return params
+        return load_params_pkl(pkl_path)
 
     # Fall back to orbax checkpoint
     ckpt_dir = workdir_path / "checkpoints"
