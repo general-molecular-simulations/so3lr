@@ -1641,6 +1641,32 @@ wheels = [
 ]
 
 [[package]]
+name = "matscipy"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ase" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/68/a8/3e1dedd4f5255dc96db25736dcd5b4815a59afc1592b9cda0232c62ac23a/matscipy-1.3.0.tar.gz", hash = "sha256:3f49a6af5a1c5cdc5a8530e44e861b8dbaea94dd85a32ca54eecf07b492612ba", size = 10379901, upload-time = "2026-09-25T22:03:54.318Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ae/94/6e23f0a175d4914b10d8eacf35235e1b22ec6624ab74ec52318996d4aa1a/matscipy-1.3.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:60fa922416ce73114d20e23a4a658f3948a665bcced2f4c98d225d297c0684e0", size = 447662, upload-time = "2026-09-25T22:03:11.68Z" },
+    { url = "https://files.pythonhosted.org/packages/96/58/a224198f60c90c1c1078274aa184430969f7e364c05c7a86d40227061689/matscipy-1.3.0-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6b36667299384ee4d543e7f67beb9886ea02b0d9c8c3acded5df85112e0112e9", size = 457336, upload-time = "2026-09-25T22:03:22.584Z" },
+    { url = "https://files.pythonhosted.org/packages/66/00/94585c8d5f89d1a8aac1ec02b055d96538cc71522fed268a95fa883515ab/matscipy-1.3.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7fcbe1d19f0299b8784daf92fddc9f7d419757fb31744ca59291c3bfe8f4b6a3", size = 457536, upload-time = "2026-09-25T22:03:24.191Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/2c/ee76ad1f6f1a7f0384cadcef67ed0244b21ae30747e847e136cc83879459/matscipy-1.3.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:726e43502c5ad5b65b9ed738897466a711c6ba03388099af79e756490504a2de", size = 1441431, upload-time = "2026-09-25T22:03:25.732Z" },
+    { url = "https://files.pythonhosted.org/packages/86/24/9c58347722e784bfdf5b190af3301e7c958442be8c457a13e55b39bbc1eb/matscipy-1.3.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:d7dfcac1faa72ad2d36bd072417c9ade3eab12e8b46d751c045723cd3373a556", size = 1490825, upload-time = "2026-09-25T22:03:27.398Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/16/8978c84559a5055aeb885d04d7f985051cb1ffea531c40275a9b1dd14897/matscipy-1.3.0-cp312-cp312-win_amd64.whl", hash = "sha256:bd65a9fa4bba70470e28f547d1b87ab1ca06460b872a13595b1f85725d6c2e72", size = 577846, upload-time = "2026-09-25T22:03:28.845Z" },
+    { url = "https://files.pythonhosted.org/packages/27/66/6d7468d930fe6623e3f764c4752d36b13e5786c7ac4f09881ff8283adfad/matscipy-1.3.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:bcd9bc3216224835b527ee9ddb1e0edda20267380a6f2d50ff32243a9ba68a44", size = 447664, upload-time = "2026-09-25T22:03:30.506Z" },
+    { url = "https://files.pythonhosted.org/packages/75/cb/f9d3df6ffca6823347be966df6b5c2795a3d96000b51c4b3f8c88d2a8208/matscipy-1.3.0-cp313-cp313-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:58845e35f3c7cce9955627885d0b48905fc8ed8d7baf9d0b6be4ae64710af003", size = 457339, upload-time = "2026-09-25T22:03:32.284Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/f6/b01388e8bad0bdc5166af004e6a997f1fd5bf1b8229d40c12fa33e5b0d0e/matscipy-1.3.0-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9397e1226c52ab854ffafdbb6e84a79955881709402e0966460d1c8af0b5ae06", size = 457538, upload-time = "2026-09-25T22:03:34.24Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/6d/2235b386d85a193486c2c3f6af500fd8b3d0eb15ac99e2894019087b6716/matscipy-1.3.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:a3ef786bd52cf2eb5bd683212725a68bb3062f4482668db960740847483a73a2", size = 1441436, upload-time = "2026-09-25T22:03:35.715Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/a5/ca8d2f8242451a98741935f79c99986d09ce8fcf423559188827ef6d1752/matscipy-1.3.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:dbe25f2031c609a29c385f89db0995f324aec79846a28ee82a30e9351a374f00", size = 1490828, upload-time = "2026-09-25T22:03:41.461Z" },
+    { url = "https://files.pythonhosted.org/packages/96/06/bc99c11586d68761a45b607485d3c5916596be9b0826080820237f0d2344/matscipy-1.3.0-cp313-cp313-win_amd64.whl", hash = "sha256:cdaf9d26c2af8fcbb2545960b739b893629cf2514d3493cab3c1b3124da411c2", size = 577841, upload-time = "2026-09-25T22:03:42.914Z" },
+]
+
+[[package]]
 name = "mdurl"
 version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2988,6 +3014,9 @@ dependencies = [
 cuda12 = [
     { name = "jax", extra = ["cuda12"], marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
+matscipy = [
+    { name = "matscipy" },
+]
 pysages = [
     { name = "pysages" },
 ]
@@ -3029,6 +3058,7 @@ requires-dist = [
     { name = "jax-pme", git = "https://github.com/fbruenig/jax-pme.git?rev=de9a3a9dfeb1f5b635a54a8f277c1ec3ecd2bf6d" },
     { name = "jaxlib", specifier = "<0.11" },
     { name = "jraph", git = "https://github.com/google-deepmind/jraph.git?rev=51f5990104f7374492f8f3ea1cbc47feb411c69c" },
+    { name = "matscipy", marker = "extra == 'matscipy'", specifier = ">=1.0" },
     { name = "ml-collections", specifier = ">=1.1,<2" },
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "optax", specifier = "<0.3" },
@@ -3041,7 +3071,7 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.67,<5" },
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.29,<0.30" },
 ]
-provides-extras = ["cuda12", "pysages", "tfds", "wandb"]
+provides-extras = ["cuda12", "pysages", "tfds", "wandb", "matscipy"]
 
 [package.metadata.requires-dev]
 dev = [
