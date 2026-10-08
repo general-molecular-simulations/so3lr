@@ -12,6 +12,11 @@ long-range kernels, and the per-atom parts (projections, MLPs, heads) in atom ti
 with ``jax.vjp``. Nothing is stored per edge or per pair, so memory grows by a few KiB
 per atom; the forward and backward are scheduled by hand, layer by layer.
 
+Three of these ideas come from Symmetrix-XL (Fu et al., arXiv:2610.01036): tabulated
+radial functions (each layer's radial filters are cubic Hermite tables of r), streaming
+the edges (each kernel program walks its atom's neighbours in chunks, so no edge array
+exists), and tiled execution (the per-atom work runs over fixed-size atom tiles).
+
 * Per-atom sums (messages, projection gradients, forces) are loop carries written once
   per atom, so the kernels need no read-modify-write of their own rows.
 * The electrostatic pair function depends only on r and Pallas-Triton has no erf, so
@@ -29,9 +34,10 @@ per atom; the forward and backward are scheduled by hand, layer by layer.
   positions scaled together, as jax-md's NPT takes it); the box is an argument of the
   compiled programs (``set_box``), so a box that moves compiles nothing.
 
-Periodic orthorhombic boxes, at least 2 x the long-range cutoff across and 7 grid cells
-per side; models with 4 heads and degrees 1-4 (so3lr-s, so3lr-m). ``so3lr.flash.md`` runs
-MD with it; ``python -m so3lr.flash.verify`` compares it with the neighbour-list potential.
+Periodic orthorhombic boxes, at least 2 x the long-range cutoff across and wide enough
+for the cell grid (``check.box_problem``); models with one head per degree entry,
+degrees 1-4 (so3lr-s, -m, -l). ``so3lr.flash.md`` runs MD with it;
+``python -m so3lr.flash.verify`` compares it with the neighbour-list potential.
 """
 from __future__ import annotations
 
@@ -48,7 +54,7 @@ from jax.experimental.pallas import triton as plgpu
 import jaxpme
 
 from so3lr.flash import blocks
-from so3lr.flash.check import box_problem
+from so3lr.flash.check import box_problem, cell_grid
 from so3lr.mlff.nn.embed.embed_sparse import PAIR_FLOOR_WIDTH, nlh_reference_distance
 from so3lr.mlff.nn.observable.observable_sparse import c6_raw_potential
 from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
@@ -361,7 +367,7 @@ def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
     # CH 0: both channels; 1: heads only (x_out); 2: degrees only (ev_out). The outputs
     # alias the inputs, so a channel not run leaves its output as it was.
     a = _i32(pl.program_id(0))
-    n_a = cnt[a]
+    n_a = jnp.minimum(cnt[a], nbr.shape[1])         # an overflowed row holds K entries
     inv_nc, spacing, n_int, rc = scal[0], scal[1], scal[2], scal[3]
     Lx, Ly, Lz = boxl[0], boxl[1], boxl[2]
     ax, ay, az = px[a], py[a], pz[a]
@@ -434,7 +440,7 @@ def _att_bwd_heads_kernel(q1, k1, v1, ev, px, py, pz, nbr, cnt, z, rmin, tv, td,
 
     @pl.when(a >= a0[1])                          # the last tile overlaps: new atoms only
     def _():
-        n_a = cnt[a]
+        n_a = jnp.minimum(cnt[a], nbr.shape[1])
         inv_nc, spacing, n_int, rc = scal[0], scal[1], scal[2], scal[3]
         Lx, Ly, Lz = boxl[0], boxl[1], boxl[2]
         ax, ay, az = px[a], py[a], pz[a]
@@ -518,7 +524,7 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
 
     @pl.when(a >= a0[1])
     def _():
-        n_a = cnt[a]
+        n_a = jnp.minimum(cnt[a], nbr.shape[1])
         inv_nc, spacing, n_int, rc = scal[0], scal[1], scal[2], scal[3]
         Lx, Ly, Lz = boxl[0], boxl[1], boxl[2]
         ax, ay, az = px[a], py[a], pz[a]
@@ -614,7 +620,7 @@ def _sr_kernel(px, py, pz, z, nbr, cnt, nlh_a, nlh_b, scal, fx_in, fy_in, fz_in,
                energy, fx_o, fy_o, fz_o, fw_o, *, ZMAX, NK, NKP):
     """Per-atom NLH energy (half of each pair) and its forces."""
     a = _i32(pl.program_id(0))
-    n_a = cnt[a]
+    n_a = jnp.minimum(cnt[a], nbr.shape[1])         # an overflowed row holds K entries
     ke, rc = scal[0], scal[3]
     Lx, Ly, Lz = boxl[0], boxl[1], boxl[2]
     ax, ay, az = px[a], py[a], pz[a]
@@ -1227,13 +1233,14 @@ class FlashSO3LR:
         so3lr_dev keeps its k-grid)."""
         L = [float(v) for v in L]
         small = [v * (1.0 - self.box_margin) for v in L]
+        if box_problem(small, self.rc, self.rc_lr):
+            small = L                     # near the smallest box: no room to shrink in this layout
         problem = box_problem(small, self.rc, self.rc_lr)
         if problem:
             raise ValueError(problem)
-        self.L = L
+        self.L, self.L_lo = L, small
         self.box = jnp.asarray(L, jnp.float64 if jax.config.jax_enable_x64 else self.dtype)
-        self.nc = [max(int(math.floor(v / self.rc)), 1) for v in small]
-        self.kc = max(int(math.ceil(self.rc_lr / (v / k))) for v, k in zip(small, self.nc))
+        self.nc, self.kc = cell_grid(small, self.rc, self.rc_lr)
         self.mesh_el = pme_mesh_shape(L, self.pme_el[1]) if self.pme_el else None
         self.mesh_disp = pme_mesh_shape(L, self.pme_disp[1]) if self.pme_disp else None
         for m in (self.mesh_el, self.mesh_disp):
@@ -1832,6 +1839,9 @@ class FlashSO3LR:
                 self._Lt = keep
         self._jit = jax.jit(ef)
         self._stage_cache = None
+        # programs others build on this engine's force (md's jitted step loops): they
+        # hold the old tables and grid, so a rebuild drops them
+        self.loops = {}
 
     def energy_forces_strain(self, R):
         """(energy, forces, dE/d(strain)) in the current box (set_box). Rebuilds with
@@ -1851,8 +1861,8 @@ class FlashSO3LR:
         the margin the cell grid was laid out for, nothing compiles; outside it the
         grid (and the PME mesh, as so3lr_dev's re-tuning would) is laid out again for L."""
         L = [float(v) for v in np.asarray(L, np.float64).reshape(-1)[:3]]
-        lo, hi = (1.0 - self.box_margin), (1.0 + self.box_margin)
-        if all(lo * b <= v <= hi * b for v, b in zip(L, self.L)):
+        hi = 1.0 + self.box_margin
+        if all(lo <= v <= hi * b for v, lo, b in zip(L, self.L_lo, self.L)):
             self.box = jnp.asarray(L, jnp.float64 if jax.config.jax_enable_x64 else self.dtype)
             return
         self._layout(L)

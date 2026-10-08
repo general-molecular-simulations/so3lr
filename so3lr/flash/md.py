@@ -9,7 +9,8 @@ forces one.
 Same settings, units, log lines, trajectory and restart files as ``perform_md``; the
 forces come from ``FlashSO3LR`` instead of the neighbour-list potential. NVE and NVT
 integrate Cartesian positions (restart files are converted on load either way); NPT
-integrates fractional ones, as ``perform_md`` does.
+integrates fractional ones, as ``perform_md`` does. With ``flash_mixed`` the MD state is
+float64 around a float32 model; trajectories are written in the model's precision.
 
 A step's new positions (and NPT box) depend only on the previous step's force (and
 strain derivative), so a step can run in two calls: the jax-md step with zero force
@@ -141,18 +142,17 @@ def _surrogate(R, box=None, perturbation=1.0, F=None, W=None, E=None, **kwargs):
 
 
 def _run_jitted(eng, step, state, k):
-    """k steps in one jitted loop; repeated with wider tables if a step overflowed."""
-    cache = eng.__dict__.setdefault("_md_loops", {})
+    """k steps in one jitted loop; repeated with wider tables if a step overflowed (its
+    force is NaN, and so are the positions of any step after it)."""
     for _ in range(MAX_OVERFLOW_RETRIES + 1):
-        if (step, k) not in cache:
-            cache[step, k] = jax.jit(lambda s: jax.lax.fori_loop(0, k, lambda i, x: step(x), s))
-        new = cache[step, k](state)
-        if bool(jnp.all(jnp.isfinite(new.position))):
+        if (step, k) not in eng.loops:                 # widen() empties eng.loops
+            eng.loops[step, k] = jax.jit(lambda s: jax.lax.fori_loop(0, k, lambda i, x: step(x), s))
+        new = eng.loops[step, k](state)
+        if bool(jnp.isfinite(new.force).all() & jnp.isfinite(new.position).all()):
             return new
         eng.widen()
-        cache.clear()
         logger.info(f"Flash: tables widened (row {eng.K}, scratch {eng.maxh}); cycle repeated")
-    raise RuntimeError(f"Flash: non-finite positions after {MAX_OVERFLOW_RETRIES} widenings of the "
+    raise RuntimeError(f"Flash: non-finite forces after {MAX_OVERFLOW_RETRIES} widenings of the "
                        f"tables: the dynamics diverged. Check the timestep, temperature and structure.")
 
 
@@ -163,9 +163,10 @@ def _two_call_step(apply_fn):
     return predict, finish
 
 
-def relax_flash(eng, staged, position, shift, box, settings, atoms):
+def relax_flash(eng, staged, position, shift, box, settings, atoms, start):
     """FIRE as ``perform_min`` runs it before MD (same settings, log and ``<output>_opt.xyz``
-    trajectory); returns the relaxed positions."""
+    trajectory) from ``position``, where (energy, forces) are ``start``; returns the
+    relaxed positions."""
     s = settings
     overwrite = bool(s.get("overwrite", False))
     out = Path(s["output_file"])
@@ -179,7 +180,7 @@ def relax_flash(eng, staged, position, shift, box, settings, atoms):
     min_cycles, min_steps, fconv = s.get("min_cycles", 10), s.get("min_steps", 10), s.get("force_convergence")
     ef = eng.energy_forces_staged if staged else eng.energy_forces
     predict, finish = _two_call_step(apply)
-    e, F = ef(position)
+    e, F = start
     state = jax.jit(lambda R, F: init(R, F=F))(position, F)
     f_max = float(jnp.abs(F).max())
     logger.info("Starting minimization (flash engine)...")
@@ -211,8 +212,14 @@ def relax_flash(eng, staged, position, shift, box, settings, atoms):
     return state.position
 
 
+class FlashUnavailable(RuntimeError):
+    """The flash engine could not be built or evaluated at the start (before anything is
+    written): ``--engine auto`` runs the neighbour-list potential instead."""
+
+
 def perform_md_flash(all_settings, restart=False, atoms=None):
-    """``perform_md`` with the flash engine (``atoms``: the input structure, if read)."""
+    """``perform_md`` with the flash engine (``atoms``: the input structure, if read).
+    Raises ``FlashUnavailable`` if the engine fails before the run starts."""
     s = all_settings
     setup_jax_globals(precision=s.get("precision", "float32"),
                       matmul_precision=s.get("matmul_precision", "highest"))
@@ -267,13 +274,27 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
             position = jnp.asarray(loaded["position"], sdt)
             if bool(loaded.get("fractional_coordinates", True)):
                 position = position * box
-            geo["masses"], geo["momenta"] = loaded["mass"], loaded["momentum"]
+            geo["masses"] = jnp.asarray(loaded["mass"], sdt)
+            geo["momenta"] = jnp.asarray(loaded["momentum"], sdt)
+        atoms = atoms.copy()
         atoms.set_cell(np.diag(np.asarray(box, np.float64)))      # the engine starts in this box
-    _, shift = jax_md.space.periodic(box)
-    eng, staged = build_engine(atoms, s, dtype)
+
+    # the engine and its first evaluation, where the run starts: a failure up to here (a
+    # kernel that does not compile on this GPU, too little memory) has written nothing
+    start = position if state is None else (state.position * box if npt else state.position)
+    try:
+        eng, staged = build_engine(atoms, s, dtype)
+        strain = eng.energy_forces_strain_staged if staged else eng.energy_forces_strain
+        e0, F0, W0 = strain(start)
+    except Exception as exc:
+        raise FlashUnavailable(f"{type(exc).__name__}: {exc}") from exc
+    del start
     logger.info(f"Flash precision: model {precision}, MD state {'float64 (mixed)' if mixed else precision}")
+    ef = eng.energy_forces_staged if staged else eng.energy_forces
+    _, shift = jax_md.space.periodic(box)
     if not restart and s.get("relax_before_run", True):
-        position = relax_flash(eng, staged, position, shift, box, s, atoms)
+        position = relax_flash(eng, staged, position, shift, box, s, atoms, start=(e0, F0))
+        e0, F0, W0 = strain(position)
 
     md_dt_ps = s.get("md_dt")
     md_T = s.get("md_T")
@@ -319,10 +340,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         return st.position, box
 
     key = jax.random.PRNGKey(s.get("seed", 0))
-    ef = eng.energy_forces_staged if staged else eng.energy_forces
-    e0 = None
     if npt:
-        strain = eng.energy_forces_strain_staged if staged else eng.energy_forces_strain
         zero = jnp.zeros((), sdt)
         predict = jax.jit(lambda st: cartesian(apply_fn(st, F=jnp.zeros_like(st.position), W=zero, E=zero)))
         finish = jax.jit(lambda st, F, W, E: apply_fn(st, F=F, W=W, E=E))
@@ -336,7 +354,6 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                 st = finish(st, F, jnp.asarray(W, sdt), jnp.asarray(e, sdt))
             return st, e
         if state is None:
-            e0, F0, W0 = strain(position)
             state = init_fn(key, position / box, box, mass=geo["masses"], momenta=geo.get("momenta"), kT=kT,
                             F=F0, W=jnp.asarray(W0, sdt), E=jnp.asarray(e0, sdt))
     else:
@@ -351,14 +368,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                 st = finish(st, F)
             return st, e
         if state is None:
-            e0, F0 = ef(position)
             state = jax.jit(lambda R, F, m, p: init_fn(key, R, kT=kT, mass=m, momenta=p, F=F))(
                 position, F0, geo["masses"], geo.get("momenta"))
-    if e0 is None:                                          # a restarted state
-        R, L1 = cartesian(state)
-        if npt:
-            eng.set_box(L1)
-        e0 = ef(R)[0]
+    del position, F0, W0
 
     unit_sys = units.metal_unit_system()
 
@@ -384,6 +396,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
 
     # trajectory positions as perform_md writes them: fractional unless asked otherwise
     frac_out = not (s.get("output_cartesian_positions") or s.get("enforce_cartesian_coordinates"))
+    odt = np.dtype(dtype)                       # in the model's precision, as perform_md writes them
     out_idx = s.get("output_atom_indices")
     hdf5_store = None
     if output_format == "hdf5":
@@ -395,8 +408,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
             num_box_entries=(3,), exist_ok=overwrite, observables=[], num_features=None,
             so3lr_version=__version__, ensemble=ensemble, md_dt_fs=md_dt_ps * 1000.0, md_steps=md_steps,
             atomic_numbers=numbers if out_idx is None else numbers[out_idx],
-            cell_a0=np.diag(np.asarray(box)).astype(np.dtype(sdt)), input_file=s.get("input_file"),
-            model_path=s.get("model_path"), dtype=np.dtype(sdt), fractional_coordinates=frac_out)
+            cell_a0=np.diag(np.asarray(box)).astype(odt), input_file=s.get("input_file"),
+            model_path=s.get("model_path"), dtype=odt, fractional_coordinates=frac_out)
 
     # perform_md's watchdog on the drift rate of the conserved quantity (meV/atom/ps),
     # measured from drift_warmup_ps on over at least drift_warmup_ps; warns once
@@ -440,9 +453,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                         f"drift early in the run is normal.)")
                     drift_warned = True
         R, L1 = cartesian(state)
-        positions.append(np.asarray(R / L1 if frac_out else R))
-        momenta.append(np.asarray(state.momentum))
-        boxes.append(np.asarray(box_for_trajectory(L1)))
+        positions.append(np.asarray(R / L1 if frac_out else R, odt))
+        momenta.append(np.asarray(state.momentum, odt))
+        boxes.append(np.asarray(box_for_trajectory(L1), odt))
         if len(positions) >= save_buffer or cycle == md_cycles - 1:
             if output_format == "hdf5":
                 positions, momenta, boxes, obs = write_to_hdf5(hdf5_store, momenta, positions, boxes, obs, out_idx)

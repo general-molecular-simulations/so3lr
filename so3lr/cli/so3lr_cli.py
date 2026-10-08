@@ -21,6 +21,7 @@ from .. import __version__
 from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
 from ..md_observables import MD_OBSERVABLES
 from ..md_settings_validation import validate_md_counts
+from ..flash.check import ENGINES, FLASH_MODES, reserve_gpu
 
 # NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
 # submodules, which pull in jax/flax/jax-md/glp/orbax) are deferred so that
@@ -713,16 +714,16 @@ def langevin_options(f: Callable) -> Callable:
 
 def flash_options(f: Callable) -> Callable:
     """The engine: SO3LR-Flash (millions of atoms) or the neighbour-list potential."""
-    f = click.option('--engine', 'engine', default='auto', type=click.Choice(['auto', 'flash', 'standard']),
+    f = click.option('--engine', 'engine', default='auto', type=click.Choice(list(ENGINES)),
                      help='auto: the flash engine (GPU kernels with their own cell grid and '
                           'no per-edge arrays: 2.5x faster, and tens of millions of atoms on one '
                           'GPU) whenever it computes what the other options ask for -- an NVIDIA '
                           'GPU, a periodic orthorhombic box, nve/nvt/nvt-langevin/isotropic npt, '
-                          'real-space long range or PME, so3lr-s/m -- else the neighbour-list '
+                          'real-space long range or PME, so3lr-s/m/l -- else the neighbour-list '
                           'potential; the log says which and why. flash or standard forces one. '
                           '[default: auto]')(f)
     f = click.option('--flash-mode', 'flash_mode', default='auto',
-                     type=click.Choice(['auto', 'fast', 'default', 'lean', 'leanest', 'minimal']),
+                     type=click.Choice(list(FLASH_MODES)),
                      help='SO3LR-Flash memory mode, fastest first; auto picks the fastest that fits. '
                           '[default: auto]')(f)
     f = click.option('--flash-mixed/--no-flash-mixed', 'flash_mixed', default=True,
@@ -1066,9 +1067,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     logger.info(f"Loading settings from {settings}")
 
     log_simulation_settings(settings_dict)
-    if (settings_dict.get('engine') or 'auto') != 'standard':
-        # as run_md_simulation: the flash engine's largest systems need nearly all of the GPU
-        os.environ.setdefault('XLA_PYTHON_CLIENT_MEM_FRACTION', '0.97')
+    reserve_gpu(settings_dict)          # before JAX starts
     get_hardware_info()
 
     time_start = time.time()
@@ -1257,10 +1256,6 @@ def run_md_simulation(
         # Use with_suffix so the log file lands next to --output, not in CWD.
         log_file = str(Path(output_file).with_suffix('.log'))
 
-    if engine != 'standard':
-        # The flash engine's largest systems need nearly all of the GPU; before JAX touches it
-        os.environ.setdefault('XLA_PYTHON_CLIENT_MEM_FRACTION', '0.97')
-
     setup_logger(log_file)
     logger.info(SO3LR_ASCII)
 
@@ -1338,6 +1333,7 @@ def run_md_simulation(
         settings['langevin_thermo'] = langevin_thermo
 
     log_simulation_settings(settings)
+    reserve_gpu(settings)               # before JAX starts
     get_hardware_info()
 
     time_start = time.time()

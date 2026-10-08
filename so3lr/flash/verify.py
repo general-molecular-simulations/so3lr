@@ -67,7 +67,7 @@ def main(argv=None):
     ok = True
     for name, at in (("as given", atoms), ("with contacts", clash)):
         geo = atoms_to_jnp(at, precision=dtype)
-        cell = cell_from_atoms_boundary_conditions(at, args.lr_cutoff, None, 4.0)
+        cell = cell_from_atoms_boundary_conditions(at, args.lr_cutoff, kel, args.kspace_smearing)
         position, box, displacement, shift, frac = handle_box("periodic", geo["positions"], cell, precision=dtype)
         neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = process_model(
             potential=potential, species=geo["species"], displacement=displacement, box=box,

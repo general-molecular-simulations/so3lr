@@ -8,12 +8,15 @@ not compute.
 import dataclasses
 import json
 import math
+import os
 
 import numpy as np
 
 # NPT: the cell grid is laid out for a box this much smaller, so the box moves without
 # a compile (and is laid out again if it leaves the margin)
 NPT_BOX_MARGIN = 0.03
+ENGINES = ("auto", "flash", "standard")
+FLASH_MODES = ("auto", "fast", "default", "lean", "leanest", "minimal")     # engine.MODES and auto
 
 # settings flash honours (aliases included)
 HANDLED = {
@@ -77,6 +80,25 @@ SIZES = {
 
 def _off(value):
     return value is None or value is False or (hasattr(value, "__len__") and len(value) == 0)
+
+
+def validate_options(settings):
+    """Raise on an engine, flash_mode or flash_mixed value flash does not take (a settings
+    file bypasses the CLI's choices)."""
+    for key, allowed in (("engine", ENGINES), ("flash_mode", FLASH_MODES)):
+        if settings.get(key) is not None and settings[key] not in allowed:
+            raise ValueError(f"{key} must be one of {', '.join(allowed)} (received {settings[key]!r})")
+    if settings.get("flash_mixed") is not None and not isinstance(settings["flash_mixed"], bool):
+        raise ValueError(f"flash_mixed must be true or false (received {settings['flash_mixed']!r})")
+
+
+def reserve_gpu(settings):
+    """Let XLA take 97% of the GPU (unless set) when flash may run these settings and this
+    model: its largest systems need nearly all of it. Called before JAX starts, so before
+    the structure is read: a run that falls back for its structure still reserves it."""
+    if ((settings.get("engine") or "auto") != "standard" and settings_problem(settings) is None
+            and model_problem(settings.get("model_path")) is None):
+        os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.97")
 
 
 def settings_problem(settings):
@@ -145,30 +167,50 @@ def model_problem(model_path):
     return None
 
 
+def cell_grid(L, rc, rc_lr):
+    """The finest cell grid for an orthorhombic box of sides L, as (cells per side, kc),
+    or None: cells at least rc wide (the short-range search looks one cell out), and
+    2 kc + 1 cells per side, kc the cells the long range reaches each way (so its walk
+    visits no cell twice). Where rc-wide cells leave too few per side, wider ones that
+    need a shorter reach are taken."""
+    for k in range(max(int(math.ceil(rc_lr / rc)), 1), 0, -1):
+        nc = [int(math.floor(v / max(rc, rc_lr / k))) for v in L]
+        if min(nc) < 3:
+            continue
+        kc = max(int(math.ceil(rc_lr / (v / n))) for v, n in zip(L, nc))
+        if min(nc) >= 2 * kc + 1:
+            return nc, kc
+    return None
+
+
 def box_problem(L, rc, rc_lr):
     """Why the engine cannot take an orthorhombic box of sides L (None if it can): the
-    minimum image needs 2 x the cutoffs, the cell grid 2 kc + 1 cells per side."""
+    minimum image needs 2 x the cutoffs, and the cell grid (``cell_grid``) must exist."""
     if min(L) < 2.0 * max(rc, rc_lr):
         return f"box {[round(v, 2) for v in L]} A narrower than twice the cutoff {max(rc, rc_lr)} A"
-    nc = [max(int(math.floor(v / rc)), 1) for v in L]
-    kc = max(int(math.ceil(rc_lr / (v / k))) for v, k in zip(L, nc))
-    if min(nc) < 2 * kc + 1:
-        return f"box too small for the cell grid: {nc} cells, need {2 * kc + 1} per side"
+    if cell_grid(L, rc, rc_lr) is None:
+        return f"box {[round(v, 2) for v in L]} A too small for the cell grid"
     return None
 
 
 def structure_problem(settings, atoms):
-    """Why flash cannot take this structure (None if it can)."""
+    """Why flash cannot take this structure, or the restart's box (None if it can)."""
     if not atoms.pbc.all() or atoms.cell.rank < 3:
         return "it needs a box periodic in all three directions"
     cell = np.asarray(atoms.cell[:])
     if np.abs(cell - np.diag(np.diag(cell))).max() > 1e-9:
         return "it needs an orthorhombic box"
+    sides = np.diag(cell)
+    if settings.get("restart_load_path"):                # a restart starts in its own box
+        with np.load(settings["restart_load_path"]) as saved:
+            box = np.asarray(saved["box"]) if "box" in saved.files else None
+        if box is not None and np.any(box):
+            sides = np.diag(box) if box.ndim == 2 else np.broadcast_to(box.reshape(-1), (3,))
     from so3lr.model_registry import resolve_model
     with open(resolve_model(settings.get("model_path")).dir / "hyperparameters.json") as fp:
         rc = float(json.load(fp)["model"]["cutoff"])
     shrink = 1.0 - (NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0)
-    return box_problem([float(v) * shrink for v in np.diag(cell)], rc, float(settings.get("lr_cutoff") or 12.0))
+    return box_problem([float(v) * shrink for v in sides], rc, float(settings.get("lr_cutoff") or 12.0))
 
 
 def device_problem():
@@ -186,6 +228,9 @@ def device_problem():
         version = ""
     if "rocm" in version or "hip" in version:
         return "its kernels are tested on NVIDIA GPUs only, and this is ROCm"
+    cc = getattr(dev, "compute_capability", None)
+    if cc is not None and float(cc) < 8.0:
+        return f"its kernels are tested on compute capability 8.0 and newer (A100, H100), and this GPU is {cc}"
     return None
 
 

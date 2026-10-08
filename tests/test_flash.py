@@ -219,6 +219,40 @@ def test_model_architecture_check(tmp_path, edit, reason):
     assert (problem is None) if reason is None else (reason in problem), problem
 
 
+def test_cell_grid_takes_every_box_from_the_smallest():
+    """Every cubic box from the smallest the grid takes on is accepted (cells rc wide where
+    they leave enough per side, wider ones where not); a large box keeps rc-wide cells."""
+    for rc, lr, smallest in [(4.5, 10.0, 25.0), (4.5, 12.0, 30.0), (5.0, 12.0, 30.0)]:
+        assert check.box_problem([smallest - 0.1] * 3, rc, lr) is not None
+        for L in np.arange(smallest, 60.0, 0.1):
+            assert check.box_problem([L] * 3, rc, lr) is None, (rc, lr, L)
+    assert check.cell_grid([49.6] * 3, 4.5, 12.0) == ([11, 11, 11], 3)
+
+
+def test_restart_box_is_checked(tmp_path, monkeypatch):
+    """A restart starts in its checkpoint's box, so that is the box auto checks."""
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    atoms = _water((3, 3, 3))
+    np.savez(tmp_path / "small.npz", box=np.array([26.0, 26.0, 26.0]))
+    np.savez(tmp_path / "same.npz", box=np.diag(atoms.cell[:]).copy())
+    problem = check.flash_problem(dict(SETTINGS, restart_load_path=str(tmp_path / "small.npz")), atoms)
+    assert "too small for the cell grid" in problem, problem
+    assert check.flash_problem(dict(SETTINGS, restart_load_path=str(tmp_path / "same.npz")), atoms) is None
+
+
+@pytest.mark.parametrize("bad", [dict(engine="Flash"), dict(engine="neighbour-list"), dict(flash_mode="Fast"),
+                                 dict(flash_mixed="false")])
+def test_bad_engine_options_raise(bad):
+    """Settings files bypass the CLI's choices: a value flash does not take is an error."""
+    with pytest.raises(ValueError):
+        check.validate_options(bad)
+    check.validate_options(dict(engine="flash", flash_mode="lean", flash_mixed=False))
+
+
+def test_flash_modes_match_the_engine():
+    assert tuple(E.MODES) == check.FLASH_MODES[1:]
+
+
 @pytest.mark.skipif(check.device_problem() is None, reason="this test is for machines without an NVIDIA GPU")
 def test_auto_falls_back_without_gpu(tmp_path):
     """Without an NVIDIA GPU, `so3lr nvt` runs the neighbour-list potential and says why."""
@@ -234,7 +268,10 @@ def test_auto_falls_back_without_gpu(tmp_path):
     assert "Engine: neighbour-list potential (flash cannot:" in log, log[-2000:]
 
 
-@pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA GPU")
+GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA GPU")
+
+
+@GPU
 @pytest.mark.parametrize("model,pme", [("so3lr-m-2606", ""), ("so3lr-m-2606", "electrostatics,dispersion"),
                                        ("so3lr-l-2606", "electrostatics,dispersion")])
 def test_flash_matches_neighbour_lists(tmp_path, model, pme):
@@ -244,3 +281,85 @@ def test_flash_matches_neighbour_lists(tmp_path, model, pme):
     write(tmp_path / "water.xyz", _water((4, 4, 4)))
     assert main(["--input", str(tmp_path / "water.xyz"), "--model", model, "--precision", "float64",
                  "--lr-cutoff", "10", "--pme", pme])
+
+
+@GPU
+def test_narrow_neighbour_rows_widen():
+    """Neighbour rows too short for water: the engine widens them and gives what wide ones
+    give, jitted and staged (the kernels never read past a row that overflowed)."""
+    from so3lr.flash.loader import load_params
+    atoms = _water((3, 3, 3))
+    params, statics = load_params(None, precision="float64", lr_cutoff=12.0)
+    args = (params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]))
+    R = jnp.asarray(atoms.get_positions())
+    e_ref, f_ref = E.FlashSO3LR(*args).energy_forces(R)
+    for staged in (False, True):
+        eng = E.FlashSO3LR(*args, max_neighbours=16)
+        e, f = (eng.energy_forces_staged if staged else eng.energy_forces)(R)
+        assert eng.K > 16
+        _check("energy", e, e_ref, 1e-12)
+        _check("forces", f, f_ref, 1e-10)
+
+
+@GPU
+def test_box_shrinks_to_the_smallest_grid():
+    """NPT near the smallest box: a box that leaves the margin downwards is laid out again
+    with no room left to shrink rather than refused, and gives what an engine built for it
+    gives."""
+    from so3lr.flash.loader import load_params
+    atoms = _water((3, 3, 3))
+    atoms.set_cell(atoms.cell[:] * (31.0 / atoms.cell[0, 0]), scale_atoms=True)
+    params, statics = load_params(None, precision="float64", lr_cutoff=12.0)
+    z = atoms.get_atomic_numbers()
+    eng = E.FlashSO3LR(params, statics, z, np.asarray(atoms.cell[:]), box_margin=0.03)
+    L = 30.05
+    R = jnp.asarray(atoms.get_positions() * (L / 31.0))
+    eng.set_box([L, L, L])
+    e, f = eng.energy_forces(R)
+    e_ref, f_ref = E.FlashSO3LR(params, statics, z, np.eye(3) * L).energy_forces(R)
+    _check("energy", e, e_ref, 1e-12)
+    _check("forces", f, f_ref, 1e-10)
+
+
+def _so3lr(args, cwd):
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    from subprocess_env import so3lr_subprocess_env
+    result = subprocess.run(["so3lr", *args], cwd=cwd, capture_output=True, text=True, env=so3lr_subprocess_env())
+    assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
+
+
+@GPU
+def test_md_restarts_on_flash(tmp_path):
+    """A float32 NVT checkpoint of the neighbour-list potential continued as NVE on flash in
+    the jitted mode (an ensemble change: masses and momenta come from the checkpoint);
+    NPT with a restart file, continued from it."""
+    from ase.io import write
+    write(tmp_path / "w.xyz", _water((3, 3, 3)))
+    run = ["--input", "w.xyz", "--no-relax", "--md-cycles", "2", "--md-steps", "5"]
+    _so3lr(["nvt", *run, "--engine", "standard", "--output", "a.hdf5", "--restart-save", "a.npz"], tmp_path)
+    _so3lr(["nve", *run, "--flash-mode", "fast", "--output", "b.hdf5", "--restart-load", "a.npz"], tmp_path)
+    _so3lr(["npt", *run, "--pressure", "1", "--output", "c.hdf5", "--restart-save", "c.npz"], tmp_path)
+    _so3lr(["npt", *run, "--pressure", "1", "--output", "d.hdf5", "--restart-load", "c.npz"], tmp_path)
+    for name in "bcd":
+        log = (tmp_path / f"{name}.log").read_text()
+        assert "Engine: flash" in log, log[-2000:]
+
+
+@GPU
+def test_auto_falls_back_when_flash_fails_to_start(tmp_path, monkeypatch):
+    """A flash engine that cannot be built (say, a kernel that does not compile on this
+    GPU): auto runs the neighbour-list potential and says why."""
+    from ase.io import write
+    from so3lr.cli.so3lr_cli import YAML_DEFAULTS
+    from so3lr.cli.so3lr_md import run
+    from so3lr.flash import md as flash_md
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("no kernels here")
+    monkeypatch.setattr(flash_md, "build_engine", broken)
+    write(tmp_path / "w.xyz", _water((3, 3, 3)))
+    run(dict(YAML_DEFAULTS, input_file=str(tmp_path / "w.xyz"), output_file=str(tmp_path / "o.hdf5"),
+             output_format="hdf5", log_file=str(tmp_path / "o.log"), ensemble="nvt", relax_before_run=False,
+             md_cycles=1, md_steps=2, save_buffer=1))
+    log = (tmp_path / "o.log").read_text()
+    assert "flash cannot: it failed to start: RuntimeError: no kernels here" in log, log[-2000:]

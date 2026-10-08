@@ -291,15 +291,14 @@ e.g. `Engine: flash (auto)` or `Engine: neighbour-list potential (flash cannot: 
 is isotropic, not semi-isotropic)`. `--engine flash` or `--engine standard` (or
 `engine:` in a settings file) forces one.
 
-Flash runs on an NVIDIA GPU, for so3lr-s, so3lr-m and so3lr-l, in a periodic
-orthorhombic box at least twice `lr_cutoff` and wide enough for its cell grid (at the
-default `lr_cutoff` of 12 A: 31.5 A for so3lr-s/m, 35 A for so3lr-l; at 10 A, 30 and
-25 A), for nve, nvt, nvt-langevin and isotropic npt, with the long range in real space
-or by PME (`--kspace-electrostatics pme`, `kspace_dispersion: pme`). Semi-isotropic NPT,
-the dispersion tail correction, re-tuning the PME mesh during NPT (`kspace_npt_cycles`),
-Ewald and P3M, fixed atoms, observables, enhanced sampling and the legacy so3lr run on
-the neighbour-list potential, as does any run with a setting or a model hyperparameter
-flash does not know.
+Flash runs on an NVIDIA GPU (compute capability 8.0 or newer), for so3lr-s, so3lr-m and
+so3lr-l, in a periodic orthorhombic box at least 30 A across at the default `lr_cutoff`
+of 12 A (25 A at 10 A), for nve, nvt, nvt-langevin and isotropic npt, with the long
+range in real space or by PME (`--kspace-electrostatics pme`, `kspace_dispersion: pme`).
+Semi-isotropic NPT, the dispersion tail correction, re-tuning the PME mesh during NPT
+(`kspace_npt_cycles`), Ewald and P3M, fixed atoms, observables, enhanced sampling and
+the legacy so3lr run on the neighbour-list potential, as does any run with a setting or
+a model hyperparameter flash does not know.
 
 - `--flash-mode` sets what flash keeps between the forward and backward pass: `fast`,
   `default`, `lean`, `leanest`, `minimal` (less memory, more recomputation). `auto`
