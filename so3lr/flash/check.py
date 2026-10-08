@@ -50,12 +50,12 @@ UNSUPPORTED = {
     "kspace_npt_cycles": "re-tuning the PME mesh every so many cycles (kspace_npt_cycles)",
 }
 
-# the model hyperparameters the kernels are written for (so3lr-s/m 2602 and 2606); the
+# the model hyperparameters the kernels are written for (so3lr-s/m/l 2602 and 2606); the
 # sizes below may vary; any other key, or any other value, makes flash decline
 ARCHITECTURE = {
     "activation_fn": "silu", "energy_activation_fn": "silu", "cutoff_fn": "phys",
-    "radial_basis_fn": "bernstein", "degrees": [1, 2, 3, 4], "num_heads": 4, "num_features_head": 32,
-    "num_features": 128, "qk_non_linearity": "identity", "qk_norm": True, "layer_normalization_1": True,
+    "radial_basis_fn": "bernstein", "num_features_head": 32,
+    "qk_non_linearity": "identity", "qk_norm": True, "layer_normalization_1": True,
     "layer_normalization_2": False, "residual_mlp_1": True, "residual_mlp_2": False,
     "message_normalization": "avg_num_neighbors", "use_charge_embed": True, "use_spin_embed": True,
     "use_final_bias_bool": False, "use_residual_scalars": True, "use_rms_norm": True,
@@ -63,6 +63,9 @@ ARCHITECTURE = {
     "energy_learn_atomic_type_shifts": True, "electrostatic_energy_kspace_do_ewald_bool": False,
     "electrostatic_energy_kspace_interp_nodes": None,
 }
+# (degrees, heads, features) checked against the neighbour-list potential: one head per
+# degree entry, 32 features each (so3lr-s/m, and so3lr-l with each degree twice)
+SHAPES = {((1, 2, 3, 4), 4, 128), ((1, 1, 2, 2, 3, 3, 4, 4), 8, 256)}
 SIZES = {
     "cutoff", "num_layers", "num_radial_basis_fn", "energy_regression_dim", "electrostatic_energy_bool",
     "electrostatic_energy_scale", "dispersion_energy_bool", "dispersion_energy_scale", "cutoff_lr",
@@ -122,9 +125,13 @@ def model_problem(model_path):
     with open(spec.dir / "hyperparameters.json") as fp:
         model = json.load(fp)["model"]
     if model.get("legacy_so3lr_bool", False):
-        return "it runs the v2 models (so3lr-s, so3lr-m), not the legacy so3lr"
+        return "it runs the v2 models (so3lr-s, -m, -l), not the legacy so3lr"
+    shape = (tuple(model.get("degrees") or ()), model.get("num_heads"), model.get("num_features"))
+    if shape not in SHAPES:
+        return (f"its kernels are written for degrees, heads and features {sorted(SHAPES)} "
+                f"({spec.dir.name} has {shape})")
     for key, value in model.items():
-        if key == "legacy_so3lr_bool":
+        if key in ("legacy_so3lr_bool", "degrees", "num_heads", "num_features"):
             continue
         if key in ARCHITECTURE:
             if value != ARCHITECTURE[key]:

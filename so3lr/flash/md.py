@@ -2,7 +2,7 @@
 
 ``so3lr_md.run`` runs the flash engine whenever it computes what the settings ask for
 (``check.flash_problem`` is None: an NVIDIA GPU, a periodic orthorhombic box, nve / nvt /
-nvt-langevin / isotropic npt, no k-space other than PME, so3lr-s or so3lr-m), else the
+nvt-langevin / isotropic npt, no k-space other than PME, so3lr-s, -m or -l), else the
 neighbour-list potential of ``perform_md``. ``--engine flash`` or ``--engine standard``
 forces one.
 
@@ -56,7 +56,7 @@ from so3lr.cli.so3lr_md import (
 from so3lr.md_settings_validation import validate_md_counts
 
 from .check import NPT_BOX_MARGIN, flash_problem
-from .engine import MODES, FlashSO3LR, pick_mode, pme_bytes
+from .engine import MODES, FlashSO3LR, mode_kib, pick_mode, pme_bytes
 from .loader import load_params
 
 logger = logging.getLogger("SO3LR")
@@ -89,11 +89,11 @@ def build_engine(atoms, settings, dtype):
     pme_el, pme_disp = _pme(settings)
     mode = settings.get("flash_mode") or "auto"
     if mode == "auto":
-        mode = pick_mode(n, _free_bytes() - pme_bytes(L, (pme_el, pme_disp), jnp.dtype(dtype).itemsize))
+        mode = pick_mode(n, _free_bytes() - pme_bytes(L, (pme_el, pme_disp), jnp.dtype(dtype).itemsize), statics)
     total_charge = float(settings.get("total_charge") or 0)
     embed = settings.get("charge_embed_total_charge")
     equil = settings.get("charge_equilibration_total_charge")
-    kw, staged, kib = MODES[mode]
+    kw, staged, _ = MODES[mode]
     eng = FlashSO3LR(params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]),
                      total_charge=total_charge if embed is None else float(embed),
                      total_spin=float(settings.get("num_unpaired_electrons") or 0),
@@ -101,7 +101,7 @@ def build_engine(atoms, settings, dtype):
                      pme_electrostatics=pme_el, pme_dispersion=pme_disp,
                      box_margin=NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0, **kw)
     logger.info(f"Flash: {n} atoms, memory mode {mode} ({'staged' if staged else 'jitted'}), "
-                f"~{kib:.1f} KiB/atom at peak")
+                f"~{mode_kib(mode, statics):.1f} KiB/atom at peak")
     for what, p, mesh in (("electrostatics", pme_el, eng.mesh_el), ("dispersion", pme_disp, eng.mesh_disp)):
         if p:
             logger.info(f"Flash: PME {what}, smearing {p[0]} A, mesh {mesh}")

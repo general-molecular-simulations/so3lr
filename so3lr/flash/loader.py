@@ -21,7 +21,7 @@ def load_params(model=None, *, precision="float32", lr_cutoff=12.0, dispersion_d
         cfg = json.load(fp)
     m = cfg["model"]
     if m.get("legacy_so3lr_bool", False):
-        raise ValueError("the flash engine runs the v2 models (so3lr-s/m), not the legacy so3lr")
+        raise ValueError("the flash engine runs the v2 models (so3lr-s/m/l), not the legacy so3lr")
     raw = expand_observables_to_theory_levels(load_params_from_workdir(spec.dir))["params"]
     dt = jnp.float64 if precision == "float64" else jnp.float32
 
@@ -36,6 +36,7 @@ def load_params(model=None, *, precision="float32", lr_cutoff=12.0, dispersion_d
         long_range_cutoff=float(lr_cutoff),
         dispersion_energy_cutoff_lr_damping=float(dispersion_damping),
         num_layers=int(m["num_layers"]),
+        num_features=int(m["num_features"]),
         num_radial_basis_fn=int(m["num_radial_basis_fn"]),
         degrees=tuple(int(d) for d in m["degrees"]),
         avg_num_neighbors=float(cfg["data"]["avg_num_neighbors"]),

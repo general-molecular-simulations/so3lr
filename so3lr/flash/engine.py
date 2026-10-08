@@ -258,17 +258,27 @@ def _consts(dtype):
     return {k: jnp.asarray(v, dtype) for k, v in _YC.items()}
 
 
-def _ylm(x, y, z, mo, MP):
+def _ycols(md, mo, YS):
+    """Each column's spherical-harmonic component (its index in _ylm_components, -1 for
+    padding): the columns of degree entry e start at YS[e][0] and hold its degree's
+    components from YS[e][1] on. A degree listed twice (so3lr-l) reads the same ones."""
+    yc = mo * 0 - 1
+    for e, (start, base) in enumerate(YS):
+        yc = jnp.where(md == e, mo - start + base, yc)
+    return yc
+
+
+def _ylm(x, y, z, yc, MP):
     t = jnp.zeros((x.shape[0], MP), x.dtype)
     for m, v in enumerate(_ylm_components(x, y, z, _consts(x.dtype))):
-        t = jnp.where(mo[None, :] == m, v[:, None], t)
+        t = jnp.where(yc[None, :] == m, v[:, None], t)
     return t
 
 
-def _ylm_vjp(x, y, z, g, mo):
-    """sum_m g[:, m] dY_m/d(x, y, z)."""
+def _ylm_vjp(x, y, z, g, yc):
+    """sum over columns c of g[:, c] dY_yc[c]/d(x, y, z)."""
     k = _consts(x.dtype)
-    col = [jnp.sum(jnp.where(mo[None, :] == m, g, 0.0), axis=1) for m in range(24)]
+    col = [jnp.sum(jnp.where(yc[None, :] == m, g, 0.0), axis=1) for m in range(24)]
     q5 = 5.0 * z * z - 1.0
     q7 = 7.0 * z * z - 1.0
     c3 = 7.0 * z ** 3 - 3.0 * z
@@ -347,7 +357,7 @@ def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, nbr, count, *
 # =========================================================================== #
 def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
                     t1v, t1d, t2v, t2d, wa1, ba1, wb1, bb1, wa2, ba2, wb2, bb2, mdeg, cdeg, scal,
-                    x_in, ev_in, boxl, x_out, ev_out, *, G, ND, MP, ZMAX, CH=0, BE=BE, H0=0, NH=4):
+                    x_in, ev_in, boxl, x_out, ev_out, *, G, ND, MP, ZMAX, YS, CH=0, BE=BE, H0=0, NH=4):
     # CH 0: both channels; 1: heads only (x_out); 2: degrees only (ev_out). The outputs
     # alias the inputs, so a channel not run leaves its output as it was.
     a = _i32(pl.program_id(0))
@@ -361,6 +371,7 @@ def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
     valid = md >= 0
     ev_a = plgpu.load(ev.at[a, mo], mask=valid, other=0.0)
     za = z[a]
+    yc = _ycols(md, mo, YS)
 
     def chunk(c, carry):
         acc, dev_a = carry
@@ -398,7 +409,7 @@ def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
             return a_m + jnp.where(md[None, :] == d, jnp.where(nz, ce * s * inv_nc, 0.0)[:, None], 0.0)
         hz = jax.nn.silu(_spherical_z(diff, md, wa2, ba2, cdeg, ND))
         a_m = lax.fori_loop(0, NH, degree, jnp.zeros((BE, MP), dt))
-        return acc, dev_a + jnp.sum(a_m * _ylm(ux, uy, uz, mo, MP), axis=0)
+        return acc, dev_a + jnp.sum(a_m * _ylm(ux, uy, uz, yc, MP), axis=0)
 
     acc, dev_a = lax.fori_loop(0, _cdiv(n_a, BE), chunk,
                                (jnp.zeros((NH, G), dt), jnp.zeros((MP,), dt)))
@@ -500,7 +511,8 @@ def _att_bwd_heads_kernel(q1, k1, v1, ev, px, py, pz, nbr, cnt, z, rmin, tv, td,
 
 def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, wa, ba, wb, bb,
                             mdeg, cdeg, par, gdev, scal, a0, gev_in, fx_in, fy_in, fz_in, fw_in, boxl,
-                            gq, gk, gev, fx_o, fy_o, fz_o, fw_o, *, G, ND, MP, ZMAX, BE=BE, H0=0, NH=4):
+                            gq, gk, gev, fx_o, fy_o, fz_o, fw_o, *, G, ND, MP, ZMAX, YS, BE=BE, H0=0,
+                            NH=4):
     t = _i32(pl.program_id(0))
     a = a0[0] + t
 
@@ -518,6 +530,7 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
         gdev_a = plgpu.load(gdev.at[a, mo], mask=valid, other=0.0)[None, :]
         par_m = plgpu.load(par.at[jnp.maximum(md, 0)], mask=valid, other=0.0)[None, :]
         za = z[a]
+        yc = _ycols(md, mo, YS)
 
         def chunk(c, carry):
             agq, agk, gev_a, fx, fy, fz, fw = carry
@@ -531,7 +544,7 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
             diff = _ev_diff(ev, ev_a, jj, mo, valid, emask)
             hz, dz = _silu_and_derivative(_spherical_z(diff, md, wa, ba, cdeg, ND))
             m2 = emask[:, None] & valid[None, :]
-            y = _ylm(ux, uy, uz, mo, MP)
+            y = _ylm(ux, uy, uz, yc, MP)
             gdev_b = plgpu.load(gdev.at[jj[:, None], mo[None, :]], mask=m2, other=0.0)
             gy = gdev_a * y
             gyr = gdev_b * y * par_m
@@ -568,7 +581,7 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
             agq, agk, gz, a_m, a_mr, gc, grr = lax.fori_loop(
                 0, NH, degree, (agq, agk, jnp.zeros((BE, wa.shape[1]), dt), zt, zt, z0, z0))
             gev_a = gev_a - jnp.sum(_spherical_grad(diff, gz * dz, md, wa, cdeg, ND), axis=0)
-            gx, gy_, gz_ = _ylm_vjp(ux, uy, uz, jnp.where(m2, a_m * gdev_a + par_m * a_mr * gdev_b, 0.0), mo)
+            gx, gy_, gz_ = _ylm_vjp(ux, uy, uz, jnp.where(m2, a_m * gdev_a + par_m * a_mr * gdev_b, 0.0), yc)
             inv_r = jnp.where(emask, 1.0 / r, 0.0)
             proj = gx * ux + gy_ * uy + gz_ * uz
             fr = jnp.where(emask, grr * drt + gc * dce, 0.0)
@@ -1058,27 +1071,34 @@ PAIR_INTERVALS = 16384       # long-range pair tables on [0, lr cutoff]
 PME_CHUNK = 1 << 20          # atoms spread or gathered at a time in the PME mesh
 
 
-# memory modes, fastest first: (engine options, staged, peak KiB per atom on an H100 in
-# water at 10-20M atoms; us/atom per force call). fast keeps each layer's input and
+# memory modes, fastest first: (engine options, staged, peak KiB per atom of so3lr-m on an
+# H100 in water at 10-20M atoms; us/atom per force call). fast keeps each layer's input and
 # attention output; default keeps the same but runs as separately jitted stages from
 # Python (energy_forces_staged: a jitted MD step cannot call them, but they keep XLA
 # from holding work across stages); lean recomputes the attention forward in the
 # backward; leanest also recomputes earlier layers and runs the attention backward a
-# channel at a time; minimal runs the attention a 32-feature block at a time.
+# channel at a time; minimal runs the attention one head's block of features at a time.
 MODES = {
     "fast": (dict(keep_attention=True), False, 9.0),          # 1.23 us/atom
     "default": (dict(keep_attention=True), True, 6.6),        # 1.24
     "lean": (dict(), True, 5.3),                              # 1.42
     "leanest": (dict(keep_layer_inputs=False, split_channels=True, tile=65536), True, 4.1),  # 1.66
-    # the attention a 32-feature block at a time (head b and degree b read only block b)
+    # the attention a block at a time (head b and degree entry b read only block b)
     "minimal": (dict(keep_layer_inputs=False, split_blocks=True, tile=65536), True, 3.0),    # 3.06
 }
 
 
-def pick_mode(n, free_bytes):
+def mode_kib(mode, statics):
+    """MODES' peak KiB per atom for this model: what a mode holds per atom scales with the
+    features and equivariant channels (so3lr-m: 128 + 24)."""
+    width = statics["num_features"] + sum(2 * int(d) + 1 for d in statics["degrees"])
+    return MODES[mode][2] * width / 152.0
+
+
+def pick_mode(n, free_bytes, statics):
     """The fastest of MODES whose peak for n atoms fits in free_bytes, else the leanest."""
-    for name, (_, _, kib) in MODES.items():
-        if n * kib * 1024 * 1.03 + (1 << 30) <= free_bytes:
+    for name in MODES:
+        if n * mode_kib(name, statics) * 1024 * 1.03 + (1 << 30) <= free_bytes:
             return name
     return name
 
@@ -1097,11 +1117,16 @@ class FlashSO3LR:
     contacts. The memory options are those of ``MODES``."""
 
     def __init__(self, params, statics, z, box, *, total_charge=0.0, total_spin=0.0,
-                 equilibration_charge=None, tile=1 << 17, max_neighbours=64, lr_scratch=1024,
+                 equilibration_charge=None, tile=1 << 17, max_neighbours=None, lr_scratch=1024,
                  keep_layer_inputs=True, keep_attention=False, split_channels=False,
                  split_blocks=False, pme_electrostatics=None, pme_dispersion=None, box_margin=0.0):
-        if tuple(statics["degrees"]) != (1, 2, 3, 4) or statics["num_heads"] != 4:
-            raise ValueError("written for degrees (1, 2, 3, 4) and 4 heads")
+        degrees = [int(d) for d in statics["degrees"]]
+        self.nh = int(statics["num_heads"])
+        # one head per degree entry, each on its own block of G features (so3lr-s/m: 4 x 32,
+        # so3lr-l: 8 x 32, degrees 1-4 each twice); harmonics up to degree 4
+        if self.nh != len(degrees) or not set(degrees) <= {1, 2, 3, 4}:
+            raise ValueError(f"written for one head per degree entry, degrees 1-4 (got {self.nh} heads, "
+                             f"degrees {degrees})")
         self.params, self.statics = params, statics
         self.dtype = statics.get("dtype", jnp.float32)
         z = np.asarray(z).astype(np.int32)
@@ -1117,7 +1142,8 @@ class FlashSO3LR:
         self.box_margin = float(box_margin)
         self._Lt = None
         self.tile = min(int(tile), n)
-        self.K = int(max_neighbours)
+        # neighbour rows sized for water at the model's cutoff (widened on overflow)
+        self.K = int(max_neighbours or math.ceil(64 * (self.rc / 4.5) ** 3 / 16) * 16)
         self.keep = bool(keep_layer_inputs)
         self.keep_attention = bool(keep_attention) and self.keep
         self.split = bool(split_channels)
@@ -1127,10 +1153,16 @@ class FlashSO3LR:
         self.total_charge = float(total_charge if equilibration_charge is None else equilibration_charge)
         dt = self.dtype
         self.F = int(params["feature_embeddings_0"]["Embed_0"]["embedding"].shape[1])
-        degrees = list(statics["degrees"])
+        self.G = self.F // self.nh
+        if self.G * self.nh != self.F or self.G & (self.G - 1):
+            raise ValueError(f"{self.F} features over {self.nh} heads: needs a power-of-two block per head")
         mdeg = [i for i, d in enumerate(degrees) for _ in range(2 * d + 1)]
-        self.M, self.MP = len(mdeg), 32
+        self.M = len(mdeg)
+        self.MP = max(32, 1 << (self.M - 1).bit_length())     # the kernels' power-of-two width
         self.mdeg = jnp.asarray(mdeg + [-1] * (self.MP - self.M), jnp.int32)
+        # where each degree entry's columns start, and its degree's first harmonic component
+        starts = np.cumsum([0] + [2 * d + 1 for d in degrees])[:-1]
+        self.ys = tuple((int(c), d * d - 1) for c, d in zip(starts, degrees))
         self.cdeg = jnp.asarray([(2 * d + 1) ** -0.5 for d in degrees], dt)
         self.par = jnp.asarray([(-1.0) ** d for d in degrees], dt)
         self.z = jnp.asarray(z)
@@ -1251,7 +1283,8 @@ class FlashSO3LR:
 
     def _project_block(self, li, xb, b):
         """Block b of q1, k1, v1, q2, k2 from block b of the layer input: the projections
-        are per head and per degree, and head b and degree b see the same 32 features."""
+        are per head and per degree entry, and head b and degree entry b see the same G
+        features."""
         p = self.params[f"layers_{li}"]["attention_block"]
         out = [xb @ p[w][b].T for w in ("Wq1", "Wk1", "Wv1", "Wq2", "Wk2")]
         if self.statics["qk_norm"]:
@@ -1320,24 +1353,25 @@ class FlashSO3LR:
     # ---- kernels -------------------------------------------------------------------
     def _passes(self):
         """(channel, projections, first block, blocks) per attention pass: all at once;
-        (split) one channel at a time; (blocks) one 32-feature block at a time, head b
-        and degree b together: both read only block b of the layer input."""
+        (split) one channel at a time; (blocks) one G-feature block at a time, head b
+        and degree entry b together: both read only block b of the layer input."""
+        nh = self.nh
         if self.blocks:
-            return [(0, (0, 1, 2, 3, 4), b, 1) for b in range(4)]
+            return [(0, (0, 1, 2, 3, 4), b, 1) for b in range(nh)]
         if self.split:
-            return [(1, (0, 1, 2), 0, 4), (2, (3, 4), 0, 4)]
-        return [(0, (0, 1, 2, 3, 4), 0, 4)]
+            return [(1, (0, 1, 2), 0, nh), (2, (3, 4), 0, nh)]
+        return [(0, (0, 1, 2, 3, 4), 0, nh)]
 
     def _projections(self, li, x_l, which, block=None):
         """Layer li's projections in ``which`` (None elsewhere), on whole arrays: without an
         autograd tape XLA fuses them with bounded temporaries. (Tile loops writing into
         zero-initialised outputs were worse: XLA hoists every zeros() to the start.) With
-        ``block``, that 32-feature block of each only."""
+        ``block``, that G-feature block of each only."""
         xi = self._x_in(li, x_l, self.elem)
         if block is None:
             out = self._project(li, xi)
         else:
-            G = self.F // 4
+            G = self.G
             out = self._project_block(li, xi[:, block * G:(block + 1) * G], block)
         return [out[k] if k in which else None for k in range(5)]
 
@@ -1362,8 +1396,8 @@ class FlashSO3LR:
                 x_l, x1, ev1 = lax.optimization_barrier((x_l, x1, ev1))
                 qkv = self._projections(li, x_l, which, block=blk)
             ref = qkv[which[0]]
-            kern = partial(_att_fwd_kernel, G=F // 4, ND=4, MP=self.MP, ZMAX=self.zmax, CH=ch,
-                           BE=ATT_LAUNCH["fwd"][0], H0=h0, NH=nh)
+            kern = partial(_att_fwd_kernel, G=self.G, ND=self.nh, MP=self.MP, ZMAX=self.zmax, YS=self.ys,
+                           CH=ch, BE=ATT_LAUNCH["fwd"][0], H0=h0, NH=nh)
             x1, ev1 = pl.pallas_call(
                 kern, grid=(n,), compiler_params=_cp(ATT_LAUNCH["fwd"][1]),
                 out_shape=(jax.ShapeDtypeStruct((n, F), dt), jax.ShapeDtypeStruct((n, self.M), dt)),
@@ -1409,12 +1443,12 @@ class FlashSO3LR:
         t1v, t1d, t2v, t2d = self.tables[li]
         sf = lambda name, k: p[f"{name}_layer_{k}"]
         px, py, pz = pos3
-        meta = dict(G=F // 4, ND=4, MP=self.MP, ZMAX=self.zmax)
+        meta = dict(G=self.G, ND=self.nh, MP=self.MP, ZMAX=self.zmax)
         shp = jax.ShapeDtypeStruct
         inplace = self._inplace(li)
         ch, which, h0, nh = self._passes()[pi]
         blk = h0 if self.blocks else None
-        FP = 32 * nh                                   # width of the projection arrays
+        FP = self.G * nh                               # width of the projection arrays
         cols = slice(0, F) if blk is None else slice(blk * FP, (blk + 1) * FP)
         q1, k1, v1, q2, k2 = self._projections(li, carry[0] if inplace else x_l, which, block=blk)
 
@@ -1435,7 +1469,8 @@ class FlashSO3LR:
                   self.mdeg, self.cdeg, gdx, self.scal, a0, g_ev, fx, fy, fz, fw, self._box(px))
             if ch != 1:
                 g[3], g[4], g_ev, fx, fy, fz, fw = pl.pallas_call(
-                    partial(_att_bwd_degrees_kernel, BE=ATT_LAUNCH["bwd_degrees"][0], H0=h0, NH=nh, **meta),
+                    partial(_att_bwd_degrees_kernel, BE=ATT_LAUNCH["bwd_degrees"][0], H0=h0, NH=nh,
+                            YS=self.ys, **meta),
                     grid=(T,), compiler_params=_cp(ATT_LAUNCH["bwd_degrees"][1]),
                     out_shape=(shp((T, FP), dt), shp((T, FP), dt), shp((n, self.M), dt),
                                shp((n,), dt), shp((n,), dt), shp((n,), dt), shp((n,), dt)),

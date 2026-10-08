@@ -168,7 +168,8 @@ SETTINGS = dict(ensemble="nvt", model_path=None, lr_cutoff=12.0)
     (dict(some_new_setting=True), "does not know the setting 'some_new_setting'"),
     (dict(some_new_setting=None), None),
     (dict(model_path="so3lr-s-2602"), None),
-    (dict(model_path="so3lr-l-2606"), "its kernels are written for"),
+    (dict(model_path="so3lr-l-2606"), None),
+    (dict(model_path="so3lr-l-2602"), None),
     (dict(model_path="so3lr"), "legacy"),
 ])
 def test_engine_choice(monkeypatch, change, reason):
@@ -193,7 +194,8 @@ def test_every_settings_key_classified():
 
 @pytest.mark.parametrize("edit,reason", [
     (None, None),
-    (("num_heads", 8), "num_heads"),
+    (("num_heads", 8), "degrees, heads and features"),
+    (("degrees", [1, 2, 3, 5]), "degrees, heads and features"),
     (("activation_fn", "gelu"), "activation_fn"),
     (("some_new_hyperparameter", True), "does not know the model hyperparameter"),
     (("qk_norm", None), "does not set 'qk_norm'"),
@@ -233,11 +235,12 @@ def test_auto_falls_back_without_gpu(tmp_path):
 
 
 @pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA GPU")
-@pytest.mark.parametrize("pme", ["", "electrostatics,dispersion"])
-def test_flash_matches_neighbour_lists(tmp_path, pme):
+@pytest.mark.parametrize("model,pme", [("so3lr-m-2606", ""), ("so3lr-m-2606", "electrostatics,dispersion"),
+                                       ("so3lr-l-2606", "electrostatics,dispersion")])
+def test_flash_matches_neighbour_lists(tmp_path, model, pme):
     """Energy, forces and dE/d(strain) on 12,288 waters (49.6 A), float64."""
     from ase.io import write
     from so3lr.flash.verify import main
     write(tmp_path / "water.xyz", _water((4, 4, 4)))
-    assert main(["--input", str(tmp_path / "water.xyz"), "--precision", "float64", "--lr-cutoff", "10",
-                 "--pme", pme])
+    assert main(["--input", str(tmp_path / "water.xyz"), "--model", model, "--precision", "float64",
+                 "--lr-cutoff", "10", "--pme", pme])
