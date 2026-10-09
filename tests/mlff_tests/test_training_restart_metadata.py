@@ -30,6 +30,7 @@ def test_training_entry_point_keeps_metadata_when_loop_rejects_restart(
             'eval_every_num_steps': 1, 'training_seed': 0, 'model_seed': 0,
             'log_gradient_values': False, 'num_epochs': 1, 'use_wandb': False,
             'use_adaptive_robust_loss': fine_tune,
+            'reduce_lr_on_plateau': True, 'reduce_lr_patience': 7,
         },
     })
     def make_loader(**kwargs):
@@ -82,6 +83,8 @@ def test_training_entry_point_keeps_metadata_when_loop_rejects_restart(
         else:
             from_config.run_training(config)
     assert len(calls) == 1
+    # Plateau LR reaches the loop when fine-tuning too.
+    assert calls[0]['reduce_lr_on_plateau'] is True and calls[0]['reduce_lr_patience'] == 7
     for name in names:
         assert (tmp_path / name).read_text() == 'original checkpoint metadata'
 

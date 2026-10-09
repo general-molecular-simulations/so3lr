@@ -190,9 +190,9 @@ def test_log_gradient_values_is_not_overwritten():
 def test_fit_skips_checkpoints_with_non_finite_loss():
     """fit() used to save NaN-loss checkpoints; orbax ranks with best_mode='min'
     and a NaN can be retained as 'best', evicting the real best weights.
-    fit_from_iterator has always guarded this."""
+    fit() saves through _log_and_checkpoint; fit_from_iterator has its own guard."""
     import inspect
-    for fn in (training_utils.fit, training_utils.fit_from_iterator):
+    for fn in (training_utils._log_and_checkpoint, training_utils.fit_from_iterator):
         src = inspect.getsource(fn)
         assert 'jnp.isfinite(eval_loss)' in src, (
             f'{fn.__name__} saves checkpoints without a finite-loss guard'

@@ -208,3 +208,21 @@ def test_npt_flex_energy_conservation():
         f"Extended Hamiltonian drifted by {rel_drift*100:.2f}%: "
         f"H0={float(H0):.6f}, H1={float(H1):.6f}"
     )
+
+
+def test_fixed_atoms_on_the_flex_state():
+    """Semi-isotropic NPT with fixed atoms: the flex state stores velocity, and
+    apply_atom_constraints_to_state used to set a 'momentum' field it does not have."""
+    from so3lr.cli.so3lr_md import apply_atom_constraints_to_state
+    box = jnp.diag(jnp.array([10., 10., 10.]))
+    _, shift = space.periodic_general(box, fractional_coordinates=True)
+    init_fn, _ = simulate.npt_nose_hoover_flex(
+        lambda R, **kwargs: jnp.sum(R ** 2), shift, dt=1e-3, pressure=0.0, kT=1.0,
+        coupling='semi-isotropic')
+    R = jax.random.uniform(jax.random.PRNGKey(0), (4, 3))
+    state = init_fn(jax.random.PRNGKey(1), R, box=box, mass=1.0, kT=1.0)
+    mobile = jnp.array([[0.], [1.], [1.], [1.]])  # atom 0 frozen
+    out = apply_atom_constraints_to_state(state, mobile, R + 0.1, box=box, fractional_coordinates=True)
+    np.testing.assert_allclose(out.position[0], R[0] + 0.1)
+    np.testing.assert_allclose(out.velocity[0], 0.)
+    np.testing.assert_allclose(out.velocity[1:], state.velocity[1:])

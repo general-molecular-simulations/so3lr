@@ -42,8 +42,9 @@ from so3lr.mlff.nn.observable.observable_sparse import (
     dispersion_tail_correction_energy,
 )
 
-from so3lr.jaxmd_utils import to_jax_md as _to_jax_md
-from so3lr.pbc import is_fully_periodic, lattice_rows
+from so3lr.jaxmd_utils import nbrs_cutoff, to_jax_md as _to_jax_md
+from so3lr.pbc import is_fully_periodic, lattice_rows, minimum_image_problem
+from so3lr import kspace_defaults as KS
 from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
 
 
@@ -63,7 +64,7 @@ import h5py
 from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
-from ..md_settings_validation import validate_md_counts
+from ..md_settings_validation import resolve_ensemble, validate_md_counts
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -938,10 +939,21 @@ def check_cell(
     if np.any(cell[~mask] != 0):
         raise ValueError(f'JAX-MD currently supports only orthogonal cells. Provided cell: {cell}') 
 
-    # if np.any(np.diag(cell) < lr_cutoff * 2):
-    #     raise ValueError(f'Each dimension of the cell {np.diag(cell)} must be at least twice the long-range cutoff distance [{lr_cutoff} Å].')
-
     return cell
+
+
+def check_box_for_neighbour_lists(box, cutoff: float, where: str) -> None:
+    """Refuse an orthorhombic box (matrix, lengths or scalar) shorter than twice
+    the neighbour-list cutoff (jaxmd_utils.nbrs_cutoff): the lists keep one image
+    per pair and would drop the rest."""
+    lengths = np.broadcast_to(np.asarray(box_to_diag(box), float).reshape(-1), (3,))
+    problem = minimum_image_problem(np.diag(lengths), cutoff)
+    if problem:
+        raise ValueError(
+            f'{where}: {problem}. Use a larger box, a smaller --lr-cutoff with k-space '
+            f'carrying the long range (--kspace-electrostatics pme, and --kspace-dispersion '
+            f'pme for dispersion), or the ASE calculator (So3lrCalculator), which lists every '
+            f'periodic image.')
 
 
 def cell_from_atoms_boundary_conditions(
@@ -964,6 +976,13 @@ def cell_from_atoms_boundary_conditions(
     return check_cell(np.zeros((3, 3)), lr_cutoff, kspace_electrostatics, kspace_smearing)
 
 
+def dispersion_ratios(aux):
+    """(polarizability ratio, C6 ratio) from the model output. The so3lr-s/m/l
+    models name the first 'a0_ratios', the legacy model 'hirshfeld_ratios', and
+    the legacy model has no C6 head (None)."""
+    return aux.get('a0_ratios', aux.get('hirshfeld_ratios')), aux.get('c6_ratios')
+
+
 def _is_legacy_model(model_dir) -> bool:
     """Return True if the resolved model is the legacy v1 SO3LR (legacy_so3lr_bool)."""
     try:
@@ -980,9 +999,9 @@ def load_model(
     lr_cutoff: float = 12.0,
     dispersion_damping: float = 2.,
     kspace_electrostatics: str = None,
-    kspace_interp_nodes: int = 4,
+    kspace_interp_nodes: int = KS.DEFAULT_KSPACE_INTERP_NODES,
     kspace_dispersion: str = None,
-    kspace_dispersion_interp_nodes: int = 4,
+    kspace_dispersion_interp_nodes: int = KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES,
     charge_embed_total_charge: float = None,
     charge_equilibration_total_charge: float = None,
     **kwargs
@@ -1663,12 +1682,12 @@ def apply_atom_constraints_to_state(
         return state
     if reference_is_cartesian:
         reference_position = cartesian_to_positions(reference_position, box, fractional_coordinates)
-    zero_momentum = jnp.zeros_like(state.momentum)
-    zero_force = jnp.zeros_like(state.force)
+    # The flexible-cell NPT state stores velocity; its momentum is a read-only property.
+    moving = 'velocity' if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState) else 'momentum'
     return state.set(
         position=jnp.where(mobile_mask == 1, state.position, reference_position),
-        momentum=jnp.where(mobile_mask == 1, state.momentum, zero_momentum),
-        force=jnp.where(mobile_mask == 1, state.force, zero_force),
+        force=jnp.where(mobile_mask == 1, state.force, 0.),
+        **{moving: jnp.where(mobile_mask == 1, getattr(state, moving), 0.)},
     )
 
 
@@ -1803,6 +1822,7 @@ def perform_md(
         opt_structure (Optional[jnp.ndarray], optional): Optimized structure, if 
                                     already available. Defaults to None.
     """
+    all_settings = resolve_ensemble(all_settings)  # also for direct Python callers
     # Direct Python callers do not necessarily enter through run(). Configure
     # precision before constructing any arrays, as perform_min already does.
     setup_jax_globals(
@@ -1844,18 +1864,18 @@ def perform_md(
 
     # Ewald electrostatics settings
     kspace_electrostatics = all_settings.get('kspace_electrostatics',None)
-    kspace_smearing = all_settings.get('kspace_smearing', 4.0)
-    kspace_spacing = all_settings.get('kspace_spacing', 2.0)
-    kspace_interp_nodes = all_settings.get('kspace_interp_nodes', 4)
+    kspace_smearing = all_settings.get('kspace_smearing', KS.DEFAULT_KSPACE_SMEARING)
+    kspace_spacing = all_settings.get('kspace_spacing', KS.DEFAULT_KSPACE_SPACING)
+    kspace_interp_nodes = all_settings.get('kspace_interp_nodes', KS.DEFAULT_KSPACE_INTERP_NODES)
     charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
     charge_equilibration_total_charge = all_settings.get('charge_equilibration_total_charge', None)
     kspace_npt_cycles = all_settings.get('kspace_npt_cycles', 100)
 
     # Dispersion PME settings
     kspace_dispersion = all_settings.get('kspace_dispersion', None)
-    kspace_dispersion_smearing = all_settings.get('kspace_dispersion_smearing', 2.0)
-    kspace_dispersion_spacing = all_settings.get('kspace_dispersion_spacing', 3.0)
-    kspace_dispersion_interp_nodes = all_settings.get('kspace_dispersion_interp_nodes', 4)
+    kspace_dispersion_smearing = all_settings.get('kspace_dispersion_smearing', KS.DEFAULT_KSPACE_DISPERSION_SMEARING)
+    kspace_dispersion_spacing = all_settings.get('kspace_dispersion_spacing', KS.DEFAULT_KSPACE_DISPERSION_SPACING)
+    kspace_dispersion_interp_nodes = all_settings.get('kspace_dispersion_interp_nodes', KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES)
 
     # MD parameters
     # md_dt is in PICOSECONDS here (the CLI YAML loader converted fs -> ps
@@ -2195,6 +2215,8 @@ def perform_md(
         minimum_cell_size_multiplier=minimum_cell_size_multiplier,
         has_aux=len(observables)>0,
     )
+    if cell is not None:
+        check_box_for_neighbour_lists(box, nbrs_cutoff(potential), 'MD box')  # also a box from a restart file
 
     k_grid, k_smearing = setup_kspace_grid(
         kspace_electrostatics=kspace_electrostatics,
@@ -2227,22 +2249,19 @@ def perform_md(
         logger.info('Computing dispersion tail correction coefficients...')
 
         # Run one forward pass to get Hirshfeld and C6 ratios
-        _energy, _aux = energy_or_obs_fn(
+        _, _aux = energy_or_obs_fn(
             position, neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx,
             box=box, k_grid=k_grid, k_grid_disp=k_grid_disp, has_aux=True
         )
 
-        # New models expose the ratio as 'a0_ratios'; the legacy model uses
-        # 'hirshfeld_ratios'. Accept either so an explicit opt-in works for both.
-        _hirshfeld_ratios = _aux.get('a0_ratios', _aux.get('hirshfeld_ratios'))
-        if _hirshfeld_ratios is None or 'c6_ratios' not in _aux:
+        _hirshfeld_ratios, _c6_ratios = dispersion_ratios(_aux)
+        if _hirshfeld_ratios is None or _c6_ratios is None:
             raise KeyError(
                 "dispersion_tail_correction requires per-atom 'a0_ratios'/"
                 "'hirshfeld_ratios' and 'c6_ratios' in the model output; the "
                 "selected model does not provide them (the legacy model has no "
                 "C6 head). Disable dispersion_tail_correction for this model."
             )
-        _c6_ratios = _aux['c6_ratios']
         _species = initial_geometry_dict['species']
 
         # Log per-element diagnostics
@@ -2640,6 +2659,8 @@ def perform_md(
 
             state = new_state
             box = new_box
+            if ensemble == 'npt':
+                check_box_for_neighbour_lists(box, nbrs_cutoff(potential), f'NPT box after cycle {current_cycle}')
 
             if (ensemble == 'npt') and (kspace_npt_cycles is not None) and (current_cycle % kspace_npt_cycles == 0):
                 box_for_kgrid = box_to_diag(box)
@@ -2976,9 +2997,9 @@ def perform_min(
 
     # Ewald electrostatics settings
     kspace_electrostatics = all_settings.get('kspace_electrostatics',None)
-    kspace_smearing = all_settings.get('kspace_smearing', 4.0)
-    kspace_spacing = all_settings.get('kspace_spacing', 2.0)
-    kspace_interp_nodes = all_settings.get('kspace_interp_nodes', 4)
+    kspace_smearing = all_settings.get('kspace_smearing', KS.DEFAULT_KSPACE_SMEARING)
+    kspace_spacing = all_settings.get('kspace_spacing', KS.DEFAULT_KSPACE_SPACING)
+    kspace_interp_nodes = all_settings.get('kspace_interp_nodes', KS.DEFAULT_KSPACE_INTERP_NODES)
     charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
     charge_equilibration_total_charge = all_settings.get('charge_equilibration_total_charge', None)
 
@@ -3086,6 +3107,9 @@ def perform_min(
         kspace_smearing=kspace_smearing,
         box=box
     )
+
+    if cell is not None:
+        check_box_for_neighbour_lists(box, nbrs_cutoff(potential), 'Input cell')
 
     energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False, k_grid=k_grid, k_smearing=k_smearing))
     force_fn = jax.jit(jax_md.quantity.force(energy_fn))
@@ -3598,8 +3622,9 @@ def run(
                             simulation and relaxation.
     """
 
+    settings = resolve_ensemble(settings)  # before the optional relaxation
     relax_before_run = settings.get('relax_before_run', True)
-    validate_md_counts(settings)  # fail before the optional relaxation
+    validate_md_counts(settings)
 
     setup_jax_globals(
         precision=settings.get('precision', 'float32'),

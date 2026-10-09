@@ -2,7 +2,7 @@
 import pathlib
 import logging
 from typing import Optional
-import yaml
+from so3lr.md_settings_validation import load_settings_yaml
 
 from so3lr.mlff.config import from_config
 
@@ -48,8 +48,7 @@ def finetune_so3lr(
     else:
         logger.info(f"Using config for finetuning from: {config_path}")
     
-    with open(config_path, mode='r') as fp:
-        finetune_cfg = config_dict.ConfigDict(yaml.safe_load(fp))
+    finetune_cfg = config_dict.ConfigDict(load_settings_yaml(config_path))
     
     finetune_cfg.workdir = workdir
     finetune_cfg.data.filepath = datafile

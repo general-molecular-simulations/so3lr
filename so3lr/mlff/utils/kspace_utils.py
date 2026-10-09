@@ -6,14 +6,10 @@ import jaxpme
 
 logger = logging.getLogger("SO3LR")
 
-# Single home for the k-space defaults; the CLI, the eval path and callers of
-# make_so3lr all read these, so a change here reaches every entry point.
-DEFAULT_KSPACE_SMEARING = 4.0            # A
-DEFAULT_KSPACE_SPACING = 2.0             # A
-DEFAULT_KSPACE_INTERP_NODES = 4
-DEFAULT_KSPACE_DISPERSION_SMEARING = 2.0 # A
-DEFAULT_KSPACE_DISPERSION_SPACING = 3.0  # A
-DEFAULT_KSPACE_DISPERSION_INTERP_NODES = 4
+from so3lr.kspace_defaults import (  # noqa: F401  (re-exported)
+    DEFAULT_KSPACE_DISPERSION_INTERP_NODES, DEFAULT_KSPACE_DISPERSION_SMEARING,
+    DEFAULT_KSPACE_DISPERSION_SPACING, DEFAULT_KSPACE_INTERP_NODES,
+    DEFAULT_KSPACE_SMEARING, DEFAULT_KSPACE_SPACING)
 
 
 def kspace_grid_shape(kspace_method, kspace_spacing, box):

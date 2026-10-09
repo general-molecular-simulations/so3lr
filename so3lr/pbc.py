@@ -27,6 +27,24 @@ def is_fully_periodic(pbc, *, context: str) -> bool:
     return bool(np.all(flags))
 
 
+def cell_heights(cell) -> np.ndarray:
+    """Perpendicular distance between opposite faces, per lattice direction (rows)."""
+    return 1.0 / np.linalg.norm(np.linalg.pinv(np.asarray(cell, float)).T, axis=1)
+
+
+def minimum_image_problem(cell, cutoff):
+    """Why a periodic cell is too thin for minimum-image neighbour lists at this
+    cutoff, or None. ``cell`` holds the lattice vectors as rows. Those lists keep
+    one image per pair, so a cell height below twice the cutoff drops the other
+    images within reach: the run continues with wrong energies.
+    """
+    heights = cell_heights(cell)
+    if np.any(heights < 2 * cutoff):
+        return (f'cell heights {np.round(heights, 3).tolist()} A: each must be at least twice the '
+                f'neighbour-list cutoff ({cutoff} A), or the list drops periodic images')
+    return None
+
+
 def lattice_rows(cell):
     """Lattice vectors as rows (ASE, HDF5, jaxpme) from a column-convention cell.
 

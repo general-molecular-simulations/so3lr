@@ -14,6 +14,7 @@ from so3lr.pbc import lattice_rows
 from so3lr.cli.so3lr_md import (
     _validate_md_output_write_policy,
     cell_from_atoms_boundary_conditions,
+    check_box_for_neighbour_lists,
     init_hdf5_store,
     load_state,
     output_position_array,
@@ -172,13 +173,22 @@ def test_sheared_cell_round_trips_through_extxyz(tmp_path):
 
 @pytest.mark.parametrize('pbc, periodic', [(False, False), (True, True)])
 def test_input_pbc_decides_periodicity(pbc, periodic):
-    cell = np.diag([10.0, 11.0, 12.0]) if periodic else [[10., 1., 0.], [0., 11., 2.], [0., 0., 12.]]
+    cell = np.diag([30.0, 31.0, 32.0]) if periodic else [[10., 1., 0.], [0., 11., 2.], [0., 0., 12.]]
     atoms = Atoms('H', positions=[[0.0, 0.0, 0.0]], cell=cell, pbc=pbc)
     result = cell_from_atoms_boundary_conditions(atoms, 12.0, None)
     if periodic:
         np.testing.assert_allclose(result, cell)
     else:
         assert result is None  # a bounding cell with pbc=False stays free
+
+
+@pytest.mark.parametrize('box', [np.diag([23.0, 30.0, 30.0]), np.array([23.0, 30.0, 30.0]), np.array(23.0)])
+def test_md_box_check_takes_every_box_shape(box):
+    """The NPT box (lengths, a semi-isotropic matrix or a scalar) is checked after
+    every cycle, and a box from a restart file before the run."""
+    with pytest.raises(ValueError, match='at least twice the'):
+        check_box_for_neighbour_lists(box, 12.0, 'NPT box')
+    check_box_for_neighbour_lists(box * 2, 12.0, 'NPT box')
 
 
 def test_mixed_axis_pbc_fails_clearly():

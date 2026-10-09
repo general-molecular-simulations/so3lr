@@ -223,6 +223,21 @@ def make_so3krates_sparse_from_config(
 
 
 
+def _reduce_lr_kwargs(config):
+    """The loop's reduce-LR-on-plateau settings from config.training, with the
+    config defaults (fit()'s own defaults differ). make_optimizer_from_config
+    installs the knob these turn."""
+    t = config.training
+    return dict(
+        reduce_lr_on_plateau=t.get('reduce_lr_on_plateau', False),
+        reduce_lr_factor=t.get('reduce_lr_factor', 0.75),
+        reduce_lr_patience=t.get('reduce_lr_patience', 1000),
+        reduce_lr_min_scale=t.get('reduce_lr_min_scale', 0.0),
+        reduce_lr_min_delta=t.get('reduce_lr_min_delta', 1e-4),
+        reduce_lr_cooldown=t.get('reduce_lr_cooldown', 0),
+    )
+
+
 def make_optimizer_from_config(config: config_dict.ConfigDict = None):
     """Make optax optimizer from config.
 
@@ -474,12 +489,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             early_stopping_patience=config.training.get('early_stopping_patience', None),
             early_stopping_min_delta=config.training.get('early_stopping_min_delta', 1e-4),
             # Reduce LR on plateau.
-            reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False),
-            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.75),
-            reduce_lr_patience=config.training.get('reduce_lr_patience', 1000),
-            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 0.0),
-            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 1e-4),
-            reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
+            **_reduce_lr_kwargs(config),
             # Two-stage loss reweighting.
             stage_two_start_epoch=stage_two_start_epoch,
             stage_two_loss_fn=stage_two_loss_fn,
@@ -519,12 +529,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             early_stopping_patience=config.training.get('early_stopping_patience', None),
             early_stopping_min_delta=config.training.get('early_stopping_min_delta', 1e-4),
             # Reduce LR on plateau.
-            reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False),
-            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.75),
-            reduce_lr_patience=config.training.get('reduce_lr_patience', 1000),
-            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 0.0),
-            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 1e-4),
-            reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
+            **_reduce_lr_kwargs(config),
             # Two-stage loss reweighting.
             stage_two_start_epoch=stage_two_start_epoch,
             stage_two_loss_fn=stage_two_loss_fn,
@@ -917,6 +922,7 @@ def run_fine_tuning(
             adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale,
             # Dataset info for effective epoch tracking
             dataset_info=training_data.dataset_info() if hasattr(training_data, 'dataset_info') else None,
+            **_reduce_lr_kwargs(config),
         )
     else:
         training_utils.fit(
@@ -945,7 +951,8 @@ def run_fine_tuning(
             use_adaptive_robust_loss=use_adaptive_robust_loss,
             adaptive_robust_loss_targets=adaptive_robust_loss_targets,
             adaptive_robust_loss_init_alpha=adaptive_robust_loss_init_alpha,
-            adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale
+            adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale,
+            **_reduce_lr_kwargs(config),
         )
     logger.info('Training has finished!')
 

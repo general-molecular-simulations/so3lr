@@ -4,7 +4,7 @@ import sys
 import time
 import yaml
 import click
-from so3lr.mlff.utils import kspace_utils as _KS
+from so3lr import kspace_defaults as _KS
 import difflib
 import logging
 import warnings
@@ -19,7 +19,7 @@ from .. import __version__
 # same table into parameter keys, so the two cannot drift apart.
 from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
 from ..md_observables import MD_OBSERVABLES
-from ..md_settings_validation import validate_md_counts
+from ..md_settings_validation import DEFAULT_PRESSURE, load_settings_yaml, resolve_ensemble, validate_md_counts
 from ..flash.check import ENGINES, FLASH_MODES, reserve_gpu
 
 # NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
@@ -154,7 +154,6 @@ DEFAULT_BUFFER_MULTIPLIER = 1.25
 DEFAULT_SAVE_BUFFER = 50
 DEFAULT_TIMESTEP = 0.5  # femtoseconds
 DEFAULT_TEMPERATURE = 300  # Kelvin
-DEFAULT_PRESSURE = 1.0  # bar
 
 # Nose-Hoover chain parameters
 DEFAULT_MD_CYCLES = 100
@@ -737,20 +736,6 @@ def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Pa
         logger.warning(msg)
 
 
-def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Determine ensemble from settings dict, defaulting to NVT.
-
-    Ensemble can be set explicitly via ``settings_dict['ensemble']`` (e.g. from a
-    YAML settings file), or is inferred: presence of ``md_P`` implies NPT, otherwise
-    NVT is used as the default.
-    """
-    if settings_dict.get('ensemble') is None:
-        if settings_dict.get('md_P') is not None:
-            settings_dict['ensemble'] = 'npt'
-        else:
-            settings_dict['ensemble'] = 'nvt'
-    return settings_dict
-
 @click.group(cls=CustomCommandClass, invoke_without_command=True,
              help="Run molecular dynamics using SO3LR Machine Learned Force Field.",
              context_settings={"help_option_names": []})
@@ -791,8 +776,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
 
     try:
         settings_path = Path(settings).expanduser().resolve()
-        with open(settings_path, 'r') as f:
-            settings_dict = yaml.safe_load(f) or {}
+        settings_dict = load_settings_yaml(settings_path)
     except (FileNotFoundError, yaml.YAMLError) as e:
         logger.error(f"Error loading settings file: {str(e)}")
         sys.exit(1)
@@ -819,7 +803,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     for key, default in YAML_DEFAULTS.items():
         settings_dict.setdefault(key, default)
 
-    settings_dict = canonicalize_ensemble(settings_dict)
+    settings_dict = resolve_ensemble(settings_dict)
     validate_md_counts(settings_dict)
 
     # Fast-fail on missing required keys before setup_logger / banner /
@@ -842,9 +826,8 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     # YAML branch left output_file=None and immediately crashed in
     # infer_output_format. We compute the same `<input>_<ensemble>.xyz` here.
     if not settings_dict.get('output_file') and settings_dict.get('input_file'):
-        _suffix = {'nvt': 'nvt', 'nvt-langevin': 'nvt_langevin', 'npt': 'npt', 'nve': 'nve'}
-        _ens = settings_dict.get('ensemble', 'nvt')
-        settings_dict['output_file'] = f"{Path(settings_dict['input_file']).stem}_{_suffix.get(_ens, _ens)}.xyz"
+        settings_dict['output_file'] = (
+            f"{Path(settings_dict['input_file']).stem}_{settings_dict['ensemble'].replace('-', '_')}.xyz")
 
     settings_dict['output_format'] = infer_output_format(settings_dict.get('output_file', ''))
 
@@ -1034,14 +1017,9 @@ def run_md_simulation(
         click.echo(ctx.get_help())
         return
 
-    # Default output filename uses ensemble-specific suffix.
-    # Note: NVT-Langevin uses the underscore form 'nvt_langevin' in filenames
-    # (and YAML `ensemble:` values) but the hyphen form 'nvt-langevin' as the
-    # CLI subcommand name (`so3lr nvt-langevin ...`); the mapping below keeps
-    # the two conventions in sync.
-    _suffix = {'nvt': 'nvt', 'nvt-langevin': 'nvt_langevin', 'npt': 'npt', 'nve': 'nve'}
+    # Default output filename: <input stem>_<ensemble with '_'>.xyz
     if output_file is None:
-        output_file = f"{Path(input_file).stem}_{_suffix[ensemble]}.xyz"
+        output_file = f"{Path(input_file).stem}_{ensemble.replace('-', '_')}.xyz"
 
     if log_file is None:
         # Use with_suffix so the log file lands next to --output, not in CWD.
@@ -1817,8 +1795,7 @@ def tune_ewald(
             if not settings_path.exists():
                 raise FileNotFoundError(f'Settings file not found: {settings}')
 
-            with open(settings_path, 'r') as f:
-                settings_dict = yaml.safe_load(f) or {}
+            settings_dict = load_settings_yaml(settings_path)
 
             logger.info(f"Loading settings from {settings}")
         except (FileNotFoundError, yaml.YAMLError) as e:
@@ -1902,7 +1879,9 @@ def main() -> None:
     """Entry point for the command line interface."""
     os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2') # Suppress TF logging
 
-    cli(standalone_mode=False)
+    # Standalone mode: click prints a usage error (missing file, bad choice,
+    # unknown flag) as one line and exits 2, instead of raising a traceback.
+    cli()
 
 
 if __name__ == '__main__':

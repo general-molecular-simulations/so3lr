@@ -8,6 +8,12 @@ from jax_md.space import DisplacementOrMetricFn, Box, transform
 from so3lr.graph import Graph
 
 
+def nbrs_cutoff(potential):
+    """The longest cutoff the neighbour lists use: the long-range one, or the
+    short-range one for a model without long-range parts."""
+    return potential.long_range_cutoff if potential.long_range_cutoff is not None else potential.cutoff
+
+
 def neighbor_list_featurizer(
         displacement_fn,
         species,
@@ -178,9 +184,11 @@ def to_jax_md(
         potential.cutoff, buffer_size_multiplier_sr,
         minimum_cell_size_multiplier_sr, partition.NeighborListFormat(1))
 
-    # create the neighbor_fn for long-range cutoff (handles OrderedSparse)
+    # create the neighbor_fn for long-range cutoff (handles OrderedSparse). A model
+    # without long-range parts has no long_range_cutoff and reads no long-range
+    # pairs; its list is built at the short-range cutoff so the same code runs it.
     neighbor_fn_lr = _make_neighbor_fn(
-        potential.long_range_cutoff, buffer_size_multiplier_lr,
+        nbrs_cutoff(potential), buffer_size_multiplier_lr,
         minimum_cell_size_multiplier_lr, partition.NeighborListFormat(2))
 
     featurizer = neighbor_list_featurizer(

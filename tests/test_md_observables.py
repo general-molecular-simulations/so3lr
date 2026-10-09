@@ -134,3 +134,12 @@ def test_tune_ewald_settings_keys_are_known_to_the_validator():
         'dispersion_damping_lo', 'dispersion_damping_hi', 'dispersion_damping_it',
     ]
     assert [k for k in tune_keys if k not in known] == []
+
+
+def test_dispersion_ratios_reads_either_name():
+    """so3lr-s/m/l output 'a0_ratios', the legacy model 'hirshfeld_ratios' and no
+    C6 head; tune-ewald used to read 'hirshfeld_ratios' and 'c6_ratios' directly
+    and raised KeyError for every bundled model."""
+    from so3lr.cli.so3lr_md import dispersion_ratios
+    assert dispersion_ratios({'a0_ratios': 2, 'c6_ratios': 3}) == (2, 3)
+    assert dispersion_ratios({'hirshfeld_ratios': 2}) == (2, None)
