@@ -2228,12 +2228,12 @@ def apply_atom_constraints_to_state(
         return state
     if reference_is_cartesian:
         reference_position = cartesian_to_positions(reference_position, box, fractional_coordinates)
-    zero_momentum = jnp.zeros_like(state.momentum)
-    zero_force = jnp.zeros_like(state.force)
+    # The flexible-cell NPT state stores velocity; its momentum is a read-only property.
+    moving = 'velocity' if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState) else 'momentum'
     return state.set(
         position=jnp.where(mobile_mask == 1, state.position, reference_position),
-        momentum=jnp.where(mobile_mask == 1, state.momentum, zero_momentum),
-        force=jnp.where(mobile_mask == 1, state.force, zero_force),
+        force=jnp.where(mobile_mask == 1, state.force, jnp.zeros_like(state.force)),
+        **{moving: jnp.where(mobile_mask == 1, getattr(state, moving), 0.)},
     )
 
 
