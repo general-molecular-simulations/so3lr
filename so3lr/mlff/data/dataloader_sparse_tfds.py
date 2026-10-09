@@ -11,7 +11,7 @@ from so3lr.mlff.utils.param_utils import MAX_NUM_THEORY_LEVELS
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from itertools import product
-from multiprocessing import Manager, get_context
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Optional
 

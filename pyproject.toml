@@ -110,8 +110,6 @@ include = [
     # discovers files located inside the package automatically.
     { path = "so3lr/cli/*.yaml", format = ["sdist", "wheel"] },
     { path = "so3lr/config/*.yaml", format = ["sdist", "wheel"] },
-    { path = "so3lr/mlff/config/*.json", format = ["sdist", "wheel"] },
-    { path = "so3lr/mlff/nn/observable/*.dat", format = ["sdist", "wheel"] },
     { path = "so3lr/models/**/*", format = ["sdist", "wheel"] },
     { path = "so3lr/mlff/sph_ops/*.npz", format = ["sdist", "wheel"] },
     { path = "so3lr/mlff/utils/robust_loss_jax/data/*.npz", format = ["sdist", "wheel"] },

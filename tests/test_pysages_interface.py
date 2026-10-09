@@ -10,10 +10,7 @@ Tests cover:
 """
 
 import os
-import re
-import sys
 import shutil
-import tempfile
 import pathlib
 import subprocess
 

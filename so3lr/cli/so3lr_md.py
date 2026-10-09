@@ -26,8 +26,6 @@ from logging.handlers import RotatingFileHandler
 from typing import Dict, Tuple, Union, List, Optional, Any, Callable, MutableMapping, Sequence
 
 import ase
-import yaml
-import click
 import numpy as np
 from ase.io import read
 import jax
@@ -44,13 +42,10 @@ from so3lr.mlff.nn.observable.observable_sparse import (
     dispersion_tail_correction_energy,
 )
 
-from so3lr.graph import Graph
-from so3lr import So3lrPotential
 from so3lr.jaxmd_utils import to_jax_md as _to_jax_md
 from so3lr.pbc import is_fully_periodic, lattice_rows
 from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
 
-import jaxpme
 
 # Optional PySAGES integration
 try:
@@ -2835,7 +2830,7 @@ def perform_md(
 
         # Log per-element diagnostics
         import numpy as _np
-        from so3lr.mlff.nn.observable.dispersion_ref_data import alphas as _alphas_ref, C6_coef as _C6_ref
+        from so3lr.mlff.nn.observable.dispersion_ref_data import C6_coef as _C6_ref
         for _z in _np.unique(_np.asarray(_species)):
             _mask = _np.asarray(_species) == _z
             _hr = _np.asarray(_hirshfeld_ratios)[_mask]

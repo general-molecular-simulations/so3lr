@@ -5,7 +5,7 @@ import numpy as np
 
 from jax.ops import segment_sum
 from functools import partial
-from typing import Any, Callable, Dict, Sequence, Optional
+from typing import Any, Callable, Dict, Sequence
 
 from so3lr.mlff.nn.sub_module import BaseSubModule
 from so3lr.mlff.sph_ops import make_l0_contraction_fn

@@ -16,7 +16,6 @@ from so3lr.mlff.nn.observable.observable_sparse import coulomb_erf_shifted_force
 import numpy as np
 import jax
 import jax.numpy as jnp
-import os
 import math
 import time
 import logging
@@ -31,13 +30,12 @@ from jax_md.quantity import force
 
 import jaxpme
 
-from ase import Atoms
 from ase.io import read
 from ase.units import Bohr
 
 from so3lr import So3lrPotential
 from so3lr.pbc import lattice_rows
-from so3lr.cli.so3lr_md import handle_box, load_model, atoms_to_jnp, process_model, load_state
+from so3lr.cli.so3lr_md import load_model, atoms_to_jnp, process_model
 from .so3lr_md import setup_logger
 
 # Setup logging

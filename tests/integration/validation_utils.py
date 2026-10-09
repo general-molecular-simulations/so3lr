@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Shared validation utilities for SO3LR integration tests."""
 import pathlib
-from typing import List, Optional, Union, Dict, Any
+from typing import List, Optional, Union, Dict
 
 
 class ValidationError(Exception):

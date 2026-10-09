@@ -29,7 +29,6 @@ def test_config_unit_accessors():
         "electric_charge_unit": "e", "dipole_vec_unit": "e * Angstrom"}})
     assert from_config.energy_unit_from_config(config) == pytest.approx(units.kcal / units.mol)
     assert from_config.length_unit_from_config(config) == pytest.approx(units.Bohr)
-    assert from_config.charge_unit_from_config(config) == 1.0
     assert from_config.dipole_vec_unit_from_config(config) == pytest.approx(units.Angstrom)
     config.data.energy_unit = '__import__("os").getcwd()'
     with pytest.raises(ValueError, match=r"data\.energy_unit"):

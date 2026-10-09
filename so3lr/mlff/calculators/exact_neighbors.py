@@ -22,8 +22,6 @@ from typing import NamedTuple, Optional
 import numpy as np
 from ase.cell import Cell
 
-from so3lr.mlff.indexing.indices import pad_index_list, pad_shift
-
 try:  # matscipy's C implementation is ~25x faster than ASE's pure-numpy one
     from matscipy.neighbours import neighbour_list as _neighbour_list
     _SLOW_FALLBACK = False
@@ -51,8 +49,9 @@ class ExactNeighbors(NamedTuple):
 
 
 def _padded(i, j, S, cap, n):
-    return (pad_index_list(i, cap, pad_value=n), pad_index_list(j, cap, pad_value=n),
-            pad_shift(S, cap))
+    pad = cap - len(i)
+    return (np.pad(i, (0, pad), constant_values=n), np.pad(j, (0, pad), constant_values=n),
+            np.pad(S, ((0, pad), (0, 0))))
 
 
 def _capacity(n_pairs, previous, multiplier):

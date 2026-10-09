@@ -6,9 +6,8 @@ import pathlib
 import pytest
 
 from ase.io import read
-from jax_md import space, quantity, simulate, units
+from jax_md import space, simulate, units
 
-from so3lr.cli.so3lr_md import to_jax_md_custom, handle_box
 from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr.model_registry import resolve_model
 

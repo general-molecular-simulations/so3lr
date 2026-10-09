@@ -12,11 +12,9 @@ from typing import Any, Callable, Type, Dict, Sequence, Optional
 
 from glp.graph import Graph
 
-from ..utils import calculator_utils
 from ...pbc import lattice_rows
 from ..utils.checkpoint_utils import load_params_pkl
 from ..utils.training_utils import expand_observables_to_theory_levels
-from .base_calculator import make_base_calculator
 from ..nn.stacknet.observable_function_sparse import get_observable_fn_sparse
 from ..nn.observable.dispersion_ref_data import supported_atomic_numbers_for_config
 from ml_collections import config_dict

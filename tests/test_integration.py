@@ -3,7 +3,6 @@ SO3LR CLI Integration Tests.
 
 These tests run actual simulations with the CLI to verify end-to-end functionality.
 """
-import os
 import subprocess
 import shutil
 import pathlib

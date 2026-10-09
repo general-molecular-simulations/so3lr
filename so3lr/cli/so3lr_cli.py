@@ -9,10 +9,9 @@ import difflib
 import logging
 import warnings
 import platform
-import numpy as np
 
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Union, Any, Callable
+from typing import Dict, Optional, Any, Callable
 
 from .. import __version__
 # Import-cheap by design (no JAX): `so3lr --help` builds the --strategy
