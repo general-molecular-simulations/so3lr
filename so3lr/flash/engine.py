@@ -61,8 +61,16 @@ from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
 
 BE = 16              # edges per chunk in the pair kernels
 NUM_WARPS = 2
-# attention kernels: (edges per chunk, warps)
-ATT_LAUNCH = {"fwd": (16, 2), "bwd_heads": (16, 2), "bwd_degrees": (16, 2)}
+# The attention kernels' launch, (edges per chunk, warps, filter matmul), by the width of
+# the spherical filters' hidden layer (so3lr-s/m 32, so3lr-l 64): the fastest on an H200
+# for 12,288 waters. so3lr-l takes 4 warps: a float32 dot lowered to FMAs keeps its whole
+# reduction in each thread's registers, and at 2 warps its kernels spill. "tf32x3": the
+# filter matmul on tensor cores as three TF32 products; float32 energies and forces are
+# as close to float64 as with the FMA dot.
+ATT_LAUNCH = {
+    32: {"fwd": (16, 2, "ieee"), "bwd_heads": (16, 2, "tf32x3"), "bwd_degrees": (8, 2, "tf32x3")},
+    64: {"fwd": (16, 4, "ieee"), "bwd_heads": (32, 4, "tf32x3"), "bwd_degrees": (16, 4, "tf32x3")},
+}
 BL = 64              # candidates per chunk in the long-range kernel
 
 
@@ -74,11 +82,18 @@ def _hi(a, b):
     return jnp.dot(a, b, precision=lax.Precision.HIGHEST, preferred_element_type=a.dtype)
 
 
-def _filter_mm(hz, wb, c0, G):
+def _mm(a, b, algo):
+    if algo == "tf32x3":
+        return jnp.dot(a, b, precision=lax.DotAlgorithmPreset.TF32_TF32_F32_X3,
+                       preferred_element_type=jnp.float32)
+    return _hi(a, b)
+
+
+def _filter_mm(hz, wb, c0, G, algo):
     """hz [BE, SH] @ wb[:, c0:c0+G]. Pallas-Triton has no float64 dot, so float64 sums
     over the SH hidden units (weight rows read from the ref: values cannot be sliced)."""
     if hz.dtype != jnp.float64:
-        return _hi(hz, wb[:, pl.ds(c0, G)])
+        return _mm(hz, wb[:, pl.ds(c0, G)], algo)
     sh = jnp.arange(hz.shape[1])
     out = jnp.zeros((hz.shape[0], G), hz.dtype)
     for k in range(hz.shape[1]):
@@ -87,10 +102,10 @@ def _filter_mm(hz, wb, c0, G):
     return out
 
 
-def _filter_mm_t(gw, wb, c0, G):
+def _filter_mm_t(gw, wb, c0, G, algo):
     """gw [BE, G] @ wb[:, c0:c0+G].T -> [BE, SH] (float64 likewise)."""
     if gw.dtype != jnp.float64:
-        return _hi(gw, wb[:, pl.ds(c0, G)].T)
+        return _mm(gw, wb[:, pl.ds(c0, G)].T, algo)
     nsh = wb.shape[0]
     sh = jnp.arange(nsh)
     out = jnp.zeros((gw.shape[0], nsh), gw.dtype)
@@ -363,7 +378,8 @@ def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, nbr, count, *
 # =========================================================================== #
 def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
                     t1v, t1d, t2v, t2d, wa1, ba1, wb1, bb1, wa2, ba2, wb2, bb2, mdeg, cdeg, scal,
-                    x_in, ev_in, boxl, x_out, ev_out, *, G, ND, MP, ZMAX, YS, CH=0, BE=BE, H0=0, NH=4):
+                    x_in, ev_in, boxl, x_out, ev_out, *, G, ND, MP, ZMAX, YS, CH=0, BE=BE, H0=0, NH=4,
+                    ALGO="ieee"):
     # CH 0: both channels; 1: heads only (x_out); 2: degrees only (ev_out). The outputs
     # alias the inputs, so a channel not run leaves its output as it was.
     a = _i32(pl.program_id(0))
@@ -394,7 +410,7 @@ def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
             h = H0 + j
             co = h * G + jnp.arange(G)
             cp = j * G + jnp.arange(G)
-            w = (_filter_mm(hz, wb1, h * G, G) + bb1[pl.ds(h * G, G)][None, :]
+            w = (_filter_mm(hz, wb1, h * G, G, ALGO) + bb1[pl.ds(h * G, G)][None, :]
                  + _radial(t1v, t1d, i0, u, spacing, co, emask))
             s = jnp.sum(q1[a, pl.ds(j * G, G)].astype(dt)[None, :] * w * _rows(k1, jj, cp, emask, dt), axis=1)
             al = jnp.where(nz, ce * s * inv_nc, 0.0)
@@ -409,7 +425,7 @@ def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
             d = H0 + j
             co = d * G + jnp.arange(G)
             cp = j * G + jnp.arange(G)
-            w = (_filter_mm(hz, wb2, d * G, G) + bb2[pl.ds(d * G, G)][None, :]
+            w = (_filter_mm(hz, wb2, d * G, G, ALGO) + bb2[pl.ds(d * G, G)][None, :]
                  + _radial(t2v, t2d, i0, u, spacing, co, emask))
             s = jnp.sum(q2[a, pl.ds(j * G, G)].astype(dt)[None, :] * w * _rows(k2, jj, cp, emask, dt), axis=1)
             return a_m + jnp.where(md[None, :] == d, jnp.where(nz, ce * s * inv_nc, 0.0)[:, None], 0.0)
@@ -434,7 +450,8 @@ def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
 # =========================================================================== #
 def _att_bwd_heads_kernel(q1, k1, v1, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, wa, ba, wb, bb,
                           mdeg, cdeg, gdx, scal, a0, gev_in, fx_in, fy_in, fz_in, fw_in, boxl,
-                          gq, gk, gv, gev, fx_o, fy_o, fz_o, fw_o, *, G, ND, MP, ZMAX, BE=BE, H0=0, NH=4):
+                          gq, gk, gv, gev, fx_o, fy_o, fz_o, fw_o, *, G, ND, MP, ZMAX, BE=BE, H0=0, NH=4,
+                          ALGO="ieee"):
     t = _i32(pl.program_id(0))
     a = a0[0] + t
 
@@ -469,7 +486,7 @@ def _att_bwd_heads_kernel(q1, k1, v1, ev, px, py, pz, nbr, cnt, z, rmin, tv, td,
                 co = h * G + jnp.arange(G)
                 cp = j * G + jnp.arange(G)
                 wr, dwr = _radial(tv, td, i0, u, spacing, co, emask, True)
-                w = _filter_mm(hz, wb, h * G, G) + bb[pl.ds(h * G, G)][None, :] + wr
+                w = _filter_mm(hz, wb, h * G, G, ALGO) + bb[pl.ds(h * G, G)][None, :] + wr
                 qa = q1[a, pl.ds(j * G, G)].astype(dt)[None, :]
                 ka = k1[a, pl.ds(j * G, G)].astype(dt)[None, :]
                 va = v1[a, pl.ds(j * G, G)].astype(dt)[None, :]
@@ -489,7 +506,7 @@ def _att_bwd_heads_kernel(q1, k1, v1, ev, px, py, pz, nbr, cnt, z, rmin, tv, td,
                 gw = gs * qa * kb + gsr * qb * ka
                 gc = gc + jnp.where(emask, (ga * s + gar * sr) * inv_nc, 0.0)
                 grr = grr + jnp.sum(gw * dwr, axis=1)
-                gz = gz + _filter_mm_t(gw, wb, h * G, G)
+                gz = gz + _filter_mm_t(gw, wb, h * G, G, ALGO)
                 return agq, agk, agv, gz, gc, grr
             z0 = jnp.zeros((BE,), dt)
             agq, agk, agv, gz, gc, grr = lax.fori_loop(
@@ -518,7 +535,7 @@ def _att_bwd_heads_kernel(q1, k1, v1, ev, px, py, pz, nbr, cnt, z, rmin, tv, td,
 def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, wa, ba, wb, bb,
                             mdeg, cdeg, par, gdev, scal, a0, gev_in, fx_in, fy_in, fz_in, fw_in, boxl,
                             gq, gk, gev, fx_o, fy_o, fz_o, fw_o, *, G, ND, MP, ZMAX, YS, BE=BE, H0=0,
-                            NH=4):
+                            NH=4, ALGO="ieee"):
     t = _i32(pl.program_id(0))
     a = a0[0] + t
 
@@ -561,7 +578,7 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
                 co = d * G + jnp.arange(G)
                 cp = j * G + jnp.arange(G)
                 wr, dwr = _radial(tv, td, i0, u, spacing, co, emask, True)
-                w = _filter_mm(hz, wb, d * G, G) + bb[pl.ds(d * G, G)][None, :] + wr
+                w = _filter_mm(hz, wb, d * G, G, ALGO) + bb[pl.ds(d * G, G)][None, :] + wr
                 qa = q2[a, pl.ds(j * G, G)].astype(dt)[None, :]
                 ka = k2[a, pl.ds(j * G, G)].astype(dt)[None, :]
                 qb = _rows(q2, jj, cp, emask, dt)
@@ -580,7 +597,7 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
                 gw = gs * qa * kb + gsr * qb * ka
                 gc = gc + jnp.where(emask, (ga * s + gar * sr) * inv_nc, 0.0)
                 grr = grr + jnp.sum(gw * dwr, axis=1)
-                gz = gz + _filter_mm_t(gw, wb, d * G, G)
+                gz = gz + _filter_mm_t(gw, wb, d * G, G, ALGO)
                 return agq, agk, gz, a_m, a_mr, gc, grr
             z0 = jnp.zeros((BE,), dt)
             zt = jnp.zeros((BE, MP), dt)
@@ -1125,7 +1142,8 @@ class FlashSO3LR:
     def __init__(self, params, statics, z, box, *, total_charge=0.0, total_spin=0.0,
                  equilibration_charge=None, tile=1 << 17, max_neighbours=None, lr_scratch=1024,
                  keep_layer_inputs=True, keep_attention=False, split_channels=False,
-                 split_blocks=False, pme_electrostatics=None, pme_dispersion=None, box_margin=0.0):
+                 split_blocks=False, pme_electrostatics=None, pme_dispersion=None, box_margin=0.0,
+                 launch=None):
         degrees = [int(d) for d in statics["degrees"]]
         self.nh = int(statics["num_heads"])
         # one head per degree entry, each on its own block of G features (so3lr-s/m: 4 x 32,
@@ -1170,6 +1188,10 @@ class FlashSO3LR:
         starts = np.cumsum([0] + [2 * d + 1 for d in degrees])[:-1]
         self.ys = tuple((int(c), d * d - 1) for c, d in zip(starts, degrees))
         self.cdeg = jnp.asarray([(2 * d + 1) ** -0.5 for d in degrees], dt)
+        # the attention kernels' launch for this width of the spherical filters' hidden
+        # layer (the nearest wider one tabulated); launch: per-kernel overrides
+        sh = int(params["layers_0"]["attention_block"]["spherical_filter1_layer_1"]["kernel"].shape[1])
+        self.launch = dict(ATT_LAUNCH[min(ATT_LAUNCH, key=lambda w: (w < sh, abs(w - sh)))], **(launch or {}))
         self.par = jnp.asarray([(-1.0) ** d for d in degrees], dt)
         self.z = jnp.asarray(z)
         # x0 depends on the element only: one row per element present
@@ -1403,10 +1425,11 @@ class FlashSO3LR:
                 x_l, x1, ev1 = lax.optimization_barrier((x_l, x1, ev1))
                 qkv = self._projections(li, x_l, which, block=blk)
             ref = qkv[which[0]]
+            be, warps, algo = self.launch["fwd"]
             kern = partial(_att_fwd_kernel, G=self.G, ND=self.nh, MP=self.MP, ZMAX=self.zmax, YS=self.ys,
-                           CH=ch, BE=ATT_LAUNCH["fwd"][0], H0=h0, NH=nh)
+                           CH=ch, BE=be, H0=h0, NH=nh, ALGO=algo)
             x1, ev1 = pl.pallas_call(
-                kern, grid=(n,), compiler_params=_cp(ATT_LAUNCH["fwd"][1]),
+                kern, grid=(n,), compiler_params=_cp(warps),
                 out_shape=(jax.ShapeDtypeStruct((n, F), dt), jax.ShapeDtypeStruct((n, self.M), dt)),
                 input_output_aliases={28: 0, 29: 1},
             )(*[q if q is not None else ref for q in qkv], ev_l, px, py, pz, nbr, cnt, self.z,
@@ -1464,9 +1487,10 @@ class FlashSO3LR:
             a0 = jnp.stack([start, first_new]).astype(jnp.int32)
             g = {}
             if ch != 2:
+                be, warps, algo = self.launch["bwd_heads"]
                 g[0], g[1], g[2], g_ev, fx, fy, fz, fw = pl.pallas_call(
-                    partial(_att_bwd_heads_kernel, BE=ATT_LAUNCH["bwd_heads"][0], H0=h0, NH=nh, **meta),
-                    grid=(T,), compiler_params=_cp(ATT_LAUNCH["bwd_heads"][1]),
+                    partial(_att_bwd_heads_kernel, BE=be, H0=h0, NH=nh, ALGO=algo, **meta),
+                    grid=(T,), compiler_params=_cp(warps),
                     out_shape=(shp((T, FP), dt), shp((T, FP), dt), shp((T, FP), dt), shp((n, self.M), dt),
                                shp((n,), dt), shp((n,), dt), shp((n,), dt), shp((n,), dt)),
                     input_output_aliases={22: 3, 23: 4, 24: 5, 25: 6, 26: 7},
@@ -1475,10 +1499,10 @@ class FlashSO3LR:
                   sf("spherical_filter1", 2)["kernel"], sf("spherical_filter1", 2)["bias"],
                   self.mdeg, self.cdeg, gdx, self.scal, a0, g_ev, fx, fy, fz, fw, self._box(px))
             if ch != 1:
+                be, warps, algo = self.launch["bwd_degrees"]
                 g[3], g[4], g_ev, fx, fy, fz, fw = pl.pallas_call(
-                    partial(_att_bwd_degrees_kernel, BE=ATT_LAUNCH["bwd_degrees"][0], H0=h0, NH=nh,
-                            YS=self.ys, **meta),
-                    grid=(T,), compiler_params=_cp(ATT_LAUNCH["bwd_degrees"][1]),
+                    partial(_att_bwd_degrees_kernel, BE=be, H0=h0, NH=nh, ALGO=algo, YS=self.ys, **meta),
+                    grid=(T,), compiler_params=_cp(warps),
                     out_shape=(shp((T, FP), dt), shp((T, FP), dt), shp((n, self.M), dt),
                                shp((n,), dt), shp((n,), dt), shp((n,), dt), shp((n,), dt)),
                     input_output_aliases={22: 2, 23: 3, 24: 4, 25: 5, 26: 6},
