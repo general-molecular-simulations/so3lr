@@ -10,9 +10,10 @@ Each subdirectory represents a test case with specific settings and validation:
 test_case_name/
 ├── settings.yaml          # Required: SO3LR configuration for the test
 ├── setup_settings.yaml    # Optional: Configuration for setup phase (e.g., restart tests)
-├── input.xyz              # Input geometry (or input.gro for some tests)
 └── validate.py            # Custom validation script using Validator utilities
 ```
+
+Input structures live in `tests/test_data/` and are named by `input_file` in the settings; a case may also ship its own.
 
 ### Shared Utilities
 

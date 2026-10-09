@@ -7,6 +7,7 @@ import subprocess
 import shutil
 import pathlib
 import pytest
+import yaml
 
 # A CLI run that stalls must fail on its own, with its so3lr.log on disk, rather
 # than take the whole shard to the 60-minute cancel with nothing to read.
@@ -47,25 +48,21 @@ def test_data_dir():
 @pytest.fixture
 def integration_workdir(tmp_path, request):
     """
-    Set up a working directory for an integration test case.
-    Copies all files from the test case directory to a temporary directory.
+    Set up a working directory for an integration test case: the case's files,
+    the shared validation utilities, and the input structure it names, which
+    lives in tests/test_data unless the case ships its own.
     """
     test_case = request.param
     integration_dir = pathlib.Path(__file__).parent / 'integration' / test_case
-    if not integration_dir.exists():
-        pytest.skip(f"Test case directory not found: {integration_dir}")
     for item in integration_dir.iterdir():
         if item.is_file():
             shutil.copy2(item, tmp_path)
-        elif item.is_dir() and item.name not in ['__pycache__', 'hdf5', 'expected']:
-            shutil.copytree(item, tmp_path / item.name)
-    # Copy shared validation utilities so validate.py scripts can import them
-    validation_utils = integration_dir.parent / 'validation_utils.py'
-    if validation_utils.exists():
-        shutil.copy2(validation_utils, tmp_path)
-    expected_dir = integration_dir / 'expected'
-    if expected_dir.exists():
-        shutil.copytree(expected_dir, tmp_path / 'expected')
+    shutil.copy2(integration_dir.parent / 'validation_utils.py', tmp_path)
+    for name in ('settings.yaml', 'setup_settings.yaml'):
+        if (integration_dir / name).exists():
+            input_file = yaml.safe_load((integration_dir / name).read_text())['input_file']
+            if not (tmp_path / input_file).exists():
+                shutil.copy2(pathlib.Path(__file__).parent / 'test_data' / input_file, tmp_path)
     return tmp_path, test_case, integration_dir
 
 # ============================================================================
@@ -129,8 +126,9 @@ def test_integration_case(integration_workdir):
             capture_output=True,
             text=True,
         )
+        # Validator.report() prints its errors to stdout.
         assert validate_result.returncode == 0, (
-            f"Validation failed:\n{validate_result.stderr}"
+            f"Validation failed:\n{validate_result.stdout}\n{validate_result.stderr}"
         )
 
 class TestSO3LRCLISubcommands:

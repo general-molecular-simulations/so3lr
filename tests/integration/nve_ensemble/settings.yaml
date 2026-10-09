@@ -1,7 +1,7 @@
 # NVE ensemble test - microcanonical simulation
 # Tests running NVE (constant energy) dynamics
 
-input_file: input.xyz
+input_file: acetone.xyz
 output_file: trajectory.hdf5
 log_file: so3lr.log
 

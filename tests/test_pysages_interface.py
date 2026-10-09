@@ -37,7 +37,6 @@ GEOMETRY_FILE = TEST_DATA_DIR / "benzoic_acid_aq_1.xyz"
 # Base MD settings shared by all integration runs.  The geometry path is
 # filled in at fixture time so it points to the temp-directory copy.
 _BASE_MD_SETTINGS = {
-    'use_so3lr': True,
     'precision': 'float64',
     'total_charge': 0.0,
     'lr_cutoff': 12.0,
@@ -47,12 +46,10 @@ _BASE_MD_SETTINGS = {
     'min_start_dt': 0.05,
     'min_max_dt': 0.1,
     'min_n_min': 2,
-    'min_print': True,
     'md_dt': 0.5,
     'md_T': 300,
     'md_cycles': 2,
     'md_steps': 500,
-    'hdf5_buffer_size': 50,
 }
 
 _PYSAGES_INPUT_UNBIASED = {
@@ -183,7 +180,6 @@ class TestImportGuard:
             'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
             'ensemble': 'nvt', 'precision': 'float32',
             'seed': 42, 'save_buffer': 10,
-            'use_so3lr': True,
             'lr_cutoff': 12.0, 'total_charge': 0.0,
             # On a periodic system, if PySAGES were silently enabled the
             # gating would auto-flip this to True and emit a warning.
@@ -726,7 +722,6 @@ class TestParsePysagesInput:
             'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
             'ensemble': 'nvt', 'precision': 'float32',
             'seed': 42, 'save_buffer': 10,
-            'use_so3lr': True,
             'lr_cutoff': 12.0, 'total_charge': 0.0,
         }
         with pytest.raises(FileNotFoundError):
@@ -1723,7 +1718,6 @@ class TestPerformMdEnforceCartesianGating:
             'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
             'precision': 'float32',
             'seed': 42, 'save_buffer': 10,
-            'use_so3lr': True,
             'lr_cutoff': 12.0, 'total_charge': 0.0,
         }
 

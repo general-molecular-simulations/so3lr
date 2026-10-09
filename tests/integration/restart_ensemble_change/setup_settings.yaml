@@ -1,7 +1,7 @@
 # Settings for generating the NVE restart file
 # Run: so3lr --settings setup_settings.yaml
 
-input_file: input.xyz
+input_file: acetone.xyz
 output_file: setup_trajectory.hdf5
 log_file: setup.log
 
