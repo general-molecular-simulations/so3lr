@@ -2,10 +2,6 @@ import flax.linen as nn
 from jax import numpy as jnp
 from so3lr.mlff.masking.mask import safe_mask
 import numpy as np
-from typing import Any
-
-
-PlaceHolder = Any
 
 
 bernstein = lambda **kwargs: BernsteinBasis(**kwargs)
@@ -235,18 +231,8 @@ def log_factorial(n):
     return np.sum(np.log(np.arange(1, n + 1)))
 
 
-def factorial(n):
-    return np.exp(log_factorial(n))
-
-
 def log_binomial_coefficient(n, k):
     n_factorial = log_factorial(n)
     k_factorial = log_factorial(k)
     n_k_factorial = log_factorial(n - k)
     return n_factorial - (k_factorial + n_k_factorial)
-
-
-def binomial_coefficient(n, k):
-    return np.exp(log_binomial_coefficient(n, k))
-
-

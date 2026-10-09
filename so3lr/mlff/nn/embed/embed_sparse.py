@@ -6,7 +6,6 @@ from functools import partial
 from typing import (Any, Dict, Optional, Sequence)
 
 import flax.linen as nn
-import e3x
 import logging
 
 from so3lr.mlff.nn.sub_module import BaseSubModule
@@ -16,125 +15,6 @@ from so3lr.mlff.masking.mask import safe_norm
 from so3lr.mlff.geometric import add_cell_offsets_sparse
 from so3lr.mlff import utils
 from so3lr.mlff.sph_ops import init_sph_fn
-
-
-class GeometryEmbedE3x(BaseSubModule):
-    prop_keys: Dict
-    max_degree: int
-    radial_basis_fn: str
-    num_radial_basis_fn: int
-    cutoff_fn: str
-    cutoff: float
-    input_convention: str = 'positions'
-    module_name: str = 'geometry_embed_e3x'
-
-    def __call__(self, inputs, *args, **kwargs):
-
-        idx_i = inputs['idx_i']  # shape: (num_pairs)
-        idx_j = inputs['idx_j']  # shape: (num_pairs)
-        idx_i_lr = inputs.get('idx_i_lr')  # shape: (num_pairs_lr)
-        idx_j_lr = inputs.get('idx_j_lr')  # shape: (num_pairs_lr)
-        cell = inputs.get('cell')  # shape: (n_graphs, 3, 3) or (3, 3)
-        cell_offsets = inputs.get('cell_offset')  # shape: (num_pairs, 3)
-        cell_offsets_lr = inputs.get('cell_offset_lr')  # shape: (num_pairs_lr, 3)
-        batch_segments = inputs.get('batch_segments')  # shape: (N,)
-
-        if self.input_convention == 'positions':
-            positions = inputs['positions']  # (N, 3)
-
-            # Calculate pairwise distance vectors.
-            r_ij = jax.vmap(
-                lambda i, j: positions[j] - positions[i]
-            )(idx_i, idx_j)  # (num_pairs, 3)
-
-            r_ij_lr = None
-            long_range_indices_present = False
-
-            if idx_i_lr is not None:
-                assert idx_j_lr is not None
-                if len(idx_i_lr) > 0:
-                    assert len(idx_j_lr) > 0
-                    long_range_indices_present = True
-
-            # If indices for long range corrections are present they are used.
-            if long_range_indices_present is True:
-                # Calculate pairwise distance vectors on long range indices.
-                r_ij_lr = jax.vmap(
-                    lambda i, j: positions[j] - positions[i]
-                )(idx_i_lr, idx_j_lr)  # (num_pairs_lr, 3)
-
-            # Apply minimal image convention if needed.
-            if cell is not None:
-                r_ij = add_cell_offsets_sparse(
-                    r_ij=r_ij,
-                    cell=cell,
-                    cell_offsets=cell_offsets,
-                    batch_segments=batch_segments,
-                    idx_i=idx_i,
-                )  # shape: (num_pairs,3)
-
-                if long_range_indices_present and cell_offsets_lr is not None:
-                    logging.warning(
-                        'The use of long range indices with PBCs has not been tested thoroughly yet, so use with care!'
-                    )
-
-                    r_ij_lr = add_cell_offsets_sparse(
-                        r_ij=r_ij_lr,
-                        cell=cell,
-                        cell_offsets=cell_offsets_lr,
-                        batch_segments=batch_segments,
-                        idx_i=idx_i_lr,
-                    )  # shape: (num_pairs_lr,3)
-
-        # Here it is assumed that PBC (if present) have already been respected in displacement calculation.
-        elif self.input_convention == 'displacements':
-            positions = inputs['positions']  # we need positions for dipole moment calculation
-            r_ij = inputs['displacements']
-            r_ij_lr = inputs.get('displacements_lr')  # shape : (num_pairs_lr, 3)
-        else:
-            raise ValueError(f"{self.input_convention} is not a valid argument for `input_convention`.")
-
-        # Calculate pairwise distances.
-        d_ij = safe_norm(r_ij, axis=-1)  # shape : (num_pairs)
-
-        if r_ij_lr is not None:
-            d_ij_lr = safe_norm(r_ij_lr, axis=-1)  # shape : (num_pairs_lr)
-            del r_ij_lr
-        else:
-            d_ij_lr = None
-
-        basis, cut = e3x.nn.basis(
-            r=r_ij,
-            max_degree=self.max_degree,
-            radial_fn=getattr(e3x.nn, self.radial_basis_fn),
-            num=self.num_radial_basis_fn,
-            cutoff_fn=partial(getattr(e3x.nn, self.cutoff_fn), cutoff=self.cutoff),
-            return_cutoff=True,
-
-        )  # (N, 1, (max_degree+1)^2, num_radial_basis_fn), (N, )
-
-        geometric_data = {'positions': positions,
-                          'basis': basis,
-                          'r_ij': r_ij,
-                          'd_ij': d_ij,
-                          'd_ij_lr': d_ij_lr,
-                          'cut': cut,
-                          }
-
-        return geometric_data
-
-    def reset_input_convention(self, input_convention: str) -> None:
-        self.input_convention = input_convention
-
-    def __dict_repr__(self) -> Dict[str, Dict[str, Any]]:
-        return {self.module_name: {'max_degree': self.max_degree,
-                                   'radial_basis_fn': self.radial_basis_fn,
-                                   'num_radial_basis_fn': self.num_radial_basis_fn,
-                                   'cutoff_fn': self.cutoff_fn,
-                                   'cutoff': self.cutoff,
-                                   'input_convention': self.input_convention,
-                                   'prop_keys': self.prop_keys}
-                }
 
 
 # --- descriptor distance floor -------------------------------------------------

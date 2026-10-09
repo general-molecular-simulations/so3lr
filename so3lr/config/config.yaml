@@ -45,11 +45,11 @@ model:
     - 3
     - 4
   cutoff: 5.0  # Short-range cutoff in Angstrom. Defines the local neighborhood for message passing.
-  cutoff_fn: phys  # Cutoff function applied to short-range edges. Options: phys, cosine, polynomial, exponential.
+  cutoff_fn: phys  # Cutoff function applied to short-range edges. Options: phys, cosine, exponential.
   cutoff_lr: null  # Long-range cutoff in Angstrom for electrostatic and dispersion modules. Set to null to disable long-range truncation.
   cutoff_lr_damping: 2.0  # Damping width in Angstrom for the long-range cutoff function. Controls how smoothly interactions decay near cutoff_lr.
   num_radial_basis_fn: 32  # Number of radial basis functions for encoding interatomic distances.
-  radial_basis_fn: bernstein  # Type of radial basis functions. Options: physnet, bernstein, bessel (resolved via e3x.nn).
+  radial_basis_fn: bernstein  # Type of radial basis functions. Options: bernstein, physnet, gaussian, fourier.
   activation_fn: silu  # Activation function for MLPs in the message passing layers. Options: silu, gelu, swish, etc. (resolved via jax.nn).
   qk_non_linearity: identity  # Non-linearity applied to query and key vectors before computing attention weights. Options: identity (none), silu, etc.
   residual_mlp_1: true  # Apply a residual MLP to invariant features after the attention update within each layer.
