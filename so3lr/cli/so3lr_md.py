@@ -1126,7 +1126,7 @@ def process_model(
     precision: jnp.dtype = jnp.float32,
     fractional_coordinates: bool = False,
     has_aux: bool = False,
-) -> Tuple[callable, callable, callable, Optional[callable]]:
+) -> Tuple[callable, callable, callable]:
     """
     Process the model and create the neighbor functions and energy function.
 
@@ -1147,9 +1147,11 @@ def process_model(
         fractional_coordinates (bool, optional): Whether to use fractional
                     coordinates or not (needs to be True for periodic systems).
                                             Defaults to False.
+        has_aux (bool, optional): Unused; the returned function takes has_aux per call.
 
     Returns:
-        Tuple[callable, callable, callable]: Neighbor functions and energy function.
+        Tuple[callable, callable, callable]: Short- and long-range neighbor functions
+        and the energy (or observables) function.
     """
 
     # Refuse elements this model was never trained on, before any jit tracing.
@@ -1254,17 +1256,19 @@ def validate_npt_restart_coupling(state, box, npt_coupling: str) -> None:
             )
 
 
-def format_pressure_tensor(state, pressure_unit):
-    """Diagonal of the instantaneous pressure tensor for the log, as (header, values).
-
-    Only the flexible-cell state has one, and normalize_npt_coupling leaves
-    semi-isotropic as the only coupling that builds it; other states log nothing.
-    """
-    if not isinstance(state, jax_md.simulate.NPTNoseHooverFlexState):
-        return '', ''
-    P_tensor = jax_md.simulate.pressure_tensor_flex(state) / pressure_unit
-    pxx, pyy, pzz = (float(P_tensor[i, i]) for i in range(3))
-    return 'P [bar] (xx,yy,zz)', f'({pxx:.1f},{pyy:.1f},{pzz:.1f})'
+def format_md_row(step, KE, PE, H, T, time_per_step, npt_state=None, box=None):
+    """One MD log row, tab-separated like the header in perform_md. For NPT pass
+    the state and box: a flexible-cell (semi-isotropic) state adds its
+    pressure-tensor diagonal, then the box lengths follow."""
+    cols = [f'{step}', f'{KE + PE:.3f}', f'{KE:.3f}', f'{PE:.3f}', f'{(H or 0.0):.3f}', f'{T:.1f}']
+    if npt_state is not None:
+        if isinstance(npt_state, jax_md.simulate.NPTNoseHooverFlexState):
+            P = jax_md.simulate.pressure_tensor_flex(npt_state) / units.metal_unit_system()['pressure']
+            cols.append('({:.1f},{:.1f},{:.1f})'.format(*(float(P[i, i]) for i in range(3))))
+        L = box_to_diag(box)
+        cols.append(f'{L[0]:.3f}' if len(L) == 1 else f'({L[0]:.3f},{L[1]:.3f},{L[2]:.3f})')
+    cols.append(f'{time_per_step:.2e}')
+    return '\t'.join(cols)
 
 
 def log_nbrs_info(nbrs, label: str = 'SR', box=None):
@@ -1390,114 +1394,6 @@ def compute_quantities(
     current_T = jax_md.quantity.temperature(momentum=state.momentum, mass=state.mass) / unit['temperature']
     return KE, PE, H, current_T
 
-def create_nve_fn(
-    energy_fn: callable,
-    shift: callable,
-    dt: float,
-    T: float,
-    box: jnp.ndarray,
-)-> Tuple[callable, callable]:
-    """
-    Create the NVE init/apply functions.
-
-    Args:
-        energy_fn (callable): Function that calculates the energy.
-        shift (callable): Function that shifts the positions.
-        dt (float): Time step.
-        box (jnp.ndarray): Box of the system.
-
-    Returns:
-        Tuple[callable, callable]: Init and apply functions.
-    """
-
-    init_fn, apply_fn = jax_md.simulate.nve(
-        energy_fn,
-        shift,
-        dt=dt,
-        kT=T
-    )
-
-    init_fn = jax.jit(init_fn)
-    apply_fn = jax.jit(apply_fn)
-
-    step_md_fn = create_md_fn('nve', apply_fn)
-
-    return init_fn, step_md_fn
-
-def create_nhc_fn(
-    energy_fn: callable,
-    shift: callable,
-    dt: float,
-    T: float,
-    box: jnp.ndarray,
-    nhc_kwargs: dict,
-) -> Tuple[callable, callable]:
-    """
-    Create the NHC thermostat functions.
-
-    Args:
-        energy_fn (callable): Function that calculates the energy.
-        shift (callable): Function that shifts the positions.
-        dt (float): Time step.
-        T (float): Target temperature.
-        box (jnp.ndarray): Box of the system.
-        nhc_kwargs (dict): Settings for the NHC thermostat.
-
-    Returns:
-        Tuple[callable, callable]: Init and apply functions.
-    """
-
-    init_fn, apply_fn = jax_md.simulate.nvt_nose_hoover(
-        energy_fn,
-        shift,
-        dt=dt,
-        kT=T,
-        **nhc_kwargs
-    )
-    init_fn = jax.jit(init_fn)
-    apply_fn = jax.jit(apply_fn)
-
-    step_md_fn = create_md_fn('nvt', apply_fn, T)
-
-    return init_fn, step_md_fn
-
-def create_langevin_fn(
-    energy_fn: callable,
-    shift: callable,
-    dt: float,
-    T: float,
-    box: jnp.ndarray,
-    langevin_kwargs: dict,
-) -> Tuple[callable, callable]:
-    """
-    Create the Langevin Thermostat functions.
-
-    Args:
-        energy_fn (callable): Function that calculates the energy.
-        shift (callable): Function that shifts the positions.
-        dt (float): Time step.
-        T (float): Target temperature.
-        box (jnp.ndarray): Box of the system.
-        nhc_kwargs (dict): Settings for the NHC thermostat.
-
-    Returns:
-        Tuple[callable, callable]: Init and apply functions.
-    """
-
-    init_fn, apply_fn = jax_md.simulate.nvt_langevin(
-        energy_fn,
-        shift,
-        dt=dt,
-        kT=T,
-        **langevin_kwargs
-    )
-    init_fn = jax.jit(init_fn)
-    apply_fn = jax.jit(apply_fn)
-
-    step_md_fn = create_md_fn('nvt', apply_fn, T)
-
-    return init_fn, step_md_fn
-
 def create_npt_nhc_fn(
     energy_fn,
     shift,
@@ -1520,8 +1416,7 @@ def create_npt_nhc_fn(
             thermostat_kwargs=nhc_kwargs
         )
         init_fn = jax.jit(init_fn)
-        apply_fn = jax.jit(apply_fn)
-        step_md_fn = create_md_fn("npt", apply_fn, T, P)
+        step_md_fn = create_md_fn(jax.jit(apply_fn), jax_md.simulate.npt_box, kT=T, pressure=P)
     else:
         init_fn, apply_fn = jax_md.simulate.npt_nose_hoover_flex(
             energy_fn,
@@ -1534,56 +1429,51 @@ def create_npt_nhc_fn(
             thermostat_kwargs=nhc_kwargs
         )
         init_fn = jax.jit(init_fn)
-        apply_fn = jax.jit(apply_fn)
-        step_md_fn = create_md_fn("npt_flex", apply_fn, T, P)
+        step_md_fn = create_md_fn(jax.jit(apply_fn), jax_md.simulate.npt_box_flex, kT=T, pressure=P)
 
     return init_fn, step_md_fn
 
 def create_md_fn(
-    ensemble: str,
     apply_fn: callable,
-    T: float = None,
-    P: float = None
+    box_from_state: Optional[callable] = None,
+    **apply_kwargs
 ) -> callable:
     """
     Create the jitted MD step for the fori_loop carry
     (state, nbrs, nbrs_lr, box, k_grid, k_grid_disp).
 
     Args:
-        ensemble (str): 'nve', 'nvt' (Nose-Hoover or Langevin), 'npt' or 'npt_flex'.
         apply_fn (callable): Function that applies the MD step.
-        T (float, optional): Target temperature. Defaults to None.
-        P (float, optional): Target pressure. Defaults to None.
-
-    Raises:
-        NotImplementedError: If ensemble is not NVE, NVT or NPT.
+        box_from_state (callable, optional): For NPT, where the barostat owns the
+            box: reads it back from the state after each step. Without it the
+            carried box is passed to apply_fn.
+        **apply_kwargs: Passed to every apply_fn call (kT, pressure).
 
     Returns:
         callable: MD step function.
     """
-    ensemble = ensemble.lower()
-    if ensemble not in ('nve', 'nvt', 'npt', 'npt_flex'):
-        raise NotImplementedError(
-            f'Ensemble "{ensemble}" is not supported. Only NVE, NVT and NPT ensembles are currently implemented.')
-
     @jax.jit
     def step_md_fn(i, carry):
         state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = carry
-        kwargs = dict(neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, k_grid=k_grid, k_grid_disp=k_grid_disp)
-        if ensemble == 'nve':
+        kwargs = dict(neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, k_grid=k_grid,
+                      k_grid_disp=k_grid_disp, **apply_kwargs)
+        if box_from_state is None:
             state = apply_fn(state, box=box, **kwargs)
-        elif ensemble == 'nvt':
-            state = apply_fn(state, kT=T, box=box, **kwargs)
         else:
-            # The barostat owns the box: read it back from the state.
-            state = apply_fn(state, kT=T, pressure=P, **kwargs)
-            box = jax_md.simulate.npt_box(state) if ensemble == 'npt' else jax_md.simulate.npt_box_flex(state)
-        nbrs_box = box_to_diag(box) if ensemble == 'npt_flex' else box
-        nbrs = nbrs.update(state.position, neighbor=nbrs.idx, box=nbrs_box)
-        nbrs_lr = nbrs_lr.update(state.position, neighbor=nbrs_lr.idx, box=nbrs_box)
+            state = apply_fn(state, **kwargs)
+            box = box_from_state(state)
+        nbrs, nbrs_lr = update_neighbor_lists(nbrs, nbrs_lr, state.position, box)
         return state, nbrs, nbrs_lr, box, k_grid, k_grid_disp
 
     return step_md_fn
+
+
+def update_neighbor_lists(nbrs, nbrs_lr, position, box):
+    """Update both neighbour lists; they take the lengths of a diagonal matrix box."""
+    box = box_to_diag(box)
+    return (nbrs.update(position, neighbor=nbrs.idx, box=box),
+            nbrs_lr.update(position, neighbor=nbrs_lr.idx, box=box))
+
 
 def create_obs_fn(
     energy_or_obs_fn: callable,
@@ -1674,7 +1564,7 @@ def validate_and_log_input(initial_geometry, input_file_path,
         diag = np.diag(np.array(initial_geometry.get_cell()))
         logger.info(f"  Periodic:     yes  (cell lengths along x,y,z = {diag[0]:.3f}, {diag[1]:.3f}, {diag[2]:.3f} Å)")
     else:
-        logger.info(f"  Periodic:     no")
+        logger.info("  Periodic:     no")
     if total_charge is not None:
         logger.info(f"  Total charge: {total_charge}    Spin (unpaired e-): {num_unpaired_electrons}")
 
@@ -1800,9 +1690,7 @@ def constrain_md_carry(
         fractional_coordinates=fractional_coordinates,
         reference_is_cartesian=reference_is_cartesian,
     )
-    box_for_nbrs = box_to_diag(box) if hasattr(box, 'ndim') and box.ndim == 2 else box
-    nbrs = nbrs.update(state.position, neighbor=nbrs.idx, box=box_for_nbrs)
-    nbrs_lr = nbrs_lr.update(state.position, neighbor=nbrs_lr.idx, box=box_for_nbrs)
+    nbrs, nbrs_lr = update_neighbor_lists(nbrs, nbrs_lr, state.position, box)
     return state, nbrs, nbrs_lr, box, k_grid, k_grid_disp
 
 
@@ -2022,7 +1910,6 @@ def perform_md(
     # Format control
     save_buffer = all_settings.get('save_buffer')
     seed = all_settings.get('seed')
-    relax_before_run = all_settings.get('relax_before_run')
     observables = all_settings.get('observables', [])
     output_atom_indices = all_settings.get('output_atom_indices', None)
     dispersion_tail_correction = all_settings.get('dispersion_tail_correction', False)
@@ -2454,33 +2341,16 @@ def perform_md(
         }
 
     # Setting up the thermostat and/or barostat jax functions
-
-    if ensemble == 'nve':
-        init_fn, step_md_fn = create_nve_fn(
-            energy_fn,
-            shift,
-            md_dt,
-            md_T,
-            box,
-        )
-    elif ensemble == 'nvt':
-        init_fn, step_md_fn = create_nhc_fn(
-            energy_fn,
-            shift,
-            md_dt,
-            md_T,
-            box,
-            nhc_kwargs,
-        )
-    elif ensemble == 'nvt-langevin':
-        init_fn, step_md_fn = create_langevin_fn(
-            energy_fn,
-            shift,
-            md_dt,
-            md_T,
-            box,
-            langevin_kwargs,
-        )
+    if ensemble in ('nve', 'nvt', 'nvt-langevin'):
+        if ensemble == 'nve':
+            simulate_fn, simulate_kwargs, apply_kwargs = jax_md.simulate.nve, {}, {}
+        elif ensemble == 'nvt':
+            simulate_fn, simulate_kwargs, apply_kwargs = jax_md.simulate.nvt_nose_hoover, nhc_kwargs, {'kT': md_T}
+        else:
+            simulate_fn, simulate_kwargs, apply_kwargs = jax_md.simulate.nvt_langevin, langevin_kwargs, {'kT': md_T}
+        init_fn, apply_fn = simulate_fn(energy_fn, shift, dt=md_dt, kT=md_T, **simulate_kwargs)
+        init_fn = jax.jit(init_fn)
+        step_md_fn = create_md_fn(jax.jit(apply_fn), **apply_kwargs)
     else:
         logger.info(f"NPT coupling mode:         {npt_coupling}")
         init_fn, step_md_fn = create_npt_nhc_fn(
@@ -2521,18 +2391,10 @@ def perform_md(
 
     # Running the MD
     logger.info('Starting MD simulation...')
-    pressure_unit = units.metal_unit_system()['pressure']
-    is_flex_npt = isinstance(state, jax_md.simulate.NPTNoseHooverFlexState)
     if ensemble == 'npt':
-        # Header tabs MUST mirror the data-line tab count (see ~line 2712 and
-        # ~line 2947). Data uses a single \t between every column; previously
-        # the header padded with \t\t\t around the Box column, which made the
-        # column titles slide three tabs right of their values.
-        if is_flex_npt:
-            p_header, _ = format_pressure_tensor(state, pressure_unit)
-            logger.info(f'Step\tE [eV]\tKE\tPE\tH\tTemp [K]\t{p_header}\tBox [A]\ttime/step [s]')
-        else:
-            logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\tBox [A]\ttime/step [s]')
+        # One \t per column, as in format_md_row.
+        p_col = '\tP [bar] (xx,yy,zz)' if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState) else ''
+        logger.info(f'Step\tE [eV]\tKE\tPE\tH\tTemp [K]{p_col}\tBox [A]\ttime/step [s]')
     else:
         logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\ttime/step [s]')
 
@@ -2550,19 +2412,8 @@ def perform_md(
         md_P,
         k_grid_disp=k_grid_disp
     )
-    if ensemble == 'npt':
-        p_str = ''
-        if is_flex_npt:
-            _, p_str = format_pressure_tensor(state, pressure_unit)
-            p_str = f'\t{p_str}'
-        box_disp = box_to_diag(box)
-        if len(box_disp) == 1:
-            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t{box_disp[0]:.3f}\t{0.0:.2e}')
-        else:
-            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t'+
-                        f'({box_disp[0]:.3f},{box_disp[1]:.3f},{box_disp[2]:.3f})\t{0.0:.2e}')
-    else:
-        logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
+    logger.info(format_md_row(current_cycle * md_steps, KE, PE, H, current_T, 0.0,
+                              state if ensemble == 'npt' else None, box))
 
     # --- Conserved-quantity drift watchdog --------------------------------
     # For NVE the conserved quantity is the total energy E = KE+PE; for the
@@ -2705,7 +2556,7 @@ def perform_md(
         old_time = time.time()
         if do_enhanced_sampling:
             generate_context = create_pysages_interface_fns(
-                True, state, box, step_md_fn, md_dt, nbrs,
+                state, box, step_md_fn, md_dt, nbrs,
                 ensemble=ensemble, nbrs_lr=nbrs_lr,
                 k_grid=k_grid, k_grid_disp=k_grid_disp
             )
@@ -2722,7 +2573,7 @@ def perform_md(
 
             new_state, nbrs, nbrs_lr, new_box, k_grid, k_grid_disp = jax.block_until_ready(
                 update_so3lr_after_pysages(
-                    candidate_result, True, init_fn, rng_key, md_T, md_dt,
+                    candidate_result, init_fn, rng_key, md_T, md_dt,
                     nbrs, ensemble=ensemble, nbrs_lr=nbrs_lr,
                     k_grid=k_grid, k_grid_disp=k_grid_disp
                 )
@@ -2863,19 +2714,8 @@ def perform_md(
                                 f"to change the equilibration window; some drift early in the run is normal.)")
                             drift_warned = True
 
-            if ensemble == 'npt':
-                p_str = ''
-                if is_flex_npt:
-                    _, p_val = format_pressure_tensor(state, pressure_unit)
-                    p_str = f'\t{p_val}'
-                box_disp = box_to_diag(box)
-                if len(box_disp) == 1:
-                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t{box_disp[0]:.3f}\t{time_per_step:.2e}')
-                else:
-                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t'+
-                                f'({box_disp[0]:.3f},{box_disp[1]:.3f},{box_disp[2]:.3f})\t{time_per_step:.2e}')
-            else:
-                logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{time_per_step:.2e}')
+            logger.info(format_md_row(current_cycle * md_steps, KE, PE, H, current_T, time_per_step,
+                                      state if ensemble == 'npt' else None, box))
 
             out_pos = output_position_array(
                 state.position, box, fractional_coordinates, output_cartesian_positions
@@ -3102,7 +2942,6 @@ def perform_min(
     )
 
     # Extract settings with defaults
-    input_file = all_settings.get('input_file')
     output_file = all_settings.get('output_file')
     output_format = all_settings.get('output_format')
     overwrite = bool(all_settings.get('overwrite', False))
@@ -3766,9 +3605,6 @@ def run(
         precision=settings.get('precision', 'float32'),
         matmul_precision=settings.get('matmul_precision', 'highest'),
     )
-    matmul_precision = _JAX_GLOBALS_CONFIGURED.get('matmul_precision', 'highest')
-
-    # Check for allowed atom types
     input_file_path = settings.get('input_file')
     if input_file_path is not None:
         try:
@@ -3788,7 +3624,7 @@ def run(
         if os.path.exists(restart_load_path):
             restart = True
         else:
-            logger.error(f"Restart load path does not exist.")
+            logger.error("Restart load path does not exist.")
             sys.exit(1)
     else:
         restart = False

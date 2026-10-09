@@ -7,7 +7,6 @@ import subprocess
 import shutil
 import pathlib
 import pytest
-import yaml
 
 # A CLI run that stalls must fail on its own, with its so3lr.log on disk, rather
 # than take the whole shard to the 60-minute cancel with nothing to read.
@@ -46,24 +45,20 @@ def test_data_dir():
     return pathlib.Path(__file__).parent / 'test_data'
 
 @pytest.fixture
-def integration_workdir(tmp_path, request):
+def integration_workdir(tmp_path, request, test_data_dir):
     """
-    Set up a working directory for an integration test case: the case's files,
-    the shared validation utilities, and the input structure it names, which
-    lives in tests/test_data unless the case ships its own.
+    A working directory for an integration test case: the shared structures in
+    tests/test_data, then the case's own files (which win), and the validation
+    utilities its validate.py imports.
     """
     test_case = request.param
     integration_dir = pathlib.Path(__file__).parent / 'integration' / test_case
+    shutil.copytree(test_data_dir, tmp_path, dirs_exist_ok=True)
     for item in integration_dir.iterdir():
         if item.is_file():
             shutil.copy2(item, tmp_path)
     shutil.copy2(integration_dir.parent / 'validation_utils.py', tmp_path)
-    for name in ('settings.yaml', 'setup_settings.yaml'):
-        if (integration_dir / name).exists():
-            input_file = yaml.safe_load((integration_dir / name).read_text())['input_file']
-            if not (tmp_path / input_file).exists():
-                shutil.copy2(pathlib.Path(__file__).parent / 'test_data' / input_file, tmp_path)
-    return tmp_path, test_case, integration_dir
+    return tmp_path, test_case
 
 # ============================================================================
 # SO3LR CLI Integration Tests
@@ -74,8 +69,7 @@ def test_integration_case(integration_workdir):
     """
     Run CLI integration test for a test case.
     """
-    workdir, test_case, source_dir = integration_workdir
-    settings_file = workdir / 'settings.yaml'
+    workdir, test_case = integration_workdir
     print(f"\n{'='*60}")
     print(f"Running test case: {test_case}")
     print(f"Working directory: {workdir}")
@@ -118,18 +112,17 @@ def test_integration_case(integration_workdir):
         f"Success message not found in output\n"
         f"STDERR:\n{result.stderr}"
     )
-    validate_script = workdir / 'validate.py'
-    if validate_script.exists():
-        validate_result = subprocess.run(
-            ['python', 'validate.py'],
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-        )
-        # Validator.report() prints its errors to stdout.
-        assert validate_result.returncode == 0, (
-            f"Validation failed:\n{validate_result.stdout}\n{validate_result.stderr}"
-        )
+    # Every case ships a validate.py.
+    validate_result = subprocess.run(
+        ['python', 'validate.py'],
+        cwd=workdir,
+        capture_output=True,
+        text=True,
+    )
+    # Validator.report() prints its errors to stdout.
+    assert validate_result.returncode == 0, (
+        f"Validation failed:\n{validate_result.stdout}\n{validate_result.stderr}"
+    )
 
 class TestSO3LRCLISubcommands:
     """Test individual SO3LR CLI subcommands with minimal configurations."""

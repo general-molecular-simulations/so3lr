@@ -35,25 +35,18 @@ def get_observable_fn_sparse(model):
 
 
 def get_energy_and_force_fn_sparse(model):
-    def energy_fn(params, positions, atomic_numbers, idx_i, idx_j, **kwargs):
-        inputs = _model_inputs(positions, atomic_numbers, idx_i, idx_j, **kwargs)
-        # Return the WHOLE model output as aux, not just the energy: the caller
-        # needs dipole_vec / the ratio heads too, and used to obtain them with a
-        # second full model.apply -- doubling the cost of every training and
-        # validation step. aux is not differentiated, so the gradient is
-        # unchanged. energy_fn is closure-internal; only
-        # energy_and_force_and_dipole_and_hirsh_fn is exported.
-        model_output = model.apply(params, inputs)
-        energy = safe_scale(model_output['energy'], inputs['graph_mask'])  # (num_graphs)
-        return -jnp.sum(energy), (energy, model_output)  # (), ((num_graphs), dict)
-
     def energy_and_force_and_dipole_and_hirsh_fn(params, positions, atomic_numbers, idx_i, idx_j, **kwargs):
-        (_, (energy, model_output)), forces = jax.value_and_grad(
-            energy_fn,
-            argnums=1,
-            has_aux=True)(params, positions, atomic_numbers, idx_i, idx_j, **kwargs)
         inputs = _model_inputs(positions, atomic_numbers, idx_i, idx_j, **kwargs)
         graph_mask, node_mask = inputs['graph_mask'], inputs['node_mask']
+
+        def energy_fn(positions):
+            # The whole model output is the aux, so dipole_vec and the ratio heads
+            # come from the same model.apply as the forces.
+            model_output = model.apply(params, {**inputs, 'positions': positions})
+            energy = safe_scale(model_output['energy'], graph_mask)  # (num_graphs)
+            return -jnp.sum(energy), (energy, model_output)  # (), ((num_graphs), dict)
+
+        (_, (energy, model_output)), forces = jax.value_and_grad(energy_fn, has_aux=True)(positions)
 
         result = dict(
             energy=energy,
@@ -65,12 +58,9 @@ def get_energy_and_force_fn_sparse(model):
             dipole_vec = safe_scale(dipole_vec, graph_mask[:, None])  # (num_graphs)
             result['dipole_vec'] = dipole_vec
 
-        # Per-atom ratio heads. 'a0_ratios' is what the current so3lr-s/m/l models
-        # emit; the legacy `so3lr` emits 'hirshfeld_ratios' for the same quantity.
-        # Both must be forwarded: omitting 'a0_ratios' dropped the head entirely,
-        # which also made the _RATIO_ALIAS remap in make_loss_fn/make_val_fn dead
-        # code (it can only rename a key that actually arrives) -- so training or
-        # evaluating a ratio target on a current model raised KeyError.
+        # Per-atom ratio heads: 'a0_ratios' (so3lr-s/m/l) or 'hirshfeld_ratios'
+        # (legacy so3lr) for the same quantity, and 'c6_ratios'. Forward whichever
+        # the model has; make_loss_fn's _RATIO_ALIAS maps between the two names.
         for ratio_key in ('a0_ratios', 'hirshfeld_ratios', 'c6_ratios'):
             if ratio_key in model_output:
                 result[ratio_key] = safe_scale(model_output[ratio_key], node_mask)

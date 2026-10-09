@@ -98,7 +98,6 @@ def get_hardware_info():
         logger.info("=" * 60)
         return
 
-    # logger.info("Hardware information")
     logger.info(f"JAX default backend:       {backend}")
     logger.info(f"Number of devices:         {len(devices)}")
 

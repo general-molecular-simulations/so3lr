@@ -127,30 +127,7 @@ class TuningErrorBounds:
         raise NotImplementedError
 
 
-class TunerBase:
-
-    def __init__(
-        self,
-        charges: jnp.ndarray,
-        cell: jnp.ndarray,
-        positions: jnp.ndarray,
-        scale: float = 14.399645351950548,
-        exponent: int = 1,
-    ):
-        if exponent != 1:
-            raise NotImplementedError(
-                f"Only exponent = 1 is supported but got {exponent}."
-            )
-
-        self.charges = charges
-        self.cell = cell
-        self.positions = positions
-        self.exponent = exponent
-
-    def tune(self, accuracy: float = 2e-2):
-        raise NotImplementedError
-
-class GridSearchTuner(TunerBase):
+class GridSearchTuner:
     def __init__(
         self,
         charges: jnp.ndarray,
@@ -161,12 +138,10 @@ class GridSearchTuner(TunerBase):
         potential_kwargs: dict,
         exponent: int = 1,
     ):
-        super().__init__(
-            charges=charges,
-            cell=cell,
-            positions=positions,
-            exponent=exponent,
-        )
+        if exponent != 1:
+            raise NotImplementedError(
+                f"Only exponent = 1 is supported but got {exponent}."
+            )
         self.error_bounds = error_bounds
         self.params = params
         self.time_func = TuningTimings(
@@ -181,7 +156,6 @@ class GridSearchTuner(TunerBase):
             raise ValueError(f"'{accuracy}' is not a float.")
         param_errors = []
         param_timings = []
-        param_memorys = []
         logger.info("---------------------------ERROR ESTIMATION:")
         for param in self.params:
             logger.info("parameters: {}".format(
@@ -193,20 +167,10 @@ class GridSearchTuner(TunerBase):
         for param, error in zip(self.params, param_errors):
             logger.info("parameters: {}".format(
                 ", ".join(f"{k}: {v}" for k, v in param.items() if v is not None)))
-            if error <= accuracy:
-                time, mem = self._timing(param)
-            else:
-                time = float("inf")
-                mem = {"not tested": float("inf")}
-            param_timings.append(time)
-            param_memorys.append(mem)
-
+            param_timings.append(self.time_func(**param) if error <= accuracy else float("inf"))
             logger.info(
                 f"measured timing: {param_timings[-1]}, total error estimate: {error}")
-        return param_errors, param_timings, param_memorys
-
-    def _timing(self, k_space_params: dict):
-        return self.time_func(**k_space_params)
+        return param_errors, param_timings
 
 
 class TuningTimings:
@@ -263,7 +227,7 @@ class TuningTimings:
 
         self.kspace_electrostatics = kspace_electrostatics
 
-    def __call__(self, **input_params) -> tuple[float, dict[str, float]]:
+    def __call__(self, **input_params) -> float:
         """
         Estimate the execution time of a given calculator for the structure
         to be used as benchmark.
@@ -304,9 +268,7 @@ class TuningTimings:
             )
             execution_time += time.monotonic() - start_time
 
-        memory_estimate = {'None': 0.0}
-
-        return execution_time / self.n_repeat, memory_estimate
+        return execution_time / self.n_repeat
 
 
 def tune_ewald(
@@ -389,7 +351,7 @@ def tune_ewald(
             kspace_electrostatics="ewald",  # Ewald summation
         ),
     )
-    errs, timings, memorys = tuner.tune(accuracy)
+    errs, timings = tuner.tune(accuracy)
 
     return params, errs, timings
 
@@ -572,7 +534,7 @@ def tune_pme(
             kspace_electrostatics="pme",  # PME summation
         ),
     )
-    errs, timings, memorys = tuner.tune(accuracy)
+    errs, timings = tuner.tune(accuracy)
 
     return params, errs, timings
 
@@ -695,8 +657,6 @@ def tune_sr(
     accuracy: float = 1.0,
     model_kwargs: dict[str, Any] = {},
 ) -> tuple[float, dict[str, Any], float]:
-    min_dimension = float(np.min(jnp.linalg.norm(cell, axis=1)))
-
     params = [
         {
             "cutoff": cut,
@@ -723,7 +683,7 @@ def tune_sr(
             kspace_electrostatics=None,  # PME summation
         ),
     )
-    errs, timings, memorys = tuner.tune(accuracy)
+    errs, timings = tuner.tune(accuracy)
     return params, errs, timings
 
 
@@ -806,8 +766,6 @@ def tune_dispersion_sr(
     model_kwargs: dict[str, Any] = {},
     c6_ratios: jnp.ndarray = None,
 ) -> tuple[float, dict[str, Any], float]:
-    min_dimension = float(np.min(jnp.linalg.norm(cell, axis=1)))
-
     params = [
         {
             "cutoff": cut,
@@ -841,7 +799,7 @@ def tune_dispersion_sr(
         ),
     )
 
-    errs, timings, memorys = tuner.tune(accuracy)
+    errs, timings = tuner.tune(accuracy)
 
     return params, errs, timings
 
@@ -1242,10 +1200,10 @@ def tune(
         logger.info(f"  force error estimate [eV/A]: {error}")
 
     else:
-        warn(f"No parameter meets the accuracy requirement.\n", stacklevel=1)
+        warn("No parameter meets the accuracy requirement.\n", stacklevel=1)
     param, timing, error = params[errs.index(
         min(errs))], timings[errs.index(min(errs))], min(errs)
-    logger.info(f"The parameters with the smallest error estimate are:")
+    logger.info("The parameters with the smallest error estimate are:")
     if kspace_electrostatics == 'cutoff':
         logger.info(f"  lr_cutoff: {param['cutoff']}")
     elif kspace_electrostatics in ['ewald', 'pme', 'p3m']:
@@ -1257,7 +1215,7 @@ def tune(
             logger.info(
                 f"  kspace_interp_nodes: {param['interpolation_nodes']}")
     elif kspace_dispersion == 'cutoff':
-        logger.info(f"Tuned cutoff dispersion parameters: ")
+        logger.info("Tuned cutoff dispersion parameters: ")
         logger.info(f"  lr_cutoff: {param['cutoff']}")
         logger.info(f"  dispersion_damping: {param['cutoff_lr_damping']}")
     logger.info(f"  timing: {timing}")

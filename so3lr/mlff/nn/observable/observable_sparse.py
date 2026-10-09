@@ -15,7 +15,6 @@ from so3lr.mlff.masking.mask import safe_mask
 from so3lr.mlff.nn.observable.dispersion_ref_data import alphas, C6_coef, alphas_legacy, C6_coef_legacy, NLH_AA, NLH_BB
 from so3lr.mlff.masking.mask import safe_scale
 from jax.nn import softplus
-from so3lr.mlff.nn.activation_function import softplus_inverse
 
 
 def _flat_to_padded(flat_array, batch_segments, num_graphs, max_atoms_per_graph, local_idx, pad_value=0.0):
@@ -1560,6 +1559,10 @@ def coulomb_erf_shifted_force_smooth_nosigma(
         c * _ke * q[idx_i] * q[idx_j] * (f * (pairwise - shift) + (1 - f) * shifted_potential),
         0.0
     )
+
+def softplus_inverse(x):
+    return x + jnp.log(-jnp.expm1(-x))
+
 
 class ZBLRepulsionSparse(BaseSubModule):
     """

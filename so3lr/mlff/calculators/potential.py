@@ -234,9 +234,6 @@ class PotentialSparse:
             charge_equilibration_total_charge=charge_equilibration_total_charge
         )
 
-        # (No theory-level expansion here: load_model_from_workdir above has
-        # already done it. This used to carry a third copy of the tiling that
-        # could never fire -- and which omitted the final-bias case.)
         cfg = load_hyperparameters(workdir=workdir)
 
         net.reset_input_convention('displacements')
@@ -259,9 +256,6 @@ class PotentialSparse:
         else:
             def shift(v, z):
                 return v
-
-        def shift_fn(x: jnp.ndarray, z: jnp.ndarray):
-            return shift(x, z)
 
         obs_fn = get_observable_fn_sparse(net)
 
@@ -299,7 +293,7 @@ class PotentialSparse:
             x = graph_to_mlff_input(graph)
             y = obs_fn(params, **x)
 
-            shifted_energy = shift_fn(y['energy'], x['atomic_numbers']).reshape(-1).astype(dtype)
+            shifted_energy = shift(y['energy'], x['atomic_numbers']).reshape(-1).astype(dtype)
 
             if has_aux:
                 aux = jax.tree_util.tree_map(lambda u: u.astype(dtype), y)
