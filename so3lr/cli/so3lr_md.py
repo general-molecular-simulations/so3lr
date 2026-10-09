@@ -46,7 +46,7 @@ from so3lr.mlff.nn.observable.observable_sparse import (
 
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
-from so3lr.jaxmd_utils import to_jax_md as _to_jax_md
+from so3lr.jaxmd_utils import nbrs_cutoff, to_jax_md as _to_jax_md
 from so3lr.pbc import is_fully_periodic, lattice_rows, minimum_image_problem
 from so3lr import kspace_defaults as KS
 from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
@@ -946,15 +946,15 @@ def check_cell(
     if np.any(cell[~mask] != 0):
         raise ValueError(f'JAX-MD currently supports only orthogonal cells. Provided cell: {cell}') 
 
-    check_box_for_neighbour_lists(cell, lr_cutoff, 'Input cell')
     return cell
 
 
-def check_box_for_neighbour_lists(box, lr_cutoff: float, where: str) -> None:
+def check_box_for_neighbour_lists(box, cutoff: float, where: str) -> None:
     """Refuse an orthorhombic box (matrix, lengths or scalar) shorter than twice
-    lr_cutoff: the neighbour lists keep one image per pair and would drop the rest."""
+    the neighbour-list cutoff (jaxmd_utils.nbrs_cutoff): the lists keep one image
+    per pair and would drop the rest."""
     lengths = np.broadcast_to(np.asarray(box_to_diag(box), float).reshape(-1), (3,))
-    problem = minimum_image_problem(np.diag(lengths), lr_cutoff)
+    problem = minimum_image_problem(np.diag(lengths), cutoff)
     if problem:
         raise ValueError(
             f'{where}: {problem}. Use a larger box, a smaller --lr-cutoff with k-space '
@@ -2791,6 +2791,8 @@ def perform_md(
         minimum_cell_size_multiplier=minimum_cell_size_multiplier,
         has_aux=len(observables)>0,
     )
+    if cell is not None:
+        check_box_for_neighbour_lists(box, nbrs_cutoff(potential), 'MD box')  # also a box from a restart file
 
     k_grid, k_smearing = setup_kspace_grid(
         kspace_electrostatics=kspace_electrostatics,
@@ -3028,9 +3030,6 @@ def perform_md(
             lr
         )
 
-
-    if cell is not None:
-        check_box_for_neighbour_lists(box, lr_cutoff, 'MD box')  # also a box from a restart file
 
     # Running the MD
     logger.info('Starting MD simulation...')
@@ -3313,7 +3312,7 @@ def perform_md(
             state = new_state
             box = new_box
             if ensemble == 'npt':
-                check_box_for_neighbour_lists(box, lr_cutoff, f'NPT box after cycle {current_cycle}')
+                check_box_for_neighbour_lists(box, nbrs_cutoff(potential), f'NPT box after cycle {current_cycle}')
 
             if (ensemble == 'npt') and (kspace_npt_cycles is not None) and (current_cycle % kspace_npt_cycles == 0):
                 box_for_kgrid = box_to_diag(box)
@@ -3811,6 +3810,9 @@ def perform_min(
         kspace_smearing=kspace_smearing,
         box=box
     )
+
+    if cell is not None:
+        check_box_for_neighbour_lists(box, nbrs_cutoff(potential), 'Input cell')
 
     energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False, k_grid=k_grid, k_smearing=k_smearing))
     force_fn = jax.jit(jax_md.quantity.force(energy_fn))

@@ -41,7 +41,7 @@ def minimum_image_problem(cell, cutoff):
     heights = cell_heights(cell)
     if np.any(heights < 2 * cutoff):
         return (f'cell heights {np.round(heights, 3).tolist()} A: each must be at least twice the '
-                f'long-range cutoff ({cutoff} A), or the neighbour list drops periodic images')
+                f'neighbour-list cutoff ({cutoff} A), or the list drops periodic images')
     return None
 
 

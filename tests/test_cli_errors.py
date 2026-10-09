@@ -8,6 +8,8 @@ The eval overwrite-refusal path is marked ``@pytest.mark.slow`` because the
 ``eval`` body calls ``setup_logger`` and ``get_hardware_info`` (both import the
 heavy stack) before reaching its refusal check, so it is not sub-second.
 """
+from pathlib import Path
+
 import pytest
 import yaml
 from click.testing import CliRunner
@@ -108,3 +110,16 @@ def test_eval_refuses_overwrite(runner, tmp_xyz, tmp_path):
     )
     assert result.exit_code != 0
     assert "Refusing to overwrite" in result.output
+
+
+@pytest.mark.slow
+def test_md_refuses_a_box_shorter_than_twice_the_cutoff(runner, tmp_path):
+    """A 12.4 A water box at lr_cutoff 12 would lose periodic images in the
+    neighbour lists; the run stops once the model's cutoff is known."""
+    water = tmp_path / "water.xyz"
+    water.write_text((Path(__file__).parent / "test_data" / "water_64.xyz").read_text())
+    result = runner.invoke(cli, ["nvt", "--input", str(water), "--no-relax", "--md-cycles", "1",
+                                 "--md-steps", "1", "--engine", "standard",
+                                 "--output", str(tmp_path / "out.xyz")])
+    assert isinstance(result.exception, ValueError)
+    assert "at least twice the" in str(result.exception)

@@ -116,6 +116,18 @@ def test_cli_train_forces_and_energy_with_lse_shifts(workdir, tmp_path):
         f"Carbon (Z=6) energy shift {carbon_shift} does not match expected value"
     )
 
+    # The default config trains a model without long-range parts; it must run
+    # relaxation and MD too (its long-range list is built at the short-range cutoff).
+    assert hyp['model']['electrostatic_energy_bool'] is False
+    assert hyp['model']['dispersion_energy_bool'] is False
+    acetone = PROJECT_ROOT / 'tests' / 'test_data' / 'acetone.xyz'
+    for args in (['opt'], ['nvt', '--no-relax', '--md-cycles', '1', '--md-steps', '2']):
+        run = subprocess.run(
+            ['so3lr', *args, '--input', str(acetone), '--model', str(workdir),
+             '--output', str(tmp_path / f'{args[0]}.xyz')],
+            cwd=tmp_path, capture_output=True, text=True, env=so3lr_subprocess_env(), timeout=900)
+        assert run.returncode == 0, f"so3lr {args[0]} failed:\n{run.stdout[-2000:]}\n{run.stderr[-2000:]}"
+
 @pytest.mark.slow
 def test_cli_train_water_pbc_forces_only(workdir, tmp_path):
     """Train on periodic water box with forces-only loss."""

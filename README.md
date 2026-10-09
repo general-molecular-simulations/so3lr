@@ -301,8 +301,9 @@ the legacy so3lr run on the neighbour-list potential, as does any run with a set
 a model hyperparameter flash does not know.
 
 Both engines need every box length to be at least twice `lr_cutoff` (24 A at the
-default 12 A); the neighbour-list engine refuses a shorter box rather than drop periodic
-images, and checks an NPT box after every cycle. For a smaller box, lower `--lr-cutoff`
+default 12 A; for a model without long-range parts, twice its short-range cutoff); the
+neighbour-list engine refuses a shorter box rather than drop periodic images, and checks
+an NPT box after every cycle. For a smaller box, lower `--lr-cutoff`
 and let k-space carry the long range (`--kspace-electrostatics pme`, plus
 `--kspace-dispersion pme`, since `lr_cutoff` also truncates the real-space dispersion), or
 use the ASE calculator, which lists every periodic image.
