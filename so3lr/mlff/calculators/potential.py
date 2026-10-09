@@ -6,7 +6,6 @@ import numpy as np
 import pathlib
 import json
 
-from abc import abstractmethod
 from flax import struct
 from typing import Any, Callable, Type, Dict, Sequence, Optional
 
@@ -162,49 +161,12 @@ def load_model_from_workdir(
     # cannot drift (they had: the copies disagreed about the optional final bias).
     params = expand_observables_to_theory_levels(params)
 
-    # # Initialize missing C6RatiosSparse params (observables_3) if not in checkpoint.
-    # # C6RatiosSparse was added after the model was trained. With embedding=1.0 and
-    # # final Dense=0, c6_ratios defaults to 1.0 (free-atom C6 values).
-    # if 'observables_3' not in params['params']:
-    #     num_features = cfg.model.num_features
-    #     regression_dim = cfg.model.energy_regression_dim
-    #     params['params']['observables_3'] = {
-    #         'Embed_0': {'embedding': jnp.ones((100, 1), dtype=jnp.float32)},
-    #         'c6_ratios_dense_regression': {
-    #             'kernel': jnp.zeros((num_features, int(regression_dim / 2)), dtype=jnp.float32),
-    #             'bias': jnp.zeros((int(regression_dim / 2),), dtype=jnp.float32),
-    #         },
-    #         'c6_ratios_dense_final': {
-    #             'kernel': jnp.zeros((int(regression_dim / 2), 1), dtype=jnp.float32),
-    #             'bias': jnp.zeros((1,), dtype=jnp.float32),
-    #         },
-    #     }
-
     return net, params
 
 
 @struct.dataclass
-class MachineLearningPotential:
+class PotentialSparse:
     cutoff: float = struct.field(pytree_node=False)
-    effective_cutoff: float = struct.field(pytree_node=False)
-
-    potential_fn: Callable[[Graph], jnp.ndarray] = struct.field(pytree_node=False)
-    dtype: Type = struct.field(pytree_node=False)
-
-    @classmethod
-    @abstractmethod
-    def create_from_workdir(cls, *args, **kwargs):
-        pass
-
-    @abstractmethod
-    def __call__(self, inputs: Dict):
-        pass
-
-
-@struct.dataclass
-class PotentialSparse(MachineLearningPotential):
-    cutoff: float = struct.field(pytree_node=False)
-    effective_cutoff: float = struct.field(pytree_node=False)
 
     long_range_bool: bool = struct.field(pytree_node=False)
     long_range_cutoff: float = struct.field(pytree_node=False)
@@ -217,36 +179,6 @@ class PotentialSparse(MachineLearningPotential):
     # working unchanged.
     supported_atomic_numbers: Optional[frozenset] = struct.field(
         pytree_node=False, default=None)
-
-    @classmethod
-    def create_from_ckpt_dir(
-            cls,
-            ckpt_dir: str,
-            from_file: bool = False,
-            add_shift: bool = False,
-            long_range_kwargs: Dict[str, Any] = None,
-            dtype=jnp.float32,
-            model: str = 'so3krates',
-            output_intermediate_quantities: Optional[Sequence[str]] = None
-    ):
-        """
-        Deprecated: Use create_from_workdir instead.
-
-        This method is kept for backward compatibility with documented API.
-        """
-        logging.warning(
-            '`create_from_ckpt_dir` is deprecated and replaced by `create_from_workdir`, please use this method in '
-            'the future. For now this calls `create_from_workdir` but will raise an error in the future.'
-        )
-        return cls.create_from_workdir(
-            ckpt_dir,
-            from_file,
-            add_shift,
-            long_range_kwargs,
-            dtype,
-            model,
-            output_intermediate_quantities
-        )
 
     @classmethod
     def create_from_workdir(
@@ -318,9 +250,6 @@ class PotentialSparse(MachineLearningPotential):
         supported_z = supported_atomic_numbers_for_config(cfg.model)
 
         cutoff = cfg.model.cutoff
-        steps = cfg.model.num_layers
-
-        effective_cutoff = steps * cutoff
 
         if add_shift:
             shifts = {int(k): float(v) for k, v in dict(cfg.data.energy_shifts).items()}
@@ -380,7 +309,6 @@ class PotentialSparse(MachineLearningPotential):
 
         return cls(
             cutoff=cutoff,
-            effective_cutoff=effective_cutoff,
             long_range_bool=long_range_bool,
             long_range_cutoff=long_range_kwargs['cutoff_lr'] if long_range_bool is True else None,
             potential_fn=potential_fn,

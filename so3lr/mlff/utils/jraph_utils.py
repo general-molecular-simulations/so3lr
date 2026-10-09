@@ -74,21 +74,6 @@ def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict, kspace_constants
     return batch
 
 
-def graph_to_inputs_fn(graph: jraph.GraphsTuple, lr_batch: dict):
-    """
-    Wrapper around graph_to_batch_fn.
-
-    Args:
-        graph: Batched jraph.GraphsTuple.
-        lr_batch: Dict with LR index arrays ('idx_i_lr', 'idx_j_lr', 'cell_offsets_lr').
-
-    Returns:
-        Dictionary representation of the graph.
-
-    """
-    return graph_to_batch_fn(graph, lr_batch)
-
-
 def dynamically_batch_with_lr(
     data_iterator,
     n_node: int,
