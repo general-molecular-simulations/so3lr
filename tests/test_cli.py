@@ -197,3 +197,14 @@ class TestTimestepConversion:
             assert settings_dict["md_dt"] == pytest.approx(0.001)  # ps
         finally:
             os.unlink(tmp)
+
+
+def test_cli_import_does_not_load_jax():
+    """`so3lr --help` must not pay for JAX/Flax start-up (see AGENTS.md)."""
+    import subprocess
+    import sys
+    code = ("import sys, so3lr.cli.so3lr_cli; "
+            "heavy = sorted(m for m in ('jax', 'flax', 'jax_md', 'glp') if m in sys.modules); "
+            "print(heavy); sys.exit(1 if heavy else 0)")
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+    assert result.returncode == 0, f"importing the CLI loaded {result.stdout.strip()}"

@@ -4,7 +4,7 @@ import sys
 import time
 import yaml
 import click
-from so3lr.mlff.utils import kspace_utils as _KS
+from so3lr import kspace_defaults as _KS
 import difflib
 import logging
 import warnings
