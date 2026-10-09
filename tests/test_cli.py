@@ -220,3 +220,28 @@ def test_usage_error_is_one_line_not_a_traceback(tmp_path):
     assert result.returncode == 2
     assert 'does not exist' in result.stderr
     assert 'Traceback' not in result.stderr
+
+
+@pytest.mark.parametrize('given,expected', [
+    ({}, 'nvt'), ({'md_P': 1.0}, 'npt'), ({'ensemble': 'NVT'}, 'nvt'),
+    ({'ensemble': 'nvt_langevin'}, 'nvt-langevin'), ({'ensemble': 'nvt-langevin'}, 'nvt-langevin'),
+])
+def test_canonicalize_ensemble_names(given, expected):
+    from so3lr.cli.so3lr_cli import canonicalize_ensemble
+    assert canonicalize_ensemble(dict(given))['ensemble'] == expected
+
+
+def test_canonicalize_ensemble_rejects_unknown_names_before_the_run():
+    """A typo used to fall into perform_md's NPT branch and crash after relaxation."""
+    from so3lr.cli.so3lr_cli import canonicalize_ensemble
+    with pytest.raises(ValueError, match="did you mean 'nvt-langevin'"):
+        canonicalize_ensemble({'ensemble': 'nvt-langevn'})
+
+
+def test_canonicalize_ensemble_pressure():
+    """`ensemble: npt` alone gets the CLI default pressure (it used to reach jax-md as None);
+    another ensemble drops a stray md_P (perform_md reads a pressure as NPT)."""
+    from so3lr.cli.so3lr_cli import canonicalize_ensemble, DEFAULT_PRESSURE
+    assert canonicalize_ensemble({'ensemble': 'npt'})['md_P'] == DEFAULT_PRESSURE
+    assert canonicalize_ensemble({'ensemble': 'npt', 'md_P': 5.0})['md_P'] == 5.0
+    assert canonicalize_ensemble({'ensemble': 'nvt', 'md_P': 5.0})['md_P'] is None

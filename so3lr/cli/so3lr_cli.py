@@ -946,18 +946,35 @@ def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Pa
         logger.warning(msg)
 
 
+ENSEMBLES = ('nve', 'nvt', 'nvt-langevin', 'npt')
+
+
 def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Determine ensemble from settings dict, defaulting to NVT.
+    """Determine the ensemble from a settings dict, defaulting to NVT.
 
     Ensemble can be set explicitly via ``settings_dict['ensemble']`` (e.g. from a
     YAML settings file), or is inferred: presence of ``md_P`` implies NPT, otherwise
-    NVT is used as the default.
+    NVT is used as the default. Case and '_' vs '-' do not matter
+    (``nvt_langevin`` is ``nvt-langevin``); anything else raises here, before the
+    model loads and the relaxation runs. NPT without ``md_P`` gets the CLI default
+    pressure, and ``md_P`` is dropped for the other ensembles (perform_md reads a
+    pressure as NPT).
     """
-    if settings_dict.get('ensemble') is None:
-        if settings_dict.get('md_P') is not None:
-            settings_dict['ensemble'] = 'npt'
-        else:
-            settings_dict['ensemble'] = 'nvt'
+    ensemble = settings_dict.get('ensemble')
+    if ensemble is None:
+        ensemble = 'npt' if settings_dict.get('md_P') is not None else 'nvt'
+    canonical = str(ensemble).strip().lower().replace('_', '-')
+    if canonical not in ENSEMBLES:
+        hint = difflib.get_close_matches(canonical, ENSEMBLES, n=1)
+        raise ValueError(
+            f"Unknown ensemble {ensemble!r}; expected one of {', '.join(ENSEMBLES)}"
+            + (f" (did you mean {hint[0]!r}?)" if hint else "") + ".")
+    settings_dict['ensemble'] = canonical
+    if canonical == 'npt':
+        if settings_dict.get('md_P') is None:
+            settings_dict['md_P'] = DEFAULT_PRESSURE
+    else:
+        settings_dict['md_P'] = None
     return settings_dict
 
 @click.group(cls=CustomCommandClass, invoke_without_command=True,
@@ -1243,11 +1260,9 @@ def run_md_simulation(
         click.echo(ctx.get_help())
         return
 
-    # Default output filename uses ensemble-specific suffix.
-    # Note: NVT-Langevin uses the underscore form 'nvt_langevin' in filenames
-    # (and YAML `ensemble:` values) but the hyphen form 'nvt-langevin' as the
-    # CLI subcommand name (`so3lr nvt-langevin ...`); the mapping below keeps
-    # the two conventions in sync.
+    # Default output filename uses ensemble-specific suffix: the underscore
+    # form 'nvt_langevin' in filenames, the hyphen form 'nvt-langevin' as the
+    # ensemble name (canonicalize_ensemble accepts either in YAML).
     _suffix = {'nvt': 'nvt', 'nvt-langevin': 'nvt_langevin', 'npt': 'npt', 'nve': 'nve'}
     if output_file is None:
         output_file = f"{Path(input_file).stem}_{_suffix[ensemble]}.xyz"

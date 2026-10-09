@@ -34,10 +34,7 @@
 # lives at so3lr/cli/eval_settings.yaml for reference.
 
 ## General Settings
-ensemble: "nvt"                            # Ensemble type: "nvt", "nvt-langevin", "npt", "nve" [Default: "nvt"]
-                                           # Note: the Langevin ensemble is spelled "nvt-langevin" (hyphen) here and as a CLI
-                                           # subcommand, but Python identifiers and auto-generated log/trajectory file
-                                           # suffixes use "nvt_langevin" (underscore). The two refer to the same ensemble.
+ensemble: "nvt"                            # Ensemble type: "nvt", "nvt-langevin" (or "nvt_langevin"), "npt", "nve" [Default: "nvt"]
 total_charge: 0                            # Total charge of the system [Default: 0]
 num_unpaired_electrons: 0                  # Spin: number of unpaired electrons (2S). [Default: 0]
 seed: 52                                   # Random seed for MD and thermostat initialization [Default: 52]
@@ -118,7 +115,7 @@ nhc_steps: 2                               # Number of Nose-Hoover integration s
 nhc_thermo: 100.0                          # Nose-Hoover thermostat damping factor. Effective damping timescale tau is roughly nhc_thermo * md_dt (e.g. ~50 fs at the default md_dt=0.5 fs). The literal formula tau = md_dt * nhc_thermo holds only after the internal ps -> jax-md natural-units conversion. [Default: 100.0]
 
 ## NPT-specific Settings
-md_P: null                                 # Target pressure in bar. Setting this enables NPT. [Default: null]  (CLI: --pressure)
+md_P: null                                 # Target pressure in bar. Setting this enables NPT; ensemble "npt" without it uses 1.0. [Default: null]  (CLI: --pressure)
 nhc_baro: 1000.0                           # Nose-Hoover barostat damping factor. Effective damping timescale tau is roughly nhc_baro * md_dt (e.g. ~500 fs at the default md_dt=0.5 fs). The literal formula tau = md_dt * nhc_baro holds only after the internal ps -> jax-md natural-units conversion. [Default: 1000.0]
 nhc_sy_steps: 3                            # Number of Suzuki-Yoshida integration steps [Default: 3]
 npt_coupling: "isotropic"                  # NPT box coupling: "isotropic" (uniform scaling) or "semi-isotropic" (EXPERIMENTAL: x/y scale together, z independently). "anisotropic" is experimental and rejected: neighbor-list, reciprocal-space and tail-correction paths assume an orthorhombic cell. [Default: "isotropic"]
