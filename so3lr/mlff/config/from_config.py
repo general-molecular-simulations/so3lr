@@ -490,12 +490,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             early_stopping_patience=config.training.get('early_stopping_patience', None),
             early_stopping_min_delta=config.training.get('early_stopping_min_delta', 1e-4),
             # Reduce LR on plateau.
-            reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False),
-            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.75),
-            reduce_lr_patience=config.training.get('reduce_lr_patience', 1000),
-            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 0.0),
-            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 1e-4),
-            reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
+            **_reduce_lr_kwargs(config),
             # Two-stage loss reweighting.
             stage_two_start_epoch=stage_two_start_epoch,
             stage_two_loss_fn=stage_two_loss_fn,
@@ -535,12 +530,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             early_stopping_patience=config.training.get('early_stopping_patience', None),
             early_stopping_min_delta=config.training.get('early_stopping_min_delta', 1e-4),
             # Reduce LR on plateau.
-            reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False),
-            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.75),
-            reduce_lr_patience=config.training.get('reduce_lr_patience', 1000),
-            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 0.0),
-            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 1e-4),
-            reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
+            **_reduce_lr_kwargs(config),
             # Two-stage loss reweighting.
             stage_two_start_epoch=stage_two_start_epoch,
             stage_two_loss_fn=stage_two_loss_fn,
@@ -1097,7 +1087,6 @@ def run_fine_tuning(
         )
 
     _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)
-    reduce_lr_kwargs = _reduce_lr_kwargs(config)
 
     if tf_record_present is True:
         training_utils.fit_from_iterator(
@@ -1129,7 +1118,7 @@ def run_fine_tuning(
             adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale,
             # Dataset info for effective epoch tracking
             dataset_info=training_data.dataset_info() if hasattr(training_data, 'dataset_info') else None,
-            **reduce_lr_kwargs,
+            **_reduce_lr_kwargs(config),
         )
     else:
         training_utils.fit(
@@ -1159,7 +1148,7 @@ def run_fine_tuning(
             adaptive_robust_loss_targets=adaptive_robust_loss_targets,
             adaptive_robust_loss_init_alpha=adaptive_robust_loss_init_alpha,
             adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale,
-            **reduce_lr_kwargs,
+            **_reduce_lr_kwargs(config),
         )
     logger.info('Training has finished!')
 

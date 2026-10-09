@@ -20,7 +20,7 @@ from .. import __version__
 # same table into parameter keys, so the two cannot drift apart.
 from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
 from ..md_observables import MD_OBSERVABLES
-from ..md_settings_validation import canonical_ensemble, load_settings_yaml, validate_md_counts
+from ..md_settings_validation import DEFAULT_PRESSURE, load_settings_yaml, resolve_ensemble, validate_md_counts
 from ..flash.check import ENGINES, FLASH_MODES, reserve_gpu
 
 # NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
@@ -157,7 +157,6 @@ DEFAULT_SAVE_BUFFER = 50
 DEFAULT_OUTPUT_FORMAT = 'extxyz'
 DEFAULT_TIMESTEP = 0.5  # femtoseconds
 DEFAULT_TEMPERATURE = 300  # Kelvin
-DEFAULT_PRESSURE = 1.0  # bar
 
 # Nose-Hoover chain parameters
 DEFAULT_MD_CYCLES = 100
@@ -946,26 +945,6 @@ def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Pa
         logger.warning(msg)
 
 
-def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Determine the ensemble from a settings dict, defaulting to NVT.
-
-    Ensemble can be set explicitly via ``settings_dict['ensemble']`` (e.g. from a
-    YAML settings file), or is inferred: presence of ``md_P`` implies NPT, otherwise
-    NVT is used as the default. The name goes through canonical_ensemble. NPT
-    without ``md_P`` gets the CLI default pressure, and ``md_P`` is dropped for the
-    other ensembles (perform_md reads a pressure as NPT).
-    """
-    ensemble = settings_dict.get('ensemble')
-    if ensemble is None:
-        ensemble = 'npt' if settings_dict.get('md_P') is not None else 'nvt'
-    settings_dict['ensemble'] = canonical_ensemble(ensemble)
-    if settings_dict['ensemble'] == 'npt':
-        if settings_dict.get('md_P') is None:
-            settings_dict['md_P'] = DEFAULT_PRESSURE
-    else:
-        settings_dict['md_P'] = None
-    return settings_dict
-
 @click.group(cls=CustomCommandClass, invoke_without_command=True,
              help="Run molecular dynamics using SO3LR Machine Learned Force Field.",
              context_settings={"help_option_names": []})
@@ -1033,7 +1012,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     for key, default in YAML_DEFAULTS.items():
         settings_dict.setdefault(key, default)
 
-    settings_dict = canonicalize_ensemble(settings_dict)
+    settings_dict = resolve_ensemble(settings_dict)
     validate_md_counts(settings_dict)
 
     # Fast-fail on missing required keys before setup_logger / banner /

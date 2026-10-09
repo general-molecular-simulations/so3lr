@@ -14,6 +14,7 @@ from so3lr.pbc import lattice_rows
 from so3lr.cli.so3lr_md import (
     _validate_md_output_write_policy,
     cell_from_atoms_boundary_conditions,
+    check_box_for_neighbour_lists,
     init_hdf5_store,
     load_state,
     output_position_array,
@@ -189,6 +190,15 @@ def test_box_below_twice_the_cutoff_fails_clearly():
     # With k-space carrying the long range, a shorter real-space cutoff fits.
     np.testing.assert_allclose(
         cell_from_atoms_boundary_conditions(atoms, 7.5, 'pme', kspace_smearing=2.0), np.diag([15.5] * 3))
+
+
+@pytest.mark.parametrize('box', [np.diag([23.0, 30.0, 30.0]), np.array([23.0, 30.0, 30.0]), np.array(23.0)])
+def test_md_box_check_takes_every_box_shape(box):
+    """The NPT box (lengths, a semi-isotropic matrix or a scalar) is checked after
+    every cycle, and a box from a restart file before the run."""
+    with pytest.raises(ValueError, match='at least twice the'):
+        check_box_for_neighbour_lists(box, 12.0, 'NPT box')
+    check_box_for_neighbour_lists(box * 2, 12.0, 'NPT box')
 
 
 def test_mixed_axis_pbc_fails_clearly():

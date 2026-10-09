@@ -1,12 +1,15 @@
-"""Import-light MD settings checks, shared by the CLI and ``so3lr_md``."""
+"""Import-light settings helpers shared by the CLI and ``so3lr_md``: loading a
+settings YAML, resolving the ensemble, checking the MD counts."""
 
 import difflib
+import logging
 import re
 from numbers import Integral
 
 import yaml
 
 ENSEMBLES = ('nve', 'nvt', 'nvt-langevin', 'npt')
+DEFAULT_PRESSURE = 1.0  # bar
 
 
 def canonical_ensemble(name) -> str:
@@ -19,6 +22,29 @@ def canonical_ensemble(name) -> str:
             f"Unknown ensemble {name!r}; expected one of {', '.join(ENSEMBLES)}"
             + (f" (did you mean {hint[0]!r}?)" if hint else "") + ".")
     return canonical
+
+
+def resolve_ensemble(settings: dict) -> dict:
+    """A copy of the settings with a canonical 'ensemble' and a pressure only for NPT.
+
+    Without 'ensemble' a pressure (md_P) selects NPT, else NVT. NPT without md_P
+    gets DEFAULT_PRESSURE; another ensemble drops md_P (perform_md reads a
+    pressure as NPT), with a warning when the ensemble was set explicitly.
+    """
+    settings = dict(settings)
+    explicit = settings.get('ensemble')
+    ensemble = canonical_ensemble(explicit if explicit is not None
+                                  else 'npt' if settings.get('md_P') is not None else 'nvt')
+    settings['ensemble'] = ensemble
+    if ensemble == 'npt':
+        if settings.get('md_P') is None:
+            settings['md_P'] = DEFAULT_PRESSURE
+    else:
+        if settings.get('md_P') is not None:
+            logging.getLogger("SO3LR").warning(
+                f"md_P={settings['md_P']} is ignored: the ensemble is {ensemble}, not npt.")
+        settings['md_P'] = None
+    return settings
 
 
 def validate_md_counts(settings) -> None:

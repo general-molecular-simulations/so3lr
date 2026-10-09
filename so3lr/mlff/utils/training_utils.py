@@ -1336,6 +1336,7 @@ def fit(
             n_pairs=batch_max_num_pairs,
         )
 
+    start_step = step
     for epoch in range(num_epochs):
         # Switch to the stage-two loss at the configured epoch boundary.
         if (stage_two_start_epoch is not None and stage_two_loss_fn is not None
@@ -1475,9 +1476,9 @@ def fit(
         if stop_training:
             break  # exit the epoch loop
 
-    # Validate and save the final weights too when the last step was not a
-    # multiple of eval_every_num_steps.
-    if step % eval_every_num_steps != 0:
+    # Validate and save the final weights too when this call trained past the
+    # last multiple of eval_every_num_steps.
+    if step > start_step and step % eval_every_num_steps != 0:
         eval_params = ema_params if use_ema else params
         _log_and_checkpoint(
             ckpt_mngr, step, epoch, eval_params,

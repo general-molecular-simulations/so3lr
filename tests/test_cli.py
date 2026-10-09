@@ -9,8 +9,8 @@ import pathlib
 import pytest
 from click.testing import CliRunner
 
-from so3lr.cli.so3lr_cli import cli, main, canonicalize_ensemble, BASIC_HELP_STRING, DEFAULT_PRESSURE
-from so3lr.md_settings_validation import load_settings_yaml
+from so3lr.cli.so3lr_cli import cli, main, BASIC_HELP_STRING
+from so3lr.md_settings_validation import DEFAULT_PRESSURE, load_settings_yaml, resolve_ensemble
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -230,15 +230,23 @@ def test_usage_error_is_one_line_not_a_traceback(tmp_path, monkeypatch, capsys):
     ({'ensemble': 'npt', 'md_P': 5.0}, 'npt', 5.0),
     ({'ensemble': 'nvt', 'md_P': 5.0}, 'nvt', None),    # perform_md reads a pressure as NPT
 ])
-def test_canonicalize_ensemble(given, ensemble, md_P):
-    settings = canonicalize_ensemble(dict(given))
+def test_resolve_ensemble(given, ensemble, md_P):
+    before = dict(given)
+    settings = resolve_ensemble(given)
     assert (settings['ensemble'], settings['md_P']) == (ensemble, md_P)
+    assert given == before  # it returns a copy
 
 
-def test_canonicalize_ensemble_rejects_unknown_names_before_the_run():
+def test_resolve_ensemble_rejects_unknown_names_before_the_run():
     """A typo used to fall into perform_md's NPT branch and crash after relaxation."""
     with pytest.raises(ValueError, match="did you mean 'nvt-langevin'"):
-        canonicalize_ensemble({'ensemble': 'nvt-langevn'})
+        resolve_ensemble({'ensemble': 'nvt-langevn'})
+
+
+def test_resolve_ensemble_warns_when_a_pressure_is_dropped(caplog):
+    with caplog.at_level('WARNING', logger='SO3LR'):
+        resolve_ensemble({'ensemble': 'nvt', 'md_P': 1.0})
+    assert 'md_P=1.0 is ignored' in caplog.text
 
 
 def test_settings_yaml_reads_exponent_floats(tmp_path):

@@ -1192,12 +1192,19 @@ def tune(
 
     # A bundled name, a path, or None for the default model; load_model builds
     # the solver for the method being timed.
+    # The PME/P3M solver is built for one interpolation order, so the timings are
+    # for nodes_lo; the error estimates cover every order in the grid.
+    nodes_lo, nodes_hi = settings.get('nodes_lo', 3), settings.get('nodes_hi', 3)
+    if kspace_electrostatics in ('pme', 'p3m') and nodes_hi != nodes_lo:
+        logger.warning(f'Timings use {nodes_lo} interpolation nodes for every candidate '
+                       f'(nodes_lo={nodes_lo}, nodes_hi={nodes_hi}).')
     potential = load_model(
         model_path,
         precision=jnp.float64 if precision == 'float64' else jnp.float32,
         lr_cutoff=lr_cutoff,
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics if kspace_electrostatics != 'cutoff' else None,
+        kspace_interp_nodes=nodes_lo,
         output_intermediate_quantities=['partial_charges'],
     )
 
@@ -1281,7 +1288,7 @@ def tune(
         logger.info(f"Tuning {kspace_electrostatics.upper()} parameters...")
         params, errs, timings = tune_pme(
             charges=charges, **common, **smearing, model_kwargs=model_kwargs,
-            nodes_lo=settings.get('nodes_lo', 3), nodes_hi=settings.get('nodes_hi', 3),
+            nodes_lo=nodes_lo, nodes_hi=nodes_hi,
             mesh_lo=settings.get('mesh_lo', 4), mesh_hi=settings.get('mesh_hi', 6),
         )
     elif kspace_electrostatics == 'cutoff':

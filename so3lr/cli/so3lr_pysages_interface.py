@@ -14,7 +14,7 @@ import jax_md.simulate
 import jax_md.quantity
 import jax_md.units
 from jax_md.space import transform
-import yaml
+from so3lr.md_settings_validation import load_settings_yaml
 from jax import jit
 
 try:
@@ -388,8 +388,7 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T, dt,
 
 def parse_pysages_input(input_path):
     """Read settings for choice of CVs, restraints, grid, sampling method."""
-    with open(input_path, 'r') as in_file:
-        settings_dict = yaml.load(in_file, Loader=yaml.SafeLoader)
+    settings_dict = load_settings_yaml(input_path)
 
     logger.info(f'Parsed settings for PySAGES: {settings_dict}')
     return settings_dict

@@ -20,7 +20,7 @@ import logging
 from typing import NamedTuple, Optional
 
 import numpy as np
-from ase.cell import Cell
+from so3lr.pbc import cell_heights
 
 from so3lr.mlff.indexing.indices import pad_index_list, pad_shift
 
@@ -81,11 +81,6 @@ def build(atoms, cutoff: float, lr_cutoff: Optional[float],
     lr = (i, j, S) if lr_cutoff is not None else (i[sr], j[sr], S[sr])
     cap_lr = _capacity(len(lr[0]), None if prev is None else len(prev.idx_i_lr), multiplier)
     return ExactNeighbors(*_padded(i[sr], j[sr], S[sr], cap, n), *_padded(*lr, cap_lr, n))
-
-
-def cell_heights(cell) -> np.ndarray:
-    """Perpendicular distance between opposite faces, per lattice direction (rows)."""
-    return 1.0 / np.linalg.norm(Cell(np.asarray(cell, float)).reciprocal(), axis=1)
 
 
 def needs_exact(cell, cutoff: float, lr_cutoff: Optional[float], skin: float = 0.0) -> bool:

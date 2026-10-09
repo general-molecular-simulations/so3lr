@@ -69,7 +69,7 @@ import h5py
 from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
-from ..md_settings_validation import canonical_ensemble, validate_md_counts
+from ..md_settings_validation import resolve_ensemble, validate_md_counts
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -946,14 +946,21 @@ def check_cell(
     if np.any(cell[~mask] != 0):
         raise ValueError(f'JAX-MD currently supports only orthogonal cells. Provided cell: {cell}') 
 
-    problem = minimum_image_problem(cell, lr_cutoff)
+    check_box_for_neighbour_lists(cell, lr_cutoff, 'Input cell')
+    return cell
+
+
+def check_box_for_neighbour_lists(box, lr_cutoff: float, where: str) -> None:
+    """Refuse an orthorhombic box (matrix, lengths or scalar) shorter than twice
+    lr_cutoff: the neighbour lists keep one image per pair and would drop the rest."""
+    lengths = np.broadcast_to(np.asarray(box_to_diag(box), float).reshape(-1), (3,))
+    problem = minimum_image_problem(np.diag(lengths), lr_cutoff)
     if problem:
         raise ValueError(
-            f'{problem}. Use a larger box, a smaller --lr-cutoff together with '
-            f'--kspace-electrostatics (k-space then carries the long range), or the ASE '
-            f'calculator (So3lrCalculator), which lists every periodic image.')
-
-    return cell
+            f'{where}: {problem}. Use a larger box, a smaller --lr-cutoff with k-space '
+            f'carrying the long range (--kspace-electrostatics pme, and --kspace-dispersion '
+            f'pme for dispersion), or the ASE calculator (So3lrCalculator), which lists every '
+            f'periodic image.')
 
 
 def cell_from_atoms_boundary_conditions(
@@ -2390,6 +2397,7 @@ def perform_md(
         opt_structure (Optional[jnp.ndarray], optional): Optimized structure, if 
                                     already available. Defaults to None.
     """
+    all_settings = resolve_ensemble(all_settings)  # also for direct Python callers
     # Direct Python callers do not necessarily enter through run(). Configure
     # precision before constructing any arrays, as perform_min already does.
     setup_jax_globals(
@@ -3021,6 +3029,9 @@ def perform_md(
         )
 
 
+    if cell is not None:
+        check_box_for_neighbour_lists(box, lr_cutoff, 'MD box')  # also a box from a restart file
+
     # Running the MD
     logger.info('Starting MD simulation...')
     pressure_unit = units.metal_unit_system()['pressure']
@@ -3301,6 +3312,8 @@ def perform_md(
 
             state = new_state
             box = new_box
+            if ensemble == 'npt':
+                check_box_for_neighbour_lists(box, lr_cutoff, f'NPT box after cycle {current_cycle}')
 
             if (ensemble == 'npt') and (kspace_npt_cycles is not None) and (current_cycle % kspace_npt_cycles == 0):
                 box_for_kgrid = box_to_diag(box)
@@ -4343,10 +4356,9 @@ def run(
                             simulation and relaxation.
     """
 
+    settings = resolve_ensemble(settings)  # before the optional relaxation
     relax_before_run = settings.get('relax_before_run', True)
-    validate_md_counts(settings)  # fail before the optional relaxation
-    if settings.get('ensemble') is not None:
-        settings['ensemble'] = canonical_ensemble(settings['ensemble'])
+    validate_md_counts(settings)
 
     setup_jax_globals(
         precision=settings.get('precision', 'float32'),

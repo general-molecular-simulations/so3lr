@@ -302,8 +302,10 @@ a model hyperparameter flash does not know.
 
 Both engines need every box length to be at least twice `lr_cutoff` (24 A at the
 default 12 A); the neighbour-list engine refuses a shorter box rather than drop periodic
-images. For a smaller box, lower `--lr-cutoff` and let `--kspace-electrostatics pme`
-carry the long range, or use the ASE calculator, which lists every periodic image.
+images, and checks an NPT box after every cycle. For a smaller box, lower `--lr-cutoff`
+and let k-space carry the long range (`--kspace-electrostatics pme`, plus
+`--kspace-dispersion pme`, since `lr_cutoff` also truncates the real-space dispersion), or
+use the ASE calculator, which lists every periodic image.
 
 - `--flash-mode` sets what flash keeps between the forward and backward pass: `fast`,
   `default`, `lean`, `leanest`, `minimal` (less memory, more recomputation). `auto`
