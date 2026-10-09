@@ -190,7 +190,7 @@ def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
 
 
 def update_so3lr_after_pysages(raw_result, init_fn, rng_key, md_T, dt,
-                                nbrs, ensemble='nvt', nbrs_lr=None,
+                                nbrs, nbrs_lr, ensemble='nvt',
                                 k_grid=None, k_grid_disp=None):
     """
     Extract the final state from PySAGES results and rebuild SO3LR state.

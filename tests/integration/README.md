@@ -93,11 +93,11 @@ if __name__ == '__main__':
 The `Validator` class in [`validation_utils.py`](validation_utils.py) provides:
 
 - **File checking**: `check_file_exists()`, `check_files_exist()`
-- **Log validation**: `check_log_contains()` with required/forbidden strings
+- **Log validation**: `check_log_contains()` with required strings (case-insensitive)
 - **HDF5 validation**: `validate_hdf5()` with dataset and shape checking
-- **NPZ validation**: `validate_npz()` for restart files
-- **XYZ validation**: `validate_xyz()` for structure files
+- **XYZ validation**: `validate_xyz()` with the expected number of atoms
 - **Settings verification**: `check_settings_in_logs()` ensures all settings appear in output
+- **Input**: `load_settings()`, `count_atoms()`
 
 See the validation scripts in each test case for usage examples.
 
