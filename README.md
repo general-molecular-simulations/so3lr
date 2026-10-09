@@ -315,8 +315,15 @@ use the ASE calculator, which lists every periodic image.
   picks the fastest that fits.
 - `--flash-mixed` (on by default) keeps positions and momenta in float64 around the
   float32 model.
+- `--flash-devices N` runs flash on N GPUs of one node, for a system that fits on one GPU
+  but should run faster. Each GPU computes the forces on an equal share of the atoms and
+  the GPUs exchange per-atom features between the layers; the forces are one GPU's to
+  rounding. NVT water with PME on H200s: 98,304 atoms take 23 ms per step on 8 GPUs
+  against 144 ms on one (6.2x), 192,000 atoms 44 against 291 ms (6.7x); 2 GPUs are
+  1.9-2.0x faster. `CUDA_VISIBLE_DEVICES` selects the GPUs; several GPUs run the `fast`
+  memory mode.
 - Unless set, `XLA_PYTHON_CLIENT_MEM_FRACTION` is raised to 0.97 so flash can use
-  nearly all of the GPU.
+  nearly all of the GPU (0.90 with `--flash-devices`, leaving room for NCCL).
 
 To compare flash with the neighbour-list potential on a structure (energy, forces and
 the NPT strain derivative; on a GPU):

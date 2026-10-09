@@ -14,6 +14,10 @@ identified by immutable dated names such as `so3lr-m-2606`.
   (`--engine auto`) wherever it applies, with real-space long range or PME and
   isotropic NPT, and say in the log which engine runs and why; `--engine standard`
   keeps the neighbour-list potential. `python -m so3lr.flash.verify` compares the two.
+- `--flash-devices N` (`flash_devices`): flash on N GPUs of one node. Each GPU computes
+  an equal share of the atoms and the GPUs exchange per-atom features between stages;
+  energies and forces match one GPU's (float64: 1e-15). NVT water with PME on 8 H200s
+  runs 6.2x (98,304 atoms) and 6.7x (192,000 atoms) faster than on one.
 - Locked environments managed by `uv`, with immutable Git dependency
   revisions and Python 3.12/3.13 coverage, including a CI smoke test of the
   built wheel (PR #55).
