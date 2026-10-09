@@ -208,3 +208,15 @@ def test_cli_import_does_not_load_jax():
             "print(heavy); sys.exit(1 if heavy else 0)")
     result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
     assert result.returncode == 0, f"importing the CLI loaded {result.stdout.strip()}"
+
+
+def test_usage_error_is_one_line_not_a_traceback(tmp_path):
+    """The console entry point reports click usage errors cleanly and exits non-zero."""
+    import subprocess
+    import sys
+    result = subprocess.run(
+        [sys.executable, '-m', 'so3lr.cli.so3lr_cli', 'nvt', '--input', str(tmp_path / 'missing.xyz')],
+        capture_output=True, text=True)
+    assert result.returncode == 2
+    assert 'does not exist' in result.stderr
+    assert 'Traceback' not in result.stderr

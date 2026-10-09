@@ -2111,7 +2111,9 @@ def main() -> None:
     """Entry point for the command line interface."""
     os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2') # Suppress TF logging
 
-    cli(standalone_mode=False)
+    # Standalone mode: click prints a usage error (missing file, bad choice,
+    # unknown flag) as one line and exits 2, instead of raising a traceback.
+    cli()
 
 
 if __name__ == '__main__':
