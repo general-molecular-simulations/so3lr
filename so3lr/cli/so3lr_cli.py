@@ -21,6 +21,7 @@ from .. import __version__
 from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
 from ..md_observables import MD_OBSERVABLES
 from ..md_settings_validation import validate_md_counts
+from ..flash.check import ENGINES, FLASH_MODES, reserve_gpu
 
 # NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
 # submodules, which pull in jax/flax/jax-md/glp/orbax) are deferred so that
@@ -711,6 +712,26 @@ def langevin_options(f: Callable) -> Callable:
     return f
 
 
+def flash_options(f: Callable) -> Callable:
+    """The engine: SO3LR-Flash (millions of atoms) or the neighbour-list potential."""
+    f = click.option('--engine', 'engine', default='auto', type=click.Choice(list(ENGINES)),
+                     help='auto: the flash engine (GPU kernels with their own cell grid and '
+                          'no per-edge arrays: 2.5x faster, and tens of millions of atoms on one '
+                          'GPU) whenever it computes what the other options ask for -- an NVIDIA '
+                          'GPU, a periodic orthorhombic box, nve/nvt/nvt-langevin/isotropic npt, '
+                          'real-space long range or PME, so3lr-s/m/l -- else the neighbour-list '
+                          'potential; the log says which and why. flash or standard forces one. '
+                          '[default: auto]')(f)
+    f = click.option('--flash-mode', 'flash_mode', default='auto',
+                     type=click.Choice(list(FLASH_MODES)),
+                     help='SO3LR-Flash memory mode, fastest first; auto picks the fastest that fits. '
+                          '[default: auto]')(f)
+    f = click.option('--flash-mixed/--no-flash-mixed', 'flash_mixed', default=True,
+                     help='With --precision float32: keep the MD state (positions, momenta, '
+                          'energy sums) in float64 and form displacements in float64. [default: on]')(f)
+    return f
+
+
 def kspace_electrostatics_options(f: Callable) -> Callable:
     """Reciprocal-space electrostatics for periodic systems (shared by MD and eval)."""
     f = click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None,
@@ -831,6 +852,8 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     'restart_pysages_save_path', 'restart_pysages_load_path',
     # Minimization (overrides cycles/steps if set)
     'force_convergence',
+    # flash engine
+    'engine', 'flash_mode', 'flash_mixed',
     # Eval keys (allowed in the same YAML even though `so3lr eval` does not use
     # --settings yet, since users often share a single YAML across runs)
     'datafile', 'save_to', 'targets', 'batch_size', 'jit_compile',
@@ -1044,6 +1067,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     logger.info(f"Loading settings from {settings}")
 
     log_simulation_settings(settings_dict)
+    reserve_gpu(settings_dict)          # before JAX starts
     get_hardware_info()
 
     time_start = time.time()
@@ -1207,6 +1231,10 @@ def run_md_simulation(
     # common_model_options flag straight into this explicit signature.
     charge_embed_total_charge: Optional[float] = None,
     charge_equilibration_total_charge: Optional[float] = None,
+    # the engine (SO3LR-Flash for nve / nvt / nvt-langevin / npt)
+    engine: str = 'auto',
+    flash_mode: str = 'auto',
+    flash_mixed: bool = True,
 ) -> None:
     """Shared runner for NVT, NVT-Langevin, NPT, and NVE MD simulations."""
     if not input_file or help:
@@ -1267,6 +1295,9 @@ def run_md_simulation(
         'kspace_interp_nodes': kspace_interp_nodes,
         'charge_embed_total_charge': charge_embed_total_charge,
         'charge_equilibration_total_charge': charge_equilibration_total_charge,
+        'engine': engine,
+        'flash_mode': flash_mode,
+        'flash_mixed': flash_mixed,
     }
 
     # Only insert kspace_npt_cycles when the user explicitly passed
@@ -1302,6 +1333,7 @@ def run_md_simulation(
         settings['langevin_thermo'] = langevin_thermo
 
     log_simulation_settings(settings)
+    reserve_gpu(settings)               # before JAX starts
     get_hardware_info()
 
     time_start = time.time()
@@ -1483,6 +1515,7 @@ def fire_optimization(
 @kspace_options
 @common_md_options
 @thermostat_options
+@flash_options
 def nvt_md(**kwargs) -> None:
     """
     Run NVT (constant volume and temperature) MD simulation using the Nose-Hoover chain thermostat.
@@ -1500,6 +1533,7 @@ def nvt_md(**kwargs) -> None:
 @kspace_options
 @common_md_options
 @langevin_options
+@flash_options
 def nvt_langevin_md(**kwargs) -> None:
     """
     Run NVT (constant volume and temperature) MD simulation using the Langevin thermostat.
@@ -1520,6 +1554,7 @@ def nvt_langevin_md(**kwargs) -> None:
 @common_md_options
 @thermostat_options
 @barostat_options
+@flash_options
 def npt_md(**kwargs) -> None:
     """
     Run NPT (constant pressure and temperature) MD simulation using the Nose-Hoover chain thermostat and barostat.
@@ -1538,6 +1573,7 @@ def npt_md(**kwargs) -> None:
 @common_model_options
 @kspace_options
 @common_md_options
+@flash_options
 def nve_md(**kwargs) -> None:
     """
     Run NVE (constant volume and energy) MD simulation with no thermostat.

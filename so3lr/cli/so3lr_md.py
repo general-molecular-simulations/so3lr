@@ -11,6 +11,7 @@ It includes functionality for:
 - Restart capabilities
 
 """
+import gc
 import os
 import sys
 import time
@@ -4374,6 +4375,33 @@ def run(
             sys.exit(1)
     else:
         restart = False
+
+    # The engine: SO3LR-Flash wherever it computes what the settings ask for, else the
+    # neighbour-list potential below (--engine flash / standard forces one). Flash relaxes
+    # with its own force (perform_min would build the full model).
+    from so3lr.flash.check import flash_problem, validate_options
+    validate_options(settings)
+    engine = settings.get('engine') or 'auto'
+    if engine != 'standard' and input_file_path is not None:
+        problem = flash_problem(settings, initial_geometry)
+        if problem is None:
+            try:
+                from so3lr.flash.md import FlashUnavailable, perform_md_flash
+            except Exception as exc:    # e.g. a JAX build without Pallas-Triton
+                problem = f"it does not import here ({type(exc).__name__}: {exc})"
+        if problem is None:
+            logger.info(f"Engine: flash ({'--engine flash' if engine == 'flash' else 'auto'})")
+            try:
+                perform_md_flash(settings, restart, atoms=initial_geometry)
+                return
+            except FlashUnavailable as exc:
+                if engine == 'flash':
+                    raise
+                problem = f"it failed to start: {exc}"
+            gc.collect()                # the failed engine's arrays, before the other one starts
+        if engine == 'flash':
+            raise ValueError(f"--engine flash: {problem}")
+        logger.info(f"Engine: neighbour-list potential (flash cannot: {problem})")
 
     # Relax the geometry
     if relax_before_run:
