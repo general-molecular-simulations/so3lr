@@ -6,7 +6,7 @@ tables against so3lr_dev's pair functions, the reasons the engine choice gives (
 settings key and model hyperparameter classified), and ``so3lr nvt`` falling back to
 the neighbour-list potential. With one:
 ``python -m so3lr.flash.verify`` on 12,288 waters (energy, forces, dE/d(strain), with and
-without PME).
+without PME). With two or more: the same on several GPUs as on one, and MD on two.
 """
 import json
 import pathlib
@@ -321,10 +321,11 @@ def test_box_shrinks_to_the_smallest_grid():
     _check("forces", f, f_ref, 1e-10)
 
 
-def _so3lr(args, cwd):
+def _so3lr(args, cwd, env=None):
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
     from subprocess_env import so3lr_subprocess_env
-    result = subprocess.run(["so3lr", *args], cwd=cwd, capture_output=True, text=True, env=so3lr_subprocess_env())
+    result = subprocess.run(["so3lr", *args], cwd=cwd, capture_output=True, text=True,
+                            env=so3lr_subprocess_env(env))
     assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
 
 
@@ -363,3 +364,43 @@ def test_auto_falls_back_when_flash_fails_to_start(tmp_path, monkeypatch):
              md_cycles=1, md_steps=2, save_buffer=1))
     log = (tmp_path / "o.log").read_text()
     assert "flash cannot: it failed to start: RuntimeError: no kernels here" in log, log[-2000:]
+
+
+GPUS = pytest.mark.skipif(check.device_problem() is not None or len(jax.local_devices()) < 2,
+                          reason="several GPUs: needs two NVIDIA GPUs or more")
+
+
+@GPUS
+def test_several_gpus_give_one_gpus_forces():
+    """Energy, forces and dE/d(strain) on two and on all visible GPUs as on one: float64,
+    PME for both, an atom count the GPUs do not divide (the last one shares rows)."""
+    from so3lr.flash.loader import load_params
+    atoms = _water((3, 3, 3))[:-3]
+    params, statics = load_params(None, precision="float64", lr_cutoff=10.0)
+    args = (params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]))
+    kw = dict(pme_electrostatics=(2.0, 1.55), pme_dispersion=(2.0, 1.55), **E.MODES["fast"][0])
+    R = jnp.asarray(atoms.get_positions())
+    e_ref, f_ref, w_ref = E.FlashSO3LR(*args, **kw).energy_forces_strain(R)
+    for P in sorted({2, len(jax.local_devices())}):
+        e, f, w = E.FlashSO3LR(*args, devices=P, **kw).energy_forces_strain(R)
+        _check(f"energy on {P} GPUs", e, e_ref, 1e-12)
+        _check(f"forces on {P} GPUs", f, f_ref, 1e-10)
+        _check(f"dE/d(strain) on {P} GPUs", w, w_ref, 1e-10)
+
+
+@GPUS
+def test_md_on_two_gpus(tmp_path):
+    """`so3lr nvt --flash-devices 2` follows the one-GPU trajectory (float64, PME)."""
+    import h5py
+    from ase.io import write
+    write(tmp_path / "w.xyz", _water((3, 3, 3)))
+    run = ["--input", "w.xyz", "--no-relax", "--md-cycles", "2", "--md-steps", "5", "--precision", "float64",
+           "--lr-cutoff", "10", "--kspace-electrostatics", "pme"]
+    # this process holds most of each GPU (its own tests): the runs allocate as they go,
+    # leaving NCCL and cuSolver room
+    env = {"XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
+    _so3lr(["nvt", *run, "--output", "a.hdf5"], tmp_path, env)
+    _so3lr(["nvt", *run, "--flash-devices", "2", "--output", "b.hdf5"], tmp_path, env)
+    assert "Flash: 2 GPUs" in (tmp_path / "b.log").read_text()
+    with h5py.File(tmp_path / "a.hdf5") as a, h5py.File(tmp_path / "b.hdf5") as b:
+        _check("positions", b["positions"][:], a["positions"][:], 1e-9)
