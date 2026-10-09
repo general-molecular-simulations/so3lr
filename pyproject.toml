@@ -34,7 +34,6 @@ classifiers = [
 dependencies = [
     "ase>=3.26,<4",
     "click>=8.2,<9",
-    "e3x<2",
     # Caps only, so existing cluster JAX installs are kept: jaxlib 0.11.1 has
     # an XLA:CPU regression (jax-ml/jax#40101) that makes the PME/P3M mesh
     # scatter hang, and flax >=0.12.9 requires jax >=0.11.1.
@@ -110,10 +109,8 @@ include = [
     # discovers files located inside the package automatically.
     { path = "so3lr/cli/*.yaml", format = ["sdist", "wheel"] },
     { path = "so3lr/config/*.yaml", format = ["sdist", "wheel"] },
-    { path = "so3lr/mlff/config/*.json", format = ["sdist", "wheel"] },
-    { path = "so3lr/mlff/nn/observable/*.dat", format = ["sdist", "wheel"] },
     { path = "so3lr/models/**/*", format = ["sdist", "wheel"] },
-    { path = "so3lr/mlff/sph_ops/*.npz", format = ["sdist", "wheel"] },
+    { path = "so3lr/mlff/nn/observable/*.npz", format = ["sdist", "wheel"] },
     { path = "so3lr/mlff/utils/robust_loss_jax/data/*.npz", format = ["sdist", "wheel"] },
 ]
 

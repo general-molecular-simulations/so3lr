@@ -1,7 +1,7 @@
 # NPT ensemble test - constant pressure simulation
 # Tests running NPT dynamics with barostat
 
-input_file: input.gro
+input_file: water_3072.gro
 output_file: trajectory.hdf5
 log_file: so3lr.log
 

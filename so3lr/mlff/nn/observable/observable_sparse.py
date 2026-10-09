@@ -14,7 +14,7 @@ from so3lr.mlff.nn.sub_module import BaseSubModule
 from so3lr.mlff.masking.mask import safe_mask
 from so3lr.mlff.nn.observable.dispersion_ref_data import alphas, C6_coef, alphas_legacy, C6_coef_legacy, NLH_AA, NLH_BB
 from so3lr.mlff.masking.mask import safe_scale
-from so3lr.mlff.nn.activation_function import softplus_inverse, softplus
+from jax.nn import softplus
 
 
 def _flat_to_padded(flat_array, batch_segments, num_graphs, max_atoms_per_graph, local_idx, pad_value=0.0):
@@ -616,12 +616,6 @@ class C6RatiosSparse(BaseSubModule):
                 name='c6_ratios_dense_final'
             )(x).squeeze(axis=-1)  # (num_nodes)
 
-        # qk = (q * k / jnp.sqrt(k.shape[-1])).sum(axis=-1)
-
-        # v_eff = v_shift + qk  # shape: (n)
-        # c6_ratios = safe_scale(jnp.abs(v_eff), node_mask)
-
-        # return dict(c6_ratios=c6_ratios)
         c6_ratios = safe_scale(jnp.abs(x_ + q), node_mask)
 
         return dict(c6_ratios=c6_ratios)
@@ -1565,6 +1559,10 @@ def coulomb_erf_shifted_force_smooth_nosigma(
         c * _ke * q[idx_i] * q[idx_j] * (f * (pairwise - shift) + (1 - f) * shifted_potential),
         0.0
     )
+
+def softplus_inverse(x):
+    return x + jnp.log(-jnp.expm1(-x))
+
 
 class ZBLRepulsionSparse(BaseSubModule):
     """

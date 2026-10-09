@@ -12,7 +12,6 @@ import pickle
 import pytest
 
 from so3lr.finetuning_strategies import (
-    FINETUNING_STRATEGIES,
     FINETUNING_STRATEGY_NAMES,
     resolve_finetuning_strategy,
 )

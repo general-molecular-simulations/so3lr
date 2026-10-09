@@ -24,10 +24,6 @@ buffer_size_multiplier_lr = 1.25
 minimum_cell_size_multiplier_sr = 1.0
 
 
-def test_jax_md_import():
-    import jax_md
-
-
 @pytest.mark.parametrize('name', ['dha'])
 def test_molecules_with_box(name: str):
     jax.config.update('jax_enable_x64', True)
@@ -271,7 +267,7 @@ def test_with_solar_potential_so3lr_s(name: str):
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
-    target_predictions = np.load(package_dir / f'tests/test_data/{name}_so3lr_s_jaxmd.npz')
+    target_predictions = np.load(package_dir / f'tests/test_data/{name}_so3lr_s_ase.npz')
 
     mol = read(
         package_dir / f'tests/test_data/{name}.xyz'

@@ -8,13 +8,12 @@ import jraph
 import numpy as np
 import jax.numpy as jnp
 import time
-import pprint
 import logging
-from typing import Dict, List, Tuple, Union, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any
 from tqdm import tqdm
 
 from ase.io import write
-from so3lr.mlff.utils import jraph_utils, evaluation_utils
+from so3lr.mlff.utils import jraph_utils
 from so3lr.mlff.utils.kspace_utils import (
     DEFAULT_KSPACE_DISPERSION_INTERP_NODES, DEFAULT_KSPACE_DISPERSION_SMEARING,
     DEFAULT_KSPACE_DISPERSION_SPACING, DEFAULT_KSPACE_INTERP_NODES,
@@ -31,7 +30,7 @@ from ..mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported,
     supported_atomic_numbers_for_config,
 )
-from .so3lr_md import load_model, setup_logger
+from .so3lr_md import setup_logger
 from ..pbc import is_fully_periodic
 
 # Get logger

@@ -14,7 +14,7 @@ from so3lr.mlff.nn.observable import HirshfeldSparse
 from so3lr.mlff.nn.observable import C6RatiosSparse
 from so3lr.mlff.nn.observable import PartialChargesSparse
 
-from typing import Optional, Sequence, Any
+from typing import Optional, Sequence
 
 from .representation_utils import make_embedding_modules
 

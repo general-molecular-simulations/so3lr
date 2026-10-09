@@ -81,8 +81,7 @@ def test_legacy_vanilla_model():
         spec = mr.resolve_model(name)
         assert spec.dir == PKG / "models" / "so3lr"
         assert spec.family == "vanilla"
-        # The legacy dir ships a canonical params.pkl, which the resolver
-        # prefers over its (incomplete) orbax checkpoint.
+        # The legacy dir ships a canonical params.pkl (no orbax checkpoint).
         assert spec.from_file is True
 
 

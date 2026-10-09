@@ -1,7 +1,7 @@
 # Geometry optimization test for acetone
 # Minimal settings for fast testing
 
-input_file: input.gro
+input_file: acetone.gro
 output_file: optimized.xyz
 log_file: so3lr.log
 
