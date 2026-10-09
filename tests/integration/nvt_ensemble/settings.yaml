@@ -1,7 +1,7 @@
 # NVT simulation test for acetone in vacuum
 # Minimal settings for fast testing
 
-input_file: input.gro
+input_file: acetone.gro
 output_file: trajectory.hdf5
 log_file: so3lr.log
 

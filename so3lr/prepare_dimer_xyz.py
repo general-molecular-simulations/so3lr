@@ -14,8 +14,7 @@ import json
 import sys
 from pathlib import Path
 import numpy as np
-from ase.io import read, write
-from ase import Atoms
+from ase.io import write
 import logging
 from tqdm import tqdm
 

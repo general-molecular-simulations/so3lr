@@ -75,7 +75,5 @@ The local implementation replaces PyTorch with JAX/NumPy and adds
 SO3LR-specific short-range corrections, dispersion tuning, model integration,
 timing, and command-line behavior.
 
-The Ewald error estimate has subsequently been updated to incorporate the
-upstream correction sequence ending at
-`1f612664e8e627143b19e8622bac9d2d81e85022`. The source comments record the
-complete correction sequence used for that scientific update.
+The Ewald reciprocal-space error estimate has since been replaced by the
+Kolafa-Perram bound (as in LAMMPS `Ewald::rms`).

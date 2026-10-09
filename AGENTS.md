@@ -18,7 +18,7 @@ uv sync --locked --group dev
 uv run python -c "import so3lr, jax"
 ```
 
-Use `--extra cuda12`, `--extra tfds`, `--extra pysages`, or `--extra wandb` when
+Use `--extra cuda12`, `--extra tfds`, `--extra pysages`, `--extra matscipy`, or `--extra wandb` when
 the task needs those optional stacks. `DEVELOPERS.md` documents the
 supported commands.
 `uv sync --locked` pulls Git dependencies at immutable commits, so first-time
@@ -47,6 +47,7 @@ minutes; prefer targeting the file that covers your change.
 | k-space electrostatics | `tests/test_pme.py` |
 | CLI surface | `tests/test_cli*.py` |
 | End-to-end MD | `tests/test_integration.py` |
+| Flash MD engine | `tests/test_flash.py` (GPU tests skip on CPU) |
 | Docs examples | `tests/test_readme.py` |
 
 ## Invariants worth knowing before you edit
@@ -101,7 +102,10 @@ dependencies; keep `sys.exit(1)` on error paths.
 **Unknown settings-YAML keys warn rather than raise**, on purpose — one typo
 should not abort a queued multi-hour job. Preserve that, and keep new keys
 listed in `YAML_DEFAULTS` or `KNOWN_YAML_KEYS_EXTRA` in `so3lr/cli/so3lr_cli.py`
-so the did-you-mean validator does not flag them as typos.
+so the did-you-mean validator does not flag them as typos. A new key must also
+be classified in `so3lr/flash/check.py` (`HANDLED`, `IRRELEVANT` or
+`UNSUPPORTED`): `--engine auto` runs the neighbour-list engine whenever a key it
+does not know is set, and `tests/test_flash.py` fails until the key is classified.
 
 ## Conventions
 

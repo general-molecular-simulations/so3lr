@@ -26,7 +26,7 @@ def test_anisotropic_and_unknown_couplings_are_rejected():
         so3lr_md.normalize_npt_coupling('independent')
     # The integrator factory is public API and must not bypass the guard.
     with pytest.raises(ValueError, match="npt_coupling='anisotropic'"):
-        so3lr_md.create_npt_nhc_fn(None, None, 0.001, 0.1, 0.0, {}, {}, False,
+        so3lr_md.create_npt_nhc_fn(None, None, 0.001, 0.1, 0.0, {}, {},
                                    npt_coupling='anisotropic')
 
 

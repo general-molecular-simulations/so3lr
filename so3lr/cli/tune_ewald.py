@@ -16,7 +16,6 @@ from so3lr.mlff.nn.observable.observable_sparse import coulomb_erf_shifted_force
 import numpy as np
 import jax
 import jax.numpy as jnp
-import os
 import math
 import time
 import logging
@@ -25,31 +24,21 @@ from warnings import warn
 from itertools import product
 from functools import partial
 
-# from jax_md import partition
 from jax_md.space import distance, periodic_general, DisplacementFn
 from jax_md.quantity import force
 
 import jaxpme
 
-from ase import Atoms
 from ase.io import read
 from ase.units import Bohr
 
 from so3lr import So3lrPotential
 from so3lr.pbc import lattice_rows
-from so3lr.cli.so3lr_md import handle_box, load_model, atoms_to_jnp, process_model, load_state
+from so3lr.cli.so3lr_md import load_model, atoms_to_jnp, process_model
 from .so3lr_md import setup_logger
 
 # Setup logging
 logger = logging.getLogger("SO3LR")
-
-
-def filter_neighbors(
-    cutoff: float, neighbor_indices: jnp.array, neighbor_distances: jnp.array
-):
-    filter_idx = jnp.where((neighbor_distances < cutoff) & (
-        neighbor_distances > 0.0) & (~jnp.isnan(neighbor_distances)))
-    return neighbor_indices[:, filter_idx], neighbor_distances[filter_idx]
 
 
 def filter_neighbor_idx(
@@ -60,54 +49,12 @@ def filter_neighbor_idx(
     return neighbor_indices[:, filter_idx]
 
 
-def get_forces(energy, rij, q, **params):
-
-    @jax.jit
-    def total_energy(r):
-        num_nodes = len(q)
-        atomic_energy = segment_sum(
-            energy(q, r, **params),
-            segment_ids=params['idx_i'],
-            num_segments=num_nodes
-        )
-        return -jnp.sum(atomic_energy)
-
-    @jax.jit
-    def forces(r):
-        # Get the force by differentiating the energy with respect to rij
-        return jax.value_and_grad(total_energy)(r)[1]
-
-    return forces(rij)
-
-
 def get_forces_rs(energy, positions, q, displacement, **params):
     d = jax.vmap(partial(displacement))
 
     @jax.jit
     def total_energy(positions):
         r = distance(d(positions[params['idx_i']], positions[params['idx_j']]))
-        num_nodes = len(positions)
-        atomic_energy = segment_sum(
-            energy(q, r, **params),
-            segment_ids=params['idx_i'],
-            num_segments=num_nodes
-        )
-        return -jnp.sum(atomic_energy)
-
-    @jax.jit
-    def forces(pos):
-        # Get the force by differentiating the energy with respect to pos
-        return jax.value_and_grad(total_energy)(pos)[1]
-
-    return forces(positions)
-
-
-def get_forces_rs_at_fixed_distance(energy, positions, q, fixed_distance, **params):
-
-    @jax.jit
-    def total_energy(positions):
-        r = jnp.ones_like(
-            params['idx_i'], dtype=positions.dtype)*fixed_distance
         num_nodes = len(positions)
         atomic_energy = segment_sum(
             energy(q, r, **params),
@@ -180,50 +127,7 @@ class TuningErrorBounds:
         raise NotImplementedError
 
 
-class TunerBase:
-
-    def __init__(
-        self,
-        charges: jnp.ndarray,
-        cell: jnp.ndarray,
-        positions: jnp.ndarray,
-        scale: float = 14.399645351950548,
-        exponent: int = 1,
-    ):
-        if exponent != 1:
-            raise NotImplementedError(
-                f"Only exponent = 1 is supported but got {exponent}."
-            )
-
-        self.charges = charges
-        self.cell = cell
-        self.positions = positions
-        self.exponent = exponent
-
-        self._prefac = 2 * scale * \
-            float((charges**2).sum()) / math.sqrt(len(positions))
-
-    def tune(self, accuracy: float = 2e-2):
-        raise NotImplementedError
-
-    def estimate_smearing(self, cutoff: float, accuracy: float) -> float:
-        if not isinstance(accuracy, float):
-            raise ValueError(f"'{accuracy}' is not a float.")
-        ratio = math.sqrt(
-            -2
-            * math.log(
-                accuracy
-                / 2
-                / self._prefac
-                * math.sqrt(cutoff * abs(np.linalg.det(self.cell)))
-            )
-        )
-        smearing = cutoff / ratio
-
-        return float(smearing)
-
-
-class GridSearchTuner(TunerBase):
+class GridSearchTuner:
     def __init__(
         self,
         charges: jnp.ndarray,
@@ -234,12 +138,10 @@ class GridSearchTuner(TunerBase):
         potential_kwargs: dict,
         exponent: int = 1,
     ):
-        super().__init__(
-            charges=charges,
-            cell=cell,
-            positions=positions,
-            exponent=exponent,
-        )
+        if exponent != 1:
+            raise NotImplementedError(
+                f"Only exponent = 1 is supported but got {exponent}."
+            )
         self.error_bounds = error_bounds
         self.params = params
         self.time_func = TuningTimings(
@@ -252,10 +154,8 @@ class GridSearchTuner(TunerBase):
     def tune(self, accuracy: float = 1e-3) -> tuple[list[float], list[float]]:
         if not isinstance(accuracy, float):
             raise ValueError(f"'{accuracy}' is not a float.")
-        # smearing = self.estimate_smearing(accuracy)
         param_errors = []
         param_timings = []
-        param_memorys = []
         logger.info("---------------------------ERROR ESTIMATION:")
         for param in self.params:
             logger.info("parameters: {}".format(
@@ -267,35 +167,10 @@ class GridSearchTuner(TunerBase):
         for param, error in zip(self.params, param_errors):
             logger.info("parameters: {}".format(
                 ", ".join(f"{k}: {v}" for k, v in param.items() if v is not None)))
-            # if param['smearing']
-            # logger.info(f"kspace_spacing: {param['spacing']}")
-            # if 'interpolation_nodes' in param:
-            #     logger.info(f"  kspace_interp_nodes: {param['interpolation_nodes']}")
-            if error <= accuracy:
-                time, mem = self._timing(param)
-            else:
-                time = float("inf")
-                mem = {"not tested": float("inf")}
-            param_timings.append(time)
-            param_memorys.append(mem)
-
-            # logger.info("Results: ")
+            param_timings.append(self.time_func(**param) if error <= accuracy else float("inf"))
             logger.info(
                 f"measured timing: {param_timings[-1]}, total error estimate: {error}")
-            # print('memory', sum(param_memorys[-1].values()))
-        return param_errors, param_timings, param_memorys
-
-    def _timing(self, k_space_params: dict):
-        # calculator = self.calculator(
-        #     potential=InversePowerLawPotential(
-        #         exponent=self.exponent,  # but only exponent = 1 is supported
-        #         smearing=smearing,
-        #     ),
-        #     **k_space_params,
-        # )
-        # calculator.to(device=self.positions.device, dtype=self.positions.dtype)
-        # return self.time_func(calculator)
-        return self.time_func(**k_space_params)
+        return param_errors, param_timings
 
 
 class TuningTimings:
@@ -349,16 +224,10 @@ class TuningTimings:
         self.nbrs_lr_distances = nbrs_lr_distances
         self.rnd_key = jax.random.key(RND_SEED)
 
-        # self.atoms = Atoms(
-        #     positions=positions,
-        #     cell=cell,
-        #     charges=charges,
-        #     pbc=True,
-        # )
 
         self.kspace_electrostatics = kspace_electrostatics
 
-    def __call__(self, **input_params) -> tuple[float, dict[str, float]]:
+    def __call__(self, **input_params) -> float:
         """
         Estimate the execution time of a given calculator for the structure
         to be used as benchmark.
@@ -397,29 +266,9 @@ class TuningTimings:
                 k_grid=k_grid,
                 k_smearing=k_smearing,
             )
-            # value=0.0
-            # forces = self.atoms.get_forces()
-            # result = calculator.forward(
-            #    positions=positions,
-            #    charges=charges,
-            #    cell=cell,
-            #    neighbor_indices=self.neighbor_indices,
-            #    neighbor_distances=self.neighbor_distances,
-            # )
-            # value = result.sum()
             execution_time += time.monotonic() - start_time
 
-        memory_estimate = {'None': 0.0}
-        # memory_estimate = {
-        #     'lr_neighbor_list':
-        #         atoms.calc.neighbors.idx_i_lr.shape[0] * 2 * 8 / 1024 / 1024,
-        #     'positions':
-        #         atoms.get_positions().shape[0] * 3 * 8 / 1024 / 1024,
-        #     'k_grid':
-        #         np.prod(atoms.info['k_grid'].shape) * 8 / 1024 / 1024,
-        # }
-
-        return execution_time / self.n_repeat, memory_estimate
+        return execution_time / self.n_repeat
 
 
 def tune_ewald(
@@ -490,7 +339,6 @@ def tune_ewald(
         charges=charges,
         cell=cell,
         positions=positions,
-        # exponent=exponent,
         error_bounds=EwaldErrorBounds_SR(charges=charges, cell=cell, positions=positions,
                                          displacement=displacement,
                                          nbrs_lr=nbrs_lr, nbrs_lr_distances=nbrs_lr_distances,
@@ -503,11 +351,7 @@ def tune_ewald(
             kspace_electrostatics="ewald",  # Ewald summation
         ),
     )
-    # smearing = tuner.estimate_smearing(accuracy)
-    # logger.info(f"Estimated smearing: {smearing}")
-    errs, timings, memorys = tuner.tune(accuracy)
-    # timings = [0.0]*len(errs)
-    # print(errs)
+    errs, timings = tuner.tune(accuracy)
 
     return params, errs, timings
 
@@ -604,14 +448,6 @@ class EwaldErrorBounds_SR(EwaldErrorBounds):
             cutoff, self.nbrs_lr, self.nbrs_lr_distances)
         idx_i, idx_j = nbrs[0], nbrs[1]
 
-        # full_force = get_forces(coulomb_erf, rij, q, idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=smearing)
-        # interp_force = get_forces(coulomb_erf_shifted_force_smooth_pme, rij, q,
-        #                           idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cuton=cuton, cutoff=cutoff, smearing=smearing)
-        # return jnp.sqrt(
-        #     jnp.sum(
-        #         jnp.square(full_force - interp_force)
-        #     )
-        # ) / jnp.sqrt(len(full_force))
         full_force = get_forces_rs(coulomb_erf,
                                    self._positions, self._charges, self.displacement,
                                    idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=smearing)
@@ -698,11 +534,7 @@ def tune_pme(
             kspace_electrostatics="pme",  # PME summation
         ),
     )
-    # smearing = tuner.estimate_smearing(accuracy)
-    # logger.info(f"Estimated smearing: {smearing}")
-    errs, timings, memorys = tuner.tune(accuracy)
-    # timings = [0.0]*len(errs)
-    # print(errs)
+    errs, timings = tuner.tune(accuracy)
 
     return params, errs, timings
 
@@ -783,14 +615,6 @@ class PMEErrorBounds_SR(PMEErrorBounds):
             cutoff, self.nbrs_lr, self.nbrs_lr_distances)
         idx_i, idx_j = nbrs[0], nbrs[1]
 
-        # full_force = get_forces(coulomb_erf, rij, q, idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=smearing)
-        # interp_force = get_forces(coulomb_erf_shifted_force_smooth_pme, rij, q,
-        #                           idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cuton=cuton, cutoff=cutoff, smearing=smearing)
-        # return jnp.sqrt(
-        #     jnp.sum(
-        #         jnp.square(full_force - interp_force)
-        #     )
-        # ) / jnp.sqrt(len(full_force))
         full_force = get_forces_rs(coulomb_erf,
                                    self._positions, self._charges, self.displacement,
                                    idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=smearing)
@@ -833,8 +657,6 @@ def tune_sr(
     accuracy: float = 1.0,
     model_kwargs: dict[str, Any] = {},
 ) -> tuple[float, dict[str, Any], float]:
-    min_dimension = float(np.min(jnp.linalg.norm(cell, axis=1)))
-
     params = [
         {
             "cutoff": cut,
@@ -861,11 +683,7 @@ def tune_sr(
             kspace_electrostatics=None,  # PME summation
         ),
     )
-    # smearing = tuner.estimate_smearing(accuracy)
-    # logger.info(f"Estimated smearing: {smearing}")
-    errs, timings, memorys = tuner.tune(accuracy)
-    # timings = [0.0]*len(errs)
-    # print(errs)
+    errs, timings = tuner.tune(accuracy)
     return params, errs, timings
 
 
@@ -905,24 +723,6 @@ class NativeErrorBounds(TuningErrorBounds):
             cutoff, self.nbrs_lr, self.nbrs_lr_distances)
         idx_i, idx_j = nbrs[0], nbrs[1]
 
-        # full_force = get_forces(coulomb_erf, rij, q, idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=smearing)
-        # interp_force = get_forces(coulomb_erf_shifted_force_smooth_pme, rij, q,
-        #                           idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cuton=cuton, cutoff=cutoff, smearing=smearing)
-        # return jnp.sqrt(
-        #     jnp.sum(
-        #         jnp.square(full_force - interp_force)
-        #     )
-        # ) / jnp.sqrt(len(full_force))
-        # full_force = get_forces_rs(coulomb_erf,
-        #                            self._positions, self._charges,self.displacement,
-        #                            idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=None)
-        # full_force = self.all_force_errs
-
-        # full_force_at_cut = get_forces_rs_at_fixed_distance(coulomb_erf,
-        #                             self._positions, self._charges, fixed_distance=cutoff,
-        #                             idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cutoff=None)
-        # lr_error = jnp.sqrt(jnp.sum(jnp.square(full_force_at_cut))/ (3*len(self._positions)))
-        # print(lr_error)
 
         full_force = get_forces_rs(coulomb_erf,
                                    self._positions, self._charges, self.displacement,
@@ -932,24 +732,11 @@ class NativeErrorBounds(TuningErrorBounds):
                                      idx_i=idx_i, idx_j=idx_j, ke=ke, sigma=sigma, cuton=cuton, cutoff=cutoff)
         return full_force, jnp.sqrt(jnp.sum(jnp.square(full_force - interp_force)) / (len(self._positions)))
 
-    def err_kspace(self, cutoff: float) -> float:
-        # Currently this give the error per interaction, not per atom, this needs to be improved
-        ke = self._scale
-        sigma = self.electrostatic_energy_scale
-        positions = self._positions
-
-        r = jnp.ones(positions.shape[0], dtype=positions.dtype)*cutoff
-        fake_idx = jnp.arange(len(positions), dtype=jnp.int32)
-        full_force_at_cut = get_forces(
-            coulomb_erf, r, q, idx_i=fake_idx,  idx_j=fake_idx, ke=ke, sigma=sigma, cutoff=None)
-        return jnp.sqrt(jnp.sum(full_force_at_cut**2)/(len(full_force_at_cut)))
-
     def error(
         self,
         cutoff: float,
     ) -> float:
 
-        # kspace = self.err_kspace(cutoff)
         full_force, rspace = self.err_rspace(cutoff)
         rspace_lr = jnp.sqrt(jnp.sum(jnp.square(
             full_force - self.best_full_force)) / (len(self._positions)))
@@ -979,8 +766,6 @@ def tune_dispersion_sr(
     model_kwargs: dict[str, Any] = {},
     c6_ratios: jnp.ndarray = None,
 ) -> tuple[float, dict[str, Any], float]:
-    min_dimension = float(np.min(jnp.linalg.norm(cell, axis=1)))
-
     params = [
         {
             "cutoff": cut,
@@ -1014,7 +799,7 @@ def tune_dispersion_sr(
         ),
     )
 
-    errs, timings, memorys = tuner.tune(accuracy)
+    errs, timings = tuner.tune(accuracy)
 
     return params, errs, timings
 
@@ -1068,17 +853,12 @@ class NativeErrorBounds_Dispersion(TuningErrorBounds):
                                      idx_i=idx_i, idx_j=idx_j)
         return full_force, jnp.sqrt(jnp.sum(jnp.square(full_force - interp_force)) / (len(self._positions)))
 
-    def err_kspace(self, cutoff: float, cutoff_lr_damping: float) -> float:
-        # Not implemented for dispersion, as it is not used in the SR part
-        return 0.0
-
     def error(
         self,
         cutoff: float,
         cutoff_lr_damping: float,
     ) -> float:
 
-        # kspace = self.err_kspace(cutoff)
         full_force, rspace = self.err_rspace(cutoff, cutoff_lr_damping)
         rspace_lr = jnp.sqrt(jnp.sum(jnp.square(
             full_force - self.best_full_force)) / (len(self._positions)))
@@ -1143,7 +923,6 @@ def tune(
 
     # Ewald electrostatics settings
     kspace_electrostatics = settings.get('kspace_electrostatics', None)
-    # assert kspace_electrostatics is not None, "type of kspace_electrostatics (\"ewald\" or \"pme\") must be provided for tuning."
     # Ewald electrostatics settings
     kspace_dispersion = settings.get('kspace_dispersion', None)
 
@@ -1169,8 +948,6 @@ def tune(
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
 
     # We don't want fractional coordinates here
-    # (position, box, displacement, shift, fractional_coordinates) = handle_box(
-    #    'periodic', initial_geometry_dict['positions'], cell)
 
     box = jnp.array(cell)
     if box.shape == (3, 3) and np.all(box[~np.eye(box.shape[0], dtype=bool)] == 0):
@@ -1188,7 +965,6 @@ def tune(
     # Loading the model
     if model_path is None:
         # Load default SO3LR
-        # logger.info("Using default SO3LR potential.")
         potential = So3lrPotential(
             dtype=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
@@ -1199,14 +975,12 @@ def tune(
     else:
         # model_path may be a bundled name (so3lr-s/m/l/so3lr) or a path;
         # load_model resolves both and raises if neither is valid.
-        # logger.info(f"Using custom MLFF potential from: {model_path}")
         potential = load_model(
             model_path,
             precision=jnp.float64 if precision == 'float64' else jnp.float32,
             lr_cutoff=lr_cutoff,
             dispersion_damping=dispersion_damping,
             kspace_electrostatics=kspace_electrostatics,
-            # kspace_interp_nodes=kspace_interp_nodes,
             output_intermediate_quantities=[
                 'partial_charges', 'hirshfeld_ratios', 'c6_ratios'],
         )
@@ -1426,10 +1200,10 @@ def tune(
         logger.info(f"  force error estimate [eV/A]: {error}")
 
     else:
-        warn(f"No parameter meets the accuracy requirement.\n", stacklevel=1)
+        warn("No parameter meets the accuracy requirement.\n", stacklevel=1)
     param, timing, error = params[errs.index(
         min(errs))], timings[errs.index(min(errs))], min(errs)
-    logger.info(f"The parameters with the smallest error estimate are:")
+    logger.info("The parameters with the smallest error estimate are:")
     if kspace_electrostatics == 'cutoff':
         logger.info(f"  lr_cutoff: {param['cutoff']}")
     elif kspace_electrostatics in ['ewald', 'pme', 'p3m']:
@@ -1441,7 +1215,7 @@ def tune(
             logger.info(
                 f"  kspace_interp_nodes: {param['interpolation_nodes']}")
     elif kspace_dispersion == 'cutoff':
-        logger.info(f"Tuned cutoff dispersion parameters: ")
+        logger.info("Tuned cutoff dispersion parameters: ")
         logger.info(f"  lr_cutoff: {param['cutoff']}")
         logger.info(f"  dispersion_damping: {param['cutoff_lr_damping']}")
     logger.info(f"  timing: {timing}")

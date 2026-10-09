@@ -5,7 +5,7 @@ import numpy as np
 
 from jax.ops import segment_sum
 from functools import partial
-from typing import Any, Callable, Dict, Sequence, Optional
+from typing import Any, Callable, Dict, Sequence
 
 from so3lr.mlff.nn.sub_module import BaseSubModule
 from so3lr.mlff.sph_ops import make_l0_contraction_fn
@@ -339,7 +339,7 @@ class AttentionBlock(nn.Module):
         )  # (tot_num_heads, num_features_head, num_features // tot_num_heads)
 
         inv_split1_h, x1_h = split_in_heads(x, num_heads=self.num_heads)
-        inv_split2_h, x2_h = split_in_heads(x, num_heads=len(self.degrees))
+        _, x2_h = split_in_heads(x, num_heads=len(self.degrees))
 
         q1_i = self.qk_non_linearity(jnp.einsum('Hij, NHj -> NHi', Wq1, x1_h))[idx_i]
         # (num_pairs, tot_num_heads, num_features_head)

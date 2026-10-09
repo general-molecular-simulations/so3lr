@@ -7,7 +7,6 @@ once another test in the same process has already traced at float32), and
 setting it at module scope in a test would leak into the rest of the group.
 """
 import json
-import sys
 import tempfile
 from pathlib import Path
 

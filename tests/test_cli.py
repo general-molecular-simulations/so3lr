@@ -1,7 +1,5 @@
 """General tests for the SO3LR command-line interface."""
-import os
 import yaml
-import tempfile
 import pathlib
 
 import pytest
@@ -170,30 +168,3 @@ class TestMdSettingsYaml:
     def test_precision_valid(self, settings):
         assert settings["precision"] in ("float32", "float64")
 
-
-# ---------------------------------------------------------------------------
-# Timestep unit conversion
-# ---------------------------------------------------------------------------
-
-class TestTimestepConversion:
-    """md_dt from a settings YAML (in fs) must be converted to ps internally."""
-
-    def test_yaml_md_dt_converted_to_ps(self):
-        """Simulate the conversion that cli() applies after loading YAML."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"input_file": "dummy.xyz", "md_dt": 1.0}, f)
-            tmp = f.name
-
-        try:
-            with open(tmp) as f:
-                settings_dict = yaml.safe_load(f)
-
-            assert settings_dict["md_dt"] == 1.0  # fs, as written
-
-            # Apply the same conversion the CLI does
-            if "md_dt" in settings_dict:
-                settings_dict["md_dt"] = settings_dict["md_dt"] / 1000
-
-            assert settings_dict["md_dt"] == pytest.approx(0.001)  # ps
-        finally:
-            os.unlink(tmp)

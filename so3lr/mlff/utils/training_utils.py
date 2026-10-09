@@ -8,15 +8,13 @@ import orbax.checkpoint as ocp
 from flax import traverse_util
 from flax.core.frozen_dict import unfreeze
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Callable, Dict
 
 from ..masking import mask as gradient_utils
 from ..utils import checkpoint_utils
 from ..utils.param_utils import (
     MAX_NUM_THEORY_LEVELS,
-    count_params,
     path_matches_key,
-    print_param_shapes,
 )
 from .jraph_utils import dynamically_batch_with_lr
 
@@ -252,17 +250,6 @@ def transform_adaptive_robust_params(alpha_raw: jnp.ndarray, scale_raw: jnp.ndar
     alpha = 2.0 * jax.nn.sigmoid(alpha_raw)  # [0, 2]
     scale = jax.nn.softplus(scale_raw) + 1e-6  # (0, inf)
     return alpha, scale
-
-
-def set_seeds(seed=0):
-    """Set random seeds for reproducibility."""
-    try:
-        random.seed(seed)
-    except NameError:
-        import random
-        random.seed(seed)
-
-    np.random.seed(seed)
 
 
 def _display_metric_keys(eval_metrics):

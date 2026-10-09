@@ -3,7 +3,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 import jraph
-from so3lr.mlff.geometric import get_rotation_matrix
+from scipy.spatial.transform import Rotation
 from so3lr.mlff.nn.stacknet import StackNetSparse
 from so3lr.mlff.nn.embed import GeometryEmbedSparse, AtomTypeEmbedSparse
 from so3lr.mlff.nn.layer import SO3kratesLayerSparse
@@ -218,7 +218,7 @@ def test_translation_symmetry():
 def test_rotation_symmetry():
     inputs = graph_to_input(graph3, lr3)
 
-    rot = get_rotation_matrix(euler_axes='xyz', angles=[87, 14, 156], degrees=True)
+    rot = Rotation.from_euler('xyz', [87, 14, 156], degrees=True).as_matrix()
     inputs_rotated = inputs.copy()
     inputs_rotated['positions'] = inputs_rotated['positions'] @ rot
 

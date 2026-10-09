@@ -45,6 +45,8 @@ telemetry clients. Optional extras are:
 - `uv sync --locked --extra wandb` — the Weights & Biases client, used only
   when `training.use_wandb: true` is explicitly enabled.
 - `uv sync --locked --extra cuda12` — CUDA 12 JAX packages on Linux x86-64.
+- `uv sync --locked --extra matscipy` — a ~25x faster neighbour list for the ASE
+  calculator's exact periodic images in small or skewed cells.
 
 ### Installing into an existing environment (pip)
 
@@ -163,7 +165,7 @@ Each subcommand has its own set of options and can be run with `--help` to see a
 so3lr opt --help
 ```
 
-All MD subcommands also accept a single `--settings` YAML file that bundles every CLI flag (plus features that have no CLI flag, like atom constraints and enhanced sampling). This is the recommended way to drive longer or more elaborate runs:
+Every MD option can also come from a single `--settings` YAML file, which bundles every CLI flag (plus features that have no CLI flag, like atom constraints and enhanced sampling). This is the recommended way to drive longer or more elaborate runs:
 
 ```shell script
 so3lr --settings settings.yaml
@@ -258,7 +260,7 @@ The `.npz` written by `--restart-save` is produced by `save_state()` in `so3lr/c
 - the simulation box and the `fractional_coordinates` flag (so a cartesian/fractional mismatch between save and restart runs is detected and converted automatically)
 - the cycle / step counter (the run resumes at the saved cycle, not from 0)
 - the ensemble tag (NVT/NPT/NVE), and for NVT/NPT the full Nose-Hoover chain state of both the thermostat and the barostat (position, momentum, mass, tau, kinetic energy, degrees of freedom)
-- for NPT: the reference box, box position/momentum/mass, and the saved stress (or stress_tensor under `npt_flex`)
+- for NPT: the reference box, box position/momentum/mass, and `dUdV` (or `stress_tensor` under `npt_flex`)
 - enhanced-sampling (PySAGES) state, when `restart_pysages_save_path` is also used — saved/loaded as a separate `.pkl` (see the PySAGES section below)
 
 **NOT preserved (regenerated on each launch):**
@@ -348,7 +350,7 @@ Notes:
 
 ### Restricting trajectory output to a subset of atoms
 
-The `output_atom_indices` YAML key (also surfaced as `--output-atom-indices` on the CLI) restricts the saved trajectory to a chosen subset of atoms — the MD itself still propagates the full system, but only the listed atoms are written to the `.hdf5` / `.xyz` trajectory at each save step. This is useful for keeping trajectory files small in large solvent boxes when you only care about a solute, a binding pocket, an interface slab, or a tagged ligand:
+The `output_atom_indices` YAML key restricts the saved trajectory to a chosen subset of atoms — the MD itself still propagates the full system, but only the listed atoms are written to the `.hdf5` / `.xyz` trajectory at each save step. This is useful for keeping trajectory files small in large solvent boxes when you only care about a solute, a binding pocket, an interface slab, or a tagged ligand:
 
 ```yaml
 # settings.yaml — save only the first 50 atoms (e.g. the solute) of a solvated box
@@ -440,7 +442,7 @@ Basic fine-tuning command:
 so3lr finetune --datafile dataset.xyz --workdir so3lr_finetuned --num-train 1000 --num-valid 100
 ```
 
-You can customize the training process with a config file (`--config custom_finetune.yaml`), choose different fine-tuning strategies (`--strategy full`), or fine-tune from a previously trained model (`--model-path ./previous_finetune_workdir`). Possible strategies include `full`, `final_mlp`, `last_layer`, `last_layer_and_final_mlp`, `first_layer`, and `first_layer_and_last_layer`. We recommend using the `full` or `last_layer_and_final_mlp` strategies. The default configuration in `so3lr/config/finetune.yaml` includes settings for the optimizer, learning rate schedule, batch size, loss weights, and data filtering. To use a fine-tuned model, use the `--model path_to_finetuned_model` flag.
+You can customize the training process with a config file (`--config custom_finetune.yaml`), choose different fine-tuning strategies (`--strategy full`), or fine-tune from a previously trained model (`--model ./previous_finetune_workdir`). Possible strategies include `full`, `final_mlp`, `last_layer`, `last_layer_and_final_mlp`, `first_layer`, and `first_layer_and_last_layer`. We recommend using the `full` or `last_layer_and_final_mlp` strategies. The default configuration in `so3lr/config/finetune.yaml` includes settings for the optimizer, learning rate schedule, batch size, loss weights, and data filtering. To use a fine-tuned model, use the `--model path_to_finetuned_model` flag.
 
 ### Fine-tuning on forces only (recommended: `freeze_long_range`)
 
@@ -452,7 +454,7 @@ For forces-only datasets, use the dedicated strategy that **freezes the long-ran
 so3lr finetune --datafile forces_only.xyz --strategy freeze_long_range --num-train 1000 --num-valid 100
 ```
 
-`freeze_long_range` (alias `forces_only`) freezes the dipole/partial-charge, `a0_ratios`, and `c6_ratios` heads (`observables_1/2/3`) while keeping the message-passing layers and the energy head (`observables_0`) trainable, so the pretrained electrostatics and dispersion are preserved. If your dataset *does* include dipole/Hirshfeld/C6 labels, prefer `full` (or add those terms to `loss_weights`) so the long-range heads adapt with supervision.
+`freeze_long_range` (alias `forces_only`) freezes the dipole/partial-charge, `a0_ratios`, and `c6_ratios` heads (`observables_0/electrostatic_energy`, `observables_2`, `observables_3`) while keeping the message-passing layers and the energy head (`observables_0`) trainable, so the pretrained electrostatics and dispersion are preserved. If your dataset *does* include dipole/Hirshfeld/C6 labels, prefer `full` (or add those terms to `loss_weights`) so the long-range heads adapt with supervision.
 
 ## Training from Scratch
 
@@ -558,7 +560,7 @@ You can calculate binding energies with SO3LR as reported in the paper (Fig. 2B)
 For XYZ files with dimer metadata (`charge_a`, `charge_b`, `selection_a`, `selection_b`, like [NCIAtlas](https://github.com/Honza-R/NCIAtlas/blob/main/geometries/NCIA_D1200/1.01.01_100.xyz) format), generate original and translated structures:
 
 ```shell script
-python so3lr/prepare_dimer_xyz.py --datafile sapt10k.xyz
+python -m so3lr.prepare_dimer_xyz --datafile sapt10k.xyz
 ```
 
 Then evaluate energies (see [SAPT10k](https://doi.org/10.1063/5.0204064) dataset in examples/data):
@@ -733,7 +735,7 @@ for idx in [0, 1, 2]:
 - `_grad`: For scalar observables (energies). Returns gradient of shape `(3,)`.
 - `_jac`: For vector observables (charges and per-atom ratio heads). Returns Jacobian of shape `(n_atoms, 3)`.
 
-> **Note:** The `_grad` and `_jac` suffixes are only supported through the ASE calculator (`So3lrCalculator`) and are **not currently supported** via the `so3lr eval` CLI or `make_so3lr`.
+> **Note:** The `_grad` and `_jac` suffixes are only supported through the ASE calculator (`So3lrCalculator`) and are **not currently supported** via the `so3lr eval` CLI or `So3lr`.
 
 ### Hessian Calculation
 
@@ -1188,10 +1190,7 @@ restart_pysages_save_path: "./restart_pysages_2.pkl"
 
 ## Coming soon!
 
-- General robust loss
 - Multi-head fine-tuning
-
-(The previously listed *Fast TFDS dataloader* now ships — install via `uv sync --locked --extra tfds`; see the *Optional extras* note in the Installation section.)
 
 If you would like to see new features, add your own functionality, or share ideas, please reach out or open an issue. We are always happy to collaborate and hear your thoughts!
 
@@ -1245,6 +1244,5 @@ from Google Research and JAX MD remain under Apache-2.0, and the Ewald tuning
 code derived from torch-pme remains under BSD-3-Clause. See
 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) and the accompanying
 license files for the exact scope and notices. Checkpoint and dataset licenses
-must be confirmed separately before the SO3LR-2 release. An archive-wide license
-expression is deliberately left unspecified until that review; the source
-licenses do not relicense checkpoints, datasets, or scientific reference data.
+must be confirmed separately before the SO3LR-2 release. The source licenses do
+not relicense checkpoints, datasets, or scientific reference data.

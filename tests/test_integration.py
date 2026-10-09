@@ -3,7 +3,6 @@ SO3LR CLI Integration Tests.
 
 These tests run actual simulations with the CLI to verify end-to-end functionality.
 """
-import os
 import subprocess
 import shutil
 import pathlib
@@ -46,28 +45,20 @@ def test_data_dir():
     return pathlib.Path(__file__).parent / 'test_data'
 
 @pytest.fixture
-def integration_workdir(tmp_path, request):
+def integration_workdir(tmp_path, request, test_data_dir):
     """
-    Set up a working directory for an integration test case.
-    Copies all files from the test case directory to a temporary directory.
+    A working directory for an integration test case: the shared structures in
+    tests/test_data, then the case's own files (which win), and the validation
+    utilities its validate.py imports.
     """
     test_case = request.param
     integration_dir = pathlib.Path(__file__).parent / 'integration' / test_case
-    if not integration_dir.exists():
-        pytest.skip(f"Test case directory not found: {integration_dir}")
+    shutil.copytree(test_data_dir, tmp_path, dirs_exist_ok=True)
     for item in integration_dir.iterdir():
         if item.is_file():
             shutil.copy2(item, tmp_path)
-        elif item.is_dir() and item.name not in ['__pycache__', 'hdf5', 'expected']:
-            shutil.copytree(item, tmp_path / item.name)
-    # Copy shared validation utilities so validate.py scripts can import them
-    validation_utils = integration_dir.parent / 'validation_utils.py'
-    if validation_utils.exists():
-        shutil.copy2(validation_utils, tmp_path)
-    expected_dir = integration_dir / 'expected'
-    if expected_dir.exists():
-        shutil.copytree(expected_dir, tmp_path / 'expected')
-    return tmp_path, test_case, integration_dir
+    shutil.copy2(integration_dir.parent / 'validation_utils.py', tmp_path)
+    return tmp_path, test_case
 
 # ============================================================================
 # SO3LR CLI Integration Tests
@@ -78,8 +69,7 @@ def test_integration_case(integration_workdir):
     """
     Run CLI integration test for a test case.
     """
-    workdir, test_case, source_dir = integration_workdir
-    settings_file = workdir / 'settings.yaml'
+    workdir, test_case = integration_workdir
     print(f"\n{'='*60}")
     print(f"Running test case: {test_case}")
     print(f"Working directory: {workdir}")
@@ -122,17 +112,17 @@ def test_integration_case(integration_workdir):
         f"Success message not found in output\n"
         f"STDERR:\n{result.stderr}"
     )
-    validate_script = workdir / 'validate.py'
-    if validate_script.exists():
-        validate_result = subprocess.run(
-            ['python', 'validate.py'],
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-        )
-        assert validate_result.returncode == 0, (
-            f"Validation failed:\n{validate_result.stderr}"
-        )
+    # Every case ships a validate.py.
+    validate_result = subprocess.run(
+        ['python', 'validate.py'],
+        cwd=workdir,
+        capture_output=True,
+        text=True,
+    )
+    # Validator.report() prints its errors to stdout.
+    assert validate_result.returncode == 0, (
+        f"Validation failed:\n{validate_result.stdout}\n{validate_result.stderr}"
+    )
 
 class TestSO3LRCLISubcommands:
     """Test individual SO3LR CLI subcommands with minimal configurations."""
