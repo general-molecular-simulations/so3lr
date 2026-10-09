@@ -172,13 +172,23 @@ def test_sheared_cell_round_trips_through_extxyz(tmp_path):
 
 @pytest.mark.parametrize('pbc, periodic', [(False, False), (True, True)])
 def test_input_pbc_decides_periodicity(pbc, periodic):
-    cell = np.diag([10.0, 11.0, 12.0]) if periodic else [[10., 1., 0.], [0., 11., 2.], [0., 0., 12.]]
+    cell = np.diag([30.0, 31.0, 32.0]) if periodic else [[10., 1., 0.], [0., 11., 2.], [0., 0., 12.]]
     atoms = Atoms('H', positions=[[0.0, 0.0, 0.0]], cell=cell, pbc=pbc)
     result = cell_from_atoms_boundary_conditions(atoms, 12.0, None)
     if periodic:
         np.testing.assert_allclose(result, cell)
     else:
         assert result is None  # a bounding cell with pbc=False stays free
+
+
+def test_box_below_twice_the_cutoff_fails_clearly():
+    """Minimum image drops periodic images in a box shorter than 2 x lr_cutoff."""
+    atoms = Atoms('H', positions=[[0.0, 0.0, 0.0]], cell=np.diag([15.5] * 3), pbc=True)
+    with pytest.raises(ValueError, match='at least twice the'):
+        cell_from_atoms_boundary_conditions(atoms, 12.0, None)
+    # With k-space carrying the long range, a shorter real-space cutoff fits.
+    np.testing.assert_allclose(
+        cell_from_atoms_boundary_conditions(atoms, 7.5, 'pme', kspace_smearing=2.0), np.diag([15.5] * 3))
 
 
 def test_mixed_axis_pbc_fails_clearly():

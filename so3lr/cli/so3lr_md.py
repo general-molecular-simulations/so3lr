@@ -945,8 +945,16 @@ def check_cell(
     if np.any(cell[~mask] != 0):
         raise ValueError(f'JAX-MD currently supports only orthogonal cells. Provided cell: {cell}') 
 
-    # if np.any(np.diag(cell) < lr_cutoff * 2):
-    #     raise ValueError(f'Each dimension of the cell {np.diag(cell)} must be at least twice the long-range cutoff distance [{lr_cutoff} Å].')
+    # The neighbour lists keep one image per pair (minimum image), which drops
+    # pairs once a box length is below twice the cutoff -- silently: a 15.5 A
+    # water box at lr_cutoff 12 was off by 95 meV/molecule without k-space.
+    if np.any(np.diag(cell) < 2 * lr_cutoff):
+        raise ValueError(
+            f'Box lengths {np.round(np.diag(cell), 3).tolist()} A: each must be at least twice the '
+            f'long-range cutoff ({lr_cutoff} A) for the neighbour-list engine, or periodic images '
+            f'are dropped. Use a larger box, a smaller --lr-cutoff together with '
+            f'--kspace-electrostatics (k-space then carries the long range), or the ASE '
+            f'calculator (So3lrCalculator), which lists every periodic image.')
 
     return cell
 
