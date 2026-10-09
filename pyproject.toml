@@ -110,6 +110,7 @@ include = [
     { path = "so3lr/cli/*.yaml", format = ["sdist", "wheel"] },
     { path = "so3lr/config/*.yaml", format = ["sdist", "wheel"] },
     { path = "so3lr/models/**/*", format = ["sdist", "wheel"] },
+    { path = "so3lr/mlff/nn/observable/*.npz", format = ["sdist", "wheel"] },
     { path = "so3lr/mlff/utils/robust_loss_jax/data/*.npz", format = ["sdist", "wheel"] },
 ]
 
