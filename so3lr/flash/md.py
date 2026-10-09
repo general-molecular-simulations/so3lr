@@ -87,18 +87,14 @@ def build_engine(atoms, settings, dtype):
     n = len(atoms)
     L = [float(v) for v in np.diag(np.asarray(atoms.cell[:]))]
     pme_el, pme_disp = _pme(settings)
-    mode = settings.get("flash_mode") or "auto"
+    devices = int(settings.get("flash_devices") or 1)
+    # several GPUs run the jitted fast mode (validate_options refuses another)
+    mode = "fast" if devices > 1 else (settings.get("flash_mode") or "auto")
     if mode == "auto":
         mode = pick_mode(n, _free_bytes() - pme_bytes(L, (pme_el, pme_disp), jnp.dtype(dtype).itemsize), statics)
     total_charge = float(settings.get("total_charge") or 0)
     embed = settings.get("charge_embed_total_charge")
     equil = settings.get("charge_equilibration_total_charge")
-    devices = int(settings.get("flash_devices") or 1)
-    if devices > 1:
-        # several GPUs run the jitted fast mode (the staged modes are for one GPU's most atoms)
-        if (settings.get("flash_mode") or "auto") not in ("auto", "fast"):
-            raise ValueError(f"flash_devices {devices} runs flash_mode fast, not {settings['flash_mode']}")
-        mode = "fast"
     kw, staged, _ = MODES[mode]
     eng = FlashSO3LR(params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]),
                      total_charge=total_charge if embed is None else float(embed),

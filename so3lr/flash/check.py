@@ -83,8 +83,8 @@ def _off(value):
 
 
 def validate_options(settings):
-    """Raise on an engine, flash_mode or flash_mixed value flash does not take (a settings
-    file bypasses the CLI's choices)."""
+    """Raise on an engine, flash_mode, flash_mixed or flash_devices value flash does not take
+    (a settings file bypasses the CLI's choices)."""
     for key, allowed in (("engine", ENGINES), ("flash_mode", FLASH_MODES)):
         if settings.get(key) is not None and settings[key] not in allowed:
             raise ValueError(f"{key} must be one of {', '.join(allowed)} (received {settings[key]!r})")
@@ -93,6 +93,9 @@ def validate_options(settings):
     n = settings.get("flash_devices")
     if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
         raise ValueError(f"flash_devices must be a positive integer (received {n!r})")
+    if (n or 1) > 1 and (settings.get("flash_mode") or "auto") not in ("auto", "fast"):
+        # several GPUs run the jitted fast mode (the staged modes are for one GPU's most atoms)
+        raise ValueError(f"flash_devices {n} runs flash_mode fast, not {settings['flash_mode']}")
 
 
 def reserve_gpu(settings):

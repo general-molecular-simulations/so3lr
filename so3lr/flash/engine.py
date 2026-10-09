@@ -1166,15 +1166,14 @@ class FlashSO3LR:
         self._Lt = None
         # the devices: each computes nl rows from r0 on, the last device's shifted back to
         # end at n (its first rows are the previous device's too, counted there)
-        devs = jax.local_devices()[:devices] if isinstance(devices, int) else list(devices)
-        self.P = len(devs)
-        if isinstance(devices, int) and self.P < devices:
-            raise ValueError(f"{devices} devices asked for, {self.P} visible")
+        self.P = int(devices)
+        devs = jax.local_devices()[:self.P]
+        if len(devs) < self.P:
+            raise ValueError(f"{self.P} devices asked for, {len(devs)} visible")
         self.nl = -(-n // self.P)
         if self.P > 1 and (self.P - 1) * self.nl >= n:
             raise ValueError(f"{n} atoms are too few for {self.P} devices")
         self.device_mesh = jax.sharding.Mesh(np.array(devs), (AXIS,)) if self.P > 1 else None
-        self._r0, self._p = 0, 0                     # traced inside the per-device program
         self.tile = min(int(tile), self.nl)
         # neighbour rows sized for water at the model's cutoff (widened on overflow)
         self.K = int(max_neighbours or math.ceil(64 * (self.rc / 4.5) ** 3 / 16) * 16)
@@ -1364,6 +1363,13 @@ class FlashSO3LR:
         return lax.fori_loop(0, nt, step, carry)
 
     # ---- several devices: each one's rows, and the exchange between stages ---------------
+    @property
+    def _r0(self):
+        """The first row this device computes (traced inside the per-device program)."""
+        if self.P == 1:
+            return 0
+        return jnp.minimum(lax.axis_index(AXIS) * self.nl, self.n - self.nl)
+
     def _row_arg(self):
         """The first row this device computes, as the kernels take it."""
         return jnp.reshape(jnp.asarray(self._r0, jnp.int32), (1,))
@@ -1372,9 +1378,11 @@ class FlashSO3LR:
         """This device's rows of a (all of a on one device)."""
         return a if self.P == 1 else lax.dynamic_slice_in_dim(a, self._r0, self.nl)
 
-    def _put_mine(self, a, v):
-        """a with this device's rows set to v."""
-        return v if self.P == 1 else lax.dynamic_update_slice_in_dim(a, v.astype(a.dtype), self._r0, 0)
+    def _add_mine(self, a, v):
+        """a with v added to this device's rows."""
+        if self.P == 1:
+            return a + v
+        return lax.dynamic_update_slice_in_dim(a, (self._mine(a) + v).astype(a.dtype), self._r0, 0)
 
     def _counted(self, v):
         """v (this device's rows) with the rows the previous device also computes zeroed,
@@ -1382,18 +1390,18 @@ class FlashSO3LR:
         if self.P == 1:
             return v
         i = self._r0 + jnp.arange(self.nl)
-        return jnp.where((i >= self._p * self.nl).reshape((-1,) + (1,) * (v.ndim - 1)), v, 0)
+        return jnp.where((i >= lax.axis_index(AXIS) * self.nl).reshape((-1,) + (1,) * (v.ndim - 1)), v, 0)
 
     def _gather_rows(self, *rows):
         """Full arrays from each device's rows (all-gather)."""
         if self.P == 1:
             return rows
         extra = self.P * self.nl - self.n            # rows the last device shares
+        cut = (self.P - 1) * self.nl
         out = []
         for v in rows:
             g = lax.all_gather(v, AXIS, axis=0, tiled=True)
             if extra:
-                cut = (self.P - 1) * self.nl
                 g = jnp.concatenate([g[:cut], g[cut + extra:]], 0)
             out.append(g)
         return tuple(out)
@@ -1401,7 +1409,7 @@ class FlashSO3LR:
     def _gather(self, *arrays):
         """The arrays with every device's rows, everywhere (each device holds valid rows only
         where it computed them)."""
-        return self._gather_rows(*(self._mine(a) for a in arrays)) if self.P > 1 else arrays
+        return self._gather_rows(*map(self._mine, arrays))
 
     def _sum(self, v):
         return v if self.P == 1 else lax.psum(v, AXIS)
@@ -1665,7 +1673,7 @@ class FlashSO3LR:
           zero + 0.0, self._box(px), self._row_arg())
         e_loc, raw_q, a0, c6 = self._heads(self._mine(x), self._mine(self.z))
         raw_q, a0, c6 = self._gather_rows(raw_q, a0, c6)
-        return self._put_mine(e_atom, self._mine(e_atom) + e_loc), raw_q, a0, c6, (fx, fy, fz, fw)
+        return self._add_mine(e_atom, e_loc), raw_q, a0, c6, (fx, fy, fz, fw)
 
     def _long_range(self, pos3, grid, q, a0, c6, e_atom, f3):
         """Electrostatics and dispersion over the cell grid: e_atom and forces added to,
@@ -1693,7 +1701,7 @@ class FlashSO3LR:
         dt = self.dtype
         f3 = list(f3)
         L = self._box(pos3[0])
-        mine, put = self._mine, self._put_mine
+        mine, add_mine = self._mine, self._add_mine
         # on several devices each spreads every atom (the charges are everywhere: no mesh to
         # sum) and takes the potential at its own
         rows = [mine(p) for p in pos3]
@@ -1703,11 +1711,11 @@ class FlashSO3LR:
             # the mesh's dU/d(strain) is one number: on atom 0's row of the per-atom virial,
             # which counts half (the pair terms count every pair from both ends); atom 0 is
             # the first device's
-            return [put(a, mine(a) + b) for a, b in zip(f3[:3], f)] + [f3[3].at[0].add(2.0 * w.astype(dt))]
+            return [add_mine(a, b) for a, b in zip(f3[:3], f)] + [f3[3].at[0].add(2.0 * w.astype(dt))]
         if self.pme_el:
             e, g, f, w = pme_electrostatics(pos3, q, L, self.mesh_el, self.pme_el[0], ASE_UNITS["ke"], dt,
                                             PME_CHUNK, **share(q))
-            e_atom, gq = put(e_atom, mine(e_atom) + e), put(gq, mine(gq) + g)
+            e_atom, gq = add_mine(e_atom, e), add_mine(gq, g)
             f3 = add(f3, f, w)
             if self.pme_disp:
                 # the dispersion mesh after the electrostatic one is gone (XLA would run
@@ -1719,9 +1727,9 @@ class FlashSO3LR:
             qd = jnp.sqrt(jnp.maximum(c6f * c6, 0.0))
             e, g, f, w = pme_dispersion(pos3, qd, L, self.mesh_disp, self.pme_disp[0], ASE_UNITS["bohr"],
                                         ASE_UNITS["hartree"], dt, PME_CHUNK, **share(qd))
-            e_atom = put(e_atom, mine(e_atom) + e)
+            e_atom = add_mine(e_atom, e)
             dq = jnp.where(qd > 0.0, c6f / (2.0 * jnp.where(qd > 0.0, qd, 1.0)), 0.0)
-            gc6 = put(gc6, mine(gc6) + g * mine(dq))
+            gc6 = add_mine(gc6, g * mine(dq))
             f3 = add(f3, f, w)
         return e_atom, gq, gc6, tuple(f3)
 
@@ -1773,13 +1781,11 @@ class FlashSO3LR:
         rep = PartitionSpec()
 
         def per_device(R, L):
-            keep = self._Lt, self._r0, self._p
-            p = lax.axis_index(AXIS)
-            self._Lt, self._p, self._r0 = L, p, jnp.minimum(p * self.nl, self.n - self.nl)
+            keep, self._Lt = self._Lt, L
             try:
                 return self._energy_forces_rows(R)
             finally:
-                self._Lt, self._r0, self._p = keep
+                self._Lt = keep
         return jax.shard_map(per_device, mesh=self.device_mesh, in_specs=(rep, rep), out_specs=(rep,) * 4,
                              check_vma=False)(R, self.box if self._Lt is None else self._Lt)
 
