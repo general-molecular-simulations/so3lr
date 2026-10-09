@@ -29,9 +29,7 @@
 # (e.g. `temperature: 300`) to the canonical name before use. Unknown keys
 # trigger a warning with did-you-mean suggestions rather than silent fallback.
 #
-# Note: `so3lr eval` does not currently read a settings file — it is driven
-# entirely by CLI flags. A template for the eventual eval-settings schema
-# lives at so3lr/cli/eval_settings.yaml for reference.
+# Note: `so3lr eval` does not read a settings file; it is driven by CLI flags.
 
 ## General Settings
 ensemble: "nvt"                            # Ensemble type: "nvt", "nvt-langevin", "npt", "nve" [Default: "nvt"]
