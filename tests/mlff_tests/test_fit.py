@@ -160,6 +160,32 @@ def test_fit_early_stopping(tmp_path, caplog):
     assert any('Early stopping at step' in r.getMessage() for r in caplog.records)
 
 
+def test_fit_saves_the_final_weights(tmp_path):
+    """fit() validates and saves the last step even when it is not a multiple of
+    eval_every_num_steps: a run shorter than that used to write no checkpoint."""
+    f = TEST_DIR / 'test_data/ethanol.npz'
+    all_data, _ = NpzDataLoaderSparse(input_file=f).load(cutoff=5.)
+    np.random.RandomState(0).shuffle(all_data)
+    data = list(transformations.unit_conversion(
+        all_data[:20], energy_unit=units.kcal / units.mol, length_unit=units.Angstrom,
+        dipole_vec_unit=units.Debye))
+    so3k = SO3kratesSparse(
+        cutoff=5., num_features=32, num_features_head=8, num_heads=2,
+        degrees=[1, 2], message_normalization='avg_num_neighbors', avg_num_neighbors=8.)
+    loss_fn = training_utils.make_loss_fn(
+        get_energy_and_force_fn_sparse(so3k), weights={'energy': 0.001, 'forces': 0.999})
+    ckpt_dir = tmp_path / 'checkpoints'
+    training_utils.fit(
+        model=so3k, optimizer=optax.adam(learning_rate=1e-3), loss_fn=loss_fn,
+        graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
+        num_epochs=1, batch_max_num_edges=72 + 72 + 1, batch_max_num_nodes=9 + 9 + 1,
+        batch_max_num_graphs=3, eval_every_num_steps=10_000, batch_max_num_pairs=100,
+        training_data=data[:15], validation_data=data[15:],
+        ckpt_dir=ckpt_dir, allow_restart=False, use_wandb=False,
+    )
+    assert ckpt_dir.exists() and any(ckpt_dir.iterdir())
+
+
 def test_make_optimizer_plateau_knob():
     """``make_optimizer(reduce_lr_on_plateau=True)`` exposes a settable
     ``plateau_lr_scale`` hyperparameter; the default optimizer does not."""
