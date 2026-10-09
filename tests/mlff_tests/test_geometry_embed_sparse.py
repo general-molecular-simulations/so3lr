@@ -360,3 +360,27 @@ def test_apply_with_long_range_pbc_non_orthogonal_cell():
         jnp.array([expected_d_lr_0, expected_d_lr_1]),
         atol=1e-6
     )
+
+
+def test_cutoff_is_zero_on_padding_self_loops():
+    """jraph pads a batch with self-loop edges (d = 0); they must carry no weight.
+
+    phys(0) = 1, and with ~10^5 such edges on one padding node the second-order
+    parameter gradient of a force loss overflowed float32 to NaN, which
+    optax.zero_nans silently turned into zero updates.
+    """
+    geometry_embed = GeometryEmbedSparse(degrees=degrees,
+                                         radial_basis_fn='bernstein',
+                                         num_radial_basis_fn=16,
+                                         cutoff_fn='phys',
+                                         cutoff=5.,
+                                         input_convention='positions',
+                                         prop_keys=None)
+    # Two real pairs, then two self-loops on atom 2.
+    graph = dict(positions=positions, atomic_numbers=atomic_numbers,
+                 idx_i=jnp.array([0, 0, 2, 2]), idx_j=jnp.array([1, 2, 2, 2]),
+                 cell=None, cell_offset=None)
+    params = geometry_embed.init(jax.random.PRNGKey(0), graph)
+    cut = geometry_embed.apply(params, graph)['cut']
+    assert bool(jnp.all(cut[:2] > 0))
+    npt.assert_array_equal(cut[2:], 0.)
