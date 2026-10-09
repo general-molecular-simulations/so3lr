@@ -37,8 +37,8 @@ exists), and tiled execution (the per-atom work runs over fixed-size atom tiles)
   own atom's row and reads the others', so each device computes an equal share of the
   rows from full copies of the per-atom arrays, and the devices exchange their rows
   (all-gather) wherever the next stage reads other atoms: each layer's output, its
-  gradients in the backward, the charges and dispersion ratios. The PME charge mesh is
-  summed over the devices; the forces are the same as on one.
+  gradients in the backward, the charges and dispersion ratios. Each device spreads
+  every atom on the PME mesh; the forces are the same as on one.
 
 Periodic orthorhombic boxes, at least 2 x the long-range cutoff across and wide enough
 for the cell grid (``check.box_problem``); models with one head per degree entry,
@@ -985,7 +985,7 @@ def _lagrange4(u, n, dt):
     return idx, w, dw
 
 
-def _pme_mesh(pos3, w, L, shape, Lk, kernel, dt, chunk, psum=None):
+def _pme_mesh(pos3, w, L, shape, Lk, kernel, dt, chunk, at=None):
     """At every atom i, phi_i = sum_m W_i(m) (K * rho)(m) / V and d phi_i / d r_i (three
     arrays; W_j alone moves with r_j): rho = sum_j w_j W_j on the mesh, K = kernel(k2)
     applied by FFT -- jaxpme's pme kspace without the corrections and the 1/2. Positions
@@ -993,16 +993,16 @@ def _pme_mesh(pos3, w, L, shape, Lk, kernel, dt, chunk, psum=None):
     that changes). Atoms a chunk at a time, so what is held per atom and mesh point is
     one chunk's. Also d/de of sum_i w_i phi_i with box and positions scaled by 1 + e
     (the mesh coordinates stay, k shrinks, V grows): sum_k |rho_k|^2 K'(k) / V,
-    K' = -2 k^2 dK/dk^2 - 3 K. With ``psum`` the atoms are one device's: each spreads
-    its own, psum adds the meshes, and phi comes back at its own atoms."""
+    K' = -2 k^2 dK/dk^2 - 3 K. ``at``: the positions where phi is wanted (a device's own
+    atoms), if not at every atom spread."""
     n = pos3[0].shape[0]
     n0, n1, n2 = shape
     C = min(int(chunk), n)
     nch = -(-n // C)
     scale = [shape[a] / L[a] for a in range(3)]
 
-    def coords(start):
-        out = [_lagrange4(lax.dynamic_slice_in_dim(pos3[a], start, C) * scale[a], shape[a], dt)
+    def coords(start, p3=pos3, C=C):
+        out = [_lagrange4(lax.dynamic_slice_in_dim(p3[a], start, C) * scale[a], shape[a], dt)
                for a in range(3)]
         (ix, wx, dx), (iy, wy, dy), (iz, wz, dz) = out
         flat = (ix[:, None, None] * n1 + iy[None, :, None]) * n2 + iz[None, None, :]
@@ -1017,8 +1017,6 @@ def _pme_mesh(pos3, w, L, shape, Lk, kernel, dt, chunk, psum=None):
         vals = wc * wx[:, None, None] * wy[None, :, None] * wz[None, None, :]
         return rho.at[flat.reshape(-1)].add(vals.reshape(-1))
     rho = lax.fori_loop(0, nch, spread, jnp.zeros((n0 * n1 * n2,), dt))
-    if psum is not None:
-        rho = psum(rho)
 
     def freq(nn, lk, half=False):
         m = (np.fft.rfftfreq(nn) if half else np.fft.fftfreq(nn)) * nn
@@ -1033,10 +1031,13 @@ def _pme_mesh(pos3, w, L, shape, Lk, kernel, dt, chunk, psum=None):
     wz = jnp.asarray(np.where((np.arange(n2 // 2 + 1) == 0) | (np.arange(n2 // 2 + 1) * 2 == n2), 1.0, 2.0), dt)
     vir = (wz * (rho_hat.real ** 2 + rho_hat.imag ** 2) * (-2.0 * k2 * dK - 3.0 * K)).sum() * inv_v
     pot = jnp.fft.irfftn(rho_hat * K, s=shape, norm="forward").reshape(-1)
+    at = pos3 if at is None else at
+    m = at[0].shape[0]
+    Cm = min(int(chunk), m)
 
     def gather(c, out):
-        start = jnp.minimum(c * C, n - C)
-        flat, (wx, wy, wz), (dx, dy, dz) = coords(start)
+        start = jnp.minimum(c * Cm, m - Cm)
+        flat, (wx, wy, wz), (dx, dy, dz) = coords(start, at, Cm)
         g = pot[flat]
 
         def contract(a, b, c, f):
@@ -1046,25 +1047,24 @@ def _pme_mesh(pos3, w, L, shape, Lk, kernel, dt, chunk, psum=None):
         cols = [contract(wx, wy, wz, inv_v), contract(dx, wy, wz, f[0]),
                 contract(wx, dy, wz, f[1]), contract(wx, wy, dz, f[2])]
         return tuple(lax.dynamic_update_slice_in_dim(o, v, start, 0) for o, v in zip(out, cols))
-    zero = jnp.zeros((n,), dt)
-    return lax.fori_loop(0, nch, gather, (zero, zero + 0.0, zero + 0.0, zero + 0.0)) + (vir,)
+    zero = jnp.zeros((m,), dt)
+    return lax.fori_loop(0, -(-m // Cm), gather, (zero, zero + 0.0, zero + 0.0, zero + 0.0)) + (vir,)
 
 
-def _pme_part(pos3, w, L, mesh, Lk, smearing, kind, sign, dt, chunk, spread=None, W=None, psum=None):
+def _pme_part(pos3, w, L, mesh, Lk, smearing, kind, sign, dt, chunk, at=None, w_at=None):
     """The mesh part of PME as so3lr_dev adds it (jaxpme's pme kspace with its self and
     background corrections) for weights w (charges, or sqrt(C6)), smearing and Lk in the
     potential's unit: E = sign sum_i w_i pot_i, pot = (phi + c) / 2,
     c = -w self - 2 bg sum(w) / V. The per-atom energy, dE/dw, forces (three arrays) and
-    dE/d(strain), to which the background energy -sign bg W^2 / V adds as 1/V. On several
-    devices pos3 and w are one device's atoms, ``spread`` their weights with the atoms
-    another device spreads zeroed, W the sum of all weights and psum the sum over the
-    devices (``_pme_mesh``)."""
+    dE/d(strain), to which the background energy -sign bg W^2 / V adds as 1/V. The
+    per-atom terms at positions ``at`` with weights ``w_at`` (a device's own atoms) if
+    given: every device spreads all atoms."""
     pot, raw = _pme_potential(kind)
-    phi, gx, gy, gz, vir = _pme_mesh(pos3, w if spread is None else spread, L, mesh, Lk,
-                                     partial(pot.lr, smearing), dt, chunk, psum)
+    phi, gx, gy, gz, vir = _pme_mesh(pos3, w, L, mesh, Lk, partial(pot.lr, smearing), dt, chunk, at)
     bg = raw.correction_background(smearing)
     inv_v = (1.0 / (jnp.asarray(Lk[0]) * Lk[1] * Lk[2])).astype(dt)
-    W = w.sum() if W is None else W
+    W = w.sum()
+    w = w if w_at is None else w_at
     pot2 = phi - raw.correction_self(smearing) * w - 2.0 * bg * W * inv_v
     dstrain = 0.5 * sign * vir + 3.0 * sign * bg * W * W * inv_v
     return 0.5 * sign * w * pot2, sign * pot2, tuple(-sign * w * g for g in (gx, gy, gz)), dstrain
@@ -1694,10 +1694,10 @@ class FlashSO3LR:
         f3 = list(f3)
         L = self._box(pos3[0])
         mine, put = self._mine, self._put_mine
+        # on several devices each spreads every atom (the charges are everywhere: no mesh to
+        # sum) and takes the potential at its own
         rows = [mine(p) for p in pos3]
-        # on several devices each spreads its own atoms and the meshes are summed
-        share = (lambda w: dict(spread=self._counted(mine(w)), W=w.sum(), psum=self._sum)) if self.P > 1 \
-            else (lambda w: {})
+        share = (lambda w: dict(at=rows, w_at=mine(w))) if self.P > 1 else (lambda w: {})
 
         def add(f3, f, w):
             # the mesh's dU/d(strain) is one number: on atom 0's row of the per-atom virial,
@@ -1705,19 +1705,19 @@ class FlashSO3LR:
             # the first device's
             return [put(a, mine(a) + b) for a, b in zip(f3[:3], f)] + [f3[3].at[0].add(2.0 * w.astype(dt))]
         if self.pme_el:
-            e, g, f, w = pme_electrostatics(rows, mine(q), L, self.mesh_el, self.pme_el[0], ASE_UNITS["ke"], dt,
+            e, g, f, w = pme_electrostatics(pos3, q, L, self.mesh_el, self.pme_el[0], ASE_UNITS["ke"], dt,
                                             PME_CHUNK, **share(q))
             e_atom, gq = put(e_atom, mine(e_atom) + e), put(gq, mine(gq) + g)
             f3 = add(f3, f, w)
             if self.pme_disp:
                 # the dispersion mesh after the electrostatic one is gone (XLA would run
                 # the two side by side, both meshes alive)
-                rows, c6, e_atom, gq, f3 = lax.optimization_barrier((rows, c6, e_atom, gq, f3))
+                pos3, rows, c6, e_atom, gq, f3 = lax.optimization_barrier((pos3, rows, c6, e_atom, gq, f3))
         if self.pme_disp:
             # dispersion charges sqrt(C6_i), C6_i = C6_free(Z_i) c6_ratio_i (atomic units)
             c6f = self.c6tab[self.z - 1]
             qd = jnp.sqrt(jnp.maximum(c6f * c6, 0.0))
-            e, g, f, w = pme_dispersion(rows, mine(qd), L, self.mesh_disp, self.pme_disp[0], ASE_UNITS["bohr"],
+            e, g, f, w = pme_dispersion(pos3, qd, L, self.mesh_disp, self.pme_disp[0], ASE_UNITS["bohr"],
                                         ASE_UNITS["hartree"], dt, PME_CHUNK, **share(qd))
             e_atom = put(e_atom, mine(e_atom) + e)
             dq = jnp.where(qd > 0.0, c6f / (2.0 * jnp.where(qd > 0.0, qd, 1.0)), 0.0)
