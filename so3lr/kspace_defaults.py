@@ -1,7 +1,7 @@
 """K-space defaults, kept free of JAX so `so3lr --help` can read them cheaply.
 
-The CLI, the eval path and callers of make_so3lr all read these (through
-so3lr.mlff.utils.kspace_utils as well), so a change here reaches every entry point.
+The CLI, the MD driver, the eval path and callers of make_so3lr all read these
+(some through so3lr.mlff.utils.kspace_utils), so a change here reaches every entry point.
 """
 DEFAULT_KSPACE_SMEARING = 4.0             # A
 DEFAULT_KSPACE_SPACING = 2.0              # A

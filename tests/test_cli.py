@@ -1,5 +1,7 @@
 """General tests for the SO3LR command-line interface."""
 import os
+import subprocess
+import sys
 import yaml
 import tempfile
 import pathlib
@@ -7,7 +9,8 @@ import pathlib
 import pytest
 from click.testing import CliRunner
 
-from so3lr.cli.so3lr_cli import cli, BASIC_HELP_STRING
+from so3lr.cli.so3lr_cli import cli, main, canonicalize_ensemble, BASIC_HELP_STRING, DEFAULT_PRESSURE
+from so3lr.md_settings_validation import load_settings_yaml
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -200,9 +203,8 @@ class TestTimestepConversion:
 
 
 def test_cli_import_does_not_load_jax():
-    """`so3lr --help` must not pay for JAX/Flax start-up (see AGENTS.md)."""
-    import subprocess
-    import sys
+    """`so3lr --help` must not pay for JAX/Flax start-up (see AGENTS.md); a fresh
+    interpreter, since this one has imported JAX already."""
     code = ("import sys, so3lr.cli.so3lr_cli; "
             "heavy = sorted(m for m in ('jax', 'flax', 'jax_md', 'glp') if m in sys.modules); "
             "print(heavy); sys.exit(1 if heavy else 0)")
@@ -210,38 +212,38 @@ def test_cli_import_does_not_load_jax():
     assert result.returncode == 0, f"importing the CLI loaded {result.stdout.strip()}"
 
 
-def test_usage_error_is_one_line_not_a_traceback(tmp_path):
-    """The console entry point reports click usage errors cleanly and exits non-zero."""
-    import subprocess
-    import sys
-    result = subprocess.run(
-        [sys.executable, '-m', 'so3lr.cli.so3lr_cli', 'nvt', '--input', str(tmp_path / 'missing.xyz')],
-        capture_output=True, text=True)
-    assert result.returncode == 2
-    assert 'does not exist' in result.stderr
-    assert 'Traceback' not in result.stderr
+def test_usage_error_is_one_line_not_a_traceback(tmp_path, monkeypatch, capsys):
+    """main() reports a click usage error as one line and exits 2."""
+    monkeypatch.setattr(sys, 'argv', ['so3lr', 'nvt', '--input', str(tmp_path / 'missing.xyz')])
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+    assert exit_info.value.code == 2
+    assert 'does not exist' in capsys.readouterr().err
 
 
-@pytest.mark.parametrize('given,expected', [
-    ({}, 'nvt'), ({'md_P': 1.0}, 'npt'), ({'ensemble': 'NVT'}, 'nvt'),
-    ({'ensemble': 'nvt_langevin'}, 'nvt-langevin'), ({'ensemble': 'nvt-langevin'}, 'nvt-langevin'),
+@pytest.mark.parametrize('given,ensemble,md_P', [
+    ({}, 'nvt', None),
+    ({'md_P': 1.0}, 'npt', 1.0),
+    ({'ensemble': 'NVT'}, 'nvt', None),
+    ({'ensemble': 'nvt_langevin'}, 'nvt-langevin', None),
+    ({'ensemble': 'npt'}, 'npt', DEFAULT_PRESSURE),     # jax-md used to get pressure=None
+    ({'ensemble': 'npt', 'md_P': 5.0}, 'npt', 5.0),
+    ({'ensemble': 'nvt', 'md_P': 5.0}, 'nvt', None),    # perform_md reads a pressure as NPT
 ])
-def test_canonicalize_ensemble_names(given, expected):
-    from so3lr.cli.so3lr_cli import canonicalize_ensemble
-    assert canonicalize_ensemble(dict(given))['ensemble'] == expected
+def test_canonicalize_ensemble(given, ensemble, md_P):
+    settings = canonicalize_ensemble(dict(given))
+    assert (settings['ensemble'], settings['md_P']) == (ensemble, md_P)
 
 
 def test_canonicalize_ensemble_rejects_unknown_names_before_the_run():
     """A typo used to fall into perform_md's NPT branch and crash after relaxation."""
-    from so3lr.cli.so3lr_cli import canonicalize_ensemble
     with pytest.raises(ValueError, match="did you mean 'nvt-langevin'"):
         canonicalize_ensemble({'ensemble': 'nvt-langevn'})
 
 
-def test_canonicalize_ensemble_pressure():
-    """`ensemble: npt` alone gets the CLI default pressure (it used to reach jax-md as None);
-    another ensemble drops a stray md_P (perform_md reads a pressure as NPT)."""
-    from so3lr.cli.so3lr_cli import canonicalize_ensemble, DEFAULT_PRESSURE
-    assert canonicalize_ensemble({'ensemble': 'npt'})['md_P'] == DEFAULT_PRESSURE
-    assert canonicalize_ensemble({'ensemble': 'npt', 'md_P': 5.0})['md_P'] == 5.0
-    assert canonicalize_ensemble({'ensemble': 'nvt', 'md_P': 5.0})['md_P'] is None
+def test_settings_yaml_reads_exponent_floats(tmp_path):
+    """PyYAML's YAML 1.1 rules load 1e-3 as the string '1e-3'."""
+    path = tmp_path / 'settings.yaml'
+    path.write_text("accuracy: 1e-3\nforce_convergence: 5E-2\nmd_steps: 10\nname: '1e-3'\n")
+    assert load_settings_yaml(path) == {'accuracy': 1e-3, 'force_convergence': 5e-2,
+                                        'md_steps': 10, 'name': '1e-3'}

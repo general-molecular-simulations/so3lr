@@ -1093,6 +1093,38 @@ def _reduce_lr_on_plateau_step(
     return opt_state, best_loss, wait, cooldown_counter, scale
 
 
+def _validation_metrics(validation_step_fn, params, batches, graph_to_batch_fn):
+    """Mean of each validation metric over the batches, keyed 'eval_<name>'."""
+    totals, n = {}, 0
+    for graph_batch, lr_batch in batches:
+        batch = jax.tree_util.tree_map(jnp.array, graph_to_batch_fn(graph_batch, lr_batch))
+        for k, v in validation_step_fn(params, batch).items():
+            totals[k] = totals.get(k, 0.0) + np.asarray(v).item()
+        n += 1
+    return {f'eval_{k}': float(v / n) for k, v in totals.items()}
+
+
+def _log_and_checkpoint(ckpt_mngr, step, epoch, eval_params, eval_metrics, print_header, use_wandb):
+    """Log the eval metrics (the table header first if asked) and save eval_params
+    when the loss is finite: orbax ranks checkpoints with best_fn/best_mode='min',
+    and a NaN comparison can leave a diverged step in the max_to_keep window as
+    'best', evicting the genuinely best weights."""
+    if print_header:
+        logger.info(print_metrics_header(eval_metrics))
+    logger.info(print_metrics_row(epoch, step, eval_metrics))
+    eval_loss = eval_metrics['eval_loss']
+    if jnp.isfinite(eval_loss):
+        ckpt_mngr.save(
+            step,
+            args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
+            metrics={'loss': eval_loss}
+        )
+    else:
+        logger.warning(f"Skipping checkpoint at step {step} because eval_loss={eval_loss}")
+    if use_wandb:
+        _wandb_log(eval_metrics, step=step)
+
+
 def fit(
         model,
         optimizer,
@@ -1295,52 +1327,14 @@ def fit(
         logger.info(f"Two-stage loss reweighting enabled (switch at epoch "
                     f"{stage_two_start_epoch}).")
 
-    def validate_and_save(epoch):
-        """Validate the deployed weights (EMA when on), log the metrics, and save a
-        checkpoint if the loss is finite. Returns the eval metrics."""
-        nonlocal header_printed
-        iterator_validation = dynamically_batch_with_lr(
+    def validation_batches():
+        return dynamically_batch_with_lr(
             iter(validation_data),
             n_node=batch_max_num_nodes,
             n_edge=batch_max_num_edges,
             n_graph=batch_max_num_graphs,
             n_pairs=batch_max_num_pairs,
         )
-        eval_params = ema_params if use_ema else params
-
-        eval_totals = {}
-        eval_counts = {}
-        for graph_batch_validation, lr_batch_validation in iterator_validation:
-            batch_validation = graph_to_batch_fn(graph_batch_validation, lr_batch_validation)
-            batch_validation = jax.tree_util.tree_map(jnp.array, batch_validation)
-            eval_out = validation_step_fn(eval_params, batch_validation)
-            for k, v in eval_out.items():
-                eval_totals[k] = eval_totals.get(k, 0.0) + np.asarray(v).item()
-                eval_counts[k] = eval_counts.get(k, 0) + 1
-        eval_metrics = {f'eval_{k}': float(eval_totals[k] / eval_counts[k]) for k in eval_totals}
-
-        if not header_printed:
-            logger.info(print_metrics_header(eval_metrics))
-            header_printed = True
-        logger.info(print_metrics_row(epoch, step, eval_metrics))
-
-        # Only when the loss is finite: orbax ranks checkpoints with
-        # best_fn/best_mode='min', and a NaN comparison can leave the diverged
-        # step sitting in the max_to_keep window as 'best', evicting the
-        # genuinely best weights.
-        eval_loss = eval_metrics['eval_loss']
-        if jnp.isfinite(eval_loss):
-            ckpt_mngr.save(
-                step,
-                args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
-                metrics={'loss': eval_loss}
-            )
-        else:
-            logger.warning(f"Skipping checkpoint at step {step} because eval_loss={eval_loss}")
-
-        if use_wandb:
-            _wandb_log(eval_metrics, step=step)
-        return eval_metrics
 
     for epoch in range(num_epochs):
         # Switch to the stage-two loss at the configured epoch boundary.
@@ -1439,7 +1433,13 @@ def fit(
 
             # Start validation process.
             if step % eval_every_num_steps == 0:
-                eval_metrics = validate_and_save(epoch)
+                # Validate the deployed weights (the EMA copy when EMA is on).
+                eval_params = ema_params if use_ema else params
+                eval_metrics = _validation_metrics(
+                    validation_step_fn, eval_params, validation_batches(), graph_to_batch_fn)
+                _log_and_checkpoint(ckpt_mngr, step, epoch, eval_params, eval_metrics,
+                                    not header_printed, use_wandb)
+                header_printed = True
 
                 # Early stopping on the validation loss.
                 if early_stopping_patience is not None:
@@ -1475,11 +1475,14 @@ def fit(
         if stop_training:
             break  # exit the epoch loop
 
-    # The loop validates every eval_every_num_steps steps; do it for the final
-    # weights too, or the steps after the last multiple were lost (and a run
-    # shorter than eval_every_num_steps saved no checkpoint at all).
+    # Validate and save the final weights too when the last step was not a
+    # multiple of eval_every_num_steps.
     if step % eval_every_num_steps != 0:
-        validate_and_save(epoch)
+        eval_params = ema_params if use_ema else params
+        _log_and_checkpoint(
+            ckpt_mngr, step, epoch, eval_params,
+            _validation_metrics(validation_step_fn, eval_params, validation_batches(), graph_to_batch_fn),
+            not header_printed, use_wandb)
 
     # Wait until checkpoint manager completes all save operations.
     ckpt_mngr.wait_until_finished()

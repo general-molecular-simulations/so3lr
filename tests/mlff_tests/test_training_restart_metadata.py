@@ -83,7 +83,7 @@ def test_training_entry_point_keeps_metadata_when_loop_rejects_restart(
         else:
             from_config.run_training(config)
     assert len(calls) == 1
-    # Plateau LR reaches the loop when fine-tuning too (it used to be dropped).
+    # Plateau LR reaches the loop when fine-tuning too.
     assert calls[0]['reduce_lr_on_plateau'] is True and calls[0]['reduce_lr_patience'] == 7
     for name in names:
         assert (tmp_path / name).read_text() == 'original checkpoint metadata'

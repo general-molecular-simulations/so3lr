@@ -136,10 +136,10 @@ def test_tune_ewald_settings_keys_are_known_to_the_validator():
     assert [k for k in tune_keys if k not in known] == []
 
 
-def test_tune_ewald_reads_either_ratio_name():
+def test_dispersion_ratios_reads_either_name():
     """so3lr-s/m/l output 'a0_ratios', the legacy model 'hirshfeld_ratios' and no
-    C6 head; tune-ewald read 'hirshfeld_ratios' and 'c6_ratios' unconditionally
+    C6 head; tune-ewald used to read 'hirshfeld_ratios' and 'c6_ratios' directly
     and raised KeyError for every bundled model."""
-    from so3lr.cli.tune_ewald import charges_and_ratios
-    assert charges_and_ratios({'partial_charges': 1, 'a0_ratios': 2, 'c6_ratios': 3}) == (1, 2, 3)
-    assert charges_and_ratios({'partial_charges': 1, 'hirshfeld_ratios': 2}) == (1, 2, None)
+    from so3lr.cli.so3lr_md import dispersion_ratios
+    assert dispersion_ratios({'a0_ratios': 2, 'c6_ratios': 3}) == (2, 3)
+    assert dispersion_ratios({'hirshfeld_ratios': 2}) == (2, None)

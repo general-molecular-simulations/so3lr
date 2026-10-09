@@ -224,6 +224,21 @@ def make_so3krates_sparse_from_config(
 
 
 
+def _reduce_lr_kwargs(config):
+    """The loop's reduce-LR-on-plateau settings from config.training, with the
+    config defaults (fit()'s own defaults differ). make_optimizer_from_config
+    installs the knob these turn."""
+    t = config.training
+    return dict(
+        reduce_lr_on_plateau=t.get('reduce_lr_on_plateau', False),
+        reduce_lr_factor=t.get('reduce_lr_factor', 0.75),
+        reduce_lr_patience=t.get('reduce_lr_patience', 1000),
+        reduce_lr_min_scale=t.get('reduce_lr_min_scale', 0.0),
+        reduce_lr_min_delta=t.get('reduce_lr_min_delta', 1e-4),
+        reduce_lr_cooldown=t.get('reduce_lr_cooldown', 0),
+    )
+
+
 def make_optimizer_from_config(config: config_dict.ConfigDict = None):
     """Make optax optimizer from config.
 
@@ -1082,16 +1097,7 @@ def run_fine_tuning(
         )
 
     _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)
-    # make_optimizer_from_config installs the plateau LR knob; the loop has to
-    # be told to use it (fine-tuning used to drop these settings).
-    reduce_lr_kwargs = dict(
-        reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False),
-        reduce_lr_factor=config.training.get('reduce_lr_factor', 0.75),
-        reduce_lr_patience=config.training.get('reduce_lr_patience', 1000),
-        reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 0.0),
-        reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 1e-4),
-        reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
-    )
+    reduce_lr_kwargs = _reduce_lr_kwargs(config)
 
     if tf_record_present is True:
         training_utils.fit_from_iterator(

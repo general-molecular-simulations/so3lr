@@ -35,8 +35,8 @@ from ase import Atoms
 from ase.io import read
 from ase.units import Bohr
 
-from so3lr.pbc import lattice_rows
-from so3lr.cli.so3lr_md import handle_box, load_model, atoms_to_jnp, process_model, load_state
+from so3lr.pbc import lattice_rows, minimum_image_problem
+from so3lr.cli.so3lr_md import handle_box, load_model, atoms_to_jnp, process_model, load_state, dispersion_ratios
 from .so3lr_md import setup_logger
 
 # Setup logging
@@ -121,14 +121,6 @@ def get_forces_rs_at_fixed_distance(energy, positions, q, fixed_distance, **para
         return jax.value_and_grad(total_energy)(pos)[1]
 
     return forces(positions)
-
-
-def charges_and_ratios(aux):
-    """Partial charges and the dispersion ratios from the model output. The
-    so3lr-s/m/l models name the polarizability ratio 'a0_ratios', the legacy model
-    'hirshfeld_ratios'; the legacy model has no C6 head (None: C6 from h^2)."""
-    return (aux['partial_charges'], aux.get('a0_ratios', aux.get('hirshfeld_ratios')),
-            aux.get('c6_ratios'))
 
 
 @jax.jit
@@ -1175,6 +1167,9 @@ def tune(
 
     cell = initial_geometry.get_cell().T
     assert cell_is_present(cell), "Cell must be provided in the input geometry."
+    problem = minimum_image_problem(initial_geometry.get_cell(), lr_cutoff)
+    if problem:
+        raise ValueError(f'tune-ewald: {problem}.')
 
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
 
@@ -1195,9 +1190,8 @@ def tune(
     )
     position = initial_geometry_dict['positions']
 
-    # Loading the model: a bundled name, a path, or None for the default model.
-    # Always through load_model, so the solver matches the method being timed
-    # (So3lrPotential defaults to PME, which then timed PME for ewald and p3m).
+    # A bundled name, a path, or None for the default model; load_model builds
+    # the solver for the method being timed.
     potential = load_model(
         model_path,
         precision=jnp.float64 if precision == 'float64' else jnp.float32,
@@ -1254,7 +1248,8 @@ def tune(
         box=box,
         has_aux=True
     )
-    charges, hirshfeld_ratios, c6_ratios = charges_and_ratios(obs_data[1])
+    charges = obs_data[1]['partial_charges']
+    hirshfeld_ratios, c6_ratios = dispersion_ratios(obs_data[1])
 
     if box.shape == (3, 3):
         cell = lattice_rows(box)  # error bounds and jaxpme k-grids use rows
@@ -1266,128 +1261,44 @@ def tune(
         raise ValueError(
             f"k-space electrostatics: Invalid box shape {box.shape}. Expected (3, 3), (3,), or (1,).")
 
+    accuracy = float(settings.get('accuracy', 1.0 if kspace_electrostatics == 'cutoff' else 1e-3))
+    common = dict(
+        cell=cell, positions=position, displacement=displacement, nbrs_lr=nbrs_lr.idx,
+        nbrs_lr_distances=nbrs_lr_distances, force_fn=force_fn, accuracy=accuracy,
+        cutoff_it=settings.get('cutoff_it', 2.0), cutoff_hi=settings.get('cutoff_hi', lr_cutoff),
+    )
+    smearing = dict(
+        cutoff_lo=settings.get('cutoff_lo', 7.0), smear_lo=settings.get('smear_lo', 2.0),
+        smear_hi=settings.get('smear_hi', 6.0), smear_it=settings.get('smear_it', 2.0),
+    )
     if kspace_electrostatics == "ewald":
-        # Tune Ewald parameters
         logger.info("Tuning Ewald parameters...")
-        accuracy = float(settings.get('accuracy', 1e-3))  # Load from settings
         params, errs, timings = tune_ewald(
-            charges=charges,
-            cell=cell,
-            positions=position,
-            displacement=displacement,
-            nbrs_lr=nbrs_lr.idx,
-            nbrs_lr_distances=nbrs_lr_distances,
-            force_fn=force_fn,
-            cutoff_lo=settings.get('cutoff_lo', 7.0),  # Load from settings
-            cutoff_it=settings.get('cutoff_it', 2.0),  # Load from settings
-            # Default to lr_cutoff
-            cutoff_hi=settings.get('cutoff_hi', lr_cutoff),
-            smear_lo=settings.get('smear_lo', 2.0),  # Load from settings
-            smear_hi=settings.get('smear_hi', 6.0),  # Load from settings
-            smear_it=settings.get('smear_it', 2.0),  # Load from settings
-            ns_lo=settings.get('ns_lo', 4),  # Load from settings
-            ns_hi=settings.get('ns_hi', 8),  # Load from settings
-            accuracy=accuracy,
-            model_kwargs=model_kwargs,
+            charges=charges, **common, **smearing, model_kwargs=model_kwargs,
+            ns_lo=settings.get('ns_lo', 4), ns_hi=settings.get('ns_hi', 8),
         )
-
-    elif kspace_electrostatics == "pme":
-        logger.info("Tuning PME parameters...")
-        # Tune PME parameters
-        accuracy = float(settings.get('accuracy', 1e-3))  # Load from settings
+    elif kspace_electrostatics in ("pme", "p3m"):
+        logger.info(f"Tuning {kspace_electrostatics.upper()} parameters...")
         params, errs, timings = tune_pme(
-            charges=charges,
-            cell=cell,
-            positions=position,
-            displacement=displacement,
-            nbrs_lr=nbrs_lr.idx,
-            nbrs_lr_distances=nbrs_lr_distances,
-            force_fn=force_fn,
-            cutoff_lo=settings.get('cutoff_lo', 7.0),  # Load from settings
-            cutoff_it=settings.get('cutoff_it', 2.0),  # Load from settings
-            # Default to lr_cutoff
-            cutoff_hi=settings.get('cutoff_hi', lr_cutoff),
-            smear_lo=settings.get('smear_lo', 2.0),  # Load from settings
-            smear_hi=settings.get('smear_hi', 6.0),  # Load from settings
-            smear_it=settings.get('smear_it', 2.0),  # Load from settings
-            nodes_lo=settings.get('nodes_lo', 3),  # Load from settings
-            nodes_hi=settings.get('nodes_hi', 3),  # Load from settings
-            mesh_lo=settings.get('mesh_lo', 4),  # Load from settings
-            mesh_hi=settings.get('mesh_hi', 6),  # Load from settings
-            accuracy=accuracy,
-            model_kwargs=model_kwargs,
-        )
-    elif kspace_electrostatics == "p3m":
-        logger.info("Tuning P3M parameters...")
-        # Tune P3M parameters (same as PME but with p3m method)
-        accuracy = float(settings.get('accuracy', 1e-3))  # Load from settings
-        params, errs, timings = tune_pme(
-            charges=charges,
-            cell=cell,
-            positions=position,
-            displacement=displacement,
-            nbrs_lr=nbrs_lr.idx,
-            nbrs_lr_distances=nbrs_lr_distances,
-            force_fn=force_fn,
-            cutoff_lo=settings.get('cutoff_lo', 7.0),  # Load from settings
-            cutoff_it=settings.get('cutoff_it', 2.0),  # Load from settings
-            # Default to lr_cutoff
-            cutoff_hi=settings.get('cutoff_hi', lr_cutoff),
-            smear_lo=settings.get('smear_lo', 2.0),  # Load from settings
-            smear_hi=settings.get('smear_hi', 6.0),  # Load from settings
-            smear_it=settings.get('smear_it', 2.0),  # Load from settings
-            nodes_lo=settings.get('nodes_lo', 3),  # Load from settings
-            nodes_hi=settings.get('nodes_hi', 3),  # Load from settings
-            mesh_lo=settings.get('mesh_lo', 4),  # Load from settings
-            mesh_hi=settings.get('mesh_hi', 6),  # Load from settings
-            accuracy=accuracy,
-            model_kwargs=model_kwargs,
+            charges=charges, **common, **smearing, model_kwargs=model_kwargs,
+            nodes_lo=settings.get('nodes_lo', 3), nodes_hi=settings.get('nodes_hi', 3),
+            mesh_lo=settings.get('mesh_lo', 4), mesh_hi=settings.get('mesh_hi', 6),
         )
     elif kspace_electrostatics == 'cutoff':
         logger.info("No k-space electrostatics tuning, only tuning the cutoff.")
-        # If no k-space electrostatics is specified, use native short-range tuning
-        # No k-space electrostatics, use native short-range tuning
-        accuracy = float(settings.get('accuracy', 1.0))  # Load from settings
         params, errs, timings = tune_sr(
-            charges=charges,
-            cell=cell,
-            positions=position,
-            displacement=displacement,
-            nbrs_lr=nbrs_lr.idx,
-            nbrs_lr_distances=nbrs_lr_distances,
-            force_fn=force_fn,
-            cutoff_lo=settings.get('cutoff_lo', 10.0),  # Load from settings
-            cutoff_it=settings.get('cutoff_it', 2.0),  # Load from settings
-            # Default to lr_cutoff
-            cutoff_hi=settings.get('cutoff_hi', lr_cutoff),
-            accuracy=accuracy,
-            exponent=1,  # Native short-range uses 1/r potential
-            model_kwargs=model_kwargs,
+            charges=charges, **common, cutoff_lo=settings.get('cutoff_lo', 10.0),
+            exponent=1, model_kwargs=model_kwargs,
         )
-    elif kspace_dispersion == 'cutoff':
+    else:  # kspace_dispersion == 'cutoff'
         logger.info("No k-space dispersion tuning, only tuning the cutoff.")
-        # If no k-space electrostatics is specified, use native short-range tuning
-        # No k-space electrostatics, use native short-range tuning
-        accuracy = float(settings.get('accuracy', 0.001))  # Load from settings
         params, errs, timings = tune_dispersion_sr(
-            hirshfeld_ratios=hirshfeld_ratios,
-            cell=cell,
-            positions=position,
-            displacement=displacement,
-            nbrs_lr=nbrs_lr.idx,
-            nbrs_lr_distances=nbrs_lr_distances,
-            force_fn=force_fn,
-            cutoff_lo=settings.get('cutoff_lo', 10.0),  # Load from settings
-            cutoff_it=settings.get('cutoff_it', 2.0),  # Load   from settings
-            # Default to lr_cutoff
-            cutoff_hi=settings.get('cutoff_hi', lr_cutoff),
+            hirshfeld_ratios=hirshfeld_ratios, c6_ratios=c6_ratios, **common,
+            cutoff_lo=settings.get('cutoff_lo', 10.0),
             damp_lo=settings.get('dispersion_damping_lo', 2.0),
             damp_hi=settings.get('dispersion_damping_hi', 4.0),
             damp_it=settings.get('dispersion_damping_it', 1.0),
-            accuracy=accuracy,
-            exponent=1,  # Native short-range uses 1/r potential
-            model_kwargs=dispersion_model_kwargs,
-            c6_ratios=c6_ratios,
+            exponent=1, model_kwargs=dispersion_model_kwargs,
         )
 
     recommended_param = None

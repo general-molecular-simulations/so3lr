@@ -20,7 +20,7 @@ from .. import __version__
 # same table into parameter keys, so the two cannot drift apart.
 from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
 from ..md_observables import MD_OBSERVABLES
-from ..md_settings_validation import validate_md_counts
+from ..md_settings_validation import canonical_ensemble, load_settings_yaml, validate_md_counts
 from ..flash.check import ENGINES, FLASH_MODES, reserve_gpu
 
 # NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
@@ -946,31 +946,20 @@ def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Pa
         logger.warning(msg)
 
 
-ENSEMBLES = ('nve', 'nvt', 'nvt-langevin', 'npt')
-
-
 def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Determine the ensemble from a settings dict, defaulting to NVT.
 
     Ensemble can be set explicitly via ``settings_dict['ensemble']`` (e.g. from a
     YAML settings file), or is inferred: presence of ``md_P`` implies NPT, otherwise
-    NVT is used as the default. Case and '_' vs '-' do not matter
-    (``nvt_langevin`` is ``nvt-langevin``); anything else raises here, before the
-    model loads and the relaxation runs. NPT without ``md_P`` gets the CLI default
-    pressure, and ``md_P`` is dropped for the other ensembles (perform_md reads a
-    pressure as NPT).
+    NVT is used as the default. The name goes through canonical_ensemble. NPT
+    without ``md_P`` gets the CLI default pressure, and ``md_P`` is dropped for the
+    other ensembles (perform_md reads a pressure as NPT).
     """
     ensemble = settings_dict.get('ensemble')
     if ensemble is None:
         ensemble = 'npt' if settings_dict.get('md_P') is not None else 'nvt'
-    canonical = str(ensemble).strip().lower().replace('_', '-')
-    if canonical not in ENSEMBLES:
-        hint = difflib.get_close_matches(canonical, ENSEMBLES, n=1)
-        raise ValueError(
-            f"Unknown ensemble {ensemble!r}; expected one of {', '.join(ENSEMBLES)}"
-            + (f" (did you mean {hint[0]!r}?)" if hint else "") + ".")
-    settings_dict['ensemble'] = canonical
-    if canonical == 'npt':
+    settings_dict['ensemble'] = canonical_ensemble(ensemble)
+    if settings_dict['ensemble'] == 'npt':
         if settings_dict.get('md_P') is None:
             settings_dict['md_P'] = DEFAULT_PRESSURE
     else:
@@ -1017,8 +1006,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
 
     try:
         settings_path = Path(settings).expanduser().resolve()
-        with open(settings_path, 'r') as f:
-            settings_dict = yaml.safe_load(f) or {}
+        settings_dict = load_settings_yaml(settings_path)
     except (FileNotFoundError, yaml.YAMLError) as e:
         logger.error(f"Error loading settings file: {str(e)}")
         sys.exit(1)
@@ -1068,9 +1056,8 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     # YAML branch left output_file=None and immediately crashed in
     # infer_output_format. We compute the same `<input>_<ensemble>.xyz` here.
     if not settings_dict.get('output_file') and settings_dict.get('input_file'):
-        _suffix = {'nvt': 'nvt', 'nvt-langevin': 'nvt_langevin', 'npt': 'npt', 'nve': 'nve'}
-        _ens = settings_dict.get('ensemble', 'nvt')
-        settings_dict['output_file'] = f"{Path(settings_dict['input_file']).stem}_{_suffix.get(_ens, _ens)}.xyz"
+        settings_dict['output_file'] = (
+            f"{Path(settings_dict['input_file']).stem}_{settings_dict['ensemble'].replace('-', '_')}.xyz")
 
     settings_dict['output_format'] = infer_output_format(settings_dict.get('output_file', ''))
 
@@ -1260,12 +1247,9 @@ def run_md_simulation(
         click.echo(ctx.get_help())
         return
 
-    # Default output filename uses ensemble-specific suffix: the underscore
-    # form 'nvt_langevin' in filenames, the hyphen form 'nvt-langevin' as the
-    # ensemble name (canonicalize_ensemble accepts either in YAML).
-    _suffix = {'nvt': 'nvt', 'nvt-langevin': 'nvt_langevin', 'npt': 'npt', 'nve': 'nve'}
+    # Default output filename: <input stem>_<ensemble with '_'>.xyz
     if output_file is None:
-        output_file = f"{Path(input_file).stem}_{_suffix[ensemble]}.xyz"
+        output_file = f"{Path(input_file).stem}_{ensemble.replace('-', '_')}.xyz"
 
     if log_file is None:
         # Use with_suffix so the log file lands next to --output, not in CWD.
@@ -2041,8 +2025,7 @@ def tune_ewald(
             if not settings_path.exists():
                 raise FileNotFoundError(f'Settings file not found: {settings}')
 
-            with open(settings_path, 'r') as f:
-                settings_dict = yaml.safe_load(f) or {}
+            settings_dict = load_settings_yaml(settings_path)
 
             logger.info(f"Loading settings from {settings}")
         except (FileNotFoundError, yaml.YAMLError) as e:

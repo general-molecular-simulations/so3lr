@@ -354,12 +354,10 @@ class GeometryEmbedSparse(BaseSubModule):
         # Gaussian basis expansion of distances.
         rbf_ij = self.rbf_fn(jnp.expand_dims(d_ij_basis, axis=-1))  # shape: (num_pairs, num_radial_basis_fn)
 
-        # Radial cutoff function, zero on d = 0 edges: jraph pads a batch with
-        # self-loops on one padding node, where phys(0) = 1 would give each of up
-        # to ~10^5 padding edges full weight. The force loss's second-order
-        # parameter gradient then overflowed float32 to NaN, and optax.zero_nans
-        # silently turned the step into a zero update. Real atoms never see a
-        # padding edge, so predictions are unchanged.
+        # Radial cutoff function, zero on d = 0 edges. Every padding convention
+        # (jraph's self-loops, index N in jax-md and the exact-image list) puts its
+        # edges at d = 0, where phys(0) = 1: ~10^5 such edges overflowed the force
+        # loss's second-order gradient to NaN. Real atoms never see them.
         cut = jnp.where(d_ij > 0, self.cut_fn(d_ij), 0.)  # shape: (num_pairs)
 
         # Normalized distance vectors.
