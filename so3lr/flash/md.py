@@ -120,10 +120,10 @@ def build_engine(atoms, settings, dtype):
 def replicated(eng, tree):
     """tree on every device of a several-GPU engine (each runs the MD step on all atoms;
     the force call splits the atoms), as is on one."""
-    if eng.mesh is None:
+    if eng.device_mesh is None:
         return tree
     from jax.sharding import NamedSharding, PartitionSpec
-    return jax.device_put(tree, NamedSharding(eng.mesh, PartitionSpec()))
+    return jax.device_put(tree, NamedSharding(eng.device_mesh, PartitionSpec()))
 
 
 def _free_bytes():

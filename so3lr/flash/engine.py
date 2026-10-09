@@ -1173,7 +1173,7 @@ class FlashSO3LR:
         self.nl = -(-n // self.P)
         if self.P > 1 and (self.P - 1) * self.nl >= n:
             raise ValueError(f"{n} atoms are too few for {self.P} devices")
-        self.mesh = jax.sharding.Mesh(np.array(devs), (AXIS,)) if self.P > 1 else None
+        self.device_mesh = jax.sharding.Mesh(np.array(devs), (AXIS,)) if self.P > 1 else None
         self._r0, self._p = 0, 0                     # traced inside the per-device program
         self.tile = min(int(tile), self.nl)
         # neighbour rows sized for water at the model's cutoff (widened on overflow)
@@ -1780,7 +1780,7 @@ class FlashSO3LR:
                 return self._energy_forces_rows(R)
             finally:
                 self._Lt, self._r0, self._p = keep
-        return jax.shard_map(per_device, mesh=self.mesh, in_specs=(rep, rep), out_specs=(rep,) * 4,
+        return jax.shard_map(per_device, mesh=self.device_mesh, in_specs=(rep, rep), out_specs=(rep,) * 4,
                              check_vma=False)(R, self.box if self._Lt is None else self._Lt)
 
     def _energy_forces_rows(self, R):
