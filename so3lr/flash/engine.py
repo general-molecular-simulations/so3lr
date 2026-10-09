@@ -1167,9 +1167,9 @@ class FlashSO3LR:
         # the devices: each computes nl rows from r0 on, the last device's shifted back to
         # end at n (its first rows are the previous device's too, counted there)
         self.P = int(devices)
-        devs = jax.local_devices()[:self.P]
-        if len(devs) < self.P:
-            raise ValueError(f"{self.P} devices asked for, {len(devs)} visible")
+        devs = jax.local_devices()[:max(self.P, 0)]
+        if not 1 <= self.P <= len(devs):
+            raise ValueError(f"devices={devices}: 1 to {len(jax.local_devices())} here")
         self.nl = -(-n // self.P)
         if self.P > 1 and (self.P - 1) * self.nl >= n:
             raise ValueError(f"{n} atoms are too few for {self.P} devices")

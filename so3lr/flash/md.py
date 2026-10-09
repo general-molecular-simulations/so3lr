@@ -107,6 +107,11 @@ def build_engine(atoms, settings, dtype):
                 f"~{mode_kib(mode, statics):.1f} KiB/atom at peak")
     if eng.P > 1:
         logger.info(f"Flash: {eng.P} GPUs, {eng.nl} atoms' rows each")
+        # each GPU holds every atom's arrays of the fast mode
+        alone = pick_mode(n, _free_bytes() - pme_bytes(L, (pme_el, pme_disp), jnp.dtype(dtype).itemsize), statics)
+        if alone != "fast":
+            logger.warning(f"Flash: {n} atoms may not fit the fast mode each of the {eng.P} GPUs runs "
+                           f"(one GPU would run {alone})")
     for what, p, mesh in (("electrostatics", pme_el, eng.mesh_el), ("dispersion", pme_disp, eng.mesh_disp)):
         if p:
             logger.info(f"Flash: PME {what}, smearing {p[0]} A, mesh {mesh}")

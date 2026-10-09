@@ -241,12 +241,14 @@ def test_restart_box_is_checked(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("bad", [dict(engine="Flash"), dict(engine="neighbour-list"), dict(flash_mode="Fast"),
-                                 dict(flash_mixed="false")])
+                                 dict(flash_mixed="false"), dict(flash_devices=0), dict(flash_devices="2"),
+                                 dict(flash_devices=2, flash_mode="lean"), dict(flash_devices=4096)])
 def test_bad_engine_options_raise(bad):
     """Settings files bypass the CLI's choices: a value flash does not take is an error."""
     with pytest.raises(ValueError):
         check.validate_options(bad)
     check.validate_options(dict(engine="flash", flash_mode="lean", flash_mixed=False))
+    check.validate_options(dict(engine="standard", flash_mode="lean", flash_devices=4096))
 
 
 def test_flash_modes_match_the_engine():
@@ -371,21 +373,29 @@ GPUS = pytest.mark.skipif(check.device_problem() is not None or len(jax.local_de
 
 
 @GPUS
-def test_several_gpus_give_one_gpus_forces():
-    """Energy, forces and dE/d(strain) on two and on all visible GPUs as on one: float64,
-    PME for both, an atom count the GPUs do not divide (the last one shares rows)."""
+@pytest.mark.parametrize("precision,tol", [("float64", 1e-10), ("float32", 1e-5)])
+def test_several_gpus_give_one_gpus_forces(precision, tol):
+    """Energy, forces and dE/d(strain) on two and on all visible GPUs as on one: PME for
+    both, an atom count the GPUs do not divide (the last one shares rows); and with
+    neighbour rows too short, widened as on one GPU."""
     from so3lr.flash.loader import load_params
     atoms = _water((3, 3, 3))[:-3]
-    params, statics = load_params(None, precision="float64", lr_cutoff=10.0)
+    params, statics = load_params(None, precision=precision, lr_cutoff=10.0)
     args = (params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]))
     kw = dict(pme_electrostatics=(2.0, 1.55), pme_dispersion=(2.0, 1.55), **E.MODES["fast"][0])
-    R = jnp.asarray(atoms.get_positions())
+    R = jnp.asarray(atoms.get_positions(), statics["dtype"])
     e_ref, f_ref, w_ref = E.FlashSO3LR(*args, **kw).energy_forces_strain(R)
     for P in sorted({2, len(jax.local_devices())}):
         e, f, w = E.FlashSO3LR(*args, devices=P, **kw).energy_forces_strain(R)
-        _check(f"energy on {P} GPUs", e, e_ref, 1e-12)
-        _check(f"forces on {P} GPUs", f, f_ref, 1e-10)
-        _check(f"dE/d(strain) on {P} GPUs", w, w_ref, 1e-10)
+        _check(f"energy on {P} GPUs", e, e_ref, tol / 100)
+        _check(f"forces on {P} GPUs", f, f_ref, tol)
+        _check(f"dE/d(strain) on {P} GPUs", w, w_ref, tol)
+    if precision == "float64":
+        eng = E.FlashSO3LR(*args, devices=2, max_neighbours=16, **kw)
+        e, f, w = eng.energy_forces_strain(R)
+        assert eng.K > 16
+        _check("energy, rows widened on 2 GPUs", e, e_ref, 1e-12)
+        _check("forces, rows widened on 2 GPUs", f, f_ref, 1e-10)
 
 
 @GPUS

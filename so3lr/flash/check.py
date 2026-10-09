@@ -93,9 +93,14 @@ def validate_options(settings):
     n = settings.get("flash_devices")
     if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
         raise ValueError(f"flash_devices must be a positive integer (received {n!r})")
-    if (n or 1) > 1 and (settings.get("flash_mode") or "auto") not in ("auto", "fast"):
+    if (n or 1) > 1 and (settings.get("engine") or "auto") != "standard":
         # several GPUs run the jitted fast mode (the staged modes are for one GPU's most atoms)
-        raise ValueError(f"flash_devices {n} runs flash_mode fast, not {settings['flash_mode']}")
+        if (settings.get("flash_mode") or "auto") not in ("auto", "fast"):
+            raise ValueError(f"flash_devices {n} runs flash_mode fast, not {settings['flash_mode']}")
+        # asked for: an error here, not a fall back to the neighbour-list engine on one
+        import jax
+        if n > len(jax.local_devices()):
+            raise ValueError(f"flash_devices {n}: only {len(jax.local_devices())} visible")
 
 
 def reserve_gpu(settings):
@@ -105,7 +110,8 @@ def reserve_gpu(settings):
     if ((settings.get("engine") or "auto") != "standard" and settings_problem(settings) is None
             and model_problem(settings.get("model_path")) is None):
         # several GPUs: room outside XLA's pool for NCCL's buffers
-        several = int(settings.get("flash_devices") or 1) > 1
+        n = settings.get("flash_devices")
+        several = isinstance(n, int) and n > 1          # validate_options rejects other values
         os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90" if several else "0.97")
 
 
