@@ -519,6 +519,10 @@ def flash_options(f: Callable) -> Callable:
     f = click.option('--flash-mixed/--no-flash-mixed', 'flash_mixed', default=True,
                      help='With --precision float32: keep the MD state (positions, momenta, '
                           'energy sums) in float64 and form displacements in float64. [default: on]')(f)
+    f = click.option('--flash-devices', 'flash_devices', default=1, type=click.IntRange(min=1),
+                     help='SO3LR-Flash on this many GPUs of the node: each computes an equal share '
+                          'of the atoms, for systems that fit on one GPU but should run faster. '
+                          '[default: 1]')(f)
     return f
 
 
@@ -643,7 +647,7 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     # Minimization (overrides cycles/steps if set)
     'force_convergence',
     # flash engine
-    'engine', 'flash_mode', 'flash_mixed',
+    'engine', 'flash_mode', 'flash_mixed', 'flash_devices',
     # Eval keys (allowed in the same YAML even though `so3lr eval` does not use
     # --settings yet, since users often share a single YAML across runs)
     'datafile', 'save_to', 'targets', 'batch_size', 'jit_compile',
@@ -1009,6 +1013,7 @@ def run_md_simulation(
     engine: str = 'auto',
     flash_mode: str = 'auto',
     flash_mixed: bool = True,
+    flash_devices: int = 1,
 ) -> None:
     """Shared runner for NVT, NVT-Langevin, NPT, and NVE MD simulations."""
     if not input_file or help:
@@ -1067,6 +1072,7 @@ def run_md_simulation(
         'engine': engine,
         'flash_mode': flash_mode,
         'flash_mixed': flash_mixed,
+        'flash_devices': flash_devices,
     }
 
     # Only insert kspace_npt_cycles when the user explicitly passed

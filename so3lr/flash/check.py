@@ -31,7 +31,7 @@ HANDLED = {
     "kspace_smearing", "kspace_spacing", "kspace_interp_nodes", "kspace_dispersion",
     "kspace_dispersion_smearing", "kspace_dispersion_spacing", "kspace_dispersion_interp_nodes",
     "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
-    "engine", "flash_mode", "flash_mixed",
+    "engine", "flash_mode", "flash_mixed", "flash_devices",
 }
 # settings that only concern the neighbour-list engine, other commands sharing a settings
 # file (eval, tune-ewald), or act only together with a declined setting below (the
@@ -83,13 +83,24 @@ def _off(value):
 
 
 def validate_options(settings):
-    """Raise on an engine, flash_mode or flash_mixed value flash does not take (a settings
-    file bypasses the CLI's choices)."""
+    """Raise on an engine, flash_mode, flash_mixed or flash_devices value flash does not take
+    (a settings file bypasses the CLI's choices)."""
     for key, allowed in (("engine", ENGINES), ("flash_mode", FLASH_MODES)):
         if settings.get(key) is not None and settings[key] not in allowed:
             raise ValueError(f"{key} must be one of {', '.join(allowed)} (received {settings[key]!r})")
     if settings.get("flash_mixed") is not None and not isinstance(settings["flash_mixed"], bool):
         raise ValueError(f"flash_mixed must be true or false (received {settings['flash_mixed']!r})")
+    n = settings.get("flash_devices")
+    if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
+        raise ValueError(f"flash_devices must be a positive integer (received {n!r})")
+    if (n or 1) > 1 and (settings.get("engine") or "auto") != "standard":
+        # several GPUs run the jitted fast mode (the staged modes are for one GPU's most atoms)
+        if (settings.get("flash_mode") or "auto") not in ("auto", "fast"):
+            raise ValueError(f"flash_devices {n} runs flash_mode fast, not {settings['flash_mode']}")
+        # asked for: an error here, not a fall back to the neighbour-list engine on one
+        import jax
+        if n > len(jax.local_devices()):
+            raise ValueError(f"flash_devices {n}: only {len(jax.local_devices())} visible")
 
 
 def reserve_gpu(settings):
@@ -98,7 +109,10 @@ def reserve_gpu(settings):
     the structure is read: a run that falls back for its structure still reserves it."""
     if ((settings.get("engine") or "auto") != "standard" and settings_problem(settings) is None
             and model_problem(settings.get("model_path")) is None):
-        os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.97")
+        # several GPUs: room outside XLA's pool for NCCL's buffers
+        n = settings.get("flash_devices")
+        several = isinstance(n, int) and n > 1          # validate_options rejects other values
+        os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90" if several else "0.97")
 
 
 def settings_problem(settings):

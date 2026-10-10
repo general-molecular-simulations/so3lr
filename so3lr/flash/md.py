@@ -87,7 +87,9 @@ def build_engine(atoms, settings, dtype):
     n = len(atoms)
     L = [float(v) for v in np.diag(np.asarray(atoms.cell[:]))]
     pme_el, pme_disp = _pme(settings)
-    mode = settings.get("flash_mode") or "auto"
+    devices = int(settings.get("flash_devices") or 1)
+    # several GPUs run the jitted fast mode (validate_options refuses another)
+    mode = "fast" if devices > 1 else (settings.get("flash_mode") or "auto")
     if mode == "auto":
         mode = pick_mode(n, _free_bytes() - pme_bytes(L, (pme_el, pme_disp), jnp.dtype(dtype).itemsize), statics)
     total_charge = float(settings.get("total_charge") or 0)
@@ -99,13 +101,30 @@ def build_engine(atoms, settings, dtype):
                      total_spin=float(settings.get("num_unpaired_electrons") or 0),
                      equilibration_charge=total_charge if equil is None else float(equil),
                      pme_electrostatics=pme_el, pme_dispersion=pme_disp,
-                     box_margin=NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0, **kw)
+                     box_margin=NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0, devices=devices,
+                     **kw)
     logger.info(f"Flash: {n} atoms, memory mode {mode} ({'staged' if staged else 'jitted'}), "
                 f"~{mode_kib(mode, statics):.1f} KiB/atom at peak")
+    if eng.P > 1:
+        logger.info(f"Flash: {eng.P} GPUs, {eng.nl} atoms' rows each")
+        # each GPU holds every atom's arrays of the fast mode
+        alone = pick_mode(n, _free_bytes() - pme_bytes(L, (pme_el, pme_disp), jnp.dtype(dtype).itemsize), statics)
+        if alone != "fast":
+            logger.warning(f"Flash: {n} atoms may not fit the fast mode each of the {eng.P} GPUs runs "
+                           f"(one GPU would run {alone})")
     for what, p, mesh in (("electrostatics", pme_el, eng.mesh_el), ("dispersion", pme_disp, eng.mesh_disp)):
         if p:
             logger.info(f"Flash: PME {what}, smearing {p[0]} A, mesh {mesh}")
     return eng, staged
+
+
+def replicated(eng, tree):
+    """tree on every device of a several-GPU engine (each runs the MD step on all atoms;
+    the force call splits the atoms), as is on one."""
+    if eng.device_mesh is None:
+        return tree
+    from jax.sharding import NamedSharding, PartitionSpec
+    return jax.device_put(tree, NamedSharding(eng.device_mesh, PartitionSpec()))
 
 
 def _free_bytes():
@@ -283,6 +302,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     start = position if state is None else (state.position * box if npt else state.position)
     try:
         eng, staged = build_engine(atoms, s, dtype)
+        # several GPUs: the MD state on all of them
+        position, box, geo, state, start = replicated(eng, (position, box, geo, state, start))
         strain = eng.energy_forces_strain_staged if staged else eng.energy_forces_strain
         e0, F0, W0 = strain(start)
     except Exception as exc:
