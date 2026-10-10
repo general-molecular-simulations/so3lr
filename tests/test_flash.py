@@ -286,6 +286,24 @@ def test_flash_matches_neighbour_lists(tmp_path, model, pme):
 
 
 @GPU
+@pytest.mark.parametrize("model", ["so3lr-m-2606", "so3lr-l-2606"])
+def test_float32_follows_float64(model):
+    """float32 (each model's attention launch; the backward's filter products as TF32x3 on
+    tensor cores, which float64 never runs) gives float64's energy and forces to float32
+    accuracy."""
+    from so3lr.flash.loader import load_params
+    atoms = _water((3, 3, 3))
+    out = {}
+    for precision in ("float64", "float32"):
+        params, statics = load_params(model, precision=precision, lr_cutoff=12.0)
+        eng = E.FlashSO3LR(params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]))
+        out[precision] = eng.energy_forces(jnp.asarray(atoms.get_positions(), statics["dtype"]))
+    (e, f), (e_ref, f_ref) = out["float32"], out["float64"]
+    _check("energy", e, e_ref, 1e-6)
+    _check("forces", f, f_ref, 1e-4)
+
+
+@GPU
 def test_narrow_neighbour_rows_widen():
     """Neighbour rows too short for water: the engine widens them and gives what wide ones
     give, jitted and staged (the kernels never read past a row that overflowed)."""

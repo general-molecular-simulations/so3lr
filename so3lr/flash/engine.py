@@ -67,8 +67,14 @@ from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
 
 BE = 16              # edges per chunk in the pair kernels
 NUM_WARPS = 2
-# attention kernels: (edges per chunk, warps)
-ATT_LAUNCH = {"fwd": (16, 2), "bwd_heads": (16, 2), "bwd_degrees": (16, 2)}
+# The attention kernels' launch, (edges per chunk, warps), by the width of the spherical
+# filters' hidden layer (so3lr-s/m 32, so3lr-l 64): the fastest on an H200 for 12,288
+# waters. so3lr-l takes 4 warps: a float32 dot lowered to FMAs keeps its whole reduction
+# in each thread's registers, and at 2 warps its kernels spill.
+ATT_LAUNCH = {
+    32: {"fwd": (16, 2), "bwd_heads": (16, 2), "bwd_degrees": (8, 2)},
+    64: {"fwd": (16, 4), "bwd_heads": (32, 4), "bwd_degrees": (16, 4)},
+}
 BL = 64              # candidates per chunk in the long-range kernel
 AXIS = "atoms"       # the device axis of the several-GPU mesh
 
@@ -77,15 +83,18 @@ def _cp(num_warps):
     return plgpu.CompilerParams(num_warps=num_warps, num_stages=1)
 
 
-def _hi(a, b):
-    return jnp.dot(a, b, precision=lax.Precision.HIGHEST, preferred_element_type=a.dtype)
+def _mm(a, b, x3=False):
+    """A float32 dot: FMAs (the forward), or x3: on tensor cores as three TF32 products (the
+    backward), whose float32 energies and forces are as close to float64."""
+    precision = lax.DotAlgorithmPreset.TF32_TF32_F32_X3 if x3 else lax.Precision.HIGHEST
+    return jnp.dot(a, b, precision=precision, preferred_element_type=a.dtype)
 
 
-def _filter_mm(hz, wb, c0, G):
+def _filter_mm(hz, wb, c0, G, x3=False):
     """hz [BE, SH] @ wb[:, c0:c0+G]. Pallas-Triton has no float64 dot, so float64 sums
     over the SH hidden units (weight rows read from the ref: values cannot be sliced)."""
     if hz.dtype != jnp.float64:
-        return _hi(hz, wb[:, pl.ds(c0, G)])
+        return _mm(hz, wb[:, pl.ds(c0, G)], x3)
     sh = jnp.arange(hz.shape[1])
     out = jnp.zeros((hz.shape[0], G), hz.dtype)
     for k in range(hz.shape[1]):
@@ -95,9 +104,9 @@ def _filter_mm(hz, wb, c0, G):
 
 
 def _filter_mm_t(gw, wb, c0, G):
-    """gw [BE, G] @ wb[:, c0:c0+G].T -> [BE, SH] (float64 likewise)."""
+    """gw [BE, G] @ wb[:, c0:c0+G].T -> [BE, SH] (float64 likewise; the backward's: TF32x3)."""
     if gw.dtype != jnp.float64:
-        return _hi(gw, wb[:, pl.ds(c0, G)].T)
+        return _mm(gw, wb[:, pl.ds(c0, G)].T, x3=True)
     nsh = wb.shape[0]
     sh = jnp.arange(nsh)
     out = jnp.zeros((gw.shape[0], nsh), gw.dtype)
@@ -476,7 +485,7 @@ def _att_bwd_heads_kernel(q1, k1, v1, ev, px, py, pz, nbr, cnt, z, rmin, tv, td,
                 co = h * G + jnp.arange(G)
                 cp = j * G + jnp.arange(G)
                 wr, dwr = _radial(tv, td, i0, u, spacing, co, emask, True)
-                w = _filter_mm(hz, wb, h * G, G) + bb[pl.ds(h * G, G)][None, :] + wr
+                w = _filter_mm(hz, wb, h * G, G, x3=True) + bb[pl.ds(h * G, G)][None, :] + wr
                 qa = q1[a, pl.ds(j * G, G)].astype(dt)[None, :]
                 ka = k1[a, pl.ds(j * G, G)].astype(dt)[None, :]
                 va = v1[a, pl.ds(j * G, G)].astype(dt)[None, :]
@@ -568,7 +577,7 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
                 co = d * G + jnp.arange(G)
                 cp = j * G + jnp.arange(G)
                 wr, dwr = _radial(tv, td, i0, u, spacing, co, emask, True)
-                w = _filter_mm(hz, wb, d * G, G) + bb[pl.ds(d * G, G)][None, :] + wr
+                w = _filter_mm(hz, wb, d * G, G, x3=True) + bb[pl.ds(d * G, G)][None, :] + wr
                 qa = q2[a, pl.ds(j * G, G)].astype(dt)[None, :]
                 ka = k2[a, pl.ds(j * G, G)].astype(dt)[None, :]
                 qb = _rows(q2, jj, cp, emask, dt)
@@ -1197,6 +1206,10 @@ class FlashSO3LR:
         starts = np.cumsum([0] + [2 * d + 1 for d in degrees])[:-1]
         self.ys = tuple((int(c), d * d - 1) for c, d in zip(starts, degrees))
         self.cdeg = jnp.asarray([(2 * d + 1) ** -0.5 for d in degrees], dt)
+        # the attention kernels' launch for this width of the spherical filters' hidden
+        # layer: the nearest wider one tabulated (the widest if none is)
+        sh = int(params["layers_0"]["attention_block"]["spherical_filter1_layer_1"]["kernel"].shape[1])
+        self.launch = ATT_LAUNCH[min((w for w in ATT_LAUNCH if w >= sh), default=max(ATT_LAUNCH))]
         self.par = jnp.asarray([(-1.0) ** d for d in degrees], dt)
         self.z = jnp.asarray(z)
         # x0 depends on the element only: one row per element present
@@ -1482,10 +1495,11 @@ class FlashSO3LR:
                 x_l, x1, ev1 = lax.optimization_barrier((x_l, x1, ev1))
                 qkv = self._projections(li, x_l, which, block=blk)
             ref = qkv[which[0]]
+            be, warps = self.launch["fwd"]
             kern = partial(_att_fwd_kernel, G=self.G, ND=self.nh, MP=self.MP, ZMAX=self.zmax, YS=self.ys,
-                           CH=ch, BE=ATT_LAUNCH["fwd"][0], H0=h0, NH=nh)
+                           CH=ch, BE=be, H0=h0, NH=nh)
             x1, ev1 = pl.pallas_call(
-                kern, grid=(self.nl,), compiler_params=_cp(ATT_LAUNCH["fwd"][1]),
+                kern, grid=(self.nl,), compiler_params=_cp(warps),
                 out_shape=(jax.ShapeDtypeStruct((n, F), dt), jax.ShapeDtypeStruct((n, self.M), dt)),
                 input_output_aliases={28: 0, 29: 1},
             )(*[q if q is not None else ref for q in qkv], ev_l, px, py, pz, nbr, cnt, self.z,
@@ -1543,9 +1557,10 @@ class FlashSO3LR:
             a0 = jnp.stack([start, first_new]).astype(jnp.int32)
             g = {}
             if ch != 2:
+                be, warps = self.launch["bwd_heads"]
                 g[0], g[1], g[2], g_ev, fx, fy, fz, fw = pl.pallas_call(
-                    partial(_att_bwd_heads_kernel, BE=ATT_LAUNCH["bwd_heads"][0], H0=h0, NH=nh, **meta),
-                    grid=(T,), compiler_params=_cp(ATT_LAUNCH["bwd_heads"][1]),
+                    partial(_att_bwd_heads_kernel, BE=be, H0=h0, NH=nh, **meta),
+                    grid=(T,), compiler_params=_cp(warps),
                     out_shape=(shp((T, FP), dt), shp((T, FP), dt), shp((T, FP), dt), shp((n, self.M), dt),
                                shp((n,), dt), shp((n,), dt), shp((n,), dt), shp((n,), dt)),
                     input_output_aliases={22: 3, 23: 4, 24: 5, 25: 6, 26: 7},
@@ -1554,10 +1569,10 @@ class FlashSO3LR:
                   sf("spherical_filter1", 2)["kernel"], sf("spherical_filter1", 2)["bias"],
                   self.mdeg, self.cdeg, gdx, self.scal, a0, g_ev, fx, fy, fz, fw, self._box(px))
             if ch != 1:
+                be, warps = self.launch["bwd_degrees"]
                 g[3], g[4], g_ev, fx, fy, fz, fw = pl.pallas_call(
-                    partial(_att_bwd_degrees_kernel, BE=ATT_LAUNCH["bwd_degrees"][0], H0=h0, NH=nh,
-                            YS=self.ys, **meta),
-                    grid=(T,), compiler_params=_cp(ATT_LAUNCH["bwd_degrees"][1]),
+                    partial(_att_bwd_degrees_kernel, BE=be, H0=h0, NH=nh, YS=self.ys, **meta),
+                    grid=(T,), compiler_params=_cp(warps),
                     out_shape=(shp((T, FP), dt), shp((T, FP), dt), shp((n, self.M), dt),
                                shp((n,), dt), shp((n,), dt), shp((n,), dt), shp((n,), dt)),
                     input_output_aliases={22: 2, 23: 3, 24: 4, 25: 5, 26: 6},
