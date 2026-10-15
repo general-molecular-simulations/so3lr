@@ -235,16 +235,13 @@ def device_problem():
     except Exception as exc:                     # no backend at all
         return f"no JAX device ({exc})"
     if dev.platform != "gpu":
-        return f"its kernels run on NVIDIA GPUs, and this process has {dev.platform}"
-    try:
-        version = str(dev.client.platform_version).lower()
-    except Exception:
-        version = ""
-    if "rocm" in version or "hip" in version:
-        return "its kernels are tested on NVIDIA GPUs only, and this is ROCm"
+        return f"its kernels run on AMD and NVIDIA GPUs, and this process has {dev.platform}"
     cc = getattr(dev, "compute_capability", None)
-    if cc is not None and float(cc) < 8.0:
-        return f"its kernels are tested on compute capability 8.0 and newer (A100, H100), and this GPU is {cc}"
+    try:
+        if cc is not None and float(cc) < 8.0:
+            return f"its kernels are tested on AMD Instinct (MI355X) and NVIDIA A100+, and this GPU is {cc}"
+    except (ValueError, TypeError):
+        pass
     return None
 
 

@@ -75,8 +75,23 @@ ATT_LAUNCH = {
     32: {"fwd": (16, 2), "bwd_heads": (16, 2), "bwd_degrees": (8, 2)},
     64: {"fwd": (16, 4), "bwd_heads": (32, 4), "bwd_degrees": (16, 4)},
 }
+# AMD wavefronts are 64 lanes (NVIDIA warps: 32). One AMD wavefront has the same thread
+# count as two NVIDIA warps, so the register pressure maps: NVIDIA num_warps=2 -> AMD
+# num_warps=1. This also keeps grid * block < 2^32 for large atom counts on HIP.
+ATT_LAUNCH_AMD = {
+    32: {"fwd": (16, 1), "bwd_heads": (16, 1), "bwd_degrees": (8, 1)},
+    64: {"fwd": (16, 2), "bwd_heads": (32, 2), "bwd_degrees": (16, 2)},
+}
+NUM_WARPS_AMD = 1
 BL = 64              # candidates per chunk in the long-range kernel
 AXIS = "atoms"       # the device axis of the several-GPU mesh
+
+
+def _is_rocm():
+    try:
+        return "rocm" in str(jax.devices()[0].client.platform_version).lower()
+    except Exception:
+        return False
 
 
 def _cp(num_warps):
@@ -84,9 +99,12 @@ def _cp(num_warps):
 
 
 def _mm(a, b, x3=False):
-    """A float32 dot: FMAs (the forward), or x3: on tensor cores as three TF32 products (the
+    """A float32 dot (FMAs), or x3: three TF32 products on tensor cores where available (the
     backward), whose float32 energies and forces are as close to float64."""
-    precision = lax.DotAlgorithmPreset.TF32_TF32_F32_X3 if x3 else lax.Precision.HIGHEST
+    if x3 and not _is_rocm():
+        precision = lax.DotAlgorithmPreset.TF32_TF32_F32_X3
+    else:
+        precision = lax.Precision.HIGHEST
     return jnp.dot(a, b, precision=precision, preferred_element_type=a.dtype)
 
 
@@ -1209,7 +1227,8 @@ class FlashSO3LR:
         # the attention kernels' launch for this width of the spherical filters' hidden
         # layer: the nearest wider one tabulated (the widest if none is)
         sh = int(params["layers_0"]["attention_block"]["spherical_filter1_layer_1"]["kernel"].shape[1])
-        self.launch = ATT_LAUNCH[min((w for w in ATT_LAUNCH if w >= sh), default=max(ATT_LAUNCH))]
+        att_table = ATT_LAUNCH_AMD if _is_rocm() else ATT_LAUNCH
+        self.launch = att_table[min((w for w in att_table if w >= sh), default=max(att_table))]
         self.par = jnp.asarray([(-1.0) ** d for d in degrees], dt)
         self.z = jnp.asarray(z)
         # x0 depends on the element only: one row per element present
@@ -1681,7 +1700,7 @@ class FlashSO3LR:
         nkp = int(2 ** math.ceil(math.log2(self.nk)))
         e_atom, fx, fy, fz, fw = pl.pallas_call(
             partial(_sr_kernel, ZMAX=self.zmax, NK=self.nk, NKP=nkp),
-            grid=(self.nl,), compiler_params=_cp(NUM_WARPS),
+            grid=(self.nl,), compiler_params=_cp(NUM_WARPS_AMD if _is_rocm() else NUM_WARPS),
             out_shape=(shp((n,), dt),) * 5,
             input_output_aliases={9: 1, 10: 2, 11: 3, 12: 4},
         )(px, py, pz, self.z, nbr, cnt, self.nlh_a, self.nlh_b, self.sr_scal, zero, zero + 0.0, zero + 0.0,
