@@ -546,6 +546,53 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
             indices_nn=arguments.get('indices_nn'),
             r0_multiplier=arguments.get('r0_multiplier'),
         )
+    elif name_lower == 'chargeseparation':
+        # Signed distance between the solute (reference atoms) and the H3O+ (> 0) or
+        # OH- (< 0) in the solvent, Xu et al. arXiv:2610.13265. Every H is shared among
+        # the owner sites (heavy atoms of the elements in owner_species, default
+        # C, N, O, P, S; monatomic ions such as Na+ / Cl- are left out). Water O
+        # default: O atoms without another heavy atom within 1.7 A in the starting
+        # structure (same rule as the pKa analysis).
+        if box is None or not np.any(box):
+            raise ValueError("chargeseparation requires a periodic box.")
+        species_arr = np.asarray(species)
+        box_arr = np.asarray(box, dtype=float)
+        ref_spec = arguments.get('reference', arguments.get('indices'))
+        if ref_spec is None:
+            raise ValueError("chargeseparation requires 'reference' (atom indices "
+                             "of the acid/base centre).")
+        ref_idx = np.asarray(_expand_indices(ref_spec), dtype=int)
+        h_idx = np.flatnonzero(species_arr == 1)
+        owner_species = arguments.get('owner_species', [6, 7, 8, 15, 16])
+        owner_idx = np.flatnonzero(np.isin(species_arr, owner_species))
+        if arguments.get('water_indices') is not None:
+            ow_idx = np.asarray(_expand_indices(arguments['water_indices']), dtype=int)
+        else:
+            pos = np.asarray(nbrs.reference_position, dtype=float)
+            if np.abs(pos).max() <= 1.0 + 1e-6:      # fractional coordinates
+                pos = pos * box_arr
+            o_idx = np.flatnonzero(species_arr == 8)
+            heavy = np.flatnonzero(species_arr != 1)
+            d = pos[o_idx][:, None, :] - pos[heavy][None, :, :]
+            d -= box_arr * np.round(d / box_arr)
+            d = np.linalg.norm(d, axis=-1)
+            d[d < 1e-8] = np.inf
+            ow_idx = o_idx[d.min(axis=1) > 1.7]
+        ow_idx = np.setdiff1d(ow_idx, ref_idx)
+        if not np.all(np.isin(ow_idx, owner_idx)):
+            raise ValueError("chargeseparation: water oxygens must be owner sites "
+                             "(check owner_species).")
+        water_sites = np.searchsorted(owner_idx, ow_idx)
+        logger.info(f'chargeseparation: reference {ref_idx.tolist()}, {len(h_idx)} H, '
+                    f'{len(owner_idx)} owner sites, {len(ow_idx)} water O, '
+                    f'sigma {arguments.get("sigma", 0.3)} A')
+        return pysages.colvars.coordinates.ChargeSeparation(
+            indices=[tuple(h_idx.tolist()), tuple(owner_idx.tolist()),
+                     tuple(ref_idx.tolist())],
+            box=box_arr,
+            water_sites=water_sites,
+            sigma=arguments.get('sigma', 0.3),
+        )
     elif name_lower == 'ringphase':
         return pysages.colvars.angles.RingPhaseAngle(indices=arguments['indices'])
     elif name_lower == 'ringamplitude':
