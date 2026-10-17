@@ -438,6 +438,29 @@ def _expand_indices(spec):
     return expand_token(spec)
 
 
+def _water_oxygens(arguments, nbrs, species, box):
+    """Water oxygen indices for the proton-transfer CVs (chargeseparation,
+    ionsitedistance): 'water_indices' if given, otherwise all O atoms without another
+    heavy atom within 1.7 A in the starting structure (same rule as the pKa analysis).
+    """
+    if arguments.get('water_indices') is not None:
+        return np.asarray(_expand_indices(arguments['water_indices']), dtype=int)
+    species = np.asarray(species)
+    box = np.asarray(box, dtype=float)
+    if box.ndim == 2:
+        box = np.diag(box)
+    pos = np.asarray(nbrs.reference_position, dtype=float)
+    if np.abs(pos).max() <= 1.0 + 1e-6:      # fractional coordinates
+        pos = pos * box
+    o_idx = np.flatnonzero(species == 8)
+    heavy = np.flatnonzero(species != 1)
+    d = pos[o_idx][:, None, :] - pos[heavy][None, :, :]
+    d -= box * np.round(d / box)
+    d = np.linalg.norm(d, axis=-1)
+    d[d < 1e-8] = np.inf
+    return o_idx[d.min(axis=1) > 1.7]
+
+
 def process_cv(cv_dict, nbrs=None, species=None, box=None):
     """Create a PySAGES collective variable from a settings dictionary."""
     name = cv_dict['type']
@@ -565,20 +588,8 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
         h_idx = np.flatnonzero(species_arr == 1)
         owner_species = arguments.get('owner_species', [6, 7, 8, 15, 16])
         owner_idx = np.flatnonzero(np.isin(species_arr, owner_species))
-        if arguments.get('water_indices') is not None:
-            ow_idx = np.asarray(_expand_indices(arguments['water_indices']), dtype=int)
-        else:
-            pos = np.asarray(nbrs.reference_position, dtype=float)
-            if np.abs(pos).max() <= 1.0 + 1e-6:      # fractional coordinates
-                pos = pos * box_arr
-            o_idx = np.flatnonzero(species_arr == 8)
-            heavy = np.flatnonzero(species_arr != 1)
-            d = pos[o_idx][:, None, :] - pos[heavy][None, :, :]
-            d -= box_arr * np.round(d / box_arr)
-            d = np.linalg.norm(d, axis=-1)
-            d[d < 1e-8] = np.inf
-            ow_idx = o_idx[d.min(axis=1) > 1.7]
-        ow_idx = np.setdiff1d(ow_idx, ref_idx)
+        ow_idx = np.setdiff1d(_water_oxygens(arguments, nbrs, species_arr, box_arr),
+                              ref_idx)
         if not np.all(np.isin(ow_idx, owner_idx)):
             raise ValueError("chargeseparation: water oxygens must be owner sites "
                              "(check owner_species).")
@@ -593,6 +604,44 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
             water_sites=water_sites,
             sigma=arguments.get('sigma', 0.3),
         )
+    elif name_lower == 'ionsitedistance':
+        # Distance between the site atoms ('indices') and the H3O+ (mode 'acid') or
+        # OH- (mode 'base') in the solvent; d_null while no such ion exists. Meant to
+        # be biased together with a coordinationnumber of the same site. Water O as
+        # for chargeseparation ('water_indices' or automatic). Every H atom of the
+        # system enters the water H counts.
+        if box is None or not np.any(box):
+            raise ValueError("ionsitedistance requires a periodic box.")
+        site_spec = arguments.get('indices', arguments.get('reference'))
+        if site_spec is None:
+            raise ValueError("ionsitedistance requires 'indices' (atom indices of the "
+                             "ionizable site).")
+        species_arr = np.asarray(species)
+        box_arr = np.asarray(box, dtype=float)
+        site_idx = np.asarray(_expand_indices(site_spec), dtype=int)
+        if np.any(species_arr[site_idx] == 1):
+            raise ValueError("ionsitedistance: the site atoms must be heavy atoms.")
+        h_idx = np.flatnonzero(species_arr == 1)
+        ow_idx = np.setdiff1d(_water_oxygens(arguments, nbrs, species_arr, box_arr),
+                              site_idx)
+        if len(ow_idx) == 0 or not np.all(species_arr[ow_idx] == 8):
+            raise ValueError("ionsitedistance: the water indices must be O atoms.")
+        cv = pysages.colvars.coordinates.IonSiteDistance(
+            indices=[tuple(site_idx.tolist()), tuple(ow_idx.tolist()),
+                     tuple(h_idx.tolist())],
+            box=box_arr,
+            mode=arguments.get('mode', 'acid'),
+            n0=arguments.get('n0'),
+            a=arguments.get('a', 0.1),
+            p=arguments.get('p', 4.0),
+            r0_water=arguments.get('r0_water', 1.3),
+            water_cn_exps=tuple(arguments.get('water_cn_exps', (16, 32))),
+            d_null=arguments.get('d_null', 2.5),
+        )
+        logger.info(f'ionsitedistance: site {site_idx.tolist()}, mode {cv.mode}, '
+                    f'{len(ow_idx)} water O, {len(h_idx)} H, n0 {cv.n0}, '
+                    f'd_null {cv.d_null} A')
+        return cv
     elif name_lower == 'ringphase':
         return pysages.colvars.angles.RingPhaseAngle(indices=arguments['indices'])
     elif name_lower == 'ringamplitude':

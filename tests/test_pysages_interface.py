@@ -905,6 +905,102 @@ class TestProcessCV:
         np.testing.assert_array_equal(np.array(cv.groups[0]), [0, 1])
         np.testing.assert_array_equal(np.array(cv.groups[1]), [2, 3])
 
+    # ------------------------------------------------------------------
+    # Proton-transfer CVs (ionsitedistance, chargeseparation) on a small
+    # synthetic system: amine N (index 0) with two H, a C bonded to it with
+    # a carbonyl O (must not count as water), an H3O+ 6 A from the N and two
+    # neutral waters.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _proton_transfer_system(ion=True):
+        def water(o, n_h):
+            dirs = [(0.98, 0.0, 0.0), (-0.33, 0.92, 0.0), (-0.33, -0.46, 0.80)]
+            return [o] + [tuple(np.add(o, d)) for d in dirs[:n_h]]
+        site = [(2.0, 2.0, 2.0), (2.0, 3.0, 2.0), (2.0, 1.66, 2.96)]   # N + 2 H
+        if not ion:   # proton back on the N, H3O+ -> water
+            site.append((2.95, 1.75, 2.0))
+        pos = site + [(0.6, 2.0, 2.0), (0.6, 3.23, 2.0)]                # C, carbonyl O
+        pos += water((8.0, 2.0, 2.0), 3 if ion else 2)
+        pos += water((2.0, 8.0, 2.0), 2) + water((2.0, 2.0, 8.0), 2)
+        species = [7] + [1] * (len(site) - 1) + [6, 8]
+        species += [8] + [1] * (3 if ion else 2) + [8, 1, 1] + [8, 1, 1]
+        return np.array(pos), np.array(species), np.array([15.0, 15.0, 15.0])
+
+    def _isd(self, pos, species, box, **kw):
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        import types
+        return process_cv({'type': 'ionsitedistance', 'indices': [0], **kw},
+                          nbrs=types.SimpleNamespace(reference_position=jnp.asarray(pos)),
+                          species=species, box=jnp.asarray(box))
+
+    @staticmethod
+    def _atoms(cv, k):
+        """Atom indices of group k (cv.groups holds positions within cv.indices)."""
+        return np.asarray(cv.indices)[np.asarray(cv.groups[k])]
+
+    @staticmethod
+    def _evaluate(cv, pos):
+        groups = [np.asarray(cv.indices)[np.asarray(g)] for g in cv.groups]
+        f = lambda X: cv.function(*(X[g] for g in groups))
+        X = jnp.asarray(pos)
+        return float(f(X)), np.asarray(jax.grad(f)(X))
+
+    def test_ionsitedistance_cv_groups_and_defaults(self):
+        import pysages.colvars.coordinates
+        pos, species, box = self._proton_transfer_system()
+        cv = self._isd(pos, species, box)
+        assert isinstance(cv, pysages.colvars.coordinates.IonSiteDistance)
+        np.testing.assert_array_equal(self._atoms(cv, 0), [0])
+        # carbonyl O (bonded to C) is not a water oxygen
+        o_idx = np.flatnonzero(species == 8)
+        np.testing.assert_array_equal(self._atoms(cv, 1), o_idx[1:])
+        np.testing.assert_array_equal(self._atoms(cv, 2), np.flatnonzero(species == 1))
+        assert cv.mode == 'acid' and cv.n0 == 2.35 and cv.d_null == 2.5
+        cvb = self._isd(pos, species, box, mode='base', d_null=2.0, n0=1.6)
+        assert cvb.mode == 'base' and cvb.n0 == 1.6 and cvb.d_null == 2.0
+
+    def test_ionsitedistance_value_and_placeholder(self):
+        """With an H3O+ the CV is its distance to the site; without one it is
+        exactly d_null with an exactly zero gradient (no force on any atom)."""
+        pos, species, box = self._proton_transfer_system(ion=True)
+        xi, grad = self._evaluate(self._isd(pos, species, box), pos)
+        assert abs(xi - 6.0) < 1e-4
+        assert np.all(np.isfinite(grad)) and np.abs(grad).max() > 0.0
+        pos, species, box = self._proton_transfer_system(ion=False)
+        xi, grad = self._evaluate(self._isd(pos, species, box), pos)
+        assert xi == 2.5
+        assert np.abs(grad).max() == 0.0
+
+    def test_ionsitedistance_invalid_input_raises(self):
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        pos, species, box = self._proton_transfer_system()
+        with pytest.raises(ValueError, match="ionsitedistance requires a periodic box"):
+            process_cv({'type': 'ionsitedistance', 'indices': [0]}, species=species)
+        with pytest.raises(ValueError, match="site atoms must be heavy atoms"):
+            self._isd(pos, species, box, indices=[1])
+        with pytest.raises(ValueError, match="mode"):
+            self._isd(pos, species, box, mode='acidic')
+        with pytest.raises(ValueError, match="must be >= 1"):
+            self._isd(pos, species, box, p=0.5)
+
+    def test_chargeseparation_cv_groups(self):
+        """Same water detection as ionsitedistance; the reference atom is
+        excluded from the waters and the water sites index the owner group."""
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        import pysages.colvars.coordinates
+        import types
+        pos, species, box = self._proton_transfer_system()
+        cv = process_cv({'type': 'chargeseparation', 'reference': [0]},
+                        nbrs=types.SimpleNamespace(reference_position=jnp.asarray(pos)),
+                        species=species, box=jnp.asarray(box))
+        assert isinstance(cv, pysages.colvars.coordinates.ChargeSeparation)
+        owners = self._atoms(cv, 1)
+        np.testing.assert_array_equal(owners[np.asarray(cv.water_sites)],
+                                      np.flatnonzero(species == 8)[1:])
+        xi, _ = self._evaluate(cv, pos)
+        assert abs(xi - 6.0) < 1e-2
+
 
 class TestGetPysagesMethod:
     """Tests for get_pysages_method."""

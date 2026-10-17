@@ -901,6 +901,42 @@ Enhanced sampling works in any ensemble that SO3LR's MD engine supports — **NV
 | `acylindricity` | Acylindricity |
 | `shapeanisotropy` | Shape anisotropy |
 | `coordinationnumber` | Coordination number with element-specific filtering |
+| `chargeseparation` | Signed distance between a solute (`reference` atoms) and the H3O+ (> 0) or OH- (< 0) in the solvent (Xu et al., arXiv:2610.13265); options `owner_species`, `water_indices`, `sigma` |
+| `ionsitedistance` | Distance between an ionizable site (`indices`) and the H3O+ (`mode: 'acid'`) or OH- (`mode: 'base'`); exactly `d_null` (default 2.5 Å) with zero gradient while no such ion exists. Bias together with a `coordinationnumber` of the same site and `use_pinv: True`; options `water_indices`, `n0`, `a`, `p`, `r0_water`, `water_cn_exps`, `d_null` |
+
+For pKa calculations with an acid (or a protonated base with a counterion), the
+proton transfer is biased with the coordination number and the separation of the
+ion pair with `ionsitedistance` (2D ABF). Both CVs need a periodic box at constant
+volume:
+
+```yaml
+method: "abf"
+method_args:
+  use_pinv: True
+
+cv:
+  - type: "coordinationnumber"
+    indices: [4298]           # ionizable site
+    cn_exps: [6, 24]
+    species: 1
+    grid_min: 1.7
+    grid_max: 3.4
+    grid_stride: 90
+    periodic: false
+  - type: "ionsitedistance"
+    indices: [4298]           # same site
+    mode: "acid"
+    grid_min: 1.95            # d_null = 2.5 A in the middle of a 0.1 A bin
+    grid_max: 14.45
+    grid_stride: 125
+    periodic: false
+
+restraints:
+  lower: [1.7, 2.0]
+  upper: [3.4, 14.0]
+  kl: [10.0, 0.3]
+  ku: [10.0, 0.3]
+```
 
 ### Usage
 
