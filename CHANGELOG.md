@@ -23,8 +23,9 @@ identified by immutable dated names such as `so3lr-tauri-m-2606`.
   built wheel (PR #55).
 - SHA-256 checksums for every bundled model artifact in
   `so3lr/models/SHA256SUMS`, checkable with `sha256sum -c`.
-- The Apache License 2.0 text and a third-party notice for the vendored Google
-  Research robust-loss implementation.
+- The Apache License 2.0 text and a notice for the vendored Google Research
+  robust-loss implementation, in its folder (`so3lr/mlff/utils/robust_loss_jax/LICENSE` and
+  `README.md`).
 
 ### Changed
 
