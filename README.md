@@ -82,9 +82,7 @@ The SO3LR Tauri models cover H to At (Z = 1–85).
 - **`so3lr-tauri-m`** *(default)*: start here; the model we use for biomolecular MD.
 - **`so3lr-tauri-l`**: the most accurate, recommended for reactions; 3.7× slower
   than `-m`.
-- **`so3lr-tauri-s`**: the fastest, 1.4× faster than `-m`, and still more accurate
-  than the original `so3lr` on every interaction-energy, conformational and
-  dipole benchmark we tested.
+- **`so3lr-tauri-s`**: 1.4× faster than `-m`.
 - **`so3lr`**: the original model from the
   [JACS paper](https://doi.org/10.1021/jacs.5c09558), for H, C, N, O, F, P, S and
   Cl, kept to reproduce published results.
