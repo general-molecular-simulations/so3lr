@@ -35,9 +35,8 @@ identified by immutable dated names such as `so3lr-tauri-m-2606`.
   `-2602`, with floating aliases `so3lr-tauri-s/m/l`; the default is
   `so3lr-tauri-m-2606`, and the original model stays `so3lr` (the `so3lr-o`
   synonym is removed). The bundled directories are renamed to match
-  (checksums unchanged). The old names
-  (`so3lr-m-2606`, `so3lr-m`, ...) still resolve and log their new name once;
-  `so3lr.model_registry.renamed_models()` lists them.
+  (checksums unchanged). The old names (`so3lr-m-2606`, `so3lr-m`, ...) are
+  removed.
 - The README is a landing page (installation, quick start, models, citation); the full
   user documentation lives at <https://so3lr.github.io/>.
 - flash: the attention kernels' launch follows the model's filter width (so3lr-tauri-l: 4 warps,

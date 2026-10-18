@@ -89,27 +89,6 @@ def test_default_resolves_to_the_new_m_model():
     assert mr.resolve_model(None) == mr.resolve_model("so3lr-tauri-m")
 
 
-@pytest.mark.parametrize("old,new", sorted(mr.renamed_models().items()))
-def test_pre_tauri_names_still_resolve(old, new):
-    """Names from before the Tauri rename keep working, but are not advertised."""
-    assert mr.resolve_model(old) == mr.resolve_model(new)
-    assert old not in mr.available_models()
-
-
-def test_pre_tauri_bare_sizes_keep_floating():
-    """so3lr-m maps to the floating so3lr-tauri-m, not to a pinned release."""
-    for size in ("s", "m", "l"):
-        assert mr.renamed_models()[f"so3lr-{size}"] in mr.model_aliases()
-
-
-def test_pre_tauri_name_logs_its_new_name_once(caplog):
-    mr._LOGGED_ALIASES.discard("so3lr-m-2606")
-    with caplog.at_level(logging.WARNING, logger="SO3LR"):
-        mr.resolve_model("so3lr-m-2606")
-        mr.resolve_model("so3lr-m-2606")
-    assert caplog.text.count("so3lr-tauri-m-2606") == 1
-
-
 def test_registry_logs_on_the_package_logger():
     """The alias line must go to the logger the CLI attaches handlers to.
 

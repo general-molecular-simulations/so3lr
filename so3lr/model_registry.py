@@ -104,16 +104,6 @@ _FLOATING_ALIASES = {
     "so3lr-tauri-l": "so3lr-tauri-l-2606",
 }
 
-# Names from before the family was called Tauri. Still accepted so existing
-# scripts and settings files keep working, but not listed by available_models();
-# resolving one logs its new name once. The bare sizes map to the new floating
-# aliases, so they keep moving with releases as they always did.
-_RENAMED = {
-    **{f"so3lr-{size}-{release}": f"so3lr-tauri-{size}-{release}"
-       for size in "sml" for release in ("2602", "2606")},
-    **{f"so3lr-{size}": f"so3lr-tauri-{size}" for size in "sml"},
-}
-
 # Model used when nothing is specified (bare calculator / CLI without --model /
 # YAML without a model key). Pinned to a canonical name so the default can never
 # drift silently when a new release lands.
@@ -131,11 +121,6 @@ def canonical_models():
 def model_aliases():
     """Return a mapping of alias name -> canonical name."""
     return dict(_FLOATING_ALIASES)
-
-
-def renamed_models():
-    """Return a mapping of pre-Tauri name -> current name (still accepted)."""
-    return dict(_RENAMED)
 
 
 def available_models():
@@ -160,15 +145,6 @@ def resolve_model(name_or_path=None):
             an existing path.
     """
     key = str(name_or_path) if name_or_path is not None else DEFAULT_MODEL
-
-    if key in _RENAMED:
-        new = _RENAMED[key]
-        if key not in _LOGGED_ALIASES:
-            _LOGGED_ALIASES.add(key)
-            logger.warning(
-                "Model name '%s' is deprecated; it is now '%s'.", key, new
-            )
-        key = new
 
     if key in _FLOATING_ALIASES:
         target = _FLOATING_ALIASES[key]

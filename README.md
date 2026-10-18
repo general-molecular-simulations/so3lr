@@ -89,9 +89,7 @@ The same names work everywhere: `So3lrCalculator(model=...)`, `--model` on the
 CLI, `model:` in a settings file; a path loads a fine-tuned or custom model. The
 previous release is bundled as `so3lr-tauri-{s,m,l}-2602`, and the original
 model from the [JACS paper](https://doi.org/10.1021/jacs.5c09558) as `so3lr`; it
-was not trained on energies, so only its relative energies are meaningful. Names
-from before the Tauri rename (`so3lr-m-2606`, `so3lr-m`, ...) still resolve, with
-a deprecation note in the log.
+was not trained on energies, so only its relative energies are meaningful.
 
 > [!WARNING]
 > `so3lr-tauri-s`, `so3lr-tauri-m` and `so3lr-tauri-l` are aliases for the
