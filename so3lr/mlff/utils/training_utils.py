@@ -648,7 +648,7 @@ property_to_loss = {
     'c6_ratios': node_mse_loss,
 }
 
-# Ratio-head alias: legacy SO3LR emits 'hirshfeld_ratios'; the new so3lr-s/m/l
+# Ratio-head alias: legacy SO3LR emits 'hirshfeld_ratios'; the new so3lr-tauri-s/m/l
 # models emit 'a0_ratios' (per-atom static-polarizability ratios). Loaded data
 # is always keyed 'hirshfeld_ratios'. We accept either spelling in loss_weights
 # and remap at the loss-fn entry point so users do not see a KeyError.
@@ -1025,7 +1025,7 @@ def expand_observables_to_theory_levels(
         # Tile the optional final bias too (use_final_bias_bool=True base models,
         # e.g. the single-level legacy SO3LR). Mirrors potential.py so finetuning
         # a 1-level model into num_theory_levels works; bias-free models
-        # (so3lr-s/m/l) have no 'bias' key and are left untouched.
+        # (so3lr-tauri-s/m/l) have no 'bias' key and are left untouched.
         bias = obs0['energy_dense_final'].get('bias')
         if bias is not None and bias.shape[-1] == 1:
             obs0['energy_dense_final']['bias'] = jnp.tile(bias, (num_theory_levels,))

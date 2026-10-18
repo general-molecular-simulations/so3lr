@@ -167,9 +167,9 @@ SETTINGS = dict(ensemble="nvt", model_path=None, lr_cutoff=12.0)
     (dict(buffer_size_multiplier_sr=1.5), None),
     (dict(some_new_setting=True), "does not know the setting 'some_new_setting'"),
     (dict(some_new_setting=None), None),
-    (dict(model_path="so3lr-s-2602"), None),
-    (dict(model_path="so3lr-l-2606"), None),
-    (dict(model_path="so3lr-l-2602"), None),
+    (dict(model_path="so3lr-tauri-s-2602"), None),
+    (dict(model_path="so3lr-tauri-l-2606"), None),
+    (dict(model_path="so3lr-tauri-l-2602"), None),
     (dict(model_path="so3lr"), "legacy"),
 ])
 def test_engine_choice(monkeypatch, change, reason):
@@ -201,9 +201,9 @@ def test_every_settings_key_classified():
     (("qk_norm", None), "does not set 'qk_norm'"),
 ])
 def test_model_architecture_check(tmp_path, edit, reason):
-    """so3lr-m with one hyperparameter changed (None: removed) is declined."""
+    """so3lr-tauri-m with one hyperparameter changed (None: removed) is declined."""
     from so3lr.model_registry import resolve_model
-    src = resolve_model("so3lr-m-2606").dir
+    src = resolve_model("so3lr-tauri-m-2606").dir
     for f in src.iterdir():
         if f.name != "hyperparameters.json":
             (tmp_path / f.name).symlink_to(f)
@@ -302,8 +302,8 @@ GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash
 
 
 @GPU
-@pytest.mark.parametrize("model,pme", [("so3lr-m-2606", ""), ("so3lr-m-2606", "electrostatics,dispersion"),
-                                       ("so3lr-l-2606", "electrostatics,dispersion")])
+@pytest.mark.parametrize("model,pme", [("so3lr-tauri-m-2606", ""), ("so3lr-tauri-m-2606", "electrostatics,dispersion"),
+                                       ("so3lr-tauri-l-2606", "electrostatics,dispersion")])
 def test_flash_matches_neighbour_lists(tmp_path, model, pme):
     """Energy, forces and dE/d(strain) on 12,288 waters (49.6 A), float64."""
     from ase.io import write
@@ -314,7 +314,7 @@ def test_flash_matches_neighbour_lists(tmp_path, model, pme):
 
 
 @GPU
-@pytest.mark.parametrize("model", ["so3lr-m-2606", "so3lr-l-2606"])
+@pytest.mark.parametrize("model", ["so3lr-tauri-m-2606", "so3lr-tauri-l-2606"])
 def test_float32_follows_float64(model):
     """float32 (each model's attention launch; the backward's filter products as TF32x3 on
     tensor cores, which float64 never runs) gives float64's energy and forces to float32

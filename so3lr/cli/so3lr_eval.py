@@ -41,7 +41,7 @@ logger = logging.getLogger("SO3LR")
 OBSERVABLES = {
     'nn_energy', 'partial_charges', 'electrostatic_energy',
     'dispersion_energy', 'zbl_repulsion',
-    'nlh_repulsion',  # clear name for the so3lr-s/m/l repulsion (== zbl_repulsion)
+    'nlh_repulsion',  # clear name for the so3lr-tauri-s/m/l repulsion (== zbl_repulsion)
     'electrostatic_energy_undamped', 'dispersion_energy_undamped',
     'x',  # final-layer atom embeddings; saved to _x.npz, not extxyz
 }
@@ -99,12 +99,12 @@ def process_predictions(
     main_graph.globals['energy_so3lr'] = output_prediction['energy']
     main_graph.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
     # The polarizability/volume-ratio head is named 'hirshfeld_ratios' for the
-    # legacy 'so3lr' model and 'a0_ratios' for the new so3lr-s/m/l models.
+    # legacy 'so3lr' model and 'a0_ratios' for the new so3lr-tauri-s/m/l models.
     if 'hirshfeld_ratios' in output_prediction:
         main_graph.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
     if 'a0_ratios' in output_prediction:
         main_graph.nodes['a0_ratios_so3lr'] = output_prediction['a0_ratios']
-    # c6_ratios is only emitted by the so3lr-s/m/l models; the legacy 'so3lr'
+    # c6_ratios is only emitted by the so3lr-tauri-s/m/l models; the legacy 'so3lr'
     # model has no c6 head, so guard against its absence.
     if 'c6_ratios' in output_prediction:
         main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
@@ -420,9 +420,8 @@ def evaluate_so3lr_on(
     # resolving the floating aliases here would log a redirect line for each.
     _bundled_paths = {resolve_model(n).dir for n in canonical_models()}
     if workdir_path in _bundled_paths:
-        # Prefer the user-typed short name when it is a registry key. Without
-        # this, legacy 'so3lr' and 'so3lr-o' both log as 'params' because they
-        # share the same on-disk directory (_PKG / 'params').
+        # Prefer the user-typed short name when it is a registry key, so a
+        # floating alias logs as typed rather than as its target's directory.
         if model_path is not None and model_path in available_models():
             _name = model_path
         elif model_path is None:
@@ -464,7 +463,7 @@ def evaluate_so3lr_on(
     logger.info(f"Using cutoff: {cutoff} Å")
 
     # The ratio head is named 'hirshfeld_ratios' for the legacy model and
-    # 'a0_ratios' for the new so3lr-s/m/l models. Normalize the requested target
+    # 'a0_ratios' for the new so3lr-tauri-s/m/l models. Normalize the requested target
     # to the model's output key so metric names (e.g. a0_ratios_rmse) match.
     legacy_model = bool(cfg['model'].get('legacy_so3lr_bool', False))
     supported_z = supported_atomic_numbers_for_config(cfg['model'])

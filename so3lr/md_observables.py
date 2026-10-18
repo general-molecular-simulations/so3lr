@@ -25,7 +25,7 @@ __all__ = [
 
 # Every value accepted by `--observable`, in help order. All are emitted by the
 # model as intermediate quantities (see ObservableSparse.get_intermediate_quantities).
-# Note `zbl_repulsion` (legacy `so3lr`) and `nlh_repulsion` (so3lr-s/m/l) are the
+# Note `zbl_repulsion` (legacy `so3lr`) and `nlh_repulsion` (so3lr-tauri-s/m/l) are the
 # same physical quantity under the two model generations' different output keys;
 # requesting the wrong one for a model raises a clear ValueError from the model.
 MD_OBSERVABLES: Tuple[str, ...] = (

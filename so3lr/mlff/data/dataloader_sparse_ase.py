@@ -245,7 +245,7 @@ def ASE_to_jraph(
     # 'hirshfeld_ratios' name or the new-model 'a0_ratios' name. Aliases
     # checked, in order of preference:
     #   'hirshfeld_ratios' (canonical) -> 'hirsh_ratios' (legacy short form)
-    #   -> 'a0_ratios' (so3lr-s/m/l output name).
+    #   -> 'a0_ratios' (so3lr-tauri-s/m/l output name).
     hirshfeld_ratios = None
     for _ratio_key in ('hirshfeld_ratios', 'hirsh_ratios', 'a0_ratios'):
         if _ratio_key in mol.arrays:

@@ -15,18 +15,18 @@ from so3lr import model_registry as mr
 PKG = pathlib.Path(mr.__file__).parent.resolve()
 
 CANONICAL = (
-    "so3lr-s-2602",
-    "so3lr-m-2602",
-    "so3lr-l-2602",
-    "so3lr-s-2606",
-    "so3lr-m-2606",
-    "so3lr-l-2606",
+    "so3lr-tauri-s-2602",
+    "so3lr-tauri-m-2602",
+    "so3lr-tauri-l-2602",
+    "so3lr-tauri-s-2606",
+    "so3lr-tauri-m-2606",
+    "so3lr-tauri-l-2606",
     "so3lr",
 )
 
 
 def test_defaults():
-    assert mr.DEFAULT_MODEL == "so3lr-m-2606"
+    assert mr.DEFAULT_MODEL == "so3lr-tauri-m-2606"
     assert mr.DEFAULT_HEAD_INDEX == 5
     # The default must be a canonical name, never a floating alias, so that the
     # no-argument default cannot drift when a new release is registered.
@@ -65,29 +65,28 @@ def test_aliases_resolve_to_their_canonical_target(alias, target):
 
 def test_size_aliases_point_at_the_current_release():
     for size in ("s", "m", "l"):
-        current = f"so3lr-{size}-2606"
-        assert mr.resolve_model(f"so3lr-{size}").dir.name == current
+        current = f"so3lr-tauri-{size}-2606"
+        assert mr.resolve_model(f"so3lr-tauri-{size}").dir.name == current
 
 
 def test_dated_names_are_pinned():
     """The 2602 pins must keep resolving to the older release."""
     for size in ("s", "m", "l"):
-        name = f"so3lr-{size}-2602"
+        name = f"so3lr-tauri-{size}-2602"
         assert mr.resolve_model(name).dir.name == name
 
 
 def test_legacy_vanilla_model():
-    for name in ("so3lr", "so3lr-o"):
-        spec = mr.resolve_model(name)
-        assert spec.dir == PKG / "models" / "so3lr"
-        assert spec.family == "vanilla"
-        # The legacy dir ships a canonical params.pkl (no orbax checkpoint).
-        assert spec.from_file is True
+    spec = mr.resolve_model("so3lr")
+    assert spec.dir == PKG / "models" / "so3lr"
+    assert spec.family == "vanilla"
+    # The legacy dir ships a canonical params.pkl (no orbax checkpoint).
+    assert spec.from_file is True
 
 
 def test_default_resolves_to_the_new_m_model():
-    assert mr.resolve_model(None) == mr.resolve_model("so3lr-m-2606")
-    assert mr.resolve_model(None) == mr.resolve_model("so3lr-m")
+    assert mr.resolve_model(None) == mr.resolve_model("so3lr-tauri-m-2606")
+    assert mr.resolve_model(None) == mr.resolve_model("so3lr-tauri-m")
 
 
 def test_registry_logs_on_the_package_logger():
@@ -101,16 +100,16 @@ def test_registry_logs_on_the_package_logger():
 
 
 def test_floating_alias_logs_its_target_once(caplog):
-    mr._LOGGED_ALIASES.discard("so3lr-l")
+    mr._LOGGED_ALIASES.discard("so3lr-tauri-l")
     with caplog.at_level(logging.INFO, logger="SO3LR"):
-        mr.resolve_model("so3lr-l")
-        mr.resolve_model("so3lr-l")
-    assert caplog.text.count("so3lr-l-2606") == 1
+        mr.resolve_model("so3lr-tauri-l")
+        mr.resolve_model("so3lr-tauri-l")
+    assert caplog.text.count("so3lr-tauri-l-2606") == 1
 
 
 def test_canonical_name_does_not_log(caplog):
     with caplog.at_level(logging.INFO, logger="SO3LR"):
-        mr.resolve_model("so3lr-m-2606")
+        mr.resolve_model("so3lr-tauri-m-2606")
     assert caplog.text == ""
 
 
@@ -129,7 +128,7 @@ def test_existing_path_is_accepted(tmp_path):
 
 def test_spec_unpacks_as_legacy_triple():
     """Old ``dir, from_file, head_index`` call sites keep working."""
-    spec = mr.resolve_model("so3lr-m-2606")
+    spec = mr.resolve_model("so3lr-tauri-m-2606")
     workdir, from_file, head_index = spec
     assert (workdir, from_file, head_index) == (
         spec.dir, spec.from_file, spec.head_index

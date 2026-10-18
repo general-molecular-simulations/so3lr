@@ -1146,7 +1146,7 @@ def mixing_rules(
         c6_ratios: Per-atom C6 volume ratios, shape: (num_nodes).
         legacy: If True, use the legacy SO3LR (v1) free-atom reference
             coefficients (``alphas_legacy``/``C6_coef_legacy``) instead of the
-            refitted ones used by the so3lr-s/m/l models.
+            refitted ones used by the so3lr-tauri-s/m/l models.
 
     Returns:
         Tuple of (alpha_ij, C6_ij): mean polarizabilities and combined C6
@@ -1154,7 +1154,7 @@ def mixing_rules(
     """
     dtype = hirshfeld_ratios.dtype
 
-    # Free-atom reference coefficients: legacy v1 vs refitted (so3lr-s/m/l).
+    # Free-atom reference coefficients: legacy v1 vs refitted (so3lr-tauri-s/m/l).
     alphas_ref = alphas_legacy if legacy else alphas
     atomic_number_i = atomic_numbers[idx_i] - 1
     atomic_number_j = atomic_numbers[idx_j] - 1
@@ -1637,7 +1637,7 @@ class ZBLRepulsionSparse(BaseSubModule):
 
 class NLHRepulsionSparse(BaseSubModule):
     """
-    NLH repulsion (used by the newer so3lr-s/m/l models).
+    NLH repulsion (used by the newer so3lr-tauri-s/m/l models).
     """
     prop_keys: Dict
     module_name: str = 'zbl_repulsion'

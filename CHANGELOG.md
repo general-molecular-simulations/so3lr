@@ -2,13 +2,13 @@
 
 All notable changes to SO3LR will be documented in this file. The project uses
 semantic versioning for the Python package; model checkpoints are additionally
-identified by immutable dated names such as `so3lr-m-2606`.
+identified by immutable dated names such as `so3lr-tauri-m-2606`.
 
 ## [Unreleased]
 
 ### Added
 
-- The flash MD engine (`so3lr/flash`): Pallas GPU kernels that evaluate so3lr-s/m/l
+- The flash MD engine (`so3lr/flash`): Pallas GPU kernels that evaluate so3lr-tauri-s/m/l
   with no per-edge arrays, the same energy and forces as the neighbour-list potential
   in a few KiB per atom. `so3lr nve|nvt|nvt-langevin|npt` use it by default
   (`--engine auto`) wherever it applies, with real-space long range or PME and
@@ -31,9 +31,17 @@ identified by immutable dated names such as `so3lr-m-2606`.
 
 ### Changed
 
-- flash: the attention kernels' launch follows the model's filter width (so3lr-l: 4 warps,
+- The s/m/l models are the SO3LR Tauri family: `so3lr-tauri-{s,m,l}-2606` and
+  `-2602`, with floating aliases `so3lr-tauri-s/m/l`; the default is
+  `so3lr-tauri-m-2606`, and the original model stays `so3lr` (the `so3lr-o`
+  synonym is removed). The bundled directories are renamed to match
+  (checksums unchanged). The old names (`so3lr-m-2606`, `so3lr-m`, ...) are
+  removed.
+- The README is a landing page (installation, quick start, models, citation); the full
+  user documentation lives at <https://so3lr.github.io/>.
+- flash: the attention kernels' launch follows the model's filter width (so3lr-tauri-l: 4 warps,
   no register spills) and the backward's filter matmuls run as TF32x3 on tensor cores:
-  so3lr-l's force call is 1.9x faster, so3lr-s/m about 10%; float32 errors unchanged,
+  so3lr-tauri-l's force call is 1.9x faster, so3lr-tauri-s/m about 10%; float32 errors unchanged,
   float64 results unchanged (its kernels take the same launch).
 - Weights & Biases telemetry is opt-in and installed through the optional
   `wandb` extra rather than the base runtime environment (PRs #44 and #45).
@@ -45,8 +53,8 @@ identified by immutable dated names such as `so3lr-m-2606`.
 - Semi-isotropic NPT is marked experimental (a warning is logged once per
   run); fully anisotropic coupling remains unsupported.
 - Documentation and Colab examples now use the immutable
-  `so3lr-{s,m,l}-2606` names for reproducible results and describe the actual
-  pinned no-argument default, `so3lr-m-2606`.
+  `so3lr-tauri-{s,m,l}-2606` names for reproducible results and describe the actual
+  pinned no-argument default, `so3lr-tauri-m-2606`.
 - README float64 examples enable JAX x64 before importing SO3LR.
 - The v2 observable example uses `a0_ratios`; `hirshfeld_ratios` remains the
   documented legacy-v1 output key.

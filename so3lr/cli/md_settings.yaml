@@ -64,7 +64,7 @@ restart_pysages_save_path: null            # Path to save PySAGES state for rest
 restart_pysages_load_path: null            # Path to load PySAGES state from a previous run [Default: null]
 
 ## Model Settings
-model_path: null                           # Model: a canonical bundled name (for example so3lr-m-2606), a floating alias (so3lr-s/m/l), or a custom MLFF directory. If null, uses the pinned so3lr-m-2606 default. [Default: null -> so3lr-m-2606]
+model_path: null                           # Model: a canonical bundled name (for example so3lr-tauri-m-2606), a floating alias (so3lr-tauri-s/m/l), or a custom MLFF directory. If null, uses the pinned so3lr-tauri-m-2606 default. [Default: null -> so3lr-tauri-m-2606]
 lr_cutoff: 12.0                            # Long-range cutoff distance in Å [Default: 12.0]  (CLI: --lr-cutoff)
 dispersion_damping: 2.0                    # Dispersion interactions start damping at (lr_cutoff - dispersion_damping) Å [Default: 2.0]  (CLI: --dispersion-damping)
 buffer_size_multiplier_sr: 1.25           # Buffer size multiplier for short-range neighbor list [Default: 1.25]  (CLI: --buffer-sr)

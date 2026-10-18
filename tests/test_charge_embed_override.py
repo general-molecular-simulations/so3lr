@@ -23,9 +23,9 @@ import pytest
 
 from ase import Atoms
 
-# so3lr-s is small and ships with use_charge_embed=True, so the embedding is
+# so3lr-tauri-s is small and ships with use_charge_embed=True, so the embedding is
 # actually present and the override has something to act on.
-MODEL = 'so3lr-s'
+MODEL = 'so3lr-tauri-s'
 
 # Finite cluster: the long-range cutoff must be large or the electrostatics are
 # truncated nonsense (see the lr_cutoff note in the PR description).

@@ -58,7 +58,7 @@ def get_energy_and_force_fn_sparse(model):
             dipole_vec = safe_scale(dipole_vec, graph_mask[:, None])  # (num_graphs)
             result['dipole_vec'] = dipole_vec
 
-        # Per-atom ratio heads: 'a0_ratios' (so3lr-s/m/l) or 'hirshfeld_ratios'
+        # Per-atom ratio heads: 'a0_ratios' (so3lr-tauri-s/m/l) or 'hirshfeld_ratios'
         # (legacy so3lr) for the same quantity, and 'c6_ratios'. Forward whichever
         # the model has; make_loss_fn's _RATIO_ALIAS maps between the two names.
         for ratio_key in ('a0_ratios', 'hirshfeld_ratios', 'c6_ratios'):

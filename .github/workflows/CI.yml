@@ -166,7 +166,7 @@ jobs:
 
           atoms = Atoms("H2", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]])
           atoms.calc = So3lrCalculator(
-              model="so3lr-m-2606",
+              model="so3lr-tauri-m-2606",
               calculate_stress=False,
               dtype=np.float32,
           )

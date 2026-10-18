@@ -1,6 +1,6 @@
 """SO3LR-Flash: SO3LR MD for millions of atoms on one GPU.
 
-``engine.FlashSO3LR`` evaluates so3lr-s/m/l with Pallas-Triton kernels that build their
+``engine.FlashSO3LR`` evaluates so3lr-tauri-s/m/l with Pallas-Triton kernels that build their
 own cell grid and keep no per-edge arrays: the same energy and forces as the
 neighbour-list potential, faster, in a few KiB per atom. Periodic orthorhombic cells;
 real-space long range or PME; dE/d(strain) for NPT. ``loader.load_params`` reads a

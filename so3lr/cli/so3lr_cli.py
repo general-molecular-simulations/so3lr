@@ -21,6 +21,12 @@ from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
 from ..md_observables import MD_OBSERVABLES
 from ..md_settings_validation import DEFAULT_PRESSURE, load_settings_yaml, resolve_ensemble, validate_md_counts
 from ..flash.check import ENGINES, FLASH_MODES, reserve_gpu
+# Import-cheap (standard library only); the --model help is built from it so the
+# listed names and the default cannot go stale when a release lands.
+from ..model_registry import DEFAULT_MODEL, available_models
+
+MODEL_HELP = (f"Model to use: a bundled name ({', '.join(available_models())}) "
+              f"or a path to a custom MLFF model directory. [default: {DEFAULT_MODEL}]")
 
 # NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
 # submodules, which pull in jax/flax/jax-md/glp/orbax) are deferred so that
@@ -400,10 +406,7 @@ def common_io_options(f: Callable) -> Callable:
 def common_model_options(f: Callable) -> Callable:
     """Common model options for all commands."""
     f = click.option('--model', '--model_path', '--model-path', 'model_path', type=str, default=None,
-                     callback=_validate_model_choice,
-                     help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
-                          'or a path to a custom MLFF model directory. '
-                          'If not provided, so3lr-m is used. [default: so3lr-m]')(f)
+                     callback=_validate_model_choice, help=MODEL_HELP)(f)
     f = click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
                      help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')(f)
     f = click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
@@ -463,7 +466,7 @@ def common_md_options(f: Callable) -> Callable:
                      type=click.Choice(list(MD_OBSERVABLES)),
                      help='Observable to compute and save during MD. Repeatable. '
                           'Note zbl_repulsion (legacy so3lr) and nlh_repulsion '
-                          '(so3lr-s/m/l) are the same quantity under the two '
+                          '(so3lr-tauri-s/m/l) are the same quantity under the two '
                           'model generations\' output keys. [default: none]')(f)
     f = click.option('--help', '-h', is_flag=True, help='Show brief command overview.')(f)
     return f
@@ -509,7 +512,7 @@ def flash_options(f: Callable) -> Callable:
                           'no per-edge arrays: 2.5x faster, and tens of millions of atoms on one '
                           'GPU) whenever it computes what the other options ask for -- an NVIDIA '
                           'GPU, a periodic orthorhombic box, nve/nvt/nvt-langevin/isotropic npt, '
-                          'real-space long range or PME, so3lr-s/m/l -- else the neighbour-list '
+                          'real-space long range or PME, so3lr-tauri-s/m/l -- else the neighbour-list '
                           'potential; the log says which and why. flash or standard forces one. '
                           '[default: auto]')(f)
     f = click.option('--flash-mode', 'flash_mode', default='auto',
@@ -1217,7 +1220,7 @@ def fire_optimization(
     logger.info(f"Spin (unpaired e-):        {num_unpaired_electrons}")
     # Mirror the MD / eval banner: log the resolved short name even when the
     # user did not pass --model (otherwise the user has no record of which
-    # bundled checkpoint was loaded by default, e.g. so3lr-m vs. legacy v1).
+    # bundled checkpoint was loaded by default, e.g. so3lr-tauri-m vs. legacy v1).
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     _model = model_path or DEFAULT_MODEL
     _kind = 'bundled' if _model in available_models() else 'custom path'
@@ -1379,10 +1382,7 @@ def nve_md(**kwargs) -> None:
                    'Default is to refuse (rename your previous run, or pass --overwrite).')
 # Model settings group
 @click.option('--model', '--model_path', 'model_path', type=str, default=None,
-              callback=_validate_model_choice,
-              help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
-                   'or a path to a custom MLFF model directory. '
-                   'If not provided, so3lr-m is used. [default: so3lr-m]')
+              callback=_validate_model_choice, help=MODEL_HELP)
 @click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
@@ -1405,10 +1405,10 @@ def nve_md(**kwargs) -> None:
               help='Comma-separated list of targets to evaluate. '
                    'Standard targets: forces, energy, dipole_vec, hirshfeld_ratios '
                    '(canonical; aliases hirsh_ratios and a0_ratios are accepted, '
-                   'and the new so3lr-s/m/l models report ratios as a0_ratios). '
+                   'and the new so3lr-tauri-s/m/l models report ratios as a0_ratios). '
                    'Observables (saved to output, metrics only if ground truth exists): '
                    'nn_energy, partial_charges (alias: charges), electrostatic_energy, dispersion_energy, '
-                   'nlh_repulsion (canonical for so3lr-s/m/l; legacy models use zbl_repulsion), '
+                   'nlh_repulsion (canonical for so3lr-tauri-s/m/l; legacy models use zbl_repulsion), '
                    'electrostatic_energy_undamped, dispersion_energy_undamped. '
                    'Embeddings: x (final-layer per-atom features, saved to <output>_x.npz). '
                    '[default: forces,dipole_vec,hirshfeld_ratios]')
@@ -1501,7 +1501,7 @@ def eval_model(
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Batch size:                {batch_size}")
     # Mirror the MD-side banner: show the resolved short name (so the user knows
-    # which bundled checkpoint actually loaded — so3lr-s/m/l/so3lr — instead of
+    # which bundled checkpoint actually loaded — so3lr-tauri-s/m/l/so3lr — instead of
     # the generic 'SO3LR' label) and tag it as bundled vs. a custom-path model.
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     _model = model_path or DEFAULT_MODEL
@@ -1581,7 +1581,9 @@ def eval_model(
 @click.option('--workdir', '--work-dir', '--workdir_path', 'workdir',
               type=click.Path(), help='Working directory for fine-tuned model checkpoints and logs.')
 @click.option('--datafile', '--data-file', '--datafile_path', 'datafile',
-              type=click.Path(), help='Path to dataset file (extxyz or tfds format) containing data used for finetuning.')
+              type=click.Path(), help='Required. Path to an ASE-readable dataset file (e.g. extxyz) or .npz used '
+                   'for finetuning. If --config lists TFDS shards under data.datasets, those are '
+                   'used instead and this path is not read.')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Finetuning settings.
