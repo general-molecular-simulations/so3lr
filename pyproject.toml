@@ -101,7 +101,6 @@ notebooks = [
 include = [
     # Publication and contributor documents belong in the source archive, not
     # at the top of site-packages when a wheel is installed.
-    { path = "CITATION.cff", format = "sdist" },
     { path = "CHANGELOG.md", format = "sdist" },
     { path = "DEVELOPERS.md", format = "sdist" },
     { path = "logo.png", format = "sdist" },

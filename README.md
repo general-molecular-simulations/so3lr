@@ -31,14 +31,14 @@ uv sync --locked --extra cuda12   # or: CUDA 12 on Linux x86-64
 uv run so3lr --help
 ```
 
-Already have JAX on a cluster (CUDA or ROCm)? Run `pip install .` in that
+Already have JAX on a cluster (CUDA or ROCm)? Run `uv pip install .` in that
 environment. Optional extras and other options:
 [installation guide](https://so3lr.github.io/installation/).
 
 ## Quick start
 
-Units are eV and Å. The default long-range cutoff (`12` Å) targets periodic
-condensed-phase systems; for gas-phase molecules use `100`.
+Units are eV and Å. The default long-range cutoff, 12 Å, targets periodic
+condensed-phase systems; for gas-phase molecules use 100 Å (`--lr-cutoff 100`).
 
 ```shell
 so3lr opt --input geometry.xyz --force-conv 0.05
@@ -50,7 +50,7 @@ so3lr eval --datafile dataset.extxyz --lr-cutoff 100 --save-to predictions.extxy
 For longer runs, use a settings file: `so3lr --settings settings.yaml`; see
 [molecular dynamics](https://so3lr.github.io/usage/md/).
 
-From Python, SO3LR is an ASE calculator:
+In Python, use SO3LR as an ASE calculator:
 
 ```python
 from ase.io import read
@@ -116,9 +116,8 @@ for development environments, tests and the lockfile policy.
 
 ## Citation
 
-If you use SO3LR, cite the software version (`so3lr.__version__`; metadata in
-[`CITATION.cff`](./CITATION.cff)) and the dated model name, e.g. `so3lr-tauri-m-2606`,
-together with:
+If you use SO3LR, please cite the paper below and give the model you used, e.g.
+`so3lr-tauri-m-2606`:
 
 ```bibtex
 @article{kabylda2025molecular,
