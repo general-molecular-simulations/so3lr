@@ -77,12 +77,11 @@ def test_dated_names_are_pinned():
 
 
 def test_legacy_vanilla_model():
-    for name in ("so3lr", "so3lr-o"):
-        spec = mr.resolve_model(name)
-        assert spec.dir == PKG / "models" / "so3lr"
-        assert spec.family == "vanilla"
-        # The legacy dir ships a canonical params.pkl (no orbax checkpoint).
-        assert spec.from_file is True
+    spec = mr.resolve_model("so3lr")
+    assert spec.dir == PKG / "models" / "so3lr"
+    assert spec.family == "vanilla"
+    # The legacy dir ships a canonical params.pkl (no orbax checkpoint).
+    assert spec.from_file is True
 
 
 def test_default_resolves_to_the_new_m_model():

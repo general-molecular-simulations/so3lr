@@ -420,9 +420,8 @@ def evaluate_so3lr_on(
     # resolving the floating aliases here would log a redirect line for each.
     _bundled_paths = {resolve_model(n).dir for n in canonical_models()}
     if workdir_path in _bundled_paths:
-        # Prefer the user-typed short name when it is a registry key. Without
-        # this, legacy 'so3lr' and 'so3lr-o' both log as 'params' because they
-        # share the same on-disk directory (_PKG / 'params').
+        # Prefer the user-typed short name when it is a registry key, so a
+        # floating alias logs as typed rather than as its target's directory.
         if model_path is not None and model_path in available_models():
             _name = model_path
         elif model_path is None:

@@ -104,11 +104,6 @@ _FLOATING_ALIASES = {
     "so3lr-tauri-l": "so3lr-tauri-l-2606",
 }
 
-# Fixed synonyms: another spelling of one canonical name, never repointed.
-_SYNONYMS = {
-    "so3lr-o": "so3lr",
-}
-
 # Names from before the family was called Tauri. Still accepted so existing
 # scripts and settings files keep working, but not listed by available_models();
 # resolving one logs its new name once. The bare sizes map to the new floating
@@ -135,7 +130,7 @@ def canonical_models():
 
 def model_aliases():
     """Return a mapping of alias name -> canonical name."""
-    return {**_FLOATING_ALIASES, **_SYNONYMS}
+    return dict(_FLOATING_ALIASES)
 
 
 def renamed_models():
@@ -145,7 +140,7 @@ def renamed_models():
 
 def available_models():
     """Return every accepted model name, canonical names first."""
-    return canonical_models() + tuple(_FLOATING_ALIASES) + tuple(_SYNONYMS)
+    return canonical_models() + tuple(_FLOATING_ALIASES)
 
 
 def resolve_model(name_or_path=None):
@@ -174,9 +169,6 @@ def resolve_model(name_or_path=None):
                 "Model name '%s' is deprecated; it is now '%s'.", key, new
             )
         key = new
-
-    if key in _SYNONYMS:
-        key = _SYNONYMS[key]
 
     if key in _FLOATING_ALIASES:
         target = _FLOATING_ALIASES[key]
