@@ -145,10 +145,8 @@ If you use SO3LR, please cite the paper below and give the model you used, e.g.
 
 ## License
 
-SO3LR is released under the [MIT License](./LICENSE). Portions derived from
-Google Research and JAX MD remain under [Apache-2.0](./LICENSE-APACHE-2.0), and
-the Ewald tuning code derived from torch-pme under
-[BSD-3-Clause](./LICENSE-BSD-3-CLAUSE); see
-[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md). These licenses cover the
-source code; they do not relicense the checkpoints, datasets or scientific
-reference data.
+SO3LR is released under the [MIT License](./LICENSE), except the robust loss in
+[`so3lr/mlff/utils/robust_loss_jax/`](./so3lr/mlff/utils/robust_loss_jax/),
+derived from Google Research, which remains under Apache-2.0 (see the `LICENSE`
+there). These licenses cover the source code; they do not relicense the
+checkpoints, datasets or scientific reference data.

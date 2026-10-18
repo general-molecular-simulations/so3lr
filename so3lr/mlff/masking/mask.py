@@ -1,26 +1,25 @@
-# The JAX MD-derived safe_mask portion is Copyright 2019 Google LLC and
-# licensed under Apache-2.0 (see LICENSE-APACHE-2.0). Modified for SO3LR with
-# local typing/documentation; the additional masking helpers are original code.
 import jax.numpy as jnp
 from typing import Callable
 
 
 def safe_mask(mask, fn: Callable, operand: jnp.ndarray, placeholder: float = 0.) -> jnp.ndarray:
     """
-    Safe mask which ensures that gradients flow nicely. See also
-    https://github.com/google/jax-md/blob/b4bce7ab9b37b6b9b2d0a5f02c143aeeb4e2a560/jax_md/util.py#L67
+    fn(operand) where mask is True, placeholder elsewhere, with finite gradients.
+
+    fn only sees operand where the mask holds (0 elsewhere), so masked-out entries cannot
+    put a NaN or inf into the gradient: the "double where" of the JAX FAQ
+    (https://docs.jax.dev/en/latest/faq.html#gradients-contain-nan-where-using-where).
 
     Args:
         mask (array_like): Array of booleans.
         fn (Callable): The function to apply at entries where mask=True.
         operand (array_like): The values to apply fn to.
-        placeholder (int): The values to fill in if mask=False.
+        placeholder (float): The value where mask=False.
 
-    Returns: New array with values either being the output of fn or the placeholder value.
-
+    Returns: fn(operand) where mask is True, else placeholder.
     """
-    masked = jnp.where(mask, operand, 0)
-    return jnp.where(mask, fn(masked), placeholder)
+    inside = jnp.where(mask, operand, jnp.zeros_like(operand))
+    return jnp.where(mask, fn(inside), placeholder)
 
 
 def safe_scale(x: jnp.ndarray, scale: jnp.ndarray, placeholder: float = 0):

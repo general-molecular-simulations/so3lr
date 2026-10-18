@@ -23,12 +23,19 @@ identified by immutable dated names such as `so3lr-tauri-m-2606`.
   built wheel (PR #55).
 - SHA-256 checksums for every bundled model artifact in
   `so3lr/models/SHA256SUMS`, checkable with `sha256sum -c`.
-- The complete Apache License 2.0 and BSD 3-Clause texts and third-party
-  notices for the vendored Google Research robust-loss implementation,
-  JAX MD-derived masking code, and torch-pme-derived Ewald tuner.
+- The Apache License 2.0 text and a notice for the vendored Google Research
+  robust-loss implementation, in its folder (`so3lr/mlff/utils/robust_loss_jax/LICENSE` and
+  `README.md`).
 
 ### Changed
 
+- `so3lr tune-ewald`'s error estimates, candidate search and timing are SO3LR's
+  own implementation of the Kolafa-Perram (Ewald) and Petersen (PME) estimates,
+  with the same error estimates, and `safe_mask` is SO3LR's own; no torch-pme or
+  JAX MD code remains, and the BSD-3-Clause license is no longer needed. In
+  `so3lr.cli.tune_ewald`, the error-bound objects are called with a candidate's
+  parameters (no `.error()`), `GridSearchTuner`, `TuningTimings` and
+  `TuningErrorBounds` are gone, and the `exponent` arguments are removed.
 - The s/m/l models are the SO3LR Tauri family: `so3lr-tauri-{s,m,l}-2606` and
   `-2602`, with floating aliases `so3lr-tauri-s/m/l`; the default is
   `so3lr-tauri-m-2606`, and the original model stays `so3lr` (the `so3lr-o`
@@ -86,6 +93,11 @@ identified by immutable dated names such as `so3lr-tauri-m-2606`.
 
 ### Fixed
 
+- `so3lr tune-ewald --kspace-electrostatics pme` searches with 4 interpolation
+  nodes by default; the default of 3 failed in jax-pme, whose PME interpolates
+  with 4 only. P3M also defaults to 4 now (the MD default; it was 3) and takes
+  3-5. Orders the solver or the PME error estimate does not cover, and
+  `nodes_lo` above `nodes_hi`, are refused before the model is built.
 - The flash engine refuses elements the model was not trained on (Z > 85 for
   so3lr-tauri-s/m/l), as the neighbour-list engine does; it ran them, with reference
   values gathered from another element's row.

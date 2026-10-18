@@ -4,12 +4,10 @@ version = "0.2.0"
 description = "SO3krates Universal Pairwise Force Field with Long Range Interactions (SO3LR) for Molecular Simulation"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-license = "MIT AND Apache-2.0 AND BSD-3-Clause"
+license = "MIT AND Apache-2.0"
 license-files = [
     "LICENSE",
-    "LICENSE-APACHE-2.0",
-    "LICENSE-BSD-3-CLAUSE",
-    "THIRD_PARTY_NOTICES.md",
+    "so3lr/mlff/utils/robust_loss_jax/LICENSE",
 ]
 authors = [
     { name = "Adil Kabylda" },
@@ -111,6 +109,8 @@ include = [
     { path = "so3lr/models/**/*", format = ["sdist", "wheel"] },
     { path = "so3lr/mlff/nn/observable/*.npz", format = ["sdist", "wheel"] },
     { path = "so3lr/mlff/utils/robust_loss_jax/data/*.npz", format = ["sdist", "wheel"] },
+    # the robust loss's Apache-2.0 notice travels with its code
+    { path = "so3lr/mlff/utils/robust_loss_jax/README.md", format = ["sdist", "wheel"] },
 ]
 
 [tool.uv]
