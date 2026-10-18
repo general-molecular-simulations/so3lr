@@ -1095,6 +1095,72 @@ class TestProcessCV:
         xi, _ = self._evaluate(cv, pos)
         assert abs(xi - 6.0) < 1e-2
 
+    def _chargesep(self, pos, species, box, **kw):
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        import types
+        return process_cv({'type': 'chargeseparation', 'reference': [0], **kw},
+                          nbrs=types.SimpleNamespace(reference_position=jnp.asarray(pos)),
+                          species=species, box=jnp.asarray(box))
+
+    def test_chargeseparation_pair_guard_plumbing(self):
+        """The guard is off by default; the yaml options reach the CV."""
+        pos, species, box = self._proton_transfer_system()
+        cv = self._chargesep(pos, species, box)
+        assert cv.pair_guard is False and cv.guard is None
+        cv = self._chargesep(pos, species, box, pair_guard=True, n_hydronium=2.15,
+                             n_hydroxide=1.85, guard_width=0.7, guard_x0=0.4)
+        assert cv.pair_guard is True
+        assert cv.guard == (2.15, 1.85, 0.7, 0.4)
+        cv = self._chargesep(pos, species, box, pair_guard=True)
+        assert cv.guard == (2.1, 1.9, 0.8, 0.5)
+
+    def test_chargeseparation_pair_guard_inert_without_pair(self):
+        """With at most one charged water (no ion, one H3O+) the guarded CV equals the
+        plain CV in value and gradient."""
+        for ion in (False, True):
+            pos, species, box = self._proton_transfer_system(ion=ion)
+            plain = self._evaluate(self._chargesep(pos, species, box), pos)
+            guarded = self._evaluate(self._chargesep(pos, species, box, pair_guard=True), pos)
+            assert guarded[0] == plain[0]
+            np.testing.assert_array_equal(guarded[1], plain[1])
+
+    def test_chargeseparation_pair_guard_collapses_with_hydroxide_and_hydronium(self):
+        """An OH- next to the H3O+ (autoionised solvent): the plain CV changes, the
+        guarded CV is mapped onto s = 0 (the undissociated value); a single OH- (no
+        H3O+) is left untouched."""
+        pos, species, box = self._proton_transfer_system(ion=True)
+        # move the neutral water at (2, 8, 2) to (2, 9, 2) and remove one of its H
+        # -> OH- 7 A from the reference (below L/2 = 7.5 A), H3O+ 6 A
+        w = np.flatnonzero(np.linalg.norm(pos - [2.0, 8.0, 2.0], axis=1) < 1.0)
+        pos = pos.copy()
+        pos[w] += [0.0, 1.0, 0.0]
+        h = int(np.flatnonzero((species == 1) & (np.linalg.norm(pos - [2.98, 9.0, 2.0], axis=1) < 1e-6))[0])
+        keep = np.setdiff1d(np.arange(len(species)), [h])
+        pos2, species2 = pos[keep], species[keep]
+        plain = self._evaluate(self._chargesep(pos2, species2, box), pos2)[0]
+        guarded, grad = self._evaluate(self._chargesep(pos2, species2, box, pair_guard=True), pos2)
+        assert plain == pytest.approx(6.0 - 7.0, abs=1e-2)
+        assert guarded == 0.0 and np.all(grad == 0.0)
+        # single OH- without H3O+: base branch, guard inactive
+        pos3, species3, _ = self._proton_transfer_system(ion=False)
+        h = int(np.flatnonzero((species3 == 1) & (np.linalg.norm(pos3 - [2.98, 8.0, 2.0], axis=1) < 1e-6))[0])
+        keep = np.setdiff1d(np.arange(len(species3)), [h])
+        pos3, species3 = pos3[keep], species3[keep]
+        plain = self._evaluate(self._chargesep(pos3, species3, box), pos3)
+        guarded = self._evaluate(self._chargesep(pos3, species3, box, pair_guard=True), pos3)
+        assert plain[0] < -5.9                        # OH- 6 A away
+        assert guarded[0] == plain[0]
+        np.testing.assert_array_equal(guarded[1], plain[1])
+
+    def test_chargeseparation_pair_guard_invalid_input_raises(self):
+        pos, species, box = self._proton_transfer_system()
+        with pytest.raises(ValueError, match="n_hydroxide < n_ref_water < n_hydronium"):
+            self._chargesep(pos, species, box, pair_guard=True, n_hydronium=1.95)
+        with pytest.raises(ValueError, match="must be positive"):
+            self._chargesep(pos, species, box, pair_guard=True, guard_x0=0.0)
+        with pytest.raises(ValueError, match="share 1"):
+            self._chargesep(pos, species, box, pair_guard=True, guard_width=1.0)
+
 
 class TestGetPysagesMethod:
     """Tests for get_pysages_method."""

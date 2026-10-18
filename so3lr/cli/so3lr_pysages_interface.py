@@ -594,16 +594,27 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
             raise ValueError("chargeseparation: water oxygens must be owner sites "
                              "(check owner_species).")
         water_sites = np.searchsorted(owner_idx, ow_idx)
-        logger.info(f'chargeseparation: reference {ref_idx.tolist()}, {len(h_idx)} H, '
-                    f'{len(owner_idx)} owner sites, {len(ow_idx)} water O, '
-                    f'sigma {arguments.get("sigma", 0.3)} A')
-        return pysages.colvars.coordinates.ChargeSeparation(
+        # 'pair_guard: true' maps configurations with an H3O+ and an OH- in the solvent
+        # (water autoionisation) onto s = 0, so the bias cannot drive autoionisation
+        cv = pysages.colvars.coordinates.ChargeSeparation(
             indices=[tuple(h_idx.tolist()), tuple(owner_idx.tolist()),
                      tuple(ref_idx.tolist())],
             box=box_arr,
             water_sites=water_sites,
             sigma=arguments.get('sigma', 0.3),
+            pair_guard=bool(arguments.get('pair_guard', False)),
+            n_hydronium=arguments.get('n_hydronium'),
+            n_hydroxide=arguments.get('n_hydroxide'),
+            guard_width=arguments.get('guard_width', 0.8),
+            guard_x0=arguments.get('guard_x0', 0.5),
         )
+        guard = (f'pair guard on (n_hydronium {cv.n_hydronium}, n_hydroxide '
+                 f'{cv.n_hydroxide}, width {cv.guard_width}, x0 {cv.guard_x0})'
+                 if cv.pair_guard else 'pair guard off')
+        logger.info(f'chargeseparation: reference {ref_idx.tolist()}, {len(h_idx)} H, '
+                    f'{len(owner_idx)} owner sites, {len(ow_idx)} water O, '
+                    f'sigma {cv.sigma} A, {guard}')
+        return cv
     elif name_lower == 'ionsitedistance':
         # Distance between the site atoms ('indices') and the H3O+ (mode 'acid') or
         # OH- (mode 'base') in the solvent; the distance to the nearest water while no
