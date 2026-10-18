@@ -90,9 +90,9 @@ identified by immutable dated names such as `so3lr-tauri-m-2606`.
 
 ### Fixed
 
-- `so3lr tune-ewald --kspace-electrostatics pme` (and `p3m`) searches with 4
-  interpolation nodes by default; the default of 3 failed in jax-pme, which
-  interpolates with 4 only. Other values of `nodes_lo`/`nodes_hi` are refused
+- `so3lr tune-ewald --kspace-electrostatics pme` searches with 4 interpolation
+  nodes by default; the default of 3 failed in jax-pme, whose PME interpolates
+  with 4 only (P3M takes 1-5). Orders a method does not implement are refused
   before the model is built.
 - The flash engine refuses elements the model was not trained on (Z > 85 for
   so3lr-tauri-s/m/l), as the neighbour-list engine does; it ran them, with reference
