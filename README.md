@@ -902,7 +902,7 @@ Enhanced sampling works in any ensemble that SO3LR's MD engine supports — **NV
 | `shapeanisotropy` | Shape anisotropy |
 | `coordinationnumber` | Coordination number with element-specific filtering |
 | `chargeseparation` | Signed distance between a solute (`reference` atoms) and the H3O+ (> 0) or OH- (< 0) in the solvent (Xu et al., arXiv:2610.13265); options `owner_species`, `water_indices`, `sigma` |
-| `ionsitedistance` | Distance between an ionizable site (`indices`) and the H3O+ (`mode: 'acid'`) or OH- (`mode: 'base'`); exactly `d_null` (default 2.5 Å) with zero gradient while no such ion exists. Bias together with a `coordinationnumber` of the same site and `use_pinv: True`; options `water_indices`, `n0`, `a`, `p`, `r0_water`, `water_cn_exps`, `d_null` |
+| `ionsitedistance` | Distance between an ionizable site (`indices`) and the H3O+ (`mode: 'acid'`) or OH- (`mode: 'base'`); the distance to the nearest water while no such ion exists, so the CV is never flat and ABF's force estimate stays bounded. Water H counts by Gaussian sharing of every H among all heavy atoms. Bias together with a `coordinationnumber` of the same site; options `water_indices`, `n0`, `a`, `sigma`, `tau` |
 
 For pKa calculations with an acid (or a protonated base with a counterion), the
 proton transfer is biased with the coordination number and the separation of the
@@ -926,7 +926,7 @@ cv:
   - type: "ionsitedistance"
     indices: [4298]           # same site
     mode: "acid"
-    grid_min: 1.95            # d_null = 2.5 A in the middle of a 0.1 A bin
+    grid_min: 1.95            # without an ion: nearest water, ~2.8-3.3 A
     grid_max: 14.45
     grid_stride: 125
     periodic: false

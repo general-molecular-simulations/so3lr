@@ -952,25 +952,111 @@ class TestProcessCV:
         cv = self._isd(pos, species, box)
         assert isinstance(cv, pysages.colvars.coordinates.IonSiteDistance)
         np.testing.assert_array_equal(self._atoms(cv, 0), [0])
-        # carbonyl O (bonded to C) is not a water oxygen
-        o_idx = np.flatnonzero(species == 8)
-        np.testing.assert_array_equal(self._atoms(cv, 1), o_idx[1:])
+        # every heavy atom owns hydrogens; the carbonyl O (bonded to C) is not water
+        owners = self._atoms(cv, 1)
+        np.testing.assert_array_equal(owners, np.flatnonzero(species != 1))
+        np.testing.assert_array_equal(owners[np.asarray(cv.water_sites)],
+                                      np.flatnonzero(species == 8)[1:])
         np.testing.assert_array_equal(self._atoms(cv, 2), np.flatnonzero(species == 1))
-        assert cv.mode == 'acid' and cv.n0 == 2.35 and cv.d_null == 2.5
-        cvb = self._isd(pos, species, box, mode='base', d_null=2.0, n0=1.6)
-        assert cvb.mode == 'base' and cvb.n0 == 1.6 and cvb.d_null == 2.0
+        assert cv.mode == 'acid' and cv.n0 == 2.5 and cv.a == 0.4
+        assert cv.sigma == 0.25 and cv.tau == 0.2
+        cvb = self._isd(pos, species, box, mode='base')
+        assert cvb.mode == 'base' and cvb.n0 == 1.5
+        cvb = self._isd(pos, species, box, mode='base', n0=1.45, a=0.3, sigma=0.2, tau=0.1)
+        assert cvb.n0 == 1.45 and cvb.a == 0.3 and cvb.sigma == 0.2 and cvb.tau == 0.1
 
     def test_ionsitedistance_value_and_placeholder(self):
-        """With an H3O+ the CV is its distance to the site; without one it is
-        exactly d_null with an exactly zero gradient (no force on any atom)."""
+        """With an H3O+ the CV is its distance to the site; without one it is the
+        soft distance to the nearest water, with an O(1) gradient (never flat)."""
         pos, species, box = self._proton_transfer_system(ion=True)
         xi, grad = self._evaluate(self._isd(pos, species, box), pos)
-        assert abs(xi - 6.0) < 1e-4
+        assert abs(xi - 6.0) < 1e-6
         assert np.all(np.isfinite(grad)) and np.abs(grad).max() > 0.0
         pos, species, box = self._proton_transfer_system(ion=False)
         xi, grad = self._evaluate(self._isd(pos, species, box), pos)
-        assert xi == 2.5
-        assert np.abs(grad).max() == 0.0
+        # three waters at 6 A: softmin = 6 - tau ln 3
+        assert xi == pytest.approx(6.0 - 0.2 * np.log(3.0), abs=1e-6)
+        assert np.all(np.isfinite(grad))
+        assert np.linalg.norm(grad) == pytest.approx(np.sqrt(2.0 / 3.0), abs=1e-6)
+
+    def test_ionsitedistance_ignores_hydrogen_bonded_neutral_water(self):
+        """An intact water whose neighbour's H sits 1.30 A away (1.07 A from its own O)
+        is neutral: it owns ~2 H, gets zero weight and the CV stays at the
+        nearest-water distance (a rational H count with r0 = 1.3 A counted it as an
+        ion)."""
+        from pysages.colvars.coordinates import ion_site_distance
+        pos, species, box = self._proton_transfer_system(ion=False)
+        # donor water: O 1.07 A from its H, that H 1.30 A from the O at (2, 8, 2)
+        pos = np.vstack([pos, [(2.0, 8.0, 4.37), (2.0, 8.0, 3.30), (2.0, 8.9, 4.7)]])
+        species = np.concatenate([species, [8, 1, 1]])
+        cv = self._isd(pos, species, box)
+        X = jnp.asarray(pos)
+        groups = [np.asarray(cv.indices)[np.asarray(g)] for g in cv.groups]
+        xi, n_w, w, w0, d_ref = ion_site_distance(
+            *(X[g] for g in groups), cv.box, cv.water_sites, cv.sign, cv.n0, cv.a,
+            cv.sigma, cv.tau)
+        assert float(jnp.max(n_w)) < 2.05
+        assert float(jnp.max(w)) == 0.0 and float(w0) == 1.0
+        assert float(xi) == pytest.approx(float(d_ref), abs=1e-12)
+
+    def test_ionsitedistance_gradient_bounded_during_proton_transfer(self):
+        """Move the proton from the site N to a water 2.7 A away. The CV stays
+        continuous and its gradient never comes close to zero, so ABF's
+        W = pinv(J^T) stays bounded (a CV that is flat while no ion exists passes
+        through vanishing gradients here)."""
+        site = [(2.0, 2.0, 2.0), (2.0, 3.0, 2.0), (2.0, 1.66, 2.96)]      # N + 2 H
+        heavy = [(0.6, 2.0, 2.0), (0.6, 3.23, 2.0)]                          # C, carbonyl O
+        acceptor = [(4.7, 2.0, 2.0), (5.03, 2.92, 2.0), (5.03, 1.54, 2.8)]  # water O + 2 H
+        others = [(8.0, 2.0, 2.0), (8.33, 2.92, 2.0), (8.33, 1.54, 2.8),
+                  (2.0, 8.0, 2.0), (2.98, 8.0, 2.0), (1.67, 8.92, 2.0)]
+        species = np.array([7, 1, 1, 6, 8, 8, 1, 1, 8, 1, 1, 8, 1, 1, 1])
+        box = np.array([15.0, 15.0, 15.0])
+        path = np.linspace(2.98, 3.72, 41)            # transferring H along N -> O
+        frame = lambda x: np.array(site + heavy + acceptor + others + [(x, 2.0, 2.0)])
+        cv = self._isd(frame(path[0]), species, box)
+        xis, gnorm = [], []
+        for x in path:
+            xi, grad = self._evaluate(cv, frame(x))
+            assert np.all(np.isfinite(grad))
+            xis.append(xi)
+            gnorm.append(np.linalg.norm(grad))
+        assert xis[-1] == pytest.approx(2.7, abs=1e-3)          # H3O+ at 2.7 A
+        assert np.max(np.abs(np.diff(xis))) < 0.02
+        assert min(gnorm) > 0.5 and max(gnorm) < 5.0
+
+    def test_ionsitedistance_smooth_water_to_water_hop(self):
+        """A proton hopping between two waters 2.45 A apart (5 -> 7.45 A from the site)
+        moves the CV smoothly and monotonically from one distance to the other: no dip
+        towards the nearest-water distance and no near-step (the hop is spread over
+        several MD steps of proton motion)."""
+        def wat(o, s):
+            o = np.asarray(o)
+            return [tuple(o), tuple(o + s * np.array([0.33, 0.92, 0.0])),
+                    tuple(o + s * np.array([0.33, -0.46, 0.80]))]
+        base = ([(0.0, 0.0, 0.0), (0.0, 1.43, 0.0)]                      # C site, O
+                + wat((5.0, 0.0, 0.0), -1) + wat((7.45, 0.0, 0.0), 1)
+                + wat((0.0, -3.2, 0.0), 1) + wat((0.0, 0.0, -6.0), 1))   # nearest water 3.2 A
+        species = np.array([6, 8] + [8, 1, 1] * 4 + [1])
+        box = np.array([20.0, 20.0, 20.0])
+        frame = lambda x: np.array(base + [(x, 0.0, 0.0)])
+        path = np.linspace(5.98, 6.47, 99)
+        cv = self._isd(frame(path[0]), species, box, indices=[0])
+        xis, gnorm = [], []
+        for x in path:
+            xi, grad = self._evaluate(cv, frame(x))
+            assert np.all(np.isfinite(grad))
+            xis.append(xi)
+            gnorm.append(np.linalg.norm(grad[-1]))                       # hopping H
+        xis = np.array(xis)
+        assert xis[0] == pytest.approx(5.0, abs=1e-6)
+        assert xis[-1] == pytest.approx(7.45, abs=1e-6)
+        assert np.all(np.diff(xis) >= -1e-9)                             # monotonic, no dip
+        assert max(gnorm) < 100.0
+        # 80 % of the change is spread over > 0.03 A of proton motion (> 3 MD steps)
+        c = np.cumsum(np.abs(np.diff(xis)))
+        c /= c[-1]
+        dx = path[1] - path[0]
+        assert (np.searchsorted(c, 0.9) - np.searchsorted(c, 0.1)) * dx > 0.03
 
     def test_ionsitedistance_invalid_input_raises(self):
         from so3lr.cli.so3lr_pysages_interface import process_cv
@@ -981,8 +1067,16 @@ class TestProcessCV:
             self._isd(pos, species, box, indices=[1])
         with pytest.raises(ValueError, match="mode"):
             self._isd(pos, species, box, mode='acidic')
-        with pytest.raises(ValueError, match="must be >= 1"):
-            self._isd(pos, species, box, p=0.5)
+        with pytest.raises(ValueError, match="must be positive"):
+            self._isd(pos, species, box, sigma=0.0)
+        with pytest.raises(ValueError, match="neutral water"):
+            self._isd(pos, species, box, n0=2.2)
+        with pytest.raises(ValueError, match="ion share 1"):
+            self._isd(pos, species, box, n0=2.7)
+        for key, val in (('d_null', 2.5), ('r0_water', 1.3), ('water_cn_exps', [16, 32]),
+                         ('p', 4.0)):
+            with pytest.raises(ValueError, match="were removed"):
+                self._isd(pos, species, box, **{key: val})
 
     def test_chargeseparation_cv_groups(self):
         """Same water detection as ionsitedistance; the reference atom is

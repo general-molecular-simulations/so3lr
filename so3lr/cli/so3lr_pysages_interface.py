@@ -606,12 +606,18 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
         )
     elif name_lower == 'ionsitedistance':
         # Distance between the site atoms ('indices') and the H3O+ (mode 'acid') or
-        # OH- (mode 'base') in the solvent; d_null while no such ion exists. Meant to
-        # be biased together with a coordinationnumber of the same site. Water O as
-        # for chargeseparation ('water_indices' or automatic). Every H atom of the
-        # system enters the water H counts.
+        # OH- (mode 'base') in the solvent; the distance to the nearest water while no
+        # such ion exists. Meant to be biased together with a coordinationnumber of the
+        # same site. Water O as for chargeseparation ('water_indices' or automatic).
+        # Every H is shared among all heavy atoms of the system (owners).
         if box is None or not np.any(box):
             raise ValueError("ionsitedistance requires a periodic box.")
+        removed = [k for k in ('d_null', 'r0_water', 'water_cn_exps', 'p') if k in arguments]
+        if removed:
+            raise ValueError(f"ionsitedistance: option(s) {removed} were removed (H counts "
+                             "now use Gaussian ownership, 'sigma'; the ion share is a smooth "
+                             "step of width 'a'; without an ion the CV is the distance to the "
+                             "nearest water, 'tau').")
         site_spec = arguments.get('indices', arguments.get('reference'))
         if site_spec is None:
             raise ValueError("ionsitedistance requires 'indices' (atom indices of the "
@@ -622,25 +628,25 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
         if np.any(species_arr[site_idx] == 1):
             raise ValueError("ionsitedistance: the site atoms must be heavy atoms.")
         h_idx = np.flatnonzero(species_arr == 1)
+        own_idx = np.flatnonzero(species_arr != 1)
         ow_idx = np.setdiff1d(_water_oxygens(arguments, nbrs, species_arr, box_arr),
                               site_idx)
         if len(ow_idx) == 0 or not np.all(species_arr[ow_idx] == 8):
             raise ValueError("ionsitedistance: the water indices must be O atoms.")
         cv = pysages.colvars.coordinates.IonSiteDistance(
-            indices=[tuple(site_idx.tolist()), tuple(ow_idx.tolist()),
+            indices=[tuple(site_idx.tolist()), tuple(own_idx.tolist()),
                      tuple(h_idx.tolist())],
             box=box_arr,
+            water_sites=np.searchsorted(own_idx, ow_idx),
             mode=arguments.get('mode', 'acid'),
             n0=arguments.get('n0'),
-            a=arguments.get('a', 0.1),
-            p=arguments.get('p', 4.0),
-            r0_water=arguments.get('r0_water', 1.3),
-            water_cn_exps=tuple(arguments.get('water_cn_exps', (16, 32))),
-            d_null=arguments.get('d_null', 2.5),
+            a=arguments.get('a', 0.4),
+            sigma=arguments.get('sigma', 0.25),
+            tau=arguments.get('tau', 0.2),
         )
         logger.info(f'ionsitedistance: site {site_idx.tolist()}, mode {cv.mode}, '
-                    f'{len(ow_idx)} water O, {len(h_idx)} H, n0 {cv.n0}, '
-                    f'd_null {cv.d_null} A')
+                    f'{len(ow_idx)} water O, {len(own_idx)} owners, {len(h_idx)} H, '
+                    f'n0 {cv.n0}, a {cv.a}, sigma {cv.sigma} A, tau {cv.tau} A')
         return cv
     elif name_lower == 'ringphase':
         return pysages.colvars.angles.RingPhaseAngle(indices=arguments['indices'])
