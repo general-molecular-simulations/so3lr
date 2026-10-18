@@ -36,7 +36,7 @@ def _supercell(atoms):
 
 def _calc(backend, kspace, **kw):
     from so3lr import So3lrCalculator
-    return So3lrCalculator(model='so3lr-s', dtype=np.float64, lr_cutoff=LR,
+    return So3lrCalculator(model='so3lr-tauri-s', dtype=np.float64, lr_cutoff=LR,
                            neighbor_backend=backend, **(PME if kspace else {}), **kw)
 
 

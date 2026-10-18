@@ -3,14 +3,14 @@
 A "model" can be referred to either by a registered name or by an arbitrary
 filesystem path to a custom/finetuned model directory.
 
-Names follow ``so3lr-<size>[-<release>]`` and come in two tiers:
+Names follow ``so3lr-tauri-<size>[-<release>]`` and come in two tiers:
 
-* ``so3lr-m-2606`` -- one exact release; immutable.
-* ``so3lr-m`` -- current recommended M; moves when a new release lands.
+* ``so3lr-tauri-m-2606`` -- one exact release; immutable.
+* ``so3lr-tauri-m`` -- current recommended M; moves when a new release lands.
 
 ``<size>`` is one of ``s``/``m``/``l``; ``<release>`` is the ``YYMM`` of the
-release. See https://so3lr.github.io/models/ for the user-facing version of
-this.
+release. The original SO3LR model is plain ``so3lr``. See
+https://so3lr.github.io/models/ for the user-facing version of this.
 
 Only canonical names correspond 1:1 to a directory under ``models/``; the bare
 sizes are aliases. Cite the canonical name in papers and benchmark tables --
@@ -86,12 +86,12 @@ class ModelSpec:
 
 # Canonical names -- exactly one per directory under models/.
 _CANONICAL = {
-    "so3lr-s-2602": ModelSpec(_MODELS / "so3lr-s-2602", family="v2"),
-    "so3lr-m-2602": ModelSpec(_MODELS / "so3lr-m-2602", family="v2"),
-    "so3lr-l-2602": ModelSpec(_MODELS / "so3lr-l-2602", family="v2"),
-    "so3lr-s-2606": ModelSpec(_MODELS / "so3lr-s-2606", family="v2"),
-    "so3lr-m-2606": ModelSpec(_MODELS / "so3lr-m-2606", family="v2"),
-    "so3lr-l-2606": ModelSpec(_MODELS / "so3lr-l-2606", family="v2"),
+    "so3lr-tauri-s-2602": ModelSpec(_MODELS / "so3lr-tauri-s-2602", family="v2"),
+    "so3lr-tauri-m-2602": ModelSpec(_MODELS / "so3lr-tauri-m-2602", family="v2"),
+    "so3lr-tauri-l-2602": ModelSpec(_MODELS / "so3lr-tauri-l-2602", family="v2"),
+    "so3lr-tauri-s-2606": ModelSpec(_MODELS / "so3lr-tauri-s-2606", family="v2"),
+    "so3lr-tauri-m-2606": ModelSpec(_MODELS / "so3lr-tauri-m-2606", family="v2"),
+    "so3lr-tauri-l-2606": ModelSpec(_MODELS / "so3lr-tauri-l-2606", family="v2"),
     # Original vanilla SO3LR (v1). Kept reachable by name for reproducibility.
     "so3lr": ModelSpec(_MODELS / "so3lr", family="vanilla"),
 }
@@ -99,20 +99,15 @@ _CANONICAL = {
 # Moving pointers. What these resolve to changes when a new release lands, so
 # resolving one emits a log line naming the canonical target it picked.
 _FLOATING_ALIASES = {
-    "so3lr-s": "so3lr-s-2606",
-    "so3lr-m": "so3lr-m-2606",
-    "so3lr-l": "so3lr-l-2606",
-}
-
-# Fixed synonyms: another spelling of one canonical name, never repointed.
-_SYNONYMS = {
-    "so3lr-o": "so3lr",
+    "so3lr-tauri-s": "so3lr-tauri-s-2606",
+    "so3lr-tauri-m": "so3lr-tauri-m-2606",
+    "so3lr-tauri-l": "so3lr-tauri-l-2606",
 }
 
 # Model used when nothing is specified (bare calculator / CLI without --model /
 # YAML without a model key). Pinned to a canonical name so the default can never
 # drift silently when a new release lands.
-DEFAULT_MODEL = "so3lr-m-2606"
+DEFAULT_MODEL = "so3lr-tauri-m-2606"
 
 # Aliases already logged, so resolving inside a loop does not spam the log.
 _LOGGED_ALIASES = set()
@@ -125,12 +120,12 @@ def canonical_models():
 
 def model_aliases():
     """Return a mapping of alias name -> canonical name."""
-    return {**_FLOATING_ALIASES, **_SYNONYMS}
+    return dict(_FLOATING_ALIASES)
 
 
 def available_models():
     """Return every accepted model name, canonical names first."""
-    return canonical_models() + tuple(_FLOATING_ALIASES) + tuple(_SYNONYMS)
+    return canonical_models() + tuple(_FLOATING_ALIASES)
 
 
 def resolve_model(name_or_path=None):
@@ -150,9 +145,6 @@ def resolve_model(name_or_path=None):
             an existing path.
     """
     key = str(name_or_path) if name_or_path is not None else DEFAULT_MODEL
-
-    if key in _SYNONYMS:
-        key = _SYNONYMS[key]
 
     if key in _FLOATING_ALIASES:
         target = _FLOATING_ALIASES[key]

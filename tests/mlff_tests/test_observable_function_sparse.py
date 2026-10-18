@@ -1,7 +1,7 @@
 """The energy/force wrapper must forward every head, exactly once.
 
 Two defects lived here: the wrapper dropped 'a0_ratios' (the key the current
-so3lr-s/m/l models emit for the ratio head), and it ran a second full
+so3lr-tauri-s/m/l models emit for the ratio head), and it ran a second full
 model.apply purely to read the non-energy outputs.
 """
 import json
@@ -45,7 +45,7 @@ def _load(model_name):
     return make_so3krates_sparse_from_config(cfg), params
 
 
-@pytest.mark.parametrize('model_name', ['so3lr-m-2606', 'so3lr'])
+@pytest.mark.parametrize('model_name', ['so3lr-tauri-m-2606', 'so3lr'])
 def test_every_ratio_head_is_forwarded(model_name):
     """Whatever ratio keys the model emits must survive the wrapper.
 
@@ -64,7 +64,7 @@ def test_every_ratio_head_is_forwarded(model_name):
 def test_ratio_target_trains_on_the_current_generation():
     """`loss_weights: {hirshfeld_ratios: ...}` on a model that emits
     'a0_ratios' must work via the alias remap; it used to raise KeyError."""
-    net, params = _load('so3lr-m-2606')
+    net, params = _load('so3lr-tauri-m-2606')
     inputs = _water_inputs()
     loss_fn = training_utils.make_loss_fn(
         get_energy_and_force_fn_sparse(net),
@@ -80,7 +80,7 @@ def test_ratio_target_trains_on_the_current_generation():
 def test_energy_and_force_call_runs_one_forward_pass():
     """The wrapper used to call model.apply a second time just to read the
     non-energy heads, doubling the cost of every training/validation step."""
-    net, params = _load('so3lr-m-2606')
+    net, params = _load('so3lr-tauri-m-2606')
     calls = {'n': 0}
     original = type(net).apply
 

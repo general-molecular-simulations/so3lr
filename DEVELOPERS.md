@@ -7,7 +7,7 @@ This document is for developers contributing to the SO3LR project. It covers rep
 - `so3lr/` — Main source code for the SO3LR model and CLI
 - `tests/` — Unit tests
 - `tests/integration/` — end-to-end integration tests
-- `so3lr/models/` — Bundled pretrained model directories, one per canonical name (`so3lr`, `so3lr-{s,m,l}-2602`, `so3lr-{s,m,l}-2606`); short names like `so3lr-m` are aliases resolved by `so3lr/model_registry.py`
+- `so3lr/models/` — Bundled pretrained model directories, one per canonical name (`so3lr`, `so3lr-tauri-{s,m,l}-2602`, `so3lr-tauri-{s,m,l}-2606`); short names like `so3lr-tauri-m` are aliases resolved by `so3lr/model_registry.py`
 - `pyproject.toml` — Python dependencies and build system
 
 ## Running Tests

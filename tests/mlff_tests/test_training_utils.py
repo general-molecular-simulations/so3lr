@@ -154,7 +154,7 @@ def test_expand_observables_tiles_the_optional_final_bias():
     npt.assert_equal(obs0['energy_dense_final']['bias'].shape, (n,))
     npt.assert_allclose(obs0['energy_dense_final']['bias'], jnp.full((n,), 0.5))
 
-    # No bias key (so3lr-s/m/l) -> nothing added.
+    # No bias key (so3lr-tauri-s/m/l) -> nothing added.
     without_bias = {'params': {'observables_0': {'energy_dense_final': {
         'kernel': jnp.ones((8, 1)),
     }}}}

@@ -20,7 +20,7 @@ from so3lr.mlff.sph_ops import init_sph_fn
 # --- descriptor distance floor -------------------------------------------------
 # Pushed far enough inside its trained range, the learned part of the model does
 # not merely become inaccurate, it leaves the physical regime: the energy head
-# returns >100 eV for a two-atom system, forces exceed 1e3 eV/A, and on so3lr-l a
+# returns >100 eV for a two-atom system, forces exceed 1e3 eV/A, and on so3lr-tauri-l a
 # compressed S-S pair returns NaN outright. The analytic terms never do this --
 # NLH/ZBL repulsion, electrostatics and dispersion are closed-form and stay valid
 # at any separation. So only the distance handed to the RADIAL BASIS is floored.
@@ -46,7 +46,7 @@ PAIR_FLOOR_WIDTH = 0.05    # [A] handover; the floor is exactly inert above it
 # means putting 3 eV -- 35 kT at 1000 K -- into one pair coordinate.
 #
 # Deliberately NOT covered: below ~1.3 A the S-S curve has a shallow spurious
-# minimum behind a ~2 eV barrier on legacy so3lr and so3lr-s. It is bounded and
+# minimum behind a ~2 eV barrier on legacy so3lr and so3lr-tauri-s. It is bounded and
 # finite, and at 1.31 A the S-S repulsion is 0.007 eV, so flooring there would
 # mean overriding the model where its own repulsion is negligible -- exactly the
 # interpolating regime this constant exists to protect. Reported, not patched.

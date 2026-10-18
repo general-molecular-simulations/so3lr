@@ -68,7 +68,7 @@ from so3lr import So3lrCalculator
 
 atoms = read("geometry.xyz")
 atoms.info["charge"] = 0          # total charge; 0 if unset
-atoms.calc = So3lrCalculator(model="so3lr-m-2606", lr_cutoff=100)
+atoms.calc = So3lrCalculator(model="so3lr-tauri-m-2606", lr_cutoff=100)
 
 energy = atoms.get_potential_energy()
 forces = atoms.get_forces()
@@ -76,24 +76,25 @@ forces = atoms.get_forces()
 
 ## Models
 
-Three sizes ship inside the package; select one by name, no download needed.
+The **SO3LR Tauri** models ship in three sizes inside the package; select one by
+name, no download needed.
 
 | Model | Layers | Features | Heads | Cutoff (Å) |
 |-------|--------|----------|-------|-----------|
-| `so3lr-s-2606` | 2 | 128 | 4 | 4.5 |
-| `so3lr-m-2606` *(default)* | 3 | 128 | 4 | 4.5 |
-| `so3lr-l-2606` | 3 | 256 | 8 | 5.0 |
+| `so3lr-tauri-s-2606` | 2 | 128 | 4 | 4.5 |
+| `so3lr-tauri-m-2606` *(default)* | 3 | 128 | 4 | 4.5 |
+| `so3lr-tauri-l-2606` | 3 | 256 | 8 | 5.0 |
 
 The same names work everywhere: `So3lrCalculator(model=...)`, `--model` on the
 CLI, `model:` in a settings file; a path loads a fine-tuned or custom model. The
-previous release is bundled as `so3lr-{s,m,l}-2602`. The original model from the
-[JACS paper](https://doi.org/10.1021/jacs.5c09558) is `so3lr` (alias `so3lr-o`);
-it was not trained on energies, so only its relative energies are meaningful.
+previous release is bundled as `so3lr-tauri-{s,m,l}-2602`, and the original
+model from the [JACS paper](https://doi.org/10.1021/jacs.5c09558) as `so3lr`; it
+was not trained on energies, so only its relative energies are meaningful.
 
 > [!WARNING]
-> `so3lr-s`, `so3lr-m` and `so3lr-l` are aliases for the current release and are
-> repointed when a new one lands. Cite the dated name (e.g. `so3lr-m-2606`) in
-> papers and benchmark tables.
+> `so3lr-tauri-s`, `so3lr-tauri-m` and `so3lr-tauri-l` are aliases for the
+> current release and are repointed when a new one lands. Cite the dated name
+> (e.g. `so3lr-tauri-m-2606`) in papers and benchmark tables.
 
 ## Documentation
 
@@ -129,7 +130,7 @@ for development environments, tests and the lockfile policy.
 ## Citation
 
 If you use SO3LR, cite the software version (`so3lr.__version__`; metadata in
-[`CITATION.cff`](./CITATION.cff)) and the dated model name, e.g. `so3lr-m-2606`,
+[`CITATION.cff`](./CITATION.cff)) and the dated model name, e.g. `so3lr-tauri-m-2606`,
 together with:
 
 ```bibtex

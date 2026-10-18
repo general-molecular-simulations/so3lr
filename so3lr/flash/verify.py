@@ -1,7 +1,7 @@
 """Check SO3LR-Flash against the neighbour-list potential of ``so3lr nve``: energy, forces
 and dE/d(strain) (the NPT pressure's virial).
 
-    python -m so3lr.flash.verify --input water.xyz [--model so3lr-m] [--precision float64]
+    python -m so3lr.flash.verify --input water.xyz [--model so3lr-tauri-m] [--precision float64]
         [--pme electrostatics,dispersion --kspace-smearing 2 --kspace-spacing 1.55]
 
 Builds the neighbour-list potential exactly as ``perform_md`` does (fractional

@@ -53,7 +53,7 @@ UNSUPPORTED = {
     "kspace_npt_cycles": "re-tuning the PME mesh every so many cycles (kspace_npt_cycles)",
 }
 
-# the model hyperparameters the kernels are written for (so3lr-s/m/l 2602 and 2606); the
+# the model hyperparameters the kernels are written for (so3lr-tauri-s/m/l 2602 and 2606); the
 # sizes below may vary; any other key, or any other value, makes flash decline
 ARCHITECTURE = {
     "activation_fn": "silu", "energy_activation_fn": "silu", "cutoff_fn": "phys",
@@ -67,7 +67,7 @@ ARCHITECTURE = {
     "electrostatic_energy_kspace_interp_nodes": None,
 }
 # (degrees, heads, features) checked against the neighbour-list potential: one head per
-# degree entry, 32 features each (so3lr-s/m, and so3lr-l with each degree twice)
+# degree entry, 32 features each (so3lr-tauri-s/m, and so3lr-tauri-l with each degree twice)
 SHAPES = {((1, 2, 3, 4), 4, 128), ((1, 1, 2, 2, 3, 3, 4, 4), 8, 256)}
 SIZES = {
     "cutoff", "num_layers", "num_radial_basis_fn", "energy_regression_dim", "electrostatic_energy_bool",
@@ -161,7 +161,7 @@ def model_problem(model_path):
     with open(spec.dir / "hyperparameters.json") as fp:
         model = json.load(fp)["model"]
     if model.get("legacy_so3lr_bool", False):
-        return "it runs the v2 models (so3lr-s, -m, -l), not the legacy so3lr"
+        return "it runs the v2 models (so3lr-tauri-s, -m, -l), not the legacy so3lr"
     shape = (tuple(model.get("degrees") or ()), model.get("num_heads"), model.get("num_features"))
     if shape not in SHAPES:
         return (f"its kernels are written for degrees, heads and features {sorted(SHAPES)} "

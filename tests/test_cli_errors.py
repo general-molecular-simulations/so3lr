@@ -60,7 +60,7 @@ def test_eval_bad_model_name_suggests(runner):
     assert result.exit_code != 0
     assert "is not a bundled name" in result.output
     assert "Did you mean" in result.output
-    assert "so3lr-m" in result.output  # a bundled name appears as a suggestion
+    assert "so3lr-tauri-m" in result.output  # a bundled name appears as a suggestion
 
 
 def test_opt_bad_model_name_suggests(runner, tmp_xyz):

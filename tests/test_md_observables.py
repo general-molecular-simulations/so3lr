@@ -81,7 +81,7 @@ def test_embeddings_are_reported_when_the_width_is_unknown(tmp_path):
 def test_model_feature_width_is_readable_for_bundled_models():
     from so3lr.cli.so3lr_md import _model_num_features
 
-    assert _model_num_features('so3lr-m-2606') == 128
+    assert _model_num_features('so3lr-tauri-m-2606') == 128
     assert _model_num_features(None) is not None  # default model
 
 
@@ -137,7 +137,7 @@ def test_tune_ewald_settings_keys_are_known_to_the_validator():
 
 
 def test_dispersion_ratios_reads_either_name():
-    """so3lr-s/m/l output 'a0_ratios', the legacy model 'hirshfeld_ratios' and no
+    """so3lr-tauri-s/m/l output 'a0_ratios', the legacy model 'hirshfeld_ratios' and no
     C6 head; tune-ewald used to read 'hirshfeld_ratios' and 'c6_ratios' directly
     and raised KeyError for every bundled model."""
     from so3lr.cli.so3lr_md import dispersion_ratios
