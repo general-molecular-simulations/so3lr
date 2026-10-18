@@ -49,6 +49,7 @@ PER_ATOM_OBSERVABLES: Tuple[str, ...] = tuple(
 ) + (
     # per-atom outputs only a settings file's `observables:` list can request
     'hirshfeld_ratios', 'a0_ratios', 'c6_ratios', 'electrostatic_energy_kspace',
+    'dispersion_energy_kspace',
 )
 
 

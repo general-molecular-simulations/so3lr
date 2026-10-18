@@ -1963,6 +1963,16 @@ def perform_md(
 
     validate_md_counts(all_settings)
 
+    restart_pysages = do_enhanced_sampling and restart_pysages_load_path is not None
+    if restart_pysages and not restart:
+        raise ValueError(
+            "restart_pysages_load_path needs an SO3LR restart (restart_load_path; "
+            "restart=True when calling perform_md directly): the PySAGES state "
+            "continues the dynamics it was saved with."
+        )
+    if restart_pysages_load_path is not None and not do_enhanced_sampling:
+        logger.warning("restart_pysages_load_path is ignored: do_enhanced_sampling is off.")
+
     if do_enhanced_sampling and not HAS_PYSAGES:
         raise ImportError(
             "PySAGES is required for enhanced sampling but is not installed. "
@@ -1984,13 +1994,6 @@ def perform_md(
                 f"'{ensemble}' was selected. Methods that support all ensembles: "
                 f"{', '.join(sorted(PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS))}."
             )
-
-    restart_pysages = do_enhanced_sampling and restart_pysages_load_path is not None
-    if restart_pysages and not restart:
-        raise ValueError(
-            "restart_pysages_load_path needs an SO3LR restart (restart_load_path): the "
-            "PySAGES state continues the dynamics it was saved with."
-        )
 
     # Handling of restart
     if restart_save_path is not None:
@@ -2100,6 +2103,12 @@ def perform_md(
                 validate_npt_restart_coupling(state, box, npt_coupling)
             position = state.position
         except RestartInNewEnsembleError as e:
+            if restart_pysages and not e.reset_only:
+                raise ValueError(
+                    f"restart_pysages_load_path cannot continue in another ensemble "
+                    f"({e.loaded_state.get('ensemble')} -> {ensemble}): the PySAGES state "
+                    f"continues the dynamics it was saved with."
+                ) from e
             logger.warning(e)
             position = e.loaded_state['position']
             initial_geometry_dict['masses'] = e.loaded_state['mass']

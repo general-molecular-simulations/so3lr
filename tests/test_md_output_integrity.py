@@ -103,6 +103,21 @@ def test_hdf_dipole_of_three_atoms_is_molecular(tmp_path, indices):
         np.testing.assert_array_equal(h5f['dipole_vec'][0, 0], dipole)
 
 
+def test_pysages_restart_needs_so3lr_restart(tmp_path):
+    """A PySAGES state without an SO3LR restart is refused before anything runs (and
+    without PySAGES installed); it used to reach an unset restart_data_pysages
+    (UnboundLocalError) after setup."""
+    settings = {
+        'do_enhanced_sampling': True,
+        'restart_pysages_load_path': str(tmp_path / 'restart_pysages.pkl'),   # no restart_load_path
+        'input_file': str(tmp_path / 'in.xyz'),
+        'output_file': str(tmp_path / 'out.xyz'),
+        'ensemble': 'nvt',
+    }
+    with pytest.raises(ValueError, match='restart_pysages_load_path needs an SO3LR restart'):
+        so3lr_md.perform_md(settings)
+
+
 @pytest.mark.parametrize('output_format', ['hdf5', 'extxyz'])
 def test_embedding_output_keeps_features_and_atom_selection(tmp_path, output_format):
     path = tmp_path / f'embeddings.{output_format}'
