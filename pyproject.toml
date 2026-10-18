@@ -99,7 +99,6 @@ notebooks = [
 include = [
     # Publication and contributor documents belong in the source archive, not
     # at the top of site-packages when a wheel is installed.
-    { path = "CHANGELOG.md", format = "sdist" },
     { path = "DEVELOPERS.md", format = "sdist" },
     { path = "logo.png", format = "sdist" },
     # Keep non-Python runtime inputs explicit even though Poetry currently

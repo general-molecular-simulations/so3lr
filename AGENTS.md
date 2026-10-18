@@ -57,7 +57,8 @@ CLI, the ASE calculator and the Python API all resolve through it. `_CANONICAL`
 maps one name to one directory; `_FLOATING_ALIASES` are pointers that move
 between releases. `DEFAULT_MODEL` is deliberately pinned to a *canonical* name
 so the no-argument default cannot drift when an alias is repointed. Repointing
-an alias silently changes everyone's results — say so in the changelog.
+an alias silently changes everyone's results — say so in the changelog (the docs
+site's `docs/reference/changelog.md`, in so3lr-docs).
 
 **`so3lr/__init__.py` must stay import-cheap.** It uses PEP 562 lazy attributes
 so that `import so3lr` does not pull in JAX, Flax or JAX-MD; `so3lr --help`
