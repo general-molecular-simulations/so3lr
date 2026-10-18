@@ -1,4 +1,5 @@
-"""The Ewald k-space error bound must predict the actual reciprocal-space force error."""
+"""tune-ewald's error estimates: the Ewald k-space bound must predict the actual
+reciprocal-space force error, and the estimates keep their values."""
 
 import jax.numpy as jnp
 import numpy as np
@@ -51,3 +52,38 @@ def test_ewald_kspace_bound_matches_measured_force_error(charge_scale, spacing):
 
     ratio = measured / _bound(positions, charges, box, smearing, spacing)
     assert 0.5 < ratio < 2.0, ratio
+
+
+def _neutral_box():
+    return dict(charges=jnp.asarray(np.array([0.5, -0.5] * 4)[:, None]),
+                cell=jnp.diag(jnp.array([20.0, 25.0, 30.0])), positions=jnp.zeros((8, 3)))
+
+
+def test_estimates_keep_their_values():
+    """The Kolafa-Perram and Petersen estimates give what the earlier implementation gave
+    for the same structure and parameters."""
+    from so3lr.cli.tune_ewald import EwaldErrorBounds, PMEErrorBounds
+
+    ewald = EwaldErrorBounds(**_neutral_box())
+    assert ewald.err_kspace(smearing=2.0, spacing=3.0) == pytest.approx(8.89619561939042e-06, rel=1e-6)
+    assert ewald.err_rspace(smearing=2.0, cutoff=10.0) == pytest.approx(1.959476866247133e-07, rel=1e-6)
+    pme = PMEErrorBounds(**_neutral_box())
+    for nodes, value in ((3, 6.177889820238487e-05), (4, 1.5689216429297842e-05),
+                         (5, 5.3114413847518695e-06)):
+        assert pme.err_kspace(smearing=2.0, spacing=1.55, interpolation_nodes=nodes) == \
+            pytest.approx(value, rel=1e-6)
+
+
+@pytest.mark.parametrize("method,nodes", [("pme", (3, 3)), ("pme", (4, 5)), ("p3m", (2, 2)),
+                                          ("p3m", (5, 4))])
+def test_unsupported_interpolation_orders_are_refused_up_front(method, nodes, monkeypatch):
+    """Refused before the geometry is read (the input file does not exist) or the model
+    is built."""
+    from so3lr.cli import so3lr_md, tune_ewald
+
+    monkeypatch.setattr(so3lr_md, "setup_jax_globals", lambda **_: None)
+    monkeypatch.setattr(tune_ewald, "setup_logger", lambda *_: None)
+    settings = dict(kspace_electrostatics=method, nodes_lo=nodes[0], nodes_hi=nodes[1],
+                    input_file="missing.xyz")
+    with pytest.raises(ValueError, match="interpolation nodes"):
+        tune_ewald.tune(settings)

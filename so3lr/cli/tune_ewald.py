@@ -128,7 +128,8 @@ def _alpha(smearing):
 
 
 def _inclusive(start, stop, step):
-    """start, start + step, ... up to stop inclusive (step may be negative)."""
+    """np.arange(start, stop + step, step): reaches stop when it lies on the step grid from
+    start, and otherwise goes up to one step past it (step may be negative)."""
     return np.arange(start, stop + step, step)
 
 
@@ -249,7 +250,11 @@ class EwaldErrorBounds:
 
     def err_kspace(self, smearing: float, spacing: float) -> float:
         """The reciprocal sum kept to |k| <= 2 pi / spacing (LAMMPS ``Ewald::rms`` evaluates
-        the same estimate)."""
+        the same estimate). jax-pme's Ewald grid keeps |k| up to about pi / spacing along
+        each axis, so for its grid this underestimates the error."""
+        # Like every Coulomb force error, linear in the prefactor (q^2). torch-pme's tuner
+        # takes its square root, which scales as |q| and underestimates the error 4-36x
+        # for typical systems.
         alpha = _alpha(smearing)
         return (self.prefactor * alpha / math.sqrt(math.pi) * math.sqrt(spacing / self.volume)
                 * math.exp(-(math.pi / (alpha * spacing)) ** 2))
@@ -551,16 +556,18 @@ def tune(
     if kspace_electrostatics not in ('ewald', 'pme', 'p3m', 'cutoff') and kspace_dispersion != 'cutoff':
         raise ValueError(
             f"Unknown kspace_electrostatics type: {kspace_electrostatics}. Must be 'ewald', 'pme', 'p3m', or 'cutoff'.")
-    # only the interpolation orders jax-pme implements; any other fails in its solver
+    # only orders jax-pme's solver implements and the PME error estimate covers; any
+    # other fails in one of them, after the model is built
     nodes_lo = settings.get('nodes_lo', DEFAULT_KSPACE_INTERP_NODES)
     nodes_hi = settings.get('nodes_hi', DEFAULT_KSPACE_INTERP_NODES)
     if kspace_electrostatics in KSPACE_INTERP_NODES:
-        supported = KSPACE_INTERP_NODES[kspace_electrostatics]
-        if not set(range(nodes_lo, nodes_hi + 1)) <= set(supported):
+        supported = sorted(set(KSPACE_INTERP_NODES[kspace_electrostatics])
+                           & set(PETERSEN_CONSTANTS))
+        if not (nodes_lo <= nodes_hi and set(range(nodes_lo, nodes_hi + 1)) <= set(supported)):
             raise ValueError(
-                f"{kspace_electrostatics.upper()} interpolates with "
-                f"{', '.join(map(str, supported))} nodes, not all of "
-                f"nodes_lo..nodes_hi = {nodes_lo}..{nodes_hi}.")
+                f"tune-ewald tunes {kspace_electrostatics.upper()} with "
+                f"{', '.join(map(str, supported))} interpolation nodes "
+                f"(received nodes_lo={nodes_lo}, nodes_hi={nodes_hi}).")
         # the solver is built for one order, so the timings are for nodes_lo; the error
         # estimates cover every order in the grid
         if nodes_hi != nodes_lo:
@@ -720,7 +727,7 @@ def tune(
         )
 
     recommended_param = None
-    if any(err < accuracy for err in errs):
+    if any(err <= accuracy for err in errs):
         param, timing, error = params[timings.index(min(timings))], min(
             timings), errs[timings.index(min(timings))]
         recommended_param = param  # fastest param that still meets the accuracy target
