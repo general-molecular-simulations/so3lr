@@ -31,12 +31,8 @@ uv sync --locked --extra cuda12   # or: CUDA 12 on Linux x86-64
 uv run so3lr --help
 ```
 
-On a cluster with a working JAX (CUDA or ROCm) install, `pip install .` into
-that environment instead. JAX is only capped (`jax<0.11`), so an existing build
-is kept; jax-md, glp, jax-pme and jraph come from pinned Git commits. Optional extras: `pysages` (enhanced sampling), `tfds` (TFDS training
-loader), `wandb` (opt-in W&B logging), `matscipy` (faster neighbour search for
-small periodic cells in the ASE calculator). For reproducing published results,
-check out a release tag first. Details:
+Already have JAX on a cluster (CUDA or ROCm)? Run `pip install .` in that
+environment. Optional extras and other options:
 [installation guide](https://so3lr.github.io/installation/).
 
 ## Quick start
@@ -51,14 +47,8 @@ so3lr npt --input geometry.xyz --temperature 300 --pressure 1.0 --dt 0.5 --md-cy
 so3lr eval --datafile dataset.extxyz --lr-cutoff 100 --save-to predictions.extxyz
 ```
 
-Longer runs are best driven by a settings file, which also covers features with
-no CLI flag (frozen atoms, k-space dispersion, enhanced sampling):
-`so3lr --settings settings.yaml`. Periodic MD on an NVIDIA GPU (compute
-capability 8.0+) runs on the **flash** engine when the box is orthorhombic and
-NPT is isotropic: fused kernels that keep a few KiB per atom, 2.5x faster than
-the neighbour-list engine on 12,288 water atoms, up to 33.7 million atoms on one
-H200, and on several GPUs of a node with `--flash-devices N`. The log names the
-engine used and why; see [molecular dynamics](https://so3lr.github.io/usage/md/).
+For longer runs, use a settings file: `so3lr --settings settings.yaml`; see
+[molecular dynamics](https://so3lr.github.io/usage/md/).
 
 From Python, SO3LR is an ASE calculator:
 
@@ -89,11 +79,9 @@ The SO3LR Tauri models cover H to At (Z = 1–85).
 
 Speeds are for MD of 12,288-atom water with PME on one NVIDIA A100.
 
-The same names work everywhere: `So3lrCalculator(model=...)`, `--model` on the
-CLI, `model:` in a settings file; a path loads a fine-tuned or custom model.
-The `so3lr-tauri` names follow the newest release. To pin one, as papers and
-benchmark tables should, add the release: `so3lr-tauri-m-2606`; the previous
-release is bundled as `so3lr-tauri-{s,m,l}-2602`.
+Use the same name everywhere (`So3lrCalculator(model=...)`, `--model`, `model:`
+in a settings file), or a path for a fine-tuned model. To pin a release for
+papers and benchmarks, add its date: `so3lr-tauri-m-2606`.
 
 ## Documentation
 
