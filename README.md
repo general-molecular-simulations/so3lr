@@ -32,8 +32,8 @@ uv run so3lr --help
 ```
 
 On a cluster with a working JAX (CUDA or ROCm) install, `pip install .` into
-that environment instead; the dependencies only cap JAX, so the existing stack
-is kept. Optional extras: `pysages` (enhanced sampling), `tfds` (TFDS training
+that environment instead. JAX is only capped (`jax<0.11`), so an existing build
+is kept; jax-md, glp, jax-pme and jraph come from pinned Git commits. Optional extras: `pysages` (enhanced sampling), `tfds` (TFDS training
 loader), `wandb` (opt-in W&B logging), `matscipy` (faster neighbour search for
 small periodic cells in the ASE calculator). For reproducing published results,
 check out a release tag first. Details:
@@ -53,11 +53,12 @@ so3lr eval --datafile dataset.extxyz --lr-cutoff 100 --save-to predictions.extxy
 
 Longer runs are best driven by a settings file, which also covers features with
 no CLI flag (frozen atoms, k-space dispersion, enhanced sampling):
-`so3lr --settings settings.yaml`. On an NVIDIA GPU, periodic MD runs on the
-**flash** engine wherever it applies: fused kernels that keep a few KiB per atom,
-2.5x faster than the neighbour-list engine on 12,288 water atoms, up to 33.7
-million atoms on one H200, and on several GPUs of a node with `--flash-devices N`.
-See [molecular dynamics](https://so3lr.github.io/usage/md/).
+`so3lr --settings settings.yaml`. Periodic MD on an NVIDIA GPU (compute
+capability 8.0+) runs on the **flash** engine when the box is orthorhombic and
+NPT is isotropic: fused kernels that keep a few KiB per atom, 2.5x faster than
+the neighbour-list engine on 12,288 water atoms, up to 33.7 million atoms on one
+H200, and on several GPUs of a node with `--flash-devices N`. The log names the
+engine used and why; see [molecular dynamics](https://so3lr.github.io/usage/md/).
 
 From Python, SO3LR is an ASE calculator:
 
@@ -127,9 +128,9 @@ for development environments, tests and the lockfile policy.
 
 ## Citation
 
-If you use SO3LR, cite the software version and the dated model name (e.g.
-`SO3LR 0.2.0, so3lr-m-2606`; machine-readable metadata in
-[`CITATION.cff`](./CITATION.cff)) together with:
+If you use SO3LR, cite the software version (`so3lr.__version__`; metadata in
+[`CITATION.cff`](./CITATION.cff)) and the dated model name, e.g. `so3lr-m-2606`,
+together with:
 
 ```bibtex
 @article{kabylda2025molecular,

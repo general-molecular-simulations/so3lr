@@ -21,6 +21,12 @@ from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
 from ..md_observables import MD_OBSERVABLES
 from ..md_settings_validation import DEFAULT_PRESSURE, load_settings_yaml, resolve_ensemble, validate_md_counts
 from ..flash.check import ENGINES, FLASH_MODES, reserve_gpu
+# Import-cheap (standard library only); the --model help is built from it so the
+# listed names and the default cannot go stale when a release lands.
+from ..model_registry import DEFAULT_MODEL, available_models
+
+MODEL_HELP = (f"Model to use: a bundled name ({', '.join(available_models())}) "
+              f"or a path to a custom MLFF model directory. [default: {DEFAULT_MODEL}]")
 
 # NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
 # submodules, which pull in jax/flax/jax-md/glp/orbax) are deferred so that
@@ -400,10 +406,7 @@ def common_io_options(f: Callable) -> Callable:
 def common_model_options(f: Callable) -> Callable:
     """Common model options for all commands."""
     f = click.option('--model', '--model_path', '--model-path', 'model_path', type=str, default=None,
-                     callback=_validate_model_choice,
-                     help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
-                          'or a path to a custom MLFF model directory. '
-                          'If not provided, so3lr-m-2606 is used. [default: so3lr-m-2606]')(f)
+                     callback=_validate_model_choice, help=MODEL_HELP)(f)
     f = click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
                      help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')(f)
     f = click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
@@ -1379,10 +1382,7 @@ def nve_md(**kwargs) -> None:
                    'Default is to refuse (rename your previous run, or pass --overwrite).')
 # Model settings group
 @click.option('--model', '--model_path', 'model_path', type=str, default=None,
-              callback=_validate_model_choice,
-              help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
-                   'or a path to a custom MLFF model directory. '
-                   'If not provided, so3lr-m-2606 is used. [default: so3lr-m-2606]')
+              callback=_validate_model_choice, help=MODEL_HELP)
 @click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
@@ -1581,8 +1581,9 @@ def eval_model(
 @click.option('--workdir', '--work-dir', '--workdir_path', 'workdir',
               type=click.Path(), help='Working directory for fine-tuned model checkpoints and logs.')
 @click.option('--datafile', '--data-file', '--datafile_path', 'datafile',
-              type=click.Path(), help='Path to an ASE-readable dataset file (e.g. extxyz) or .npz used for finetuning. '
-                   'TFDS datasets go under data.datasets in --config.')
+              type=click.Path(), help='Required. Path to an ASE-readable dataset file (e.g. extxyz) or .npz used '
+                   'for finetuning. If --config lists TFDS shards under data.datasets, those are '
+                   'used instead and this path is not read.')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Finetuning settings.
