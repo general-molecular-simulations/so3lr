@@ -21,8 +21,6 @@ identified by immutable dated names such as `so3lr-tauri-m-2606`.
 - Locked environments managed by `uv`, with immutable Git dependency
   revisions and Python 3.12/3.13 coverage, including a CI smoke test of the
   built wheel (PR #55).
-- Machine-readable software and published SO3LR v1 citation metadata in
-  `CITATION.cff`. No SO3LR-2 or software DOI is claimed before one is issued.
 - SHA-256 checksums for every bundled model artifact in
   `so3lr/models/SHA256SUMS`, checkable with `sha256sum -c`.
 - The complete Apache License 2.0 and BSD 3-Clause texts and third-party
