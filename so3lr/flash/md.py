@@ -54,6 +54,8 @@ from so3lr.cli.so3lr_md import (
     write_to_hdf5,
 )
 from so3lr.md_settings_validation import validate_md_counts
+from so3lr.mlff.nn.observable.dispersion_ref_data import (
+    check_atomic_numbers_supported, supported_atomic_numbers_for_model)
 
 from .check import NPT_BOX_MARGIN, flash_problem
 from .engine import MODES, FlashSO3LR, mode_kib, pick_mode, pme_bytes
@@ -244,6 +246,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     setup_logger(s.get("log_file"))
     validate_md_counts(s)
     atoms = read(s["input_file"]) if atoms is None else atoms
+    # process_model's element check: past the trained elements the tables are gathered
+    # out of bounds under jit
+    check_atomic_numbers_supported(atoms.numbers, supported_atomic_numbers_for_model(s.get("model_path")))
     problem = flash_problem(s, atoms)
     if problem:
         raise ValueError(f"flash: {problem}")

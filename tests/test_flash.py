@@ -270,6 +270,34 @@ def test_auto_falls_back_without_gpu(tmp_path):
     assert "Engine: neighbour-list potential (flash cannot:" in log, log[-2000:]
 
 
+def test_standard_engine_is_logged(tmp_path, monkeypatch):
+    """`--engine standard` names the engine in the log, as auto and flash do (the line
+    comes before perform_md, so no MD runs)."""
+    from click.testing import CliRunner
+    from so3lr.cli import so3lr_md
+    from so3lr.cli.so3lr_cli import cli
+    monkeypatch.setattr(so3lr_md, "setup_jax_globals", lambda **kwargs: None)
+    monkeypatch.setattr(so3lr_md, "perform_md", lambda *args, **kwargs: None)
+    log = tmp_path / "out.log"
+    result = CliRunner().invoke(cli, ["nvt", "--input", str(DATA / "acetone.xyz"), "--no-relax",
+                                      "--output", str(tmp_path / "out.hdf5"), "--log-file", str(log),
+                                      "--engine", "standard"])
+    assert result.exit_code == 0, result.output
+    assert "Engine: neighbour-list potential (--engine standard)" in log.read_text()
+
+
+def test_flash_refuses_untrained_elements(monkeypatch):
+    """Flash runs the neighbour-list engine's element check before anything else (so no
+    GPU is needed here): Rn is past what so3lr-tauri-m was trained on, an error rather than a
+    value gathered from another element's row of the reference tables."""
+    from so3lr.flash import md as flash_md
+    monkeypatch.setattr(flash_md, "setup_jax_globals", lambda **kwargs: None)
+    atoms = _water((3, 3, 3))
+    atoms.numbers[0] = 86
+    with pytest.raises(ValueError, match="Z=86"):
+        flash_md.perform_md_flash(SETTINGS, atoms=atoms)
+
+
 GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA GPU")
 
 
