@@ -46,6 +46,9 @@ MD_OBSERVABLES: Tuple[str, ...] = (
 # width and is supported for extxyz output only.
 PER_ATOM_OBSERVABLES: Tuple[str, ...] = tuple(
     o for o in MD_OBSERVABLES if o != 'x'
+) + (
+    # per-atom outputs only a settings file's `observables:` list can request
+    'hirshfeld_ratios', 'a0_ratios', 'c6_ratios', 'electrostatic_energy_kspace',
 )
 
 

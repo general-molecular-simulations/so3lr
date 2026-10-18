@@ -22,7 +22,6 @@ NPT runs every step in two calls: the engine evaluates in the box the step reach
 (``set_box``), and the step takes the force and dE/d(strain) through an energy whose
 gradients they are (``_surrogate``).
 """
-import json
 import logging
 import time
 from pathlib import Path
@@ -56,8 +55,7 @@ from so3lr.cli.so3lr_md import (
 )
 from so3lr.md_settings_validation import validate_md_counts
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
-    check_atomic_numbers_supported, supported_atomic_numbers_for_config)
-from so3lr.model_registry import resolve_model
+    check_atomic_numbers_supported, supported_atomic_numbers_for_model)
 
 from .check import NPT_BOX_MARGIN, flash_problem
 from .engine import MODES, FlashSO3LR, mode_kib, pick_mode, pme_bytes
@@ -248,12 +246,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     setup_logger(s.get("log_file"))
     validate_md_counts(s)
     atoms = read(s["input_file"]) if atoms is None else atoms
-    # process_model's element check, which the neighbour-list engine runs: past the
-    # elements the model was trained on, the reference tables are gathered out of bounds
-    # under jit and return some other element's value instead of raising
-    with open(resolve_model(s.get("model_path")).dir / "hyperparameters.json") as fp:
-        check_atomic_numbers_supported(atoms.get_atomic_numbers(),
-                                       supported_atomic_numbers_for_config(json.load(fp)["model"]))
+    # process_model's element check: past the trained elements the tables are gathered
+    # out of bounds under jit
+    check_atomic_numbers_supported(atoms.numbers, supported_atomic_numbers_for_model(s.get("model_path")))
     problem = flash_problem(s, atoms)
     if problem:
         raise ValueError(f"flash: {problem}")

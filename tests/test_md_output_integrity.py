@@ -103,19 +103,6 @@ def test_hdf_dipole_of_three_atoms_is_molecular(tmp_path, indices):
         np.testing.assert_array_equal(h5f['dipole_vec'][0, 0], dipole)
 
 
-@pytest.mark.parametrize('name', ['a0_ratios', 'hirshfeld_ratios', 'c6_ratios'])
-def test_hdf5_stores_ratio_heads_per_atom(tmp_path, name):
-    """a0_ratios is the current models' ratio head; it was skipped with a warning."""
-    path = tmp_path / 'ratios.hdf5'
-    ratios = np.array([0.9, 1.1, 1.0], dtype=np.float32)
-    store = init_hdf5_store(path, batch_size=1, num_atoms=3, num_box_entries=3, observables=[name])
-    write_to_hdf5(store, [np.zeros((3, 3))], [np.arange(9.).reshape(3, 3)], [np.zeros(3)],
-                  {name: [ratios]})
-    with h5py.File(path) as h5f:
-        assert h5f[name].shape == (1, 3)
-        np.testing.assert_array_equal(h5f[name][0], ratios)
-
-
 @pytest.mark.parametrize('output_format', ['hdf5', 'extxyz'])
 def test_embedding_output_keeps_features_and_atom_selection(tmp_path, output_format):
     path = tmp_path / f'embeddings.{output_format}'

@@ -251,19 +251,12 @@ class TestImportGuard:
         settings = {
             'do_enhanced_sampling': True,
             'pysages_input': str(pysages_path),
-            'restart_pysages_load_path': str(tmp_path / "restart_pysages.pkl"),
+            'restart_pysages_load_path': str(tmp_path / "restart_pysages.pkl"),  # no restart_load_path
             'input_file': 'dummy.xyz',
             'output_file': 'dummy.xyz',
-            'md_dt': 0.5,
-            'md_T': 300,
-            'md_cycles': 1,
-            'md_steps': 10,
             'ensemble': 'nvt',
-            'precision': 'float32',
-            'seed': 42,
-            'save_buffer': 10,
         }
-        with pytest.raises(ValueError, match="restart_pysages_load_path needs restart_load_path"):
+        with pytest.raises(ValueError, match="restart_pysages_load_path needs an SO3LR restart"):
             md_module.perform_md(settings)
 
     @pytest.mark.parametrize("method_input,ensemble", [

@@ -603,8 +603,7 @@ def init_hdf5_store(
                 dtype=storage_dtype,
                 per_atom=True,
             )
-        elif is_per_atom_observable(o) or o in ('hirshfeld_ratios', 'a0_ratios', 'c6_ratios',
-                                               'electrostatic_energy_kspace'):
+        elif is_per_atom_observable(o):
             # Every one-scalar-per-atom observable gets a dataset. This list used
             # to be a fourth hand-maintained copy that omitted five selectable
             # observables (nn_energy, nlh_repulsion, the two *_undamped ones),
@@ -1986,16 +1985,11 @@ def perform_md(
                 f"{', '.join(sorted(PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS))}."
             )
 
-    if do_enhanced_sampling and restart_pysages_load_path is not None:
-        restart_pysages = True
-    else:
-        restart_pysages = False
+    restart_pysages = do_enhanced_sampling and restart_pysages_load_path is not None
     if restart_pysages and not restart:
-        # The PySAGES state is loaded together with the SO3LR restart below and
-        # continues the dynamics saved with it; on its own it was never loaded.
         raise ValueError(
-            "restart_pysages_load_path needs restart_load_path: the PySAGES state "
-            "continues the dynamics it was saved with."
+            "restart_pysages_load_path needs an SO3LR restart (restart_load_path): the "
+            "PySAGES state continues the dynamics it was saved with."
         )
 
     # Handling of restart

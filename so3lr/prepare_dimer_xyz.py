@@ -10,7 +10,6 @@ See methods section in SO3LR preprint for details: https://chemrxiv.org/engage/c
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 import numpy as np
@@ -18,19 +17,13 @@ from ase.io import write
 import logging
 from tqdm import tqdm
 
-from so3lr.model_registry import DEFAULT_MODEL, resolve_model
+from so3lr.model_registry import DEFAULT_MODEL
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
-    supported_atomic_numbers_for_config,
+    supported_atomic_numbers_for_model as supported_elements_for_model,
 )
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-
-
-def supported_elements_for_model(model=None):
-    """Return the element coverage of a bundled model name or custom model directory."""
-    with open(resolve_model(model).dir / "hyperparameters.json") as fp:
-        return supported_atomic_numbers_for_config(json.load(fp)["model"])
 
 
 def check_supported_elements(atoms, supported):
