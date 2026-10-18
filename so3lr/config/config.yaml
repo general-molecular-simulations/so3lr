@@ -7,7 +7,7 @@
 #   model.electrostatic_energy_bool: true
 #   model.dispersion_energy_bool: true
 #   model.zbl_repulsion_bool: true      # already true by default
-# See README "Training from Scratch" for details.
+# See https://so3lr.github.io/training/from-scratch/ for details.
 # =============================================================================
 workdir: first_experiment  # Output directory for checkpoints and hyperparameters.
 data:

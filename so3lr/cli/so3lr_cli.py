@@ -403,7 +403,7 @@ def common_model_options(f: Callable) -> Callable:
                      callback=_validate_model_choice,
                      help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
                           'or a path to a custom MLFF model directory. '
-                          'If not provided, so3lr-m is used. [default: so3lr-m]')(f)
+                          'If not provided, so3lr-m-2606 is used. [default: so3lr-m-2606]')(f)
     f = click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
                      help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')(f)
     f = click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
@@ -1382,7 +1382,7 @@ def nve_md(**kwargs) -> None:
               callback=_validate_model_choice,
               help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
                    'or a path to a custom MLFF model directory. '
-                   'If not provided, so3lr-m is used. [default: so3lr-m]')
+                   'If not provided, so3lr-m-2606 is used. [default: so3lr-m-2606]')
 @click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
@@ -1581,7 +1581,8 @@ def eval_model(
 @click.option('--workdir', '--work-dir', '--workdir_path', 'workdir',
               type=click.Path(), help='Working directory for fine-tuned model checkpoints and logs.')
 @click.option('--datafile', '--data-file', '--datafile_path', 'datafile',
-              type=click.Path(), help='Path to dataset file (extxyz or tfds format) containing data used for finetuning.')
+              type=click.Path(), help='Path to an ASE-readable dataset file (e.g. extxyz) or .npz used for finetuning. '
+                   'TFDS datasets go under data.datasets in --config.')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Finetuning settings.

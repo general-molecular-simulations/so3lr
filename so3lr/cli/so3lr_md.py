@@ -951,9 +951,9 @@ def check_box_for_neighbour_lists(box, cutoff: float, where: str) -> None:
     if problem:
         raise ValueError(
             f'{where}: {problem}. Use a larger box, a smaller --lr-cutoff with k-space '
-            f'carrying the long range (--kspace-electrostatics pme, and --kspace-dispersion '
-            f'pme for dispersion), or the ASE calculator (So3lrCalculator), which lists every '
-            f'periodic image.')
+            f'carrying the long range (--kspace-electrostatics pme, and kspace_dispersion: pme '
+            f'in a --settings file for dispersion), or the ASE calculator (So3lrCalculator), '
+            f'which lists every periodic image.')
 
 
 def cell_from_atoms_boundary_conditions(

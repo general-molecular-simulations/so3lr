@@ -130,5 +130,7 @@ does not know is set, and `tests/test_flash.py` fails until the key is classifie
 - The active Langevin PRNG key is saved with the integrator state and restored
   on restart. The setup key is reseeded, but does not replace that saved key.
   Reproducibility still depends on numerical precision and backend.
-- SO3LR is single-device. There is no `pmap`/sharding, and adding one is a
-  substantial change rather than a fix.
+- Only the flash MD engine runs on several devices (`--flash-devices N`, the GPUs
+  of one node, via `shard_map` in `so3lr/flash/`). The neighbour-list potential,
+  the ASE calculator, evaluation and training are single-device; adding sharding
+  to them is a substantial change rather than a fix.

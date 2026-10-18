@@ -984,7 +984,8 @@ def data_loader_from_config(config):
                 "config.data.datasets (multi-dataset training) is only supported by the TFDS "
                 "dataloader, but no .tfrecord shards were found in one or more of: "
                 f"{[str(p) for p in dataset_paths]}. Either convert each dataset to TFDS shards "
-                "(see README), or use a single dataset via config.data.filepath."
+                "(see https://so3lr.github.io/training/from-scratch/), or use a single dataset via "
+                "config.data.filepath."
             )
     else:
         # Single dataset case (original functionality)
