@@ -2,7 +2,7 @@
 
     from so3lr.flash.loader import load_params
     from so3lr.flash.engine import FlashSO3LR
-    params, statics = load_params("so3lr-m", precision="float32", lr_cutoff=12.0)
+    params, statics = load_params("so3lr-tauri-m", precision="float32", lr_cutoff=12.0)
     eng = FlashSO3LR(params, statics, z, box)          # box: orthorhombic, [3, 3]
     energy, forces = eng.energy_forces(positions)      # jitted
 
@@ -42,7 +42,7 @@ exists), and tiled execution (the per-atom work runs over fixed-size atom tiles)
 
 Periodic orthorhombic boxes, at least 2 x the long-range cutoff across and wide enough
 for the cell grid (``check.box_problem``); models with one head per degree entry,
-degrees 1-4 (so3lr-s, -m, -l). ``so3lr.flash.md`` runs MD with it;
+degrees 1-4 (so3lr-tauri-s, -m, -l). ``so3lr.flash.md`` runs MD with it;
 ``python -m so3lr.flash.verify`` compares it with the neighbour-list potential.
 """
 from __future__ import annotations
@@ -68,8 +68,8 @@ from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
 BE = 16              # edges per chunk in the pair kernels
 NUM_WARPS = 2
 # The attention kernels' launch, (edges per chunk, warps), by the width of the spherical
-# filters' hidden layer (so3lr-s/m 32, so3lr-l 64): the fastest on an H200 for 12,288
-# waters. so3lr-l takes 4 warps: a float32 dot lowered to FMAs keeps its whole reduction
+# filters' hidden layer (so3lr-tauri-s/m 32, so3lr-tauri-l 64): the fastest on an H200 for 12,288
+# waters. so3lr-tauri-l takes 4 warps: a float32 dot lowered to FMAs keeps its whole reduction
 # in each thread's registers, and at 2 warps its kernels spill.
 ATT_LAUNCH = {
     32: {"fwd": (16, 2), "bwd_heads": (16, 2), "bwd_degrees": (8, 2)},
@@ -283,7 +283,7 @@ def _consts(dtype):
 def _ycols(md, mo, YS):
     """Each column's spherical-harmonic component (its index in _ylm_components, -1 for
     padding): the columns of degree entry e start at YS[e][0] and hold its degree's
-    components from YS[e][1] on. A degree listed twice (so3lr-l) reads the same ones."""
+    components from YS[e][1] on. A degree listed twice (so3lr-tauri-l) reads the same ones."""
     yc = mo * 0 - 1
     for e, (start, base) in enumerate(YS):
         yc = jnp.where(md == e, mo - start + base, yc)
@@ -1102,7 +1102,7 @@ PAIR_INTERVALS = 16384       # long-range pair tables on [0, lr cutoff]
 PME_CHUNK = 1 << 20          # atoms spread or gathered at a time in the PME mesh
 
 
-# memory modes, fastest first: (engine options, staged, peak KiB per atom of so3lr-m on an
+# memory modes, fastest first: (engine options, staged, peak KiB per atom of so3lr-tauri-m on an
 # H100 in water at 10-20M atoms; us/atom per force call). fast keeps each layer's input and
 # attention output; default keeps the same but runs as separately jitted stages from
 # Python (energy_forces_staged: a jitted MD step cannot call them, but they keep XLA
@@ -1121,7 +1121,7 @@ MODES = {
 
 def mode_kib(mode, statics):
     """MODES' peak KiB per atom for this model: what a mode holds per atom scales with the
-    features and equivariant channels (so3lr-m: 128 + 24)."""
+    features and equivariant channels (so3lr-tauri-m: 128 + 24)."""
     width = statics["num_features"] + sum(2 * int(d) + 1 for d in statics["degrees"])
     return MODES[mode][2] * width / 152.0
 
@@ -1154,8 +1154,8 @@ class FlashSO3LR:
                  devices=1):
         degrees = [int(d) for d in statics["degrees"]]
         self.nh = int(statics["num_heads"])
-        # one head per degree entry, each on its own block of G features (so3lr-s/m: 4 x 32,
-        # so3lr-l: 8 x 32, degrees 1-4 each twice); harmonics up to degree 4
+        # one head per degree entry, each on its own block of G features (so3lr-tauri-s/m: 4 x 32,
+        # so3lr-tauri-l: 8 x 32, degrees 1-4 each twice); harmonics up to degree 4
         if self.nh != len(degrees) or not set(degrees) <= {1, 2, 3, 4}:
             raise ValueError(f"written for one head per degree entry, degrees 1-4 (got {self.nh} heads, "
                              f"degrees {degrees})")

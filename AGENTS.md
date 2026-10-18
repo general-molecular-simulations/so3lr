@@ -86,7 +86,7 @@ path, and they read different `training:` keys — fine-tuning ignores `use_ema`
 `early_stopping_patience` and `stage_two_*` entirely. A feature added to one
 does not appear in the other, and nothing warns about it.
 
-**Two model generations produce different output keys.** `so3lr-s/m/l` emit
+**Two model generations produce different output keys.** `so3lr-tauri-s/m/l` emit
 `a0_ratios`, `c6_ratios` and NLH repulsion; the legacy `so3lr` emits
 `hirshfeld_ratios` and ZBL. Code touching observables must handle both — see
 the `legacy` branches in `so3lr/mlff/nn/observable/observable_sparse.py`.

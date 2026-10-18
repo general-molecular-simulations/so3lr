@@ -21,7 +21,7 @@ def load_params(model=None, *, precision="float32", lr_cutoff=12.0, dispersion_d
         cfg = json.load(fp)
     m = cfg["model"]
     if m.get("legacy_so3lr_bool", False):
-        raise ValueError("the flash engine runs the v2 models (so3lr-s/m/l), not the legacy so3lr")
+        raise ValueError("the flash engine runs the v2 models (so3lr-tauri-s/m/l), not the legacy so3lr")
     raw = expand_observables_to_theory_levels(load_params_from_workdir(spec.dir))["params"]
     dt = jnp.float64 if precision == "float64" else jnp.float32
 

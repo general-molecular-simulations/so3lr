@@ -157,8 +157,8 @@ def test_md_cli_rejects_before_building_neighbor_lists():
 @pytest.mark.parametrize('model_name, bad_z, bad_match', [
     # Rn (86) has refitted reference data and Ra (88) has legacy data, but the
     # training set stops at At (85), so both must be refused by both families.
-    ('so3lr-m-2606', 86, r'Rn \(Z=86\)'),
-    ('so3lr-m-2606', 94, r'Pu \(Z=94\)'),
+    ('so3lr-tauri-m-2606', 86, r'Rn \(Z=86\)'),
+    ('so3lr-tauri-m-2606', 94, r'Pu \(Z=94\)'),
     ('so3lr', 11, r'Na \(Z=11\)'),
 ])
 def test_end_to_end_wiring_rejects_unsupported_elements(

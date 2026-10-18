@@ -977,7 +977,7 @@ def cell_from_atoms_boundary_conditions(
 
 
 def dispersion_ratios(aux):
-    """(polarizability ratio, C6 ratio) from the model output. The so3lr-s/m/l
+    """(polarizability ratio, C6 ratio) from the model output. The so3lr-tauri-s/m/l
     models name the first 'a0_ratios', the legacy model 'hirshfeld_ratios', and
     the legacy model has no C6 head (None)."""
     return aux.get('a0_ratios', aux.get('hirshfeld_ratios')), aux.get('c6_ratios')
@@ -2178,7 +2178,7 @@ def perform_md(
 
     patched_potential_kwargs = intermediate_quantity_kwargs(observables)
 
-    # Loading the model. A bundled name (so3lr-s/m/l/so3lr) or a custom path; None
+    # Loading the model. A bundled name (so3lr-tauri-s/m/l/so3lr) or a custom path; None
     # falls back to the default model. load_model resolves names and paths alike.
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     selected_model = model_path if model_path is not None else DEFAULT_MODEL
@@ -3067,7 +3067,7 @@ def perform_min(
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
 
-    # Loading the model. A bundled name (so3lr-s/m/l/so3lr) or a custom path; None
+    # Loading the model. A bundled name (so3lr-tauri-s/m/l/so3lr) or a custom path; None
     # falls back to the default model. load_model resolves names and paths alike.
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     selected_model = model_path if model_path is not None else DEFAULT_MODEL

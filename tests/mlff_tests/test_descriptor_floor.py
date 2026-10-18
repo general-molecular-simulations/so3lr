@@ -101,7 +101,7 @@ def test_inert_at_the_closest_approach_real_simulations_reach(pair, closest):
 @pytest.mark.parametrize('pair,edge', list(SEVERE_EDGE.items()))
 def test_floor_reaches_past_the_measured_severe_failure(pair, edge):
     """The clamp value has to sit outside the broken band, not merely near it.
-    Failures are not monotone in distance -- so3lr-l is sane for S-S at 0.2 A,
+    Failures are not monotone in distance -- so3lr-tauri-l is sane for S-S at 0.2 A,
     where 18 keV of repulsion swamps everything, and catastrophic from 0.45 to
     1.05 A -- so clamping to a distance inside the band would just move the
     descriptor from one bad place to another."""
@@ -182,7 +182,7 @@ def test_clash_stays_finite_and_repulsive_end_to_end():
     from so3lr import So3lrCalculator
 
     water = Atoms('OHH', positions=[[0., 0., 0.], [0.13, 0., 0.], [-0.24, 0.93, 0.]])
-    water.calc = So3lrCalculator(model='so3lr-s')
+    water.calc = So3lrCalculator(model='so3lr-tauri-s')
     e, f = water.get_potential_energy(), water.get_forces()
     assert np.isfinite(e) and np.isfinite(f).all()
     assert e > 0, 'a 0.13 A contact must cost energy, not release it'

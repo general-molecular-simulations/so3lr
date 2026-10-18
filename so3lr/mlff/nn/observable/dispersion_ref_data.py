@@ -16,7 +16,7 @@ species = [
 ]
 
 # Legacy SO3LR (v1) free-atom reference polarizabilities and C6 coefficients.
-# The original v1 model was calibrated against these values; the new so3lr-s/m/l
+# The original v1 model was calibrated against these values; the new so3lr-tauri-s/m/l
 # models use the refitted ``alphas``/``C6_coef`` defined below. ``mixing_rules``
 # selects between the two via its ``legacy`` flag.
 alphas_legacy = np.array(
@@ -103,7 +103,7 @@ with (files('so3lr.mlff.nn.observable') / 'nlh_ref.npz').open('rb') as _f, np.lo
 # 1. Reference-table coverage. Every table above is indexed with ``Z - 1``, so a
 #    table with ``n`` rows covers Z = 1..n. The tables are NOT all the same
 #    length and the smallest binds:
-#      NLH_AA / NLH_BB   (92)  -- NLH repulsion, used by so3lr-s/m/l
+#      NLH_AA / NLH_BB   (92)  -- NLH repulsion, used by so3lr-tauri-s/m/l
 #      alphas / C6_coef  (86)  -- refitted alpha_0 / C6 free-atom references
 #      *_legacy          (102) -- v1 SO3LR references
 #

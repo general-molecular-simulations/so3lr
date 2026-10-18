@@ -466,7 +466,7 @@ def common_md_options(f: Callable) -> Callable:
                      type=click.Choice(list(MD_OBSERVABLES)),
                      help='Observable to compute and save during MD. Repeatable. '
                           'Note zbl_repulsion (legacy so3lr) and nlh_repulsion '
-                          '(so3lr-s/m/l) are the same quantity under the two '
+                          '(so3lr-tauri-s/m/l) are the same quantity under the two '
                           'model generations\' output keys. [default: none]')(f)
     f = click.option('--help', '-h', is_flag=True, help='Show brief command overview.')(f)
     return f
@@ -512,7 +512,7 @@ def flash_options(f: Callable) -> Callable:
                           'no per-edge arrays: 2.5x faster, and tens of millions of atoms on one '
                           'GPU) whenever it computes what the other options ask for -- an NVIDIA '
                           'GPU, a periodic orthorhombic box, nve/nvt/nvt-langevin/isotropic npt, '
-                          'real-space long range or PME, so3lr-s/m/l -- else the neighbour-list '
+                          'real-space long range or PME, so3lr-tauri-s/m/l -- else the neighbour-list '
                           'potential; the log says which and why. flash or standard forces one. '
                           '[default: auto]')(f)
     f = click.option('--flash-mode', 'flash_mode', default='auto',
@@ -1220,7 +1220,7 @@ def fire_optimization(
     logger.info(f"Spin (unpaired e-):        {num_unpaired_electrons}")
     # Mirror the MD / eval banner: log the resolved short name even when the
     # user did not pass --model (otherwise the user has no record of which
-    # bundled checkpoint was loaded by default, e.g. so3lr-m vs. legacy v1).
+    # bundled checkpoint was loaded by default, e.g. so3lr-tauri-m vs. legacy v1).
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     _model = model_path or DEFAULT_MODEL
     _kind = 'bundled' if _model in available_models() else 'custom path'
@@ -1405,10 +1405,10 @@ def nve_md(**kwargs) -> None:
               help='Comma-separated list of targets to evaluate. '
                    'Standard targets: forces, energy, dipole_vec, hirshfeld_ratios '
                    '(canonical; aliases hirsh_ratios and a0_ratios are accepted, '
-                   'and the new so3lr-s/m/l models report ratios as a0_ratios). '
+                   'and the new so3lr-tauri-s/m/l models report ratios as a0_ratios). '
                    'Observables (saved to output, metrics only if ground truth exists): '
                    'nn_energy, partial_charges (alias: charges), electrostatic_energy, dispersion_energy, '
-                   'nlh_repulsion (canonical for so3lr-s/m/l; legacy models use zbl_repulsion), '
+                   'nlh_repulsion (canonical for so3lr-tauri-s/m/l; legacy models use zbl_repulsion), '
                    'electrostatic_energy_undamped, dispersion_energy_undamped. '
                    'Embeddings: x (final-layer per-atom features, saved to <output>_x.npz). '
                    '[default: forces,dipole_vec,hirshfeld_ratios]')
@@ -1501,7 +1501,7 @@ def eval_model(
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Batch size:                {batch_size}")
     # Mirror the MD-side banner: show the resolved short name (so the user knows
-    # which bundled checkpoint actually loaded — so3lr-s/m/l/so3lr — instead of
+    # which bundled checkpoint actually loaded — so3lr-tauri-s/m/l/so3lr — instead of
     # the generic 'SO3LR' label) and tag it as bundled vs. a custom-path model.
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     _model = model_path or DEFAULT_MODEL
