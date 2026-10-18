@@ -305,8 +305,8 @@ def tune_pme(
     smear_hi: float = 6.0,
     smear_it: float = 2.0,
     exponent: int = 1,
-    nodes_lo: int = 3,
-    nodes_hi: int = 5,
+    nodes_lo: int = 4,
+    nodes_hi: int = 4,
     mesh_lo: int = 2,
     mesh_hi: int = 6,
     accuracy: float = 2e-2,
@@ -561,6 +561,12 @@ def tune(
     if kspace_electrostatics not in ('ewald', 'pme', 'p3m', 'cutoff') and kspace_dispersion != 'cutoff':
         raise ValueError(
             f"Unknown kspace_electrostatics type: {kspace_electrostatics}. Must be 'ewald', 'pme', 'p3m', or 'cutoff'.")
+    # jax-pme's mesh interpolates with 4 nodes only (any other order fails in the
+    # solver), so the PME/P3M candidates all use 4
+    nodes_lo, nodes_hi = settings.get('nodes_lo', 4), settings.get('nodes_hi', 4)
+    if kspace_electrostatics in ('pme', 'p3m') and (nodes_lo, nodes_hi) != (4, 4):
+        raise ValueError(f"PME/P3M interpolate with 4 nodes; nodes_lo and nodes_hi must be 4 "
+                         f"(received {nodes_lo} and {nodes_hi}).")
 
     # Tuning parameters
     # Note that all the tuning parameters are loaded further below
@@ -603,12 +609,6 @@ def tune(
 
     # A bundled name, a path, or None for the default model; load_model builds
     # the solver for the method being timed.
-    # The PME/P3M solver is built for one interpolation order, so the timings are
-    # for nodes_lo; the error estimates cover every order in the grid.
-    nodes_lo, nodes_hi = settings.get('nodes_lo', 3), settings.get('nodes_hi', 3)
-    if kspace_electrostatics in ('pme', 'p3m') and nodes_hi != nodes_lo:
-        logger.warning(f'Timings use {nodes_lo} interpolation nodes for every candidate '
-                       f'(nodes_lo={nodes_lo}, nodes_hi={nodes_hi}).')
     potential = load_model(
         model_path,
         precision=jnp.float64 if precision == 'float64' else jnp.float32,
