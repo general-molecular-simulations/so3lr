@@ -270,6 +270,32 @@ def test_auto_falls_back_without_gpu(tmp_path):
     assert "Engine: neighbour-list potential (flash cannot:" in log, log[-2000:]
 
 
+def test_standard_engine_is_logged(tmp_path):
+    """`--engine standard` names the engine in the log, as auto and flash do."""
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    from subprocess_env import so3lr_subprocess_env
+    (tmp_path / "in.xyz").write_text((DATA / "acetone.xyz").read_text())
+    result = subprocess.run(
+        ["so3lr", "nvt", "--input", "in.xyz", "--no-relax", "--md-cycles", "1", "--md-steps", "2",
+         "--engine", "standard", "--output", "out.hdf5"],
+        cwd=tmp_path, capture_output=True, text=True, env=so3lr_subprocess_env())
+    assert result.returncode == 0, result.stdout + result.stderr
+    log = (tmp_path / "out.log").read_text()
+    assert "Engine: neighbour-list potential (--engine standard)" in log, log[-2000:]
+
+
+def test_flash_refuses_untrained_elements(monkeypatch):
+    """Flash runs the neighbour-list engine's element check before anything else (so no
+    GPU is needed here): Rn is past what so3lr-m was trained on, an error rather than a
+    value gathered from another element's row of the reference tables."""
+    from so3lr.flash import md as flash_md
+    monkeypatch.setattr(flash_md, "setup_jax_globals", lambda **kwargs: None)
+    atoms = _water((3, 3, 3))
+    atoms.numbers[0] = 86
+    with pytest.raises(ValueError, match="Z=86"):
+        flash_md.perform_md_flash(dict(SETTINGS, input_file="w.xyz", md_cycles=1, md_steps=1), atoms=atoms)
+
+
 GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA GPU")
 
 

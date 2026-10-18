@@ -603,7 +603,7 @@ def init_hdf5_store(
                 dtype=storage_dtype,
                 per_atom=True,
             )
-        elif is_per_atom_observable(o) or o in ('hirshfeld_ratios', 'c6_ratios',
+        elif is_per_atom_observable(o) or o in ('hirshfeld_ratios', 'a0_ratios', 'c6_ratios',
                                                'electrostatic_energy_kspace'):
             # Every one-scalar-per-atom observable gets a dataset. This list used
             # to be a fourth hand-maintained copy that omitted five selectable
@@ -1990,6 +1990,13 @@ def perform_md(
         restart_pysages = True
     else:
         restart_pysages = False
+    if restart_pysages and not restart:
+        # The PySAGES state is loaded together with the SO3LR restart below and
+        # continues the dynamics saved with it; on its own it was never loaded.
+        raise ValueError(
+            "restart_pysages_load_path needs restart_load_path: the PySAGES state "
+            "continues the dynamics it was saved with."
+        )
 
     # Handling of restart
     if restart_save_path is not None:
@@ -3660,7 +3667,9 @@ def run(
     from so3lr.flash.check import flash_problem, validate_options
     validate_options(settings)
     engine = settings.get('engine') or 'auto'
-    if engine != 'standard' and input_file_path is not None:
+    if engine == 'standard':
+        logger.info("Engine: neighbour-list potential (--engine standard)")
+    elif input_file_path is not None:
         problem = flash_problem(settings, initial_geometry)
         if problem is None:
             try:

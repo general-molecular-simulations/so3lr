@@ -242,6 +242,30 @@ class TestImportGuard:
         with pytest.raises(ValueError, match="only supports the NVT ensemble"):
             md_module.perform_md(settings)
 
+    def test_pysages_restart_needs_so3lr_restart(self, tmp_path):
+        """A PySAGES state without restart_load_path is refused up front; it used to
+        reach an unset restart_data_pysages (UnboundLocalError) after setup."""
+        import so3lr.cli.so3lr_md as md_module
+        pysages_path = tmp_path / "pysages_input.yaml"
+        _write_yaml(pysages_path, _PYSAGES_INPUT_UNBIASED)
+        settings = {
+            'do_enhanced_sampling': True,
+            'pysages_input': str(pysages_path),
+            'restart_pysages_load_path': str(tmp_path / "restart_pysages.pkl"),
+            'input_file': 'dummy.xyz',
+            'output_file': 'dummy.xyz',
+            'md_dt': 0.5,
+            'md_T': 300,
+            'md_cycles': 1,
+            'md_steps': 10,
+            'ensemble': 'nvt',
+            'precision': 'float32',
+            'seed': 42,
+            'save_buffer': 10,
+        }
+        with pytest.raises(ValueError, match="restart_pysages_load_path needs restart_load_path"):
+            md_module.perform_md(settings)
+
     @pytest.mark.parametrize("method_input,ensemble", [
         (_PYSAGES_INPUT_UNBIASED, "nve"),
         (_PYSAGES_INPUT_UNBIASED, "npt"),
