@@ -89,14 +89,14 @@ identified by immutable dated names such as `so3lr-tauri-m-2606`.
 ### Fixed
 
 - The flash engine refuses elements the model was not trained on (Z > 85 for
-  so3lr-s/m/l), as the neighbour-list engine does; it ran them, with reference
+  so3lr-tauri-s/m/l), as the neighbour-list engine does; it ran them, with reference
   values gathered from another element's row.
 - `restart_pysages_load_path` without `restart_load_path` is an error up front
   (it crashed with `UnboundLocalError` after setup), as is a PySAGES restart into
   another ensemble (its snapshot no longer matched the rebuilt integrator). With
   `do_enhanced_sampling` off, the path is ignored with a warning.
 - `--engine standard` writes an `Engine:` line to the log, as auto and flash do.
-- HDF5 trajectories store `a0_ratios` (the ratio head of so3lr-s/m/l) and
+- HDF5 trajectories store `a0_ratios` (the ratio head of so3lr-tauri-s/m/l) and
   `dispersion_energy_kspace` per atom; they were skipped with a warning.
 - Evaluation overwrite replaces old predictions and embeddings instead of
   appending or silently overwriting; individual files are saved only after

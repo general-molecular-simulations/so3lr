@@ -288,7 +288,7 @@ def test_standard_engine_is_logged(tmp_path, monkeypatch):
 
 def test_flash_refuses_untrained_elements(monkeypatch):
     """Flash runs the neighbour-list engine's element check before anything else (so no
-    GPU is needed here): Rn is past what so3lr-m was trained on, an error rather than a
+    GPU is needed here): Rn is past what so3lr-tauri-m was trained on, an error rather than a
     value gathered from another element's row of the reference tables."""
     from so3lr.flash import md as flash_md
     monkeypatch.setattr(flash_md, "setup_jax_globals", lambda **kwargs: None)
