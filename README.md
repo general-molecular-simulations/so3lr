@@ -77,13 +77,18 @@ forces = atoms.get_forces()
 ## Models
 
 The models ship inside the package; select one by name, no download needed.
+The SO3LR Tauri models cover H to At (Z = 1–85).
 
-| Model | Elements | Pick it for |
-|-------|----------|-------------|
-| `so3lr-tauri-s` | H to At (Z = 1–85) | Speed: the largest systems and longest runs |
-| `so3lr-tauri-m` *(default)* | H to At (Z = 1–85) | A balance of speed and accuracy; start here |
-| `so3lr-tauri-l` | H to At (Z = 1–85) | Accuracy, at the most cost per step |
-| `so3lr` | H, C, N, O, F, P, S, Cl | Reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558); not trained on energies, so only relative energies are meaningful |
+- **`so3lr-tauri-m`** *(default)*: start here; the model we use for biomolecular MD.
+- **`so3lr-tauri-l`**: the most accurate, recommended for reactions; 3.7× slower
+  than `-m`.
+- **`so3lr-tauri-s`**: 1.4× faster than `-m`.
+- **`so3lr`**: the original model from the
+  [JACS paper](https://doi.org/10.1021/jacs.5c09558), for H, C, N, O, F, P, S and
+  Cl, kept to reproduce published results. It was not trained on energies, so
+  only its relative energies are meaningful.
+
+Speeds are for MD of 12,288-atom water with PME on one NVIDIA A100.
 
 The same names work everywhere: `So3lrCalculator(model=...)`, `--model` on the
 CLI, `model:` in a settings file; a path loads a fine-tuned or custom model.
