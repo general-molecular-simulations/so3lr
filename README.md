@@ -68,7 +68,7 @@ from so3lr import So3lrCalculator
 
 atoms = read("geometry.xyz")
 atoms.info["charge"] = 0          # total charge; 0 if unset
-atoms.calc = So3lrCalculator(model="so3lr-tauri-m-2606", lr_cutoff=100)
+atoms.calc = So3lrCalculator(model="so3lr-tauri-m", lr_cutoff=100)
 
 energy = atoms.get_potential_energy()
 forces = atoms.get_forces()
@@ -76,25 +76,20 @@ forces = atoms.get_forces()
 
 ## Models
 
-The **SO3LR Tauri** models ship in three sizes inside the package; select one by
-name, no download needed.
+The models ship inside the package; select one by name, no download needed.
 
-| Model | Layers | Features | Heads | Cutoff (Å) |
-|-------|--------|----------|-------|-----------|
-| `so3lr-tauri-s-2606` | 2 | 128 | 4 | 4.5 |
-| `so3lr-tauri-m-2606` *(default)* | 3 | 128 | 4 | 4.5 |
-| `so3lr-tauri-l-2606` | 3 | 256 | 8 | 5.0 |
+| Model | Elements | Pick it for |
+|-------|----------|-------------|
+| `so3lr-tauri-s` | H to At (Z = 1–85) | Speed: the largest systems and longest runs |
+| `so3lr-tauri-m` *(default)* | H to At (Z = 1–85) | A balance of speed and accuracy; start here |
+| `so3lr-tauri-l` | H to At (Z = 1–85) | Accuracy, at the most cost per step |
+| `so3lr` | H, C, N, O, F, P, S, Cl | Reproducing the [JACS paper](https://doi.org/10.1021/jacs.5c09558); not trained on energies, so only relative energies are meaningful |
 
 The same names work everywhere: `So3lrCalculator(model=...)`, `--model` on the
-CLI, `model:` in a settings file; a path loads a fine-tuned or custom model. The
-previous release is bundled as `so3lr-tauri-{s,m,l}-2602`, and the original
-model from the [JACS paper](https://doi.org/10.1021/jacs.5c09558) as `so3lr`; it
-was not trained on energies, so only its relative energies are meaningful.
-
-> [!WARNING]
-> `so3lr-tauri-s`, `so3lr-tauri-m` and `so3lr-tauri-l` are aliases for the
-> current release and are repointed when a new one lands. Cite the dated name
-> (e.g. `so3lr-tauri-m-2606`) in papers and benchmark tables.
+CLI, `model:` in a settings file; a path loads a fine-tuned or custom model.
+The `so3lr-tauri` names follow the newest release. To pin one, as papers and
+benchmark tables should, add the release: `so3lr-tauri-m-2606`; the previous
+release is bundled as `so3lr-tauri-{s,m,l}-2602`.
 
 ## Documentation
 
