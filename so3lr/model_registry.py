@@ -9,8 +9,8 @@ Names follow ``so3lr-<size>[-<release>]`` and come in two tiers:
 * ``so3lr-m`` -- current recommended M; moves when a new release lands.
 
 ``<size>`` is one of ``s``/``m``/``l``; ``<release>`` is the ``YYMM`` of the
-release. See the README section "Model names and versions" for the user-facing
-version of this.
+release. See https://so3lr.github.io/models/ for the user-facing version of
+this.
 
 Only canonical names correspond 1:1 to a directory under ``models/``; the bare
 sizes are aliases. Cite the canonical name in papers and benchmark tables --

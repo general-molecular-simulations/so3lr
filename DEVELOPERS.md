@@ -54,7 +54,9 @@ lockfile diff with the change that needed it. Git dependencies must be pinned to
 Look at `tests/integration/README.md` on how to add new integration tests. This should be very easy. Please also consider writing unit tests for deeper functionality.
 
 ## Documentation
-- Update the user `README.md` for user-facing changes.
+- Update the user documentation at <https://so3lr.github.io/> for user-facing
+  changes. `README.md` is a landing page: keep it to installation, a quick
+  start, the model table and links into the docs.
 - Update this `DEVELOPERS.md` for developer-facing changes.
 - Use docstrings for all modules, classes, and functions.
 

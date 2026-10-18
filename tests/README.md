@@ -50,7 +50,7 @@ uv run --no-sync pytest tests/test_integration.py -v -k "nve_ensemble"
 | `test_observables.py` | Tests extraction of individual observables and their summation to total energy |
 | `test_observable_gradients.py` | Tests observable gradients/Jacobians with finite-difference validation |
 | `test_pme.py` | Tests PME/Ewald electrostatics against direct jax-pme calculations |
-| `test_readme.py` | Tests code examples from the README documentation |
+| `test_readme.py` | Tests the basic ASE calculator and JAX-MD usage (energies and forces on gas-phase molecules) |
 
 ## Subdirectories
 

@@ -31,6 +31,8 @@ identified by immutable dated names such as `so3lr-m-2606`.
 
 ### Changed
 
+- The README is a landing page (installation, quick start, models, citation); the full
+  user documentation lives at <https://so3lr.github.io/>.
 - flash: the attention kernels' launch follows the model's filter width (so3lr-l: 4 warps,
   no register spills) and the backward's filter matmuls run as TF32x3 on tensor cores:
   so3lr-l's force call is 1.9x faster, so3lr-s/m about 10%; float32 errors unchanged,
