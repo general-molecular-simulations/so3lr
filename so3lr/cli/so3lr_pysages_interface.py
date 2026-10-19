@@ -9,6 +9,7 @@ without PySAGES installed.
 import logging
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 import jax_md.simulate
 import jax_md.quantity
@@ -90,6 +91,31 @@ def create_pysages_interface_fns(state, box, step_md_fn, md_dt, nbrs,
         return pb.JaxMDContext(init_fn_pysages, step_fn_pysages, box, md_dt)
 
     return generate_context_pysages
+
+
+def run_pysages_cycle(method, pysages_result, generate_context, md_steps):
+    """One MD cycle under PySAGES: continues ``pysages_result`` if given, else starts
+    ``method``. Returns the new PySAGES result."""
+    # A fresh dict each call: pysages.run stores its context in context_args, and its
+    # default dict would carry that into the next run started in the same process.
+    if pysages_result:
+        return jax.block_until_ready(
+            pysages.run(pysages_result, generate_context, md_steps,
+                        context_args={})
+        )
+    return jax.block_until_ready(
+        pysages.run(method, generate_context, md_steps, context_args={})
+    )
+
+
+def reset_pysages_runner():
+    """Drop the run loop that the PySAGES jax-md backend compiles once and caches for
+    the process, so the next cycle compiles it again. Needed when the force inside the
+    MD step changes while its inputs keep their shapes (the flash engine's wider tables
+    after an overflow)."""
+    import importlib
+    backend = importlib.import_module("pysages.backends.jax-md")
+    backend.jax_fn_container.update(is_defined=False, run_fn=None)
 
 
 @jit
@@ -201,9 +227,9 @@ def update_so3lr_after_pysages(raw_result, init_fn, rng_key, md_T, dt,
         rng_key: JAX random key.
         md_T: Target temperature.
         dt: MD timestep (used to apply the post-snapshot bias momentum kick).
-        nbrs: Short-range neighbor list.
+        nbrs: Short-range neighbor list (None for the flash engine, which keeps none).
         ensemble: Ensemble type ('nvt', 'nve', or 'npt').
-        nbrs_lr: Long-range neighbor list.
+        nbrs_lr: Long-range neighbor list (None with nbrs).
         k_grid: K-space grid (passed through unchanged).
         k_grid_disp: Dispersion-PME k-space grid (passed through unchanged).
 
@@ -283,9 +309,10 @@ def update_so3lr_after_pysages(raw_result, init_fn, rng_key, md_T, dt,
         raise ValueError(f"Unsupported ensemble for PySAGES: '{ensemble}'")
 
     # Update neighbor lists with the correct box
-    position = frac_positions if ensemble == 'npt' else final_snapshot.positions
-    nbrs = nbrs.update(position, neighbor=nbrs.idx, box=new_box)
-    nbrs_lr = nbrs_lr.update(position, neighbor=nbrs_lr.idx, box=new_box)
+    if nbrs is not None:
+        position = frac_positions if ensemble == 'npt' else final_snapshot.positions
+        nbrs = nbrs.update(position, neighbor=nbrs.idx, box=new_box)
+        nbrs_lr = nbrs_lr.update(position, neighbor=nbrs_lr.idx, box=new_box)
 
     # Restore bias forces to avoid a discontinuity at the cycle boundary.
     # The snapshot stores unbiased forces (captured before PySAGES adds bias),

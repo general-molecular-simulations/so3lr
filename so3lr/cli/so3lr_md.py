@@ -54,7 +54,7 @@ try:
     from .so3lr_pysages_interface import (
         create_pysages_interface_fns, update_so3lr_after_pysages,
         save_pysages_state, parse_pysages_input, get_pysages_method,
-        load_pysages_state
+        load_pysages_state, run_pysages_cycle, reset_pysages_runner
     )
     HAS_PYSAGES = True
 except ImportError:
@@ -1905,6 +1905,113 @@ def save_restart_checkpoints(
         save_pysages_state(pysages_result, restart_pysages_save_path)
 
 
+# Methods that only add a fixed bias potential (no histogram accumulation
+# or adaptive forces) work correctly with any ensemble.
+PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS = {'harmonic', 'unbiased'}
+
+
+def check_enhanced_sampling(all_settings: Dict, ensemble: str, restart: bool) -> Optional[Dict]:
+    """Validate the PySAGES settings before anything runs (both MD engines).
+
+    Returns the parsed PySAGES input, or None when enhanced sampling is off.
+    """
+    do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
+    restart_pysages_load_path = all_settings.get('restart_pysages_load_path')
+
+    restart_pysages = do_enhanced_sampling and restart_pysages_load_path is not None
+    if restart_pysages and not restart:
+        raise ValueError(
+            "restart_pysages_load_path needs an SO3LR restart (restart_load_path; "
+            "restart=True when calling perform_md directly): the PySAGES state "
+            "continues the dynamics it was saved with."
+        )
+    if restart_pysages_load_path is not None and not do_enhanced_sampling:
+        logger.warning("restart_pysages_load_path is ignored: do_enhanced_sampling is off.")
+
+    if not do_enhanced_sampling:
+        return None
+    if not HAS_PYSAGES:
+        raise ImportError(
+            "PySAGES is required for enhanced sampling but is not installed. "
+            "Install it with: pip install so3lr[pysages]"
+        )
+
+    pysages_set_dict = parse_pysages_input(all_settings.get('pysages_input', './pysages_input.yaml'))
+    pysages_method_name = pysages_set_dict['method'].lower()
+    if (pysages_method_name not in PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS
+            and ensemble not in ('nvt',)):
+        raise ValueError(
+            f"Enhanced sampling method '{pysages_method_name}' currently only "
+            f"supports the NVT ensemble (Nose-Hoover thermostat), but "
+            f"'{ensemble}' was selected. Methods that support all ensembles: "
+            f"{', '.join(sorted(PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS))}."
+        )
+    return pysages_set_dict
+
+
+def check_pysages_restart_ensemble(error, restart_pysages: bool, ensemble: str) -> None:
+    """Refuse a PySAGES restart into another ensemble (``error``: the
+    RestartInNewEnsembleError of the SO3LR restart)."""
+    if restart_pysages and not error.reset_only:
+        raise ValueError(
+            f"restart_pysages_load_path cannot continue in another ensemble "
+            f"({error.loaded_state.get('ensemble')} -> {ensemble}): the PySAGES state "
+            f"continues the dynamics it was saved with."
+        ) from error
+
+
+def load_pysages_restart(path, dtype):
+    """The pickled PySAGES result at ``path``, its snapshots in the run's ``dtype``."""
+    restart_data_pysages = load_pysages_state(path)
+    # Match the dtypes of the pickled PySAGES result to the run precision,
+    # exactly as load_state() does for the .npz state. The PySAGES
+    # snapshot is pickled at whatever dtype the *originating* run carried
+    # (a fresh run keeps e.g. the Nose-Hoover chain `tau` at float32 even
+    # under x64, because jax-md hardcodes `tau = f32(tau)` in its
+    # integrator factories). On restart that pickled snapshot seeds the
+    # fori_loop carry's snapshot slot, while the jax-md state comes from
+    # load_state() normalized to `dtype`. If the two disagree, the loop
+    # carry input (snapshot float32) != output (re-snapshot of the
+    # float64 state) and jax.lax.scan rejects it:
+    #   loop_carry[...].chain_data['tau']: float32 vs float64
+    #
+    # The PySAGES Result is a plain class (not a registered pytree), so
+    # we normalize its pytree-valued `snapshots` attribute (a list of
+    # registered NamedTuples) rather than the Result itself -- a
+    # tree_map over the Result would treat it as a single opaque leaf
+    # and do nothing.
+    #
+    # IMPORTANT: only `snapshots` is normalized, NOT `states`. The
+    # method `states` (e.g. ABFState: Fsum/Wp/force/bias) are the
+    # sampler's internal accumulators, which are *not* part of the
+    # integrator carry that `_match_float_dtypes` pins to the run
+    # precision. PySAGES always computes them at its float64 working
+    # precision (the method view promotes the snapshot to float64 via
+    # `_as_default_float`), and a fresh run carries them at float64
+    # regardless of the integrator dtype. Casting them down to float32
+    # here both (a) silently degrades the accumulated mean force to
+    # float32 for the continued run, and (b) breaks ABF's out-of-bounds
+    # `cond` in `estimate_force`: the `average_force` branch derives its
+    # dtype from `Fsum` (now float32) while the `restraints_force`
+    # branch stays at the float64 of the restraint bounds baked into
+    # `method`, so `lax.cond` rejects the mismatched branches with
+    #   "true_fun output float64[1] vs false_fun output float32[1]".
+    # Leaving `states` at their pickled (float64) dtype matches exactly
+    # what a fresh run produces.
+    def _to_run_precision(x):
+        if hasattr(x, 'dtype') and jnp.issubdtype(
+            jnp.asarray(x).dtype, jnp.floating
+        ):
+            return jnp.asarray(x).astype(dtype)
+        return x
+
+    if restart_data_pysages.snapshots is not None:
+        restart_data_pysages.snapshots = jax.tree_util.tree_map(
+            _to_run_precision, restart_data_pysages.snapshots
+        )
+    return restart_data_pysages
+
+
 def _validate_md_output_write_policy(
     *,
     output_file: Optional[Union[str, Path]],
@@ -2112,7 +2219,6 @@ def perform_md(
 
     # Enhanced sampling (PySAGES)
     do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
-    pysages_input_path = all_settings.get('pysages_input', './pysages_input.yaml')
     restart_pysages_save_path = all_settings.get('restart_pysages_save_path')
     restart_pysages_load_path = all_settings.get('restart_pysages_load_path')
     enforce_cartesian_coordinates = all_settings.get('enforce_cartesian_coordinates', False)
@@ -2120,36 +2226,7 @@ def perform_md(
     validate_md_counts(all_settings)
 
     restart_pysages = do_enhanced_sampling and restart_pysages_load_path is not None
-    if restart_pysages and not restart:
-        raise ValueError(
-            "restart_pysages_load_path needs an SO3LR restart (restart_load_path; "
-            "restart=True when calling perform_md directly): the PySAGES state "
-            "continues the dynamics it was saved with."
-        )
-    if restart_pysages_load_path is not None and not do_enhanced_sampling:
-        logger.warning("restart_pysages_load_path is ignored: do_enhanced_sampling is off.")
-
-    if do_enhanced_sampling and not HAS_PYSAGES:
-        raise ImportError(
-            "PySAGES is required for enhanced sampling but is not installed. "
-            "Install it with: pip install so3lr[pysages]"
-        )
-
-    # Methods that only add a fixed bias potential (no histogram accumulation
-    # or adaptive forces) work correctly with any ensemble.
-    PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS = {'harmonic', 'unbiased'}
-
-    if do_enhanced_sampling:
-        pysages_set_dict = parse_pysages_input(pysages_input_path)
-        pysages_method_name = pysages_set_dict['method'].lower()
-        if (pysages_method_name not in PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS
-                and ensemble not in ('nvt',)):
-            raise ValueError(
-                f"Enhanced sampling method '{pysages_method_name}' currently only "
-                f"supports the NVT ensemble (Nose-Hoover thermostat), but "
-                f"'{ensemble}' was selected. Methods that support all ensembles: "
-                f"{', '.join(sorted(PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS))}."
-            )
+    pysages_set_dict = check_enhanced_sampling(all_settings, ensemble, restart)
 
     # Handling of restart
     if restart_save_path is not None:
@@ -2304,12 +2381,7 @@ def perform_md(
                 validate_npt_restart_coupling(state, box, npt_coupling)
             position = state.position
         except RestartInNewEnsembleError as e:
-            if restart_pysages and not e.reset_only:
-                raise ValueError(
-                    f"restart_pysages_load_path cannot continue in another ensemble "
-                    f"({e.loaded_state.get('ensemble')} -> {ensemble}): the PySAGES state "
-                    f"continues the dynamics it was saved with."
-                ) from e
+            check_pysages_restart_ensemble(e, restart_pysages, ensemble)
             logger.warning(e)
             position = e.loaded_state['position']
             initial_geometry_dict['masses'] = e.loaded_state['mass']
@@ -2339,53 +2411,7 @@ def perform_md(
             raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
 
         if restart_pysages:
-            restart_data_pysages = load_pysages_state(restart_pysages_load_path)
-            # Match the dtypes of the pickled PySAGES result to the run precision,
-            # exactly as load_state() does for the .npz state above. The PySAGES
-            # snapshot is pickled at whatever dtype the *originating* run carried
-            # (a fresh run keeps e.g. the Nose-Hoover chain `tau` at float32 even
-            # under x64, because jax-md hardcodes `tau = f32(tau)` in its
-            # integrator factories). On restart that pickled snapshot seeds the
-            # fori_loop carry's snapshot slot, while the jax-md state comes from
-            # load_state() normalized to `dtype`. If the two disagree, the loop
-            # carry input (snapshot float32) != output (re-snapshot of the
-            # float64 state) and jax.lax.scan rejects it:
-            #   loop_carry[...].chain_data['tau']: float32 vs float64
-            #
-            # The PySAGES Result is a plain class (not a registered pytree), so
-            # we normalize its pytree-valued `snapshots` attribute (a list of
-            # registered NamedTuples) rather than the Result itself -- a
-            # tree_map over the Result would treat it as a single opaque leaf
-            # and do nothing.
-            #
-            # IMPORTANT: only `snapshots` is normalized, NOT `states`. The
-            # method `states` (e.g. ABFState: Fsum/Wp/force/bias) are the
-            # sampler's internal accumulators, which are *not* part of the
-            # integrator carry that `_match_float_dtypes` pins to the run
-            # precision. PySAGES always computes them at its float64 working
-            # precision (the method view promotes the snapshot to float64 via
-            # `_as_default_float`), and a fresh run carries them at float64
-            # regardless of the integrator dtype. Casting them down to float32
-            # here both (a) silently degrades the accumulated mean force to
-            # float32 for the continued run, and (b) breaks ABF's out-of-bounds
-            # `cond` in `estimate_force`: the `average_force` branch derives its
-            # dtype from `Fsum` (now float32) while the `restraints_force`
-            # branch stays at the float64 of the restraint bounds baked into
-            # `method`, so `lax.cond` rejects the mismatched branches with
-            #   "true_fun output float64[1] vs false_fun output float32[1]".
-            # Leaving `states` at their pickled (float64) dtype matches exactly
-            # what a fresh run produces.
-            def _to_run_precision(x):
-                if hasattr(x, 'dtype') and jnp.issubdtype(
-                    jnp.asarray(x).dtype, jnp.floating
-                ):
-                    return jnp.asarray(x).astype(dtype)
-                return x
-
-            if restart_data_pysages.snapshots is not None:
-                restart_data_pysages.snapshots = jax.tree_util.tree_map(
-                    _to_run_precision, restart_data_pysages.snapshots
-                )
+            restart_data_pysages = load_pysages_restart(restart_pysages_load_path, dtype)
 
     patched_potential_kwargs = intermediate_quantity_kwargs(observables)
 
@@ -2712,6 +2738,9 @@ def perform_md(
 
     # PySAGES setup (pysages_set_dict was already parsed during validation)
     if do_enhanced_sampling:
+        # PySAGES caches its compiled run loop, with the step of the run that built it,
+        # for the process: a second run in one process must not step with the first's
+        reset_pysages_runner()
         method = get_pysages_method(
             pysages_set_dict,
             nbrs=nbrs,
@@ -2819,15 +2848,9 @@ def perform_md(
                 k_grid=k_grid, k_grid_disp=k_grid_disp
             )
 
-            if pysages_result:
-                candidate_result = jax.block_until_ready(
-                    pysages.run(pysages_result, generate_context, md_steps,
-                                context_args={})
-                )
-            else:
-                candidate_result = jax.block_until_ready(
-                    pysages.run(method, generate_context, md_steps)
-                )
+            candidate_result = run_pysages_cycle(
+                method, pysages_result, generate_context, md_steps
+            )
 
             new_state, nbrs, nbrs_lr, new_box, k_grid, k_grid_disp = jax.block_until_ready(
                 update_so3lr_after_pysages(
