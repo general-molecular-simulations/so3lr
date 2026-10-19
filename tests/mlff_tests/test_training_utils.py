@@ -136,3 +136,64 @@ def test_expand_observables_to_theory_levels():
     # Missing observables_0 -> returned unchanged.
     empty = {'params': {}}
     assert training_utils.expand_observables_to_theory_levels(empty) is empty
+
+
+def test_expand_observables_tiles_the_optional_final_bias():
+    """`use_final_bias_bool=True` models (the legacy single-level SO3LR) carry a
+    'bias' next to the kernel; leaving it 1-wide while the kernel is tiled makes
+    the head shapes inconsistent. Bias-free models must stay untouched."""
+    n = 4
+    with_bias = {'params': {'observables_0': {'energy_dense_final': {
+        'kernel': jnp.ones((8, 1)),
+        'bias': jnp.full((1,), 0.5),
+    }}}}
+    obs0 = training_utils.expand_observables_to_theory_levels(
+        with_bias, num_theory_levels=n
+    )['params']['observables_0']
+    npt.assert_equal(obs0['energy_dense_final']['kernel'].shape, (8, n))
+    npt.assert_equal(obs0['energy_dense_final']['bias'].shape, (n,))
+    npt.assert_allclose(obs0['energy_dense_final']['bias'], jnp.full((n,), 0.5))
+
+    # No bias key (so3lr-tauri-s/m/l) -> nothing added.
+    without_bias = {'params': {'observables_0': {'energy_dense_final': {
+        'kernel': jnp.ones((8, 1)),
+    }}}}
+    out = training_utils.expand_observables_to_theory_levels(
+        without_bias, num_theory_levels=n
+    )
+    assert 'bias' not in out['params']['observables_0']['energy_dense_final']
+
+    # Already multi-level bias -> unchanged.
+    already = {'params': {'observables_0': {'energy_dense_final': {
+        'kernel': jnp.ones((8, n)),
+        'bias': jnp.ones((n,)),
+    }}}}
+    out = training_utils.expand_observables_to_theory_levels(
+        already, num_theory_levels=n
+    )
+    npt.assert_equal(out['params']['observables_0']['energy_dense_final']['bias'].shape, (n,))
+
+
+def test_log_gradient_values_is_not_overwritten():
+    """Per-leaf gradient norms must survive the step function.
+
+    They were written to metrics['grad_norm'], which the unconditional global
+    norm assignment then overwrote, making log_gradient_values a pure no-op.
+    """
+    import inspect
+    src = inspect.getsource(training_utils.make_training_step_fn)
+    assert "metrics['grad_norm_per_leaf']" in src
+    # The global norm still lands under its own key, and no longer clobbers.
+    assert src.count("metrics['grad_norm'] =") == 1
+
+
+def test_fit_skips_checkpoints_with_non_finite_loss():
+    """fit() used to save NaN-loss checkpoints; orbax ranks with best_mode='min'
+    and a NaN can be retained as 'best', evicting the real best weights.
+    fit() saves through _log_and_checkpoint; fit_from_iterator has its own guard."""
+    import inspect
+    for fn in (training_utils._log_and_checkpoint, training_utils.fit_from_iterator):
+        src = inspect.getsource(fn)
+        assert 'jnp.isfinite(eval_loss)' in src, (
+            f'{fn.__name__} saves checkpoints without a finite-loss guard'
+        )

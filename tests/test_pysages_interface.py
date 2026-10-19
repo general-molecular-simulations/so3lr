@@ -10,10 +10,7 @@ Tests cover:
 """
 
 import os
-import re
-import sys
 import shutil
-import tempfile
 import pathlib
 import subprocess
 
@@ -40,7 +37,6 @@ GEOMETRY_FILE = TEST_DATA_DIR / "benzoic_acid_aq_1.xyz"
 # Base MD settings shared by all integration runs.  The geometry path is
 # filled in at fixture time so it points to the temp-directory copy.
 _BASE_MD_SETTINGS = {
-    'use_so3lr': True,
     'precision': 'float64',
     'total_charge': 0.0,
     'lr_cutoff': 12.0,
@@ -50,12 +46,10 @@ _BASE_MD_SETTINGS = {
     'min_start_dt': 0.05,
     'min_max_dt': 0.1,
     'min_n_min': 2,
-    'min_print': True,
     'md_dt': 0.5,
     'md_T': 300,
     'md_cycles': 2,
     'md_steps': 500,
-    'hdf5_buffer_size': 50,
 }
 
 _PYSAGES_INPUT_UNBIASED = {
@@ -186,7 +180,6 @@ class TestImportGuard:
             'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
             'ensemble': 'nvt', 'precision': 'float32',
             'seed': 42, 'save_buffer': 10,
-            'use_so3lr': True,
             'lr_cutoff': 12.0, 'total_charge': 0.0,
             # On a periodic system, if PySAGES were silently enabled the
             # gating would auto-flip this to True and emit a warning.
@@ -398,34 +391,10 @@ class TestCreatePysagesInterfaceFns:
             return args
 
         gen = create_pysages_interface_fns(
-            lr=False, state=state, box=box, step_md_fn=dummy_step,
+            state=state, box=box, step_md_fn=dummy_step,
             md_dt=0.5, nbrs=nbrs, k_grid=k_grid
         )
         assert callable(gen)
-
-    def test_context_has_correct_extras_no_lr(self):
-        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
-        import pysages.backends as pb
-
-        state = "mock_state"
-        box = jnp.array([10.0, 10.0, 10.0])
-        nbrs = "mock_nbrs"
-        k_grid = jnp.ones((3, 3))
-
-        def dummy_step(i, args):
-            return args
-
-        gen = create_pysages_interface_fns(
-            lr=False, state=state, box=box, step_md_fn=dummy_step,
-            md_dt=0.5, nbrs=nbrs, k_grid=k_grid
-        )
-        ctx = gen()
-        # Access init state via the context
-        init_state = ctx.init_fn()
-        assert "nbrs" in init_state.extras
-        assert "box" in init_state.extras
-        assert "k_grid" in init_state.extras
-        assert "nbrs_lr" not in init_state.extras
 
     def test_context_has_correct_extras_with_lr(self):
         from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
@@ -441,7 +410,7 @@ class TestCreatePysagesInterfaceFns:
             return args
 
         gen = create_pysages_interface_fns(
-            lr=True, state=state, box=box, step_md_fn=dummy_step,
+            state=state, box=box, step_md_fn=dummy_step,
             md_dt=0.5, nbrs=nbrs, nbrs_lr=nbrs_lr, k_grid=k_grid
         )
         ctx = gen()
@@ -449,7 +418,7 @@ class TestCreatePysagesInterfaceFns:
         assert "nbrs_lr" in init_state.extras
         assert init_state.extras["nbrs_lr"] == "mock_nbrs_lr"
 
-    def test_step_fn_threads_k_grid_no_lr(self):
+    def test_step_fn_threads_k_grid(self):
         """Verify step_fn_pysages correctly passes k_grid through."""
         from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
         import pysages.backends as pb
@@ -464,7 +433,7 @@ class TestCreatePysagesInterfaceFns:
             return args
 
         gen = create_pysages_interface_fns(
-            lr=False, state=state, box=box, step_md_fn=identity_step,
+            state=state, box=box, step_md_fn=identity_step,
             md_dt=0.5, nbrs=nbrs, k_grid=k_grid_input
         )
         ctx = gen()
@@ -487,7 +456,7 @@ class TestCreatePysagesInterfaceFns:
             return args
 
         gen = create_pysages_interface_fns(
-            lr=False, state=state, box=box, step_md_fn=dummy_step,
+            state=state, box=box, step_md_fn=dummy_step,
             md_dt=0.5, nbrs=nbrs
         )
         # The generated context should use the replaced box
@@ -495,12 +464,8 @@ class TestCreatePysagesInterfaceFns:
         np.testing.assert_allclose(ctx.box, jnp.array([0.0, 0.0, 0.0]))
 
     # ------------------------------------------------------------------
-    # Additional coverage for the NPT and lr=True branches of
-    # create_pysages_interface_fns. The existing tests above only exercise
-    # the lr=False / non-NPT path. The new tests below cover:
-    #   * Cartesian<->fractional position conversions in init_fn (NPT)
-    #     and step_fn (NPT, both lr branches)
-    #   * threading of nbrs_lr through the lr=True step_fn
+    # NPT coverage: Cartesian<->fractional conversions in init_fn and
+    # step_fn, and threading of nbrs_lr through the step_fn.
     # ------------------------------------------------------------------
 
     class _SettableState:
@@ -532,7 +497,7 @@ class TestCreatePysagesInterfaceFns:
             return args
 
         gen = create_pysages_interface_fns(
-            lr=False, state=state, box=box, step_md_fn=dummy_step,
+            state=state, box=box, step_md_fn=dummy_step,
             md_dt=0.5, nbrs="mock", ensemble='npt',
         )
         ctx = gen()
@@ -558,7 +523,7 @@ class TestCreatePysagesInterfaceFns:
             return args
 
         gen = create_pysages_interface_fns(
-            lr=False, state=state, box=box, step_md_fn=dummy_step,
+            state=state, box=box, step_md_fn=dummy_step,
             md_dt=0.5, nbrs="mock", ensemble='nvt',
         )
         ctx = gen()
@@ -567,60 +532,11 @@ class TestCreatePysagesInterfaceFns:
             ctx_state.state.position, positions, atol=1e-10
         )
 
-    def test_step_fn_npt_no_lr_roundtrips_position(self):
-        """For ensemble='npt' and lr=False, step_fn_pysages must:
-          1. convert state.position from Cartesian to fractional
-             (state.position / box) *before* calling step_md_fn;
-          2. convert state.position back from fractional to Cartesian
-             (state.position * box) *after* step_md_fn returns.
-        With an identity step_md_fn the round-trip composes to the identity.
-        We assert both halves: step_md_fn observes fractional coords inside,
-        and the outgoing context_state holds Cartesian coords.
-
-        Catches mutations that drop either the pre- or post-conversion
-        (lines 84-87 / 94-97 for lr=True, 113-116 / 122-125 for lr=False).
-        """
-        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
-
-        box = jnp.array([10.0, 10.0, 10.0])
-        cart_initial = jnp.array([[1.0, 2.0, 3.0]])
-        state = self._SettableState(cart_initial / 10.0)  # fractional input
-
-        seen_inside_step = []
-
-        def capture_step(i, args):
-            # lr=False step_md_fn now sees a 5-tuple
-            # (state, nbrs, box, k_grid, k_grid_disp).
-            inner_state, _nbrs, _box, _k, _k_disp = args
-            seen_inside_step.append(np.array(inner_state.position))
-            return args
-
-        gen = create_pysages_interface_fns(
-            lr=False, state=state, box=box, step_md_fn=capture_step,
-            md_dt=0.5, nbrs="mock", ensemble='npt',
-        )
-        ctx = gen()
-        # init_fn transforms fractional -> Cartesian
-        ctx_state_after_init = ctx.init_fn()
-        np.testing.assert_allclose(
-            ctx_state_after_init.state.position, cart_initial, atol=1e-10
-        )
-        # step_fn should: cart -> frac (inside step_md_fn) -> cart (output)
-        ctx_state_after_step = ctx.step_fn(ctx_state_after_init)
-
-        assert seen_inside_step, "step_md_fn was never invoked"
-        np.testing.assert_allclose(
-            seen_inside_step[0], np.array([[0.1, 0.2, 0.3]]), atol=1e-10
-        )
-        np.testing.assert_allclose(
-            ctx_state_after_step.state.position, cart_initial, atol=1e-10
-        )
-
-    def test_step_fn_npt_lr_true_roundtrips_position(self):
-        """Same NPT pre/post-conversion check as the no-lr test, but on the
-        lr=True branch (lines 75-103). Verifies that the conversion logic is
-        replicated correctly in both branches; a copy-paste regression in one
-        branch is exactly the kind of bug a single-branch test misses.
+    def test_step_fn_npt_roundtrips_position(self):
+        """For ensemble='npt', step_fn_pysages converts state.position from
+        Cartesian to fractional before step_md_fn and back after it. With an
+        identity step_md_fn the round trip is the identity; the test checks
+        both halves (fractional inside, Cartesian out).
         """
         from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
 
@@ -631,14 +547,12 @@ class TestCreatePysagesInterfaceFns:
         seen_inside_step = []
 
         def capture_step(i, args):
-            # lr=True step_md_fn now sees a 6-tuple
-            # (state, nbrs, nbrs_lr, box, k_grid, k_grid_disp).
             inner_state, _nbrs, _nbrs_lr, _box, _k, _k_disp = args
             seen_inside_step.append(np.array(inner_state.position))
             return args
 
         gen = create_pysages_interface_fns(
-            lr=True, state=state, box=box, step_md_fn=capture_step,
+            state=state, box=box, step_md_fn=capture_step,
             md_dt=0.5, nbrs="mock", nbrs_lr="mock_lr", ensemble='npt',
         )
         ctx = gen()
@@ -653,13 +567,10 @@ class TestCreatePysagesInterfaceFns:
             ctx_state_after_step.state.position, cart_initial, atol=1e-10
         )
 
-    def test_step_fn_lr_true_threads_nbrs_lr(self):
-        """The lr=True step_fn must pack/unpack a 6-tuple
+    def test_step_fn_threads_nbrs_lr(self):
+        """The step_fn packs/unpacks the 6-tuple
         ``(state, nbrs, nbrs_lr, box, k_grid, k_grid_disp)`` through step_md_fn
-        and propagate ``nbrs_lr`` in the returned extras dict.
-        If lr=True silently dispatched to the lr=False branch (a 5-tuple),
-        step_md_fn would receive the wrong arity and nbrs_lr would not
-        appear in the output extras. Catches that swap.
+        and propagates ``nbrs_lr`` in the returned extras dict.
         """
         from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
 
@@ -675,7 +586,7 @@ class TestCreatePysagesInterfaceFns:
             return args
 
         gen = create_pysages_interface_fns(
-            lr=True, state="mock", box=box, step_md_fn=capture_step,
+            state="mock", box=box, step_md_fn=capture_step,
             md_dt=0.5, nbrs=nbrs, nbrs_lr=nbrs_lr_token, k_grid=k_grid,
         )
         ctx = gen()
@@ -683,7 +594,7 @@ class TestCreatePysagesInterfaceFns:
         ctx_state_after_step = ctx.step_fn(ctx_state_after_init)
 
         assert observed_arity == [6], (
-            f"lr=True step_md_fn should receive a 6-tuple "
+            f"step_md_fn should receive a 6-tuple "
             f"(state, nbrs, nbrs_lr, box, k_grid, k_grid_disp); "
             f"got arity {observed_arity}."
         )
@@ -729,7 +640,6 @@ class TestParsePysagesInput:
             'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
             'ensemble': 'nvt', 'precision': 'float32',
             'seed': 42, 'save_buffer': 10,
-            'use_so3lr': True,
             'lr_cutoff': 12.0, 'total_charge': 0.0,
         }
         with pytest.raises(FileNotFoundError):
@@ -1458,8 +1368,8 @@ class TestUpdateAfterPysages:
         nbrs = _RecordingNeighbors()
 
         _, _, _, _, k_grid_out, _ = update_so3lr_after_pysages(
-            result, lr=False, init_fn=None, rng_key=None,
-            md_T=self.MD_T, dt=self.DT, nbrs=nbrs, ensemble='nvt',
+            result, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=nbrs, nbrs_lr=_RecordingNeighbors(), ensemble='nvt',
             k_grid=k_grid_in,
         )
         # Same object identity, same values.
@@ -1470,8 +1380,8 @@ class TestUpdateAfterPysages:
         from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
         result, *_ = self._make_nvt_inputs()
         _, _, _, _, k_grid_out, _ = update_so3lr_after_pysages(
-            result, lr=False, init_fn=None, rng_key=None,
-            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            result, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(), nbrs_lr=_RecordingNeighbors(),
             ensemble='nvt', k_grid=None,
         )
         assert k_grid_out is None
@@ -1484,8 +1394,8 @@ class TestUpdateAfterPysages:
         nbrs = _RecordingNeighbors()
 
         state, nbrs_out, nbrs_lr_out, new_box, _, _ = update_so3lr_after_pysages(
-            result, lr=False, init_fn=None, rng_key=None,
-            md_T=self.MD_T, dt=self.DT, nbrs=nbrs, ensemble='nvt', k_grid=None,
+            result, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=nbrs, nbrs_lr=_RecordingNeighbors(), ensemble='nvt', k_grid=None,
         )
 
         assert isinstance(state, jax_md.simulate.NVTNoseHooverState)
@@ -1496,8 +1406,7 @@ class TestUpdateAfterPysages:
         np.testing.assert_allclose(state.momentum, state.mass * velocities, atol=1e-10)
         # Box came from snapshot.box.H
         np.testing.assert_allclose(new_box, jnp.eye(3) * 10.0)
-        # No long-range nbrs in lr=False
-        assert nbrs_lr_out is None
+        assert nbrs_lr_out.last_update is not None
         # Neighbor list was refreshed with the snapshot positions and new box
         assert nbrs.last_update is not None
         np.testing.assert_allclose(nbrs.last_update['positions'], positions)
@@ -1524,8 +1433,8 @@ class TestUpdateAfterPysages:
         result, _, velocities, forces, _ = self._make_nvt_inputs(n_atoms=n_atoms, bias=bias)
 
         state, *_ = update_so3lr_after_pysages(
-            result, lr=False, init_fn=None, rng_key=None,
-            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            result, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(), nbrs_lr=_RecordingNeighbors(),
             ensemble='nvt', k_grid=None,
         )
 
@@ -1552,8 +1461,8 @@ class TestUpdateAfterPysages:
         result = _make_result(snap, bias=None)
 
         state, _, nbrs_lr_out, new_box, _, _ = update_so3lr_after_pysages(
-            result, lr=False, init_fn=None, rng_key=None,
-            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            result, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(), nbrs_lr=_RecordingNeighbors(),
             ensemble='nve', k_grid=None,
         )
 
@@ -1562,7 +1471,7 @@ class TestUpdateAfterPysages:
         np.testing.assert_allclose(state.position, positions)
         np.testing.assert_allclose(state.force, forces)
         np.testing.assert_allclose(state.momentum, state.mass * velocities, atol=1e-10)
-        assert nbrs_lr_out is None
+        assert nbrs_lr_out.last_update is not None
         np.testing.assert_allclose(new_box, jnp.eye(3) * 20.0)
 
     def test_nve_bias_skips_chain_ke_resync(self):
@@ -1582,8 +1491,8 @@ class TestUpdateAfterPysages:
         result = _make_result(snap, bias=bias)
 
         state, *_ = update_so3lr_after_pysages(
-            result, lr=False, init_fn=None, rng_key=None,
-            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            result, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(), nbrs_lr=_RecordingNeighbors(),
             ensemble='nve', k_grid=None,
         )
 
@@ -1629,7 +1538,7 @@ class TestUpdateAfterPysages:
         nbrs_lr = _RecordingNeighbors()
 
         state, _, _, new_box, _, _ = update_so3lr_after_pysages(
-            result, lr=True, init_fn=None, rng_key=None,
+            result, init_fn=None, rng_key=None,
             md_T=self.MD_T, dt=self.DT, nbrs=nbrs, ensemble='npt',
             nbrs_lr=nbrs_lr, k_grid=None,
         )
@@ -1670,8 +1579,8 @@ class TestUpdateAfterPysages:
         result = _make_result(snap, bias=None)
 
         state, _, _, new_box, _, _ = update_so3lr_after_pysages(
-            result, lr=False, init_fn=None, rng_key=None,
-            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            result, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(), nbrs_lr=_RecordingNeighbors(),
             ensemble='npt', k_grid=None,
         )
 
@@ -1687,8 +1596,8 @@ class TestUpdateAfterPysages:
         result, *_ = self._make_nvt_inputs()
         with pytest.raises(ValueError, match="Unsupported ensemble"):
             update_so3lr_after_pysages(
-                result, lr=False, init_fn=None, rng_key=None,
-                md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+                result, init_fn=None, rng_key=None,
+                md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(), nbrs_lr=_RecordingNeighbors(),
                 ensemble='nonsense', k_grid=None,
             )
 
@@ -1730,8 +1639,8 @@ class TestUpdateAfterPysages:
         result = _make_result(snap, bias=bias)
 
         state, *_ = update_so3lr_after_pysages(
-            result, lr=False, init_fn=None, rng_key=None,
-            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(),
+            result, init_fn=None, rng_key=None,
+            md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(), nbrs_lr=_RecordingNeighbors(),
             ensemble='npt', k_grid=None,
         )
 
@@ -1982,7 +1891,6 @@ class TestPerformMdEnforceCartesianGating:
             'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
             'precision': 'float32',
             'seed': 42, 'save_buffer': 10,
-            'use_so3lr': True,
             'lr_cutoff': 12.0, 'total_charge': 0.0,
         }
 

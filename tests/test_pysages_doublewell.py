@@ -42,7 +42,6 @@ BOX = 100.0
 
 
 def _energy_fn(R, **kwargs):
-    import jax.numpy as jnp
     x = R[0, 0]; y = R[0, 1]; z = R[0, 2]
     return K_DW * (x * x - X0 * X0) ** 2 + 0.5 * K_YZ * (y * y + z * z)
 

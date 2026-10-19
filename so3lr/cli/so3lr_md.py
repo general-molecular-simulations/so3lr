@@ -11,39 +11,42 @@ It includes functionality for:
 - Restart capabilities
 
 """
+import gc
 import os
 import sys
 import time
 import json
 import logging
 import pathlib
+import stat
+import tempfile
 from pathlib import Path
 from functools import partial
 from logging.handlers import RotatingFileHandler
 from typing import Dict, Tuple, Union, List, Optional, Any, Callable, MutableMapping, Sequence
 
 import ase
-import yaml
-import click
 import numpy as np
 from ase.io import read
 import jax
 import jax.numpy as jnp
 import jax_md
 from jax_md import units, partition
-from jax_md.space import DisplacementOrMetricFn, raw_transform, transform
+from jax_md.space import DisplacementOrMetricFn, raw_transform
 from so3lr.mlff.calculators.potential import PotentialSparse
+from so3lr.mlff.nn.observable.dispersion_ref_data import (
+    check_atomic_numbers_supported,
+)
 from so3lr.mlff.nn.observable.observable_sparse import (
     compute_avg_dispersion_coefficients,
     dispersion_tail_correction_energy,
 )
 
-from so3lr.graph import Graph
-from so3lr import So3lrPotential
-from so3lr.jaxmd_utils import to_jax_md as _to_jax_md
+from so3lr.jaxmd_utils import nbrs_cutoff, to_jax_md as _to_jax_md
+from so3lr.pbc import is_fully_periodic, lattice_rows, minimum_image_problem
+from so3lr import kspace_defaults as KS
 from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
 
-import jaxpme
 
 # Optional PySAGES integration
 try:
@@ -60,8 +63,55 @@ except ImportError:
 import h5py
 from collections import namedtuple
 
+from ..md_observables import is_per_atom_observable
+from ..md_settings_validation import resolve_ensemble, validate_md_counts
+
+
+def _model_num_features(model_path) -> Optional[int]:
+    """Per-atom feature width of the model, or None if it cannot be read.
+
+    Needed to size the 'x' (embeddings) HDF5 dataset, which -- unlike every
+    other observable -- is not one scalar per atom. Read straight from the
+    checkpoint's hyperparameters.json: the store is initialized before the
+    model itself is loaded.
+    """
+    try:
+        from ..model_registry import resolve_model
+        workdir = resolve_model(model_path).dir
+        with open(pathlib.Path(workdir) / 'hyperparameters.json') as fp:
+            return int(json.load(fp)['model']['num_features'])
+    except Exception as e:  # pragma: no cover - informational fallback
+        logger.warning(f"Could not determine the model's feature width: {e}")
+        return None
+
+
+def intermediate_quantity_kwargs(observables) -> Dict[str, Any]:
+    """Extra kwargs asking the model to emit the requested observables.
+
+    Must fire for ANY requested observable. This used to be gated on
+    ``'partial_charges' in observables``, so every other ``--observable`` choice
+    was never produced by the model and the run died with ``KeyError`` at the
+    end of the first MD cycle.
+    """
+    if len(observables) > 0:
+        return {'output_intermediate_quantities': observables}
+    return {}
+
 # HDF5 wrapper to replace mlff.mdx.hdfdict
-DataSetEntry = namedtuple('DataSetEntry', ('chunk_length', 'shape', 'dtype'))
+# per_atom: the leading dataset axis is atoms, so atom selections apply to it.
+DataSetEntry = namedtuple('DataSetEntry', ('chunk_length', 'shape', 'dtype', 'per_atom'),
+                          defaults=(False,))
+
+
+def _existing_regular_output_mode(path: Path) -> Optional[int]:
+    """Return an existing output file's mode (symlinks are followed)."""
+    try:
+        metadata = path.stat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(f'Output must be a regular file: {path}')
+    return stat.S_IMODE(metadata.st_mode)
 
 
 class HDF5Store(object):
@@ -93,14 +143,36 @@ class HDF5Store(object):
                     chunks=(x.chunk_length,) + x.shape)
 
     def append(self, x: Dict):
-        with h5py.File(self.datapath, mode='a') as h5f:
-            for key, values in x.items():
-                dset = h5f[key]
-                dset.resize((self.i + 1,) + self.dataset[key].shape)
-                dset[self.i] = [values]
+        """Append a batch of frames; each array is shaped (n_frames, *dataset_shape).
 
-            self.i += 1
-            h5f.flush()
+        The whole batch is validated before any dataset is resized, and a failed
+        write is rolled back, so datasets never end with different frame counts.
+        """
+        arrays = {k: np.asarray(v, dtype=self.dataset[k].dtype) for k, v in x.items()}
+        shapes = {k: a.shape for k, a in arrays.items()}
+        n_frames = {s[0] for s in shapes.values() if s}
+        if len(n_frames) > 1 or any(s[1:] != self.dataset[k].shape for k, s in shapes.items()):
+            raise ValueError(
+                f"HDF5 batch must be (n_frames, *dataset_shape) with the same "
+                f"n_frames for every dataset; received {shapes}."
+            )
+        n = n_frames.pop() if n_frames else 0
+        if n == 0:
+            return
+        with h5py.File(self.datapath, mode='a') as h5f:
+            try:
+                for key, array in arrays.items():
+                    dset = h5f[key]
+                    dset.resize((self.i + n,) + self.dataset[key].shape)
+                    dset[self.i:] = array
+            except BaseException:
+                # Keep every dataset at the same frame count if a write fails.
+                for key in arrays:
+                    h5f[key].resize((self.i,) + self.dataset[key].shape)
+                raise
+            finally:
+                h5f.flush()
+        self.i += n
 
 # Setup logging
 logger = logging.getLogger("SO3LR")
@@ -422,9 +494,10 @@ def init_hdf5_store(
     save_to: Union[str, Path],
     batch_size: int,
     num_atoms: int,
-    num_box_entries: int,
+    num_box_entries: Union[int, Sequence[int]],
     exist_ok: bool = False,
     observables: Optional[Sequence[str]] = [],
+    num_features: Optional[int] = None,
     so3lr_version: Optional[str] = None,
     ensemble: Optional[str] = None,
     md_dt_fs: Optional[float] = None,
@@ -433,17 +506,22 @@ def init_hdf5_store(
     cell_a0: Optional[Any] = None,
     input_file: Optional[str] = None,
     model_path: Optional[str] = None,
+    dtype: Any = np.float32,
+    fractional_coordinates: Optional[bool] = None,
 ) -> HDF5Store:
     """
     Initialize an HDF5 storage object for trajectory data.
 
     Args:
         save_to: Path to save the HDF5 file.
-        batch_size: Batch size for the storage.
+        batch_size: Number of frames per HDF5 chunk / normal write buffer.
         num_atoms: Number of atoms in the system.
-        num_box_entries: Number of entries in the box vector (typically 3).
+        num_box_entries: Shape of a stored box, or the length of a box vector.
         exist_ok: Whether to overwrite the file if it exists.
         observables: Observable names that get their own dataset.
+        num_features: Per-atom feature width, needed to size the 'x' dataset.
+            Read from the model's hyperparameters by the caller; when None,
+            'x' cannot be stored and is reported.
         so3lr_version: SO3LR package version recorded as a root attribute.
         ensemble: Ensemble label (nve/nvt/nvt-langevin/npt) recorded as a root attribute.
         md_dt_fs: MD timestep in femtoseconds recorded as a root attribute.
@@ -452,6 +530,9 @@ def init_hdf5_store(
         cell_a0: Initial cell as a (3,3) or (3,) array in Angstrom. Zeros if non-periodic.
         input_file: Original input geometry filename.
         model_path: Resolved SO3LR model name or path.
+        dtype: Floating-point storage dtype. This should match the configured
+            simulation precision.
+        fractional_coordinates: Whether stored positions are fractional.
 
     Raises:
         RuntimeError: If the file exists and exist_ok is set to False.
@@ -459,63 +540,88 @@ def init_hdf5_store(
     Returns:
         HDF5Store: Initialized HDF5 storage object.
     """
-    # Convert to Path object and resolve path
-    save_path = Path(save_to).expanduser().resolve()
+    # Do not resolve the final component: that would hide a symlink target.
+    save_path = Path(save_to).expanduser().absolute()
 
     # Create parent directory if it doesn't exist
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Check if file exists
-    if save_path.exists() and not exist_ok:
+    if _existing_regular_output_mode(save_path) is not None and not exist_ok:
         raise RuntimeError(
             f'File exists: {save_path}. '
             f'Set exist_ok=True to override file.'
         )
 
-    # Define dataset structure
+    storage_dtype = np.dtype(dtype)
+    box_shape = tuple(int(n) for n in np.atleast_1d(num_box_entries))
+
+    # Dataset shapes exclude the resizable leading frame dimension.  The
+    # configured save buffer controls HDF5 chunking only; it is not part of
+    # the public trajectory shape.
     dataset = {
         'positions': DataSetEntry(
-            chunk_length=1,
-            shape=(batch_size, num_atoms, 3),
-            dtype=np.float32
+            chunk_length=batch_size,
+            shape=(num_atoms, 3),
+            dtype=storage_dtype,
+            per_atom=True,
         ),
         'momenta': DataSetEntry(
-            chunk_length=1,
-            shape=(batch_size, num_atoms, 3),
-            dtype=np.float32
+            chunk_length=batch_size,
+            shape=(num_atoms, 3),
+            dtype=storage_dtype,
+            per_atom=True,
         ),
         'box': DataSetEntry(
-            chunk_length=1,
-            shape=(batch_size, num_box_entries),
-            dtype=np.float32
+            chunk_length=batch_size,
+            shape=box_shape,
+            dtype=storage_dtype
         )
     }
 
     for o in observables:
         if o == "dipole_vec":
             dataset['dipole_vec'] = DataSetEntry(
-                chunk_length=1,
-                shape=(batch_size, 1, 3),
-                dtype=np.float32
+                chunk_length=batch_size,
+                shape=(1, 3),
+                dtype=storage_dtype
             )
-        elif o in   ['partial_charges',
-                    'hirshfeld_ratios',
-                    'c6_ratios',
-                    'electrostatic_energy_kspace',
-                    'electrostatic_energy',
-                    'dispersion_energy',
-                    'zbl_repulsion']:
+        elif o == 'x':
+            # Per-atom embeddings: (num_atoms, num_features). Unlike every other
+            # observable this is not one scalar per atom, so the dataset can only
+            # be sized once the model's feature width is known.
+            if num_features is None:
+                logger.warning(
+                    "Observable 'x' needs the model's feature width to size its "
+                    "HDF5 dataset and it could not be determined; use "
+                    "--output-format extxyz to record it."
+                )
+                continue
+            dataset['x'] = DataSetEntry(
+                chunk_length=batch_size,
+                shape=(num_atoms, num_features),
+                dtype=storage_dtype,
+                per_atom=True,
+            )
+        elif is_per_atom_observable(o):
+            # Every one-scalar-per-atom observable gets a dataset. This list used
+            # to be a fourth hand-maintained copy that omitted five selectable
+            # observables (nn_energy, nlh_repulsion, the two *_undamped ones),
+            # so requesting them failed at write time with
+            # "object '<name>' doesn't exist" even after the model produced them.
             dataset[o] = DataSetEntry(
-                chunk_length=1,
-                shape=(batch_size, num_atoms,),
-                dtype=np.float32
+                chunk_length=batch_size,
+                shape=(num_atoms,),
+                dtype=storage_dtype,
+                per_atom=True,
             )
         else:
             logger.warning(
-                f"Observable '{o}' is not recognized or not supported for HDF5 storage."
+                f"Observable '{o}' has a model-dependent width and cannot be "
+                f"stored in HDF5; use --output-format extxyz to record it."
             )
 
-    store = HDF5Store(save_path, datasets=dataset, mode='w')
+    store = HDF5Store(save_path, datasets=dataset, mode='w' if exist_ok else 'w-')
 
     # Write self-describing root-group attributes so the .hdf5 file carries
     # provenance on its own (model, ensemble, timestep, system, observables).
@@ -536,13 +642,17 @@ def init_hdf5_store(
                     atomic_numbers, dtype=np.int32
                 )
             if cell_a0 is not None:
-                h5f.attrs['cell_a0'] = np.asarray(cell_a0, dtype=np.float32)
+                h5f.attrs['cell_a0'] = np.asarray(cell_a0, dtype=storage_dtype)
             if observables is not None:
                 h5f.attrs['observables'] = ','.join(str(o) for o in observables)
             if input_file is not None:
                 h5f.attrs['input_file'] = str(input_file)
             if model_path is not None:
                 h5f.attrs['model_path'] = str(model_path)
+            if fractional_coordinates is not None:
+                h5f.attrs['fractional_coordinates'] = bool(fractional_coordinates)
+            h5f.attrs['trajectory_layout'] = 'frame-major-v1'
+            h5f.attrs['box_convention'] = 'ase-cell-vectors-as-rows'
     except Exception as e:
         logger.warning(f"Could not write HDF5 root attributes: {e}")
 
@@ -551,64 +661,38 @@ def init_hdf5_store(
 
 def write_to_hdf5(
     hdf5_store: HDF5Store,
-    momenta: Optional[List[jnp.ndarray]],
+    momenta: List[jnp.ndarray],
     positions: List[jnp.ndarray],
-    boxes: Union[float, jnp.ndarray, List[jnp.ndarray], None],
-    obs_dict: MutableMapping[str, list] = {},
+    boxes: List[jnp.ndarray],
+    obs_dict: Optional[MutableMapping[str, list]] = None,
     indices: Optional[List[int]] = None,
-) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
-    """
-    Write trajectory data to an HDF5 file.
+) -> Tuple[list, list, list, MutableMapping[str, list]]:
+    """Append buffered frames (one list entry per frame) to the HDF5 store.
 
-    Writes the accumulated trajectory data to HDF5 storage.
+    ``indices`` selects the stored atoms for every dataset whose schema entry
+    is ``per_atom``; molecular datasets (e.g. the dipole) are reshaped to their
+    stored shape instead.
 
-    Args:
-        hdf5_store: HDF5 storage object.
-        momenta: List of momenta arrays for each frame, or None.
-        positions: List of position arrays for each frame.
-        boxes: Box vectors for each frame. Can be float, array, list of arrays, or None.
-        obs_dict: Dictionary of observables. Defaults to {}.
-    Returns:
-        Tuple of empty lists for momenta, positions, and boxes.
+    Returns empty buffers for momenta, positions, boxes, and observables.
     """
+    obs_dict = obs_dict or {}
+    if not positions:
+        return momenta, positions, boxes, obs_dict
+    atoms = slice(None) if indices is None else indices
     try:
-        if indices is None:
-            indices = list(range(positions[0].shape[0]))
-
-        step_data = {
-            'positions': jnp.stack(positions, axis=0)[:,indices],
-        }
-
-        if np.any(boxes != 0):
-            step_data['box'] = jnp.stack(boxes, axis=0)
-    
-        if momenta is not None:
-            step_data['momenta'] = jnp.stack(momenta, axis=0)[:,indices]
-
-        for o in obs_dict.keys():
-            # Check if the observable has atom_wise data, this test could be improved
-            if obs_dict[o][0].shape == (positions[0].shape[0],):
-                step_data.update(
-                    {o: jnp.stack(obs_dict[o], axis=0)[:,indices]},
-                )
-            else:
-                step_data.update(
-                    {o: jnp.stack(obs_dict[o], axis=0)},
-                )
-
-        step_data = jax.tree.map(
-            lambda u: np.asarray(u), step_data
-            )
-        
+        frames = {'positions': positions, 'momenta': momenta, 'box': boxes, **obs_dict}
+        step_data = {}
+        for key, values in frames.items():
+            if key not in hdf5_store.dataset:  # skipped (with a warning) at init
+                continue
+            values, entry = np.stack(values), hdf5_store.dataset[key]
+            step_data[key] = (values[:, atoms] if entry.per_atom
+                              else values.reshape((len(values),) + entry.shape))
         hdf5_store.append(step_data)
-        
-        obs_dict = {o: [] for o in obs_dict.keys()}
-
-        return [], [], [], obs_dict
-
     except Exception as e:
         logger.error(f"Failed to write to HDF5 file: {str(e)}")
         sys.exit(1)
+    return [], [], [], {o: [] for o in obs_dict}
 
 
 def write_to_extxyz(
@@ -617,9 +701,12 @@ def write_to_extxyz(
     boxes: Union[float, jnp.ndarray, List, None],
     momenta: List,
     positions: List,
-    obs_dict: MutableMapping[str, list] = {},
+    obs_dict: Optional[MutableMapping[str, list]] = None,
     indices: Optional[List[int]] = None,
     fractional_coordinates: bool = True,
+    *,
+    append: bool = True,
+    overwrite: bool = False,
 ) -> Tuple[List[jnp.ndarray], List[jnp.ndarray], List[jnp.ndarray], MutableMapping[str, list]]:
     """
     Write trajectory data to an extended XYZ file.
@@ -640,6 +727,10 @@ def write_to_extxyz(
         fractional_coordinates: If True, positions are in fractional coordinates
             and will be scaled by box vectors. If False, positions are already
             in Cartesian Angstroms and are written directly.
+        append: Append this batch to a trajectory. MD uses False for the first
+            batch of a fresh run, then True for later batches and restarts.
+        overwrite: Allow the first batch (append=False) to replace an existing
+            file. The old file is retained until the complete batch is written.
 
     Returns:
         Tuple of empty lists (momenta, positions, boxes, obs_dict) to clear memory
@@ -648,9 +739,12 @@ def write_to_extxyz(
         (matches the HDF5 writer behavior).
     """
     try:
+        if obs_dict is None:
+            obs_dict = {}
+
         # Ensure output_file is a Path object
-        output_path = Path(output_file) if isinstance(
-            output_file, str) else output_file
+        # Resolve symlinks so replacing the file keeps the link intact.
+        output_path = Path(os.path.realpath(output_file))
 
         # Create parent directory if it doesn't exist
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -658,7 +752,7 @@ def write_to_extxyz(
         # Check if we have data to write
         if not positions:
             logger.info('No positions to write to extxyz file')
-            return momenta, positions, boxes
+            return momenta, positions, boxes, obs_dict
 
         # Convert positions to numpy array
         positions = np.asarray(positions)
@@ -668,40 +762,31 @@ def write_to_extxyz(
         for i in range(len(positions)):
             atoms_copy = atoms.copy()
 
-            # TODO: replace with raw_transform(box, positions)
-            # Handle different box types and set positions accordingly
-            if isinstance(boxes, float):
-                if boxes == 0:
-                    atoms_copy.set_positions(positions[i])
+            # Resolve the box for this frame.  Lists are the trajectory form;
+            # an ndarray/scalar is a fixed box shared by all frames.
+            if isinstance(boxes, list):
+                if len(boxes) != len(positions):
+                    raise ValueError(
+                        f"boxes contains {len(boxes)} frames; expected {len(positions)}"
+                    )
+                frame_box = boxes[i]
+            else:
+                frame_box = boxes
+
+            if frame_box is not None and np.any(np.asarray(frame_box) != 0):
+                atoms_copy.set_cell(frame_box)
+                if fractional_coordinates:
+                    # ASE applies the full cell matrix here.  Element-wise
+                    # multiplication only happened to work for diagonal boxes
+                    # and corrupted coordinates in sheared cells.
+                    atoms_copy.set_scaled_positions(positions[i])
                 else:
-                    atoms_copy.set_cell(boxes)
-                    if fractional_coordinates:
-                        atoms_copy.set_positions(positions[i] * boxes)
-                    else:
-                        atoms_copy.set_positions(positions[i])
-            elif isinstance(boxes, (jnp.ndarray, np.ndarray)):
-                if np.any(boxes == 0):
                     atoms_copy.set_positions(positions[i])
-                else:
-                    atoms_copy.set_cell(boxes)
-                    if fractional_coordinates:
-                        atoms_copy.set_positions(positions[i] * boxes)
-                    else:
-                        atoms_copy.set_positions(positions[i])
-            elif isinstance(boxes, list):
-                if np.any(boxes[0] == 0):
-                    atoms_copy.set_positions(positions[i])
-                else:
-                    atoms_copy.set_cell(boxes[i])
-                    if fractional_coordinates:
-                        atoms_copy.set_positions(positions[i] * boxes[i])
-                    else:
-                        atoms_copy.set_positions(positions[i])
             else:
                 atoms_copy.set_positions(positions[i])
 
             # Set momenta if available
-            if momenta and i < len(momenta):
+            if momenta is not None and i < len(momenta):
                 atoms_copy.set_momenta(momenta[i])
 
             # Canonicalize the extxyz column name so the eval-side reader
@@ -727,6 +812,11 @@ def write_to_extxyz(
                 elif o == "dipole_vec" :
                     atoms_copy.info['dipole_vec'] = np.asarray(obs_dict['dipole_vec'][i]).flatten()
 
+                elif o == 'x':
+                    # EXTXYZ supports multi-column per-atom arrays. Retain the
+                    # feature axis so the later atom selection also subsets x.
+                    atoms_copy.set_array(col, np.asarray(obs_dict[o][i]))
+
                 elif obs_dict[o][0].shape == (positions[0].shape[0],):
                     atoms_copy.set_array(col, np.asarray(obs_dict[o][i]).flatten())
                 else:
@@ -735,15 +825,30 @@ def write_to_extxyz(
                     )
 
             if indices is not None:
-                # Filter atoms based on indices
-                #atoms_copy = Filter(atoms_copy, indices=indices)
                 atoms_copy = atoms_copy[indices]
             atoms_list.append(atoms_copy)
 
-        # Write all atoms to file at once
-        file_exists = output_path.exists()
-        ase.io.write(output_path, atoms_list,
-                     format='extxyz', append=file_exists)
+        output_mode = _existing_regular_output_mode(output_path)
+        if append:
+            ase.io.write(output_path, atoms_list, format='extxyz', append=True)
+        else:
+            # Stage only the first batch: neither serialization failure nor a
+            # run that produces no frames should erase the previous trajectory.
+            # Later batches retain the normal streaming append behavior.
+            with tempfile.TemporaryDirectory(
+                dir=output_path.parent, prefix=f'.{output_path.name}.',
+            ) as temporary_dir:
+                temporary_path = Path(temporary_dir) / output_path.name
+                with temporary_path.open('w', encoding='utf-8') as stream:
+                    ase.io.write(stream, atoms_list, format='extxyz')
+                if output_mode is not None:
+                    if not overwrite:
+                        raise RuntimeError(
+                            f'Output file already exists: {output_path}. '
+                            'Pass --overwrite or choose a different output path.'
+                        )
+                    temporary_path.chmod(output_mode)
+                os.replace(temporary_path, output_path)
 
         # Clear lists to free memory
         obs_dict = {o: [] for o in obs_dict.keys()}
@@ -833,10 +938,49 @@ def check_cell(
     if np.any(cell[~mask] != 0):
         raise ValueError(f'JAX-MD currently supports only orthogonal cells. Provided cell: {cell}') 
 
-    # if np.any(np.diag(cell) < lr_cutoff * 2):
-    #     raise ValueError(f'Each dimension of the cell {np.diag(cell)} must be at least twice the long-range cutoff distance [{lr_cutoff} Å].')
-
     return cell
+
+
+def check_box_for_neighbour_lists(box, cutoff: float, where: str) -> None:
+    """Refuse an orthorhombic box (matrix, lengths or scalar) shorter than twice
+    the neighbour-list cutoff (jaxmd_utils.nbrs_cutoff): the lists keep one image
+    per pair and would drop the rest."""
+    lengths = np.broadcast_to(np.asarray(box_to_diag(box), float).reshape(-1), (3,))
+    problem = minimum_image_problem(np.diag(lengths), cutoff)
+    if problem:
+        raise ValueError(
+            f'{where}: {problem}. Use a larger box, a smaller --lr-cutoff with k-space '
+            f'carrying the long range (--kspace-electrostatics pme, and kspace_dispersion: pme '
+            f'in a --settings file for dispersion), or the ASE calculator (So3lrCalculator), '
+            f'which lists every periodic image.')
+
+
+def cell_from_atoms_boundary_conditions(
+    atoms: ase.Atoms,
+    lr_cutoff: float,
+    kspace_electrostatics: str,
+    kspace_smearing: float = None,
+) -> Optional[np.ndarray]:
+    """Return the validated periodic cell, or None for a non-periodic system.
+
+    Mixed-axis PBC raises. With ``pbc=False`` any ASE cell is only a bounding
+    box, so the system runs in vacuum.
+    """
+    cell = np.asarray(atoms.get_cell())
+    if is_fully_periodic(atoms.get_pbc(), context='SO3LR MD'):
+        return check_cell(cell, lr_cutoff, kspace_electrostatics, kspace_smearing)
+    if np.any(cell):
+        logger.info('Input has a cell but pbc=False: ignoring the cell and running in vacuum.')
+    # Still run check_cell's cutoff validation.
+    return check_cell(np.zeros((3, 3)), lr_cutoff, kspace_electrostatics, kspace_smearing)
+
+
+def dispersion_ratios(aux):
+    """(polarizability ratio, C6 ratio) from the model output. The so3lr-tauri-s/m/l
+    models name the first 'a0_ratios', the legacy model 'hirshfeld_ratios', and
+    the legacy model has no C6 head (None)."""
+    return aux.get('a0_ratios', aux.get('hirshfeld_ratios')), aux.get('c6_ratios')
+
 
 def _is_legacy_model(model_dir) -> bool:
     """Return True if the resolved model is the legacy v1 SO3LR (legacy_so3lr_bool)."""
@@ -854,9 +998,11 @@ def load_model(
     lr_cutoff: float = 12.0,
     dispersion_damping: float = 2.,
     kspace_electrostatics: str = None,
-    kspace_interp_nodes: int = 4,
+    kspace_interp_nodes: int = KS.DEFAULT_KSPACE_INTERP_NODES,
     kspace_dispersion: str = None,
-    kspace_dispersion_interp_nodes: int = 4,
+    kspace_dispersion_interp_nodes: int = KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES,
+    charge_embed_total_charge: float = None,
+    charge_equilibration_total_charge: float = None,
     **kwargs
 ) -> PotentialSparse:
     """
@@ -870,6 +1016,13 @@ def load_model(
                                 energy damping in Å. Defaults to 2.0.
         kspace_dispersion (str, optional): Method for dispersion PME ('ewald', 'pme', or None).
         kspace_dispersion_interp_nodes (int, optional): Interpolation nodes for dispersion PME.
+        charge_embed_total_charge (float, optional): Override the total charge seen by
+                                the charge embedding. None (default) uses the system's
+                                total charge.
+        charge_equilibration_total_charge (float, optional): Override the total charge
+                                that charge equilibration conserves to. None (default)
+                                uses the system's total charge. Independent of the
+                                embedding override.
 
     Returns:
         PotentialSparse: The loaded MLFF model.
@@ -881,7 +1034,6 @@ def load_model(
     from so3lr.model_registry import resolve_model
     spec = resolve_model(model_path)
     model_dir, from_file = spec.dir, spec.from_file
-    params_pkl = model_dir / 'params.pkl'
 
     # The legacy v1 model used real-space cutoff electrostatics; k-space
     # (pme/ewald/p3m) is untested for it. Warn but allow.
@@ -904,28 +1056,15 @@ def load_model(
         long_range_kw['dispersion_kspace_do_ewald'] = do_ewald
         long_range_kw['dispersion_kspace_interp_nodes'] = kspace_dispersion_interp_nodes
 
-    def _create_potential(from_file_flag: bool) -> PotentialSparse:
-        return PotentialSparse.create_from_workdir(
-            workdir=model_dir,
-            from_file=from_file_flag,
-            long_range_kwargs=long_range_kw,
-            dtype=precision,
-            **kwargs
-        )
-
-    try:
-        potential = _create_potential(from_file)
-    except FileNotFoundError:
-        if (not from_file) and params_pkl.exists():
-            logger.warning(
-                'Checkpoint loading failed for %s; falling back to params.pkl.',
-                model_dir,
-            )
-            potential = _create_potential(True)
-        else:
-            raise
-
-    return potential
+    return PotentialSparse.create_from_workdir(
+        workdir=model_dir,
+        from_file=from_file,
+        long_range_kwargs=long_range_kw,
+        dtype=precision,
+        charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge,
+        **kwargs
+    )
 
 
 def to_jax_md_custom(
@@ -1005,7 +1144,7 @@ def process_model(
     precision: jnp.dtype = jnp.float32,
     fractional_coordinates: bool = False,
     has_aux: bool = False,
-) -> Tuple[callable, callable, callable, Optional[callable]]:
+) -> Tuple[callable, callable, callable]:
     """
     Process the model and create the neighbor functions and energy function.
 
@@ -1026,10 +1165,21 @@ def process_model(
         fractional_coordinates (bool, optional): Whether to use fractional
                     coordinates or not (needs to be True for periodic systems).
                                             Defaults to False.
+        has_aux (bool, optional): Unused; the returned function takes has_aux per call.
 
     Returns:
-        Tuple[callable, callable, callable]: Neighbor functions and energy function.
+        Tuple[callable, callable, callable]: Short- and long-range neighbor functions
+        and the energy (or observables) function.
     """
+
+    # Refuse elements this model was never trained on, before any jit tracing.
+    # Both perform_md and perform_min funnel through here, and the set is
+    # model-dependent: legacy v1 saw only the eight biomolecular elements, the
+    # v2 models Z = 1..85. Past that the reference tables are indexed out of
+    # bounds inside jit, so JAX returns a value belonging to some other element
+    # instead of raising.
+    check_atomic_numbers_supported(
+        species, getattr(potential, 'supported_atomic_numbers', None))
 
     neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = to_jax_md_custom(
         potential=potential,
@@ -1050,38 +1200,93 @@ def process_model(
 
 
 def box_to_diag(box):
-    """Extract diagonal from box matrix, or return as-is if already 1D."""
+    """Return orthorhombic lengths from a box vector or diagonal matrix.
+
+    This is intentionally not a conversion for general cells. Fully flexible
+    cells are rejected by :func:`normalize_npt_coupling` before they can reach
+    any caller of this helper.
+    """
     if box is not None and hasattr(box, 'ndim') and box.ndim == 2:
         return jnp.diag(box)
     return box
 
 
-def format_pressure_tensor(state, npt_coupling, pressure_unit):
-    """Format instantaneous pressure tensor for logging.
+def normalize_npt_coupling(npt_coupling: str) -> str:
+    """Return 'isotropic' or 'semi-isotropic' (spaces/underscores/hyphens accepted).
 
-    Returns (header_str, value_str) appropriate for the coupling mode:
-    - isotropic: 1 number (scalar pressure = trace/3)
-    - semi-isotropic: 3 numbers (Pxx, Pyy, Pzz)
-    - anisotropic: 9 numbers (full tensor, row-major)
+    Semi-isotropic coupling is experimental. Fully anisotropic coupling is
+    rejected: the integrator would evolve shear, but the neighbour-list,
+    reciprocal-space and dispersion-tail paths assume an orthorhombic cell.
     """
-    if not isinstance(state, jax_md.simulate.NPTNoseHooverFlexState):
-        return '', ''
+    coupling = '-'.join(str(npt_coupling).strip().lower().replace('_', ' ').replace('-', ' ').split())
+    if coupling == 'anisotropic':
+        raise ValueError(
+            "npt_coupling='anisotropic' is experimental and not supported by SO3LR MD: "
+            "the cell would shear, but the neighbour-list, reciprocal-space and "
+            "dispersion-tail paths assume an orthorhombic cell. Use 'isotropic' or "
+            "the experimental 'semi-isotropic' (coupled x/y, independent z)."
+        )
+    if coupling not in ('isotropic', 'semi-isotropic'):
+        raise ValueError(
+            f"Unknown npt_coupling={npt_coupling!r}. Supported values: isotropic, semi-isotropic."
+        )
+    return coupling
 
-    P_tensor = jax_md.simulate.pressure_tensor_flex(state)
-    P_tensor = P_tensor / pressure_unit
 
-    coupling = jax_md.simulate._normalize_coupling(npt_coupling)
-    if coupling == 'isotropic':
-        p_scalar = float(jnp.trace(P_tensor) / 3)
-        return 'P [bar]', f'{p_scalar:.1f}'
-    elif coupling == 'semi_isotropic':
-        pxx, pyy, pzz = float(P_tensor[0, 0]), float(P_tensor[1, 1]), float(P_tensor[2, 2])
-        return 'P [bar] (xx,yy,zz)', f'({pxx:.1f},{pyy:.1f},{pzz:.1f})'
-    else:  # anisotropic
-        vals = [float(P_tensor[i, j]) for i in range(3) for j in range(3)]
-        header = 'P [bar] (xx,xy,xz,yx,yy,yz,zx,zy,zz)'
-        val_str = '(' + ','.join(f'{v:.1f}' for v in vals) + ')'
-        return header, val_str
+def validate_orthorhombic_restart_box(box, label: str = 'box') -> None:
+    """Reject a sheared checkpoint cell (e.g. from a legacy anisotropic run)."""
+    m = np.asarray(box)
+    if m.ndim != 2:
+        return
+    eps = np.finfo(m.dtype if np.issubdtype(m.dtype, np.floating) else np.float64).eps
+    if not np.allclose(m, np.diag(np.diag(m)), rtol=0, atol=100 * eps * max(1.0, np.abs(m).max())):
+        raise ValueError(
+            f"The checkpoint's {label} is sheared, which SO3LR MD cannot represent; "
+            "restart_reset cannot remove cell shear. Start a fresh run from an "
+            "orthorhombic cell."
+        )
+
+
+def validate_npt_restart_coupling(state, box, npt_coupling: str) -> None:
+    """Reject an NPT checkpoint whose barostat does not match ``npt_coupling``.
+
+    The state class separates the isotropic from the flexible barostat, and the
+    flexible barostat's degrees of freedom separate semi-isotropic (2) from
+    anisotropic (6), so an anisotropic checkpoint cannot resume as semi-isotropic.
+    """
+    is_flex = isinstance(state, jax_md.simulate.NPTNoseHooverFlexState)
+    validate_orthorhombic_restart_box(box)
+    if is_flex != (normalize_npt_coupling(npt_coupling) == 'semi-isotropic'):
+        raise ValueError(
+            f"The NPT checkpoint contains a {'flexible' if is_flex else 'isotropic'} "
+            f"barostat state, but npt_coupling={npt_coupling!r} was requested. Resume "
+            "with the matching coupling or set restart_reset: true."
+        )
+    if is_flex:
+        validate_orthorhombic_restart_box(state.box_position, 'box_position')
+        dof = int(np.asarray(state.barostat.degrees_of_freedom))
+        if dof != 2:
+            raise ValueError(
+                f"The NPT checkpoint contains an anisotropic barostat ({dof} cell "
+                "degrees of freedom); only the 2-DOF semi-isotropic barostat can be "
+                "resumed. Set restart_reset: true to keep the geometry and "
+                "reinitialize the barostat."
+            )
+
+
+def format_md_row(step, KE, PE, H, T, time_per_step, npt_state=None, box=None):
+    """One MD log row, tab-separated like the header in perform_md. For NPT pass
+    the state and box: a flexible-cell (semi-isotropic) state adds its
+    pressure-tensor diagonal, then the box lengths follow."""
+    cols = [f'{step}', f'{KE + PE:.3f}', f'{KE:.3f}', f'{PE:.3f}', f'{(H or 0.0):.3f}', f'{T:.1f}']
+    if npt_state is not None:
+        if isinstance(npt_state, jax_md.simulate.NPTNoseHooverFlexState):
+            P = jax_md.simulate.pressure_tensor_flex(npt_state) / units.metal_unit_system()['pressure']
+            cols.append('({:.1f},{:.1f},{:.1f})'.format(*(float(P[i, i]) for i in range(3))))
+        L = box_to_diag(box)
+        cols.append(f'{L[0]:.3f}' if len(L) == 1 else f'({L[0]:.3f},{L[1]:.3f},{L[2]:.3f})')
+    cols.append(f'{time_per_step:.2e}')
+    return '\t'.join(cols)
 
 
 def log_nbrs_info(nbrs, label: str = 'SR', box=None):
@@ -1148,12 +1353,11 @@ def check_overflow(
         logger.info(f'Neighbor list overflowed, reallocating (SR extra_capacity={sr_extra}).')
         nbrs = neighbor_fn.allocate(state.position, box=box_diag, extra_capacity=sr_extra)
         log_nbrs_info(nbrs, 'SR', box=box)
-    if nbrs_lr is not None:
-        if nbrs_lr.did_buffer_overflow:
-            lr_overflow = True
-            logger.info(f'Long-range neighbor list overflowed, reallocating (LR extra_capacity={lr_extra}).')
-            nbrs_lr = neighbor_fn_lr.allocate(state.position, box=box_diag, extra_capacity=lr_extra)
-            log_nbrs_info(nbrs_lr, 'LR', box=box)
+    if nbrs_lr.did_buffer_overflow:
+        lr_overflow = True
+        logger.info(f'Long-range neighbor list overflowed, reallocating (LR extra_capacity={lr_extra}).')
+        nbrs_lr = neighbor_fn_lr.allocate(state.position, box=box_diag, extra_capacity=lr_extra)
+        log_nbrs_info(nbrs_lr, 'LR', box=box)
     return nbrs, nbrs_lr, sr_overflow, lr_overflow
 
 
@@ -1169,12 +1373,11 @@ def compute_quantities(
     T: float,
     P: float = None,
     k_grid_disp: jnp.ndarray = None,
-) -> Tuple[float, float, float, float, float]:
+) -> Tuple[float, float, float, float]:
     """
-    Compute the kinetic energy, potential energy, Hamiltonian, temperature
-    and pressure of the system.
-    *** Warning:Pressure calculation is too memory intensive for large systems 
-        so it just returns 0 pressure at the moment ***
+    Compute the kinetic energy, potential energy, conserved quantity H and
+    temperature of the system. H is the Nose-Hoover invariant for NVT/NPT and
+    KE + PE for NVE and Langevin.
 
     Args:
         energy_fn (callable): Function that calculates the energy.
@@ -1187,250 +1390,27 @@ def compute_quantities(
         P (float, optional): Target pressure. Defaults to None.
 
     Returns:
-        Tuple[float, float, float, float, float]: Kinetic energy, potential 
-                             energy, Hamiltonian, temperature and pressure.
+        Tuple[float, float, float, float]: Kinetic energy, potential energy,
+        H and temperature.
     """
+    kwargs = dict(neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, k_grid=k_grid, k_grid_disp=k_grid_disp)
+    KE = jax_md.quantity.kinetic_energy(momentum=state.momentum, mass=state.mass)
+    PE = energy_fn(state.position, box=box, **kwargs)
 
-    KE = jax_md.quantity.kinetic_energy(
-        momentum=state.momentum,
-        mass=state.mass
-    )
-    H = None
-
-    if nbrs_lr is not None:
-        PE = energy_fn(
-            state.position,
-            neighbor=nbrs.idx,
-            neighbor_lr=nbrs_lr.idx,
-            box=box,
-            k_grid=k_grid,
-            k_grid_disp=k_grid_disp
-        )
-
-        if ensemble == 'nvt':
-            H = jax_md.simulate.nvt_nose_hoover_invariant(
-                energy_fn,
-                state,
-                kT=T,
-                neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx,
-                box=box,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            ) / unit['energy']
-        elif ensemble == 'nvt-langevin':
-            H = KE + PE
-        elif ensemble == 'npt':
-            if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState):
-                H = jax_md.simulate.npt_nose_hoover_flex_invariant(
-                    energy_fn,
-                    state,
-                    pressure=P,
-                    kT=T,
-                    neighbor=nbrs.idx,
-                    neighbor_lr=nbrs_lr.idx,
-                    k_grid=k_grid,
-                    k_grid_disp=k_grid_disp
-                )
-            else:
-                H = jax_md.simulate.npt_nose_hoover_invariant(
-                    energy_fn,
-                    state,
-                    pressure=P,
-                    kT=T,
-                    neighbor=nbrs.idx,
-                    neighbor_lr=nbrs_lr.idx,
-                    k_grid=k_grid,
-                    k_grid_disp=k_grid_disp
-                )
-        elif ensemble == 'nve':
-            # NVE: the conserved quantity is the total energy E = KE + PE.
-            H = KE + PE
-        else:
-            H = None
-
+    if ensemble == 'nvt':
+        H = jax_md.simulate.nvt_nose_hoover_invariant(energy_fn, state, kT=T, box=box, **kwargs) / unit['energy']
+    elif ensemble == 'npt':
+        invariant = (jax_md.simulate.npt_nose_hoover_flex_invariant
+                     if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState)
+                     else jax_md.simulate.npt_nose_hoover_invariant)
+        H = invariant(energy_fn, state, pressure=P, kT=T, **kwargs)
+    elif ensemble in ('nve', 'nvt-langevin'):
+        H = KE + PE
     else:
-        PE = energy_fn(
-            state.position,
-            neighbor=nbrs.idx,
-            box=box,
-            k_grid=k_grid,
-            k_grid_disp=k_grid_disp
-        )
-        if ensemble == 'nvt':
-            H = jax_md.simulate.nvt_nose_hoover_invariant(
-                energy_fn,
-                state,
-                kT=T,
-                neighbor=nbrs.idx,
-                box=box,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            ) / unit['energy']
-        elif ensemble == 'nvt-langevin':
-            H = KE + PE
-        elif ensemble == 'npt':
-            H = jax_md.simulate.npt_nose_hoover_invariant(
-                energy_fn,
-                state,
-                pressure=P,
-                kT=T,
-                neighbor=nbrs.idx,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
-        elif ensemble == 'nve':
-            # NVE: the conserved quantity is the total energy E = KE + PE.
-            H = KE + PE
-        else:
-            H = None
+        H = None
 
-    current_T = jax_md.quantity.temperature(
-        momentum=state.momentum,
-        mass=state.mass
-    ) / unit['temperature']
-
-    # Too memory intensive to calculate pressure for large systems
-    if P is not None:
-        if nbrs_lr is not None:
-            # current_P = jax_md.quantity.pressure(
-            #    energy_fn,
-            #    state.position,
-            #    box=box,
-            #    neighbor=nbrs.idx,
-            #    neighbor_lr=nbrs_lr.idx,
-            #    kinetic_energy=KE,
-            #    k_grid=k_grid
-            # )
-            current_P = 0.0
-        else:
-            # current_P = jax_md.quantity.pressure(
-            #    energy_fn,
-            #    state.position,
-            #    box=box,
-            #    neighbor=nbrs.idx,
-            #    kinetic_energy=KE,
-            #    k_grid=k_grid
-            # )
-            current_P = 0.0
-    else:
-        current_P = None
-
-    return KE, PE, H, current_T, current_P
-
-def create_nve_fn(
-    energy_fn: callable,
-    shift: callable,
-    dt: float,
-    T: float,
-    box: jnp.ndarray,
-    lr: bool,
-)-> Tuple[callable, callable]:
-    """
-    Create the NVE init/apply functions.
-
-    Args:
-        energy_fn (callable): Function that calculates the energy.
-        shift (callable): Function that shifts the positions.
-        dt (float): Time step.
-        box (jnp.ndarray): Box of the system.
-        lr (bool): whether to use long-range interactions.
-
-    Returns:
-        Tuple[callable, callable]: Init and apply functions.
-    """
-
-    init_fn, apply_fn = jax_md.simulate.nve(
-        energy_fn,
-        shift,
-        dt=dt,
-        kT=T
-    )
-
-    init_fn = jax.jit(init_fn)
-    apply_fn = jax.jit(apply_fn)
-
-    step_md_fn = create_md_fn('nve',lr,apply_fn)
-
-    return init_fn, step_md_fn
-
-def create_nhc_fn(
-    energy_fn: callable,
-    shift: callable,
-    dt: float,
-    T: float,
-    box: jnp.ndarray,
-    nhc_kwargs: dict,
-    lr: bool
-) -> Tuple[callable, callable]:
-    """
-    Create the NHC thermostat functions.
-
-    Args:
-        energy_fn (callable): Function that calculates the energy.
-        shift (callable): Function that shifts the positions.
-        dt (float): Time step.
-        T (float): Target temperature.
-        box (jnp.ndarray): Box of the system.
-        nhc_kwargs (dict): Settings for the NHC thermostat.
-        lr (bool): whether to use long-range interactions.
-
-    Returns:
-        Tuple[callable, callable]: Init and apply functions.
-    """
-
-    init_fn, apply_fn = jax_md.simulate.nvt_nose_hoover(
-        energy_fn,
-        shift,
-        dt=dt,
-        kT=T,
-        **nhc_kwargs
-    )
-    init_fn = jax.jit(init_fn)
-    apply_fn = jax.jit(apply_fn)
-
-    step_md_fn = create_md_fn('nvt', lr, apply_fn, T)
-
-    return init_fn, step_md_fn
-
-def create_langevin_fn(
-    energy_fn: callable,
-    shift: callable,
-    dt: float,
-    T: float,
-    box: jnp.ndarray,
-    langevin_kwargs: dict,
-    lr: bool
-) -> Tuple[callable, callable]:
-    """
-    Create the Langevin Thermostat functions.
-
-    Args:
-        energy_fn (callable): Function that calculates the energy.
-        shift (callable): Function that shifts the positions.
-        dt (float): Time step.
-        T (float): Target temperature.
-        box (jnp.ndarray): Box of the system.
-        nhc_kwargs (dict): Settings for the NHC thermostat.
-        lr (bool): whether to use long-range interactions.
-
-    Returns:
-        Tuple[callable, callable]: Init and apply functions.
-    """
-
-    init_fn, apply_fn = jax_md.simulate.nvt_langevin(
-        energy_fn,
-        shift,
-        dt=dt,
-        kT=T,
-        **langevin_kwargs
-    )
-    init_fn = jax.jit(init_fn)
-    apply_fn = jax.jit(apply_fn)
-
-    step_md_fn = create_md_fn('nvt', lr, apply_fn, T)
-
-    return init_fn, step_md_fn
+    current_T = jax_md.quantity.temperature(momentum=state.momentum, mass=state.mass) / unit['temperature']
+    return KE, PE, H, current_T
 
 def create_npt_nhc_fn(
     energy_fn,
@@ -1440,9 +1420,9 @@ def create_npt_nhc_fn(
     P,
     nhc_kwargs,
     barostat_kwargs,
-    lr,
     npt_coupling='isotropic'
 ):
+    npt_coupling = normalize_npt_coupling(npt_coupling)  # also guards direct Python callers
     if npt_coupling == 'isotropic':
         init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
             energy_fn,
@@ -1454,12 +1434,8 @@ def create_npt_nhc_fn(
             thermostat_kwargs=nhc_kwargs
         )
         init_fn = jax.jit(init_fn)
-        apply_fn = jax.jit(apply_fn)
-        step_md_fn = create_md_fn("npt", lr, apply_fn, T, P)
+        step_md_fn = create_md_fn(jax.jit(apply_fn), jax_md.simulate.npt_box, kT=T, pressure=P)
     else:
-        # Use full float32 matmul precision to avoid TF32 drift on GPUs
-        # jax.config.update("jax_default_matmul_precision", "highest")
-        # logger.info("Flex NPT: matmul precision set to 'highest' (recommended)")
         init_fn, apply_fn = jax_md.simulate.npt_nose_hoover_flex(
             energy_fn,
             shift,
@@ -1471,330 +1447,55 @@ def create_npt_nhc_fn(
             thermostat_kwargs=nhc_kwargs
         )
         init_fn = jax.jit(init_fn)
-        apply_fn = jax.jit(apply_fn)
-        step_md_fn = create_md_fn("npt_flex", lr, apply_fn, T, P)
+        step_md_fn = create_md_fn(jax.jit(apply_fn), jax_md.simulate.npt_box_flex, kT=T, pressure=P)
 
     return init_fn, step_md_fn
 
-def create_nve_step_fn(
-    lr: bool,
-    apply_fn: callable,
-)-> callable:
-    """
-    Create the NVE step function.
-
-    Args:
-        lr (bool): Whether to use long-range interactions.
-        apply_fn (callable): Function that applies the MD step.
-
-    Returns:
-        callable: NVT step function.
-    """
-
-    if lr:
-        @jax.jit
-        def step_nve_fn_lr(
-            i: int,
-            state):
-            state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = state
-            state = apply_fn(
-                state,
-                neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx,
-                box=box,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
-            nbrs = nbrs.update(
-                state.position,
-                neighbor=nbrs.idx,
-                box=box
-            )
-            nbrs_lr = nbrs_lr.update(
-                state.position,
-                neighbor=nbrs_lr.idx,
-                box=box
-            )
-            return state, nbrs, nbrs_lr, box, k_grid, k_grid_disp
-        return step_nve_fn_lr
-
-    else:
-        @jax.jit
-        def step_nve_fn(
-            i: int,
-            state):
-            state, nbrs, box, k_grid, k_grid_disp = state
-            state = apply_fn(
-                state,
-                neighbor=nbrs.idx,
-                box=box,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
-            nbrs = nbrs.update(
-                state.position,
-                neighbor=nbrs.idx,
-                box=box
-            )
-            return state, nbrs, box, k_grid, k_grid_disp
-        return step_nve_fn
-
-def create_nvt_step_fn(
-    lr: bool,
-    apply_fn: callable,
-    T: float,
-) -> callable:
-    """
-    Create the NVT step function.
-
-    Args:
-        lr (bool): Whether to use long-range interactions.
-        apply_fn (callable): Function that applies the MD step.
-        T (float): Target temperature.
-
-    Returns:
-        callable: NVT step function.
-    """
-
-    if lr:
-        @jax.jit
-        def step_nvt_fn_lr(i: int, state):
-            state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = state
-            state = apply_fn(
-                state,
-                neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx,
-                kT=T,
-                box=box,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
-            nbrs = nbrs.update(
-                state.position,
-                neighbor=nbrs.idx,
-                box=box
-            )
-            nbrs_lr = nbrs_lr.update(
-                state.position,
-                neighbor=nbrs_lr.idx,
-                box=box
-            )
-            return state, nbrs, nbrs_lr, box, k_grid, k_grid_disp
-        return step_nvt_fn_lr
-    else:
-        @jax.jit
-        def step_nvt_fn(i: int, state):
-            state, nbrs, box, k_grid, k_grid_disp = state
-            state = apply_fn(
-                state,
-                neighbor=nbrs.idx,
-                kT=T,
-                box=box,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
-            nbrs = nbrs.update(
-                state.position,
-                neighbor=nbrs.idx,
-                box=box
-            )
-            return state, nbrs, box, k_grid, k_grid_disp
-        return step_nvt_fn
-
-
-def create_npt_step_fn(
-    lr: bool,
-    apply_fn: callable,
-    T: float,
-    P: float
-) -> callable:
-    """
-    Create the NPT step function.
-
-    Args:
-        lr (bool): Whether to use long-range interactions.
-        apply_fn (callable): Function that applies the MD step.
-        T (float): Target temperature.
-        P (float): Target pressure.
-
-    Returns:
-        callable: NPT step function.
-    """
-
-    if lr:
-        @jax.jit
-        def step_npt_fn(i, state):
-            state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = state
-
-            state = apply_fn(
-                state,
-                neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx,
-                kT=T,
-                pressure=P,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
-
-            box = jax_md.simulate.npt_box(state)
-
-            nbrs = nbrs.update(
-                state.position,
-                neighbor=nbrs.idx,
-                box=box
-            )
-
-            nbrs_lr = nbrs_lr.update(
-                state.position,
-                neighbor=nbrs_lr.idx,
-                box=box
-            )
-
-            return state, nbrs, nbrs_lr, box, k_grid, k_grid_disp
-        return step_npt_fn
-    else:
-        @jax.jit
-        def step_npt_fn(i, state):
-            state, nbrs, box, k_grid, k_grid_disp = state
-
-            state = apply_fn(
-                state,
-                neighbor=nbrs.idx,
-                kT=T,
-                pressure=P,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
-
-            box = jax_md.simulate.npt_box(state)
-
-            nbrs = nbrs.update(
-                state.position,
-                neighbor=nbrs.idx,
-                box=box
-            )
-
-            return state, nbrs, box, k_grid, k_grid_disp
-        return step_npt_fn
-
-
-def create_npt_flex_step_fn(
-    lr: bool,
-    apply_fn: callable,
-    T: float,
-    P: float
-) -> callable:
-    """
-    Create the NPT step function for flexible cell (anisotropic/semi-isotropic).
-
-    Args:
-        lr (bool): Whether to use long-range interactions.
-        apply_fn (callable): Function that applies the MD step.
-        T (float): Target temperature.
-        P (float): Target pressure.
-
-    Returns:
-        callable: NPT flex step function.
-    """
-
-    if lr:
-        @jax.jit
-        def step_npt_flex_fn(i, state):
-            state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = state
-
-            state = apply_fn(
-                state,
-                neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx,
-                kT=T,
-                pressure=P,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
-
-            box = jax_md.simulate.npt_box_flex(state)
-            box_diag = box_to_diag(box)
-
-            nbrs = nbrs.update(
-                state.position,
-                neighbor=nbrs.idx,
-                box=box_diag
-            )
-
-            nbrs_lr = nbrs_lr.update(
-                state.position,
-                neighbor=nbrs_lr.idx,
-                box=box_diag
-            )
-
-            return state, nbrs, nbrs_lr, box, k_grid, k_grid_disp
-        return step_npt_flex_fn
-    else:
-        @jax.jit
-        def step_npt_flex_fn(i, state):
-            state, nbrs, box, k_grid, k_grid_disp = state
-
-            state = apply_fn(
-                state,
-                neighbor=nbrs.idx,
-                kT=T,
-                pressure=P,
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
-
-            box = jax_md.simulate.npt_box_flex(state)
-
-            nbrs = nbrs.update(
-                state.position,
-                neighbor=nbrs.idx,
-                box=box_to_diag(box)
-            )
-
-            return state, nbrs, box, k_grid, k_grid_disp
-        return step_npt_flex_fn
-
-
 def create_md_fn(
-    ensemble: str,
-    lr: bool,
     apply_fn: callable,
-    T: float = None,
-    P: float = None
+    box_from_state: Optional[callable] = None,
+    **apply_kwargs
 ) -> callable:
     """
-    Create the MD step function for the given ensemble.
+    Create the jitted MD step for the fori_loop carry
+    (state, nbrs, nbrs_lr, box, k_grid, k_grid_disp).
 
     Args:
-        ensemble (str): String specifying the ensemble.
-        lr (bool): Whether to use long-range interactions.
         apply_fn (callable): Function that applies the MD step.
-        T (float, optional): Target temperature. Defaults to None.
-        P (float, optional): Target pressure. Defaults to None.
-
-    Raises:
-        NotImplementedError: If ensemble is not NVT or NPT.
+        box_from_state (callable, optional): For NPT, where the barostat owns the
+            box: reads it back from the state after each step. Without it the
+            carried box is passed to apply_fn.
+        **apply_kwargs: Passed to every apply_fn call (kT, pressure).
 
     Returns:
         callable: MD step function.
     """
-    ensemble = ensemble.lower()
-    if ensemble == 'nve':
-        return create_nve_step_fn(lr, apply_fn)
-    elif ensemble == 'nvt':
-        return create_nvt_step_fn(lr, apply_fn, T)
-    elif ensemble == 'npt':
-        return create_npt_step_fn(lr, apply_fn, T, P)
-    elif ensemble == 'npt_flex':
-        return create_npt_flex_step_fn(lr, apply_fn, T, P)
-    else:
-        raise NotImplementedError(
-            f'Ensemble "{ensemble}" is not supported. Only NVE, NVT and NPT ensembles are currently implemented.')
+    @jax.jit
+    def step_md_fn(i, carry):
+        state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = carry
+        kwargs = dict(neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, k_grid=k_grid,
+                      k_grid_disp=k_grid_disp, **apply_kwargs)
+        if box_from_state is None:
+            state = apply_fn(state, box=box, **kwargs)
+        else:
+            state = apply_fn(state, **kwargs)
+            box = box_from_state(state)
+        nbrs, nbrs_lr = update_neighbor_lists(nbrs, nbrs_lr, state.position, box)
+        return state, nbrs, nbrs_lr, box, k_grid, k_grid_disp
+
+    return step_md_fn
+
+
+def update_neighbor_lists(nbrs, nbrs_lr, position, box):
+    """Update both neighbour lists; they take the lengths of a diagonal matrix box."""
+    box = box_to_diag(box)
+    return (nbrs.update(position, neighbor=nbrs.idx, box=box),
+            nbrs_lr.update(position, neighbor=nbrs_lr.idx, box=box))
+
 
 def create_obs_fn(
     energy_or_obs_fn: callable,
     observables: Sequence[str],
-    lr: bool,
 )-> Tuple[callable, MutableMapping[str, list]]:
     """
     Creates an observation function for monitoring simulation observables.
@@ -1802,7 +1503,6 @@ def create_obs_fn(
     Args:
         energy_or_obs_fn (callable): A function that computes the energy or observables of the system.
         observables (Sequence[str]): A list of observable names to monitor during the simulation.
-        lr (bool): A flag indicating whether to use a low-rank approximation.
 
     Returns:
         Tuple[callable, MutableMapping[str, list]]: A tuple containing:
@@ -1812,31 +1512,18 @@ def create_obs_fn(
 
     obs_dict = {o: [] for o in observables}
 
-    if lr:
-        @jax.jit
-        def obs_fn(state):
-            state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = state
-            return  energy_or_obs_fn(
-                        state.position,
-                        neighbor=nbrs.idx,
-                        neighbor_lr=nbrs_lr.idx,
-                        box=box,
-                        k_grid=k_grid,
-                        k_grid_disp=k_grid_disp,
-                        has_aux=True
-                    )
-    else:
-        @jax.jit
-        def obs_fn(state):
-            state, nbrs, box, k_grid, k_grid_disp = state
-            return  energy_or_obs_fn(
-                        state.position,
-                        neighbor=nbrs.idx,
-                        box=box,
-                        k_grid=k_grid,
-                        k_grid_disp=k_grid_disp,
-                        has_aux=True
-                    )
+    @jax.jit
+    def obs_fn(carry):
+        state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = carry
+        return energy_or_obs_fn(
+            state.position,
+            neighbor=nbrs.idx,
+            neighbor_lr=nbrs_lr.idx,
+            box=box,
+            k_grid=k_grid,
+            k_grid_disp=k_grid_disp,
+            has_aux=True
+        )
 
     return obs_fn, obs_dict
 
@@ -1848,58 +1535,16 @@ def setup_kspace_grid(
     k_grid: jnp.ndarray = None
     )-> Tuple[jnp.ndarray, jnp.ndarray]:
     """
-    Setup the k-space grid for Ewald summation.
-    Delegates to so3lr.mlff.utils.kspace_utils.setup_kspace_grid.
+    Setup the k-space grid for Ewald summation from a jax-md box (columns).
+    Delegates to so3lr.mlff.utils.kspace_utils.setup_kspace_grid, which takes rows.
     """
     return _setup_kspace_grid(
         kspace_electrostatics=kspace_electrostatics,
         kspace_smearing=kspace_smearing,
         kspace_spacing=kspace_spacing,
-        box=box,
+        box=lattice_rows(box),
         k_grid=k_grid,
     )
-
-def check_kspace_grid(
-    k_grid: jnp.array,
-    kspace_electrostatics: str,
-    kspace_smearing: float,
-    kspace_spacing: float,
-    box: jnp.ndarray,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Check and setup the k-space grid for Ewald summation.
-
-    Args:
-        kspace_electrostatics (str): Type of k-space electrostatics (None or 'ewald' or 'pme').
-        kspace_smearing (float): Smearing value for the k-space grid.
-        kspace_spacing (float): Spacing for the k-space grid.
-        box (jnp.ndarray): Box of the system.
-
-    Returns:
-        Tuple[jnp.ndarray, jnp.ndarray]: k-space grid and smearing values.
-    """
-
-    if kspace_electrostatics is None:
-        return None
-    else:
-        k_spacing = jnp.array([kspace_spacing], dtype=jnp.float32)
-        k_smearing = jnp.array([kspace_smearing], dtype=jnp.float32)
-        if kspace_electrostatics == 'ewald':
-            if k_grid.shape != jaxpme.kspace.get_kgrid_ewald_shape(box,lr_wavelength=k_spacing):
-                k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
-                logger.info(f'k-grid shape: {k_grid.shape}')
-                return k_grid
-        elif kspace_electrostatics == 'pme' or kspace_electrostatics == 'p3m':
-            if k_grid.shape != jaxpme.kspace.get_kgrid_mesh_shape(box,mesh_spacing=k_spacing):
-                k_grid = setup_kspace_grid(kspace_electrostatics, kspace_smearing, kspace_spacing, box)[0]
-                logger.info(f'k-grid shape: {k_grid.shape}')
-                return k_grid
-        else:
-            raise ValueError(
-                f'Invalid kspace_electrostatics value: {kspace_electrostatics}. '
-                'Expected None, "ewald", "pme", or "p3m".'
-            )
-
 
 def validate_and_log_input(initial_geometry, input_file_path,
                            total_charge=None, num_unpaired_electrons=None,
@@ -1937,7 +1582,7 @@ def validate_and_log_input(initial_geometry, input_file_path,
         diag = np.diag(np.array(initial_geometry.get_cell()))
         logger.info(f"  Periodic:     yes  (cell lengths along x,y,z = {diag[0]:.3f}, {diag[1]:.3f}, {diag[2]:.3f} Å)")
     else:
-        logger.info(f"  Periodic:     no")
+        logger.info("  Periodic:     no")
     if total_charge is not None:
         logger.info(f"  Total charge: {total_charge}    Spin (unpaired e-): {num_unpaired_electrons}")
 
@@ -2175,18 +1820,17 @@ def apply_atom_constraints_to_state(
         return state
     if reference_is_cartesian:
         reference_position = cartesian_to_positions(reference_position, box, fractional_coordinates)
-    zero_momentum = jnp.zeros_like(state.momentum)
-    zero_force = jnp.zeros_like(state.force)
+    # The flexible-cell NPT state stores velocity; its momentum is a read-only property.
+    moving = 'velocity' if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState) else 'momentum'
     return state.set(
         position=jnp.where(mobile_mask == 1, state.position, reference_position),
-        momentum=jnp.where(mobile_mask == 1, state.momentum, zero_momentum),
-        force=jnp.where(mobile_mask == 1, state.force, zero_force),
+        force=jnp.where(mobile_mask == 1, state.force, 0.),
+        **{moving: jnp.where(mobile_mask == 1, getattr(state, moving), 0.)},
     )
 
 
 def constrain_md_carry(
     carry,
-    lr: bool,
     mobile_mask: Optional[jnp.ndarray],
     reference_position,
     fractional_coordinates: bool,
@@ -2194,21 +1838,7 @@ def constrain_md_carry(
 ):
     if mobile_mask is None:
         return carry
-    if lr:
-        state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = carry
-        state = apply_atom_constraints_to_state(
-            state,
-            mobile_mask,
-            reference_position,
-            box=box,
-            fractional_coordinates=fractional_coordinates,
-            reference_is_cartesian=reference_is_cartesian,
-        )
-        box_for_nbrs = box_to_diag(box) if hasattr(box, 'ndim') and box.ndim == 2 else box
-        nbrs = nbrs.update(state.position, neighbor=nbrs.idx, box=box_for_nbrs)
-        nbrs_lr = nbrs_lr.update(state.position, neighbor=nbrs_lr.idx, box=box_for_nbrs)
-        return state, nbrs, nbrs_lr, box, k_grid, k_grid_disp
-    state, nbrs, box, k_grid, k_grid_disp = carry
+    state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = carry
     state = apply_atom_constraints_to_state(
         state,
         mobile_mask,
@@ -2217,14 +1847,12 @@ def constrain_md_carry(
         fractional_coordinates=fractional_coordinates,
         reference_is_cartesian=reference_is_cartesian,
     )
-    box_for_nbrs = box_to_diag(box) if hasattr(box, 'ndim') and box.ndim == 2 else box
-    nbrs = nbrs.update(state.position, neighbor=nbrs.idx, box=box_for_nbrs)
-    return state, nbrs, box, k_grid, k_grid_disp
+    nbrs, nbrs_lr = update_neighbor_lists(nbrs, nbrs_lr, state.position, box)
+    return state, nbrs, nbrs_lr, box, k_grid, k_grid_disp
 
 
 def wrap_step_with_constraints(
     step_md_fn,
-    lr: bool,
     mobile_mask: Optional[jnp.ndarray],
     reference_position,
     fractional_coordinates: bool,
@@ -2237,7 +1865,6 @@ def wrap_step_with_constraints(
     def constrained_step(i, carry):
         return constrain_md_carry(
             step_md_fn(i, carry),
-            lr,
             mobile_mask,
             reference_position,
             fractional_coordinates,
@@ -2251,6 +1878,72 @@ def output_position_array(position, box, fractional_coordinates: bool, output_ca
     if fractional_coordinates and output_cartesian_positions and box is not None:
         return positions_to_cartesian(position, box, fractional_coordinates)
     return position
+
+
+def save_restart_checkpoints(
+    state,
+    box,
+    current_cycle: int,
+    *,
+    ensemble: str,
+    fractional_coordinates: bool,
+    restart_save_path: Optional[str] = None,
+    pysages_result=None,
+    restart_pysages_save_path: Optional[str] = None,
+) -> None:
+    """Persist SO3LR and optional PySAGES state for one accepted cycle."""
+    if restart_save_path is not None:
+        save_state(
+            state,
+            box,
+            current_cycle,
+            restart_save_path,
+            ensemble=ensemble,
+            fractional_coordinates=fractional_coordinates,
+        )
+    if restart_pysages_save_path is not None:
+        save_pysages_state(pysages_result, restart_pysages_save_path)
+
+
+def _validate_md_output_write_policy(
+    *,
+    output_file: Optional[Union[str, Path]],
+    output_format: Optional[str],
+    overwrite: bool,
+    restart_load_path: Optional[Union[str, Path]],
+) -> bool:
+    """Reject an existing trajectory that the selected writer would truncate.
+
+    EXTXYZ is intentionally appendable when continuing from a restart. HDF5 is
+    opened in ``mode='w'`` and therefore needs a fresh output path unless the
+    caller explicitly opts in to replacement with ``--overwrite``. Return
+    whether the first EXTXYZ batch should append to an existing restart output.
+    """
+    append = (
+        restart_load_path is not None and output_format == 'extxyz'
+        and not overwrite
+    )
+    if output_file is None:
+        return append
+
+    output_path = Path(output_file)
+    output_mode = _existing_regular_output_mode(output_path)
+    if output_mode is None or overwrite:
+        return append
+    if append:
+        return True
+
+    if restart_load_path is not None and output_format == 'hdf5':
+        raise RuntimeError(
+            f"HDF5 output file already exists: {output_file}. Refusing to "
+            "truncate it during restart. Choose a new --output path for the "
+            "continued trajectory, or pass --overwrite to replace it."
+        )
+
+    raise RuntimeError(
+        f"Output file already exists: {output_file}. Refusing to overwrite. "
+        "Pass --overwrite to replace it, or choose a different --output."
+    )
 
 
 def perform_md(
@@ -2267,6 +1960,13 @@ def perform_md(
         opt_structure (Optional[jnp.ndarray], optional): Optimized structure, if 
                                     already available. Defaults to None.
     """
+    all_settings = resolve_ensemble(all_settings)  # also for direct Python callers
+    # Direct Python callers do not necessarily enter through run(). Configure
+    # precision before constructing any arrays, as perform_min already does.
+    setup_jax_globals(
+        precision=all_settings.get('precision', 'float32'),
+        matmul_precision=all_settings.get('matmul_precision', 'highest'),
+    )
     # Setup logger
     log_file = all_settings.get('log_file')
     setup_logger(log_file)
@@ -2274,22 +1974,20 @@ def perform_md(
     # Extract settings with defaults
     input_file = all_settings.get('input_file')
     output_file = all_settings.get('output_file')
+    output_format = all_settings.get('output_format')
     restart_save_path = all_settings.get('restart_save_path')
     restart_load_path = all_settings.get('restart_load_path')
     overwrite = bool(all_settings.get('overwrite', False))
 
     # Refuse to clobber existing output unless the user opted in via
-    # --overwrite. The previous behavior was format-dependent: HDF5 silently
-    # truncated, extxyz silently appended. With this guard the policy is
-    # uniform across formats and across restarts.
-    if (output_file and Path(output_file).exists() and not overwrite
-            and not restart_load_path
-            and not all_settings.get('_relax_wrote_output')):
-        raise RuntimeError(
-            f"Output file already exists: {output_file}. Refusing to overwrite. "
-            f"Pass --overwrite to overwrite, choose a different --output, or "
-            f"pass --restart-load to resume from a checkpoint."
-        )
+    # --overwrite. A deliberate exception lets EXTXYZ append a continued run;
+    # HDF5 cannot append safely and therefore still requires a fresh path.
+    append_extxyz = _validate_md_output_write_policy(
+        output_file=output_file,
+        output_format=output_format,
+        overwrite=overwrite,
+        restart_load_path=restart_load_path if restart else None,
+    )
 
     # Model parameters
     model_path = all_settings.get('model_path')
@@ -2304,16 +2002,18 @@ def perform_md(
 
     # Ewald electrostatics settings
     kspace_electrostatics = all_settings.get('kspace_electrostatics',None)
-    kspace_smearing = all_settings.get('kspace_smearing', 4.0)
-    kspace_spacing = all_settings.get('kspace_spacing', 2.0)
-    kspace_interp_nodes = all_settings.get('kspace_interp_nodes', 4)
+    kspace_smearing = all_settings.get('kspace_smearing', KS.DEFAULT_KSPACE_SMEARING)
+    kspace_spacing = all_settings.get('kspace_spacing', KS.DEFAULT_KSPACE_SPACING)
+    kspace_interp_nodes = all_settings.get('kspace_interp_nodes', KS.DEFAULT_KSPACE_INTERP_NODES)
+    charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
+    charge_equilibration_total_charge = all_settings.get('charge_equilibration_total_charge', None)
     kspace_npt_cycles = all_settings.get('kspace_npt_cycles', 100)
 
     # Dispersion PME settings
     kspace_dispersion = all_settings.get('kspace_dispersion', None)
-    kspace_dispersion_smearing = all_settings.get('kspace_dispersion_smearing', 2.0)
-    kspace_dispersion_spacing = all_settings.get('kspace_dispersion_spacing', 3.0)
-    kspace_dispersion_interp_nodes = all_settings.get('kspace_dispersion_interp_nodes', 4)
+    kspace_dispersion_smearing = all_settings.get('kspace_dispersion_smearing', KS.DEFAULT_KSPACE_DISPERSION_SMEARING)
+    kspace_dispersion_spacing = all_settings.get('kspace_dispersion_spacing', KS.DEFAULT_KSPACE_DISPERSION_SPACING)
+    kspace_dispersion_interp_nodes = all_settings.get('kspace_dispersion_interp_nodes', KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES)
 
     # MD parameters
     # md_dt is in PICOSECONDS here (the CLI YAML loader converted fs -> ps
@@ -2343,8 +2043,14 @@ def perform_md(
     nhc_baro = all_settings.get('nhc_baro')
     nhc_sy_steps = all_settings.get('nhc_sy_steps')
 
-    # NPT coupling mode: 'isotropic', 'semi-isotropic', or 'anisotropic'
     npt_coupling = all_settings.get('npt_coupling', 'isotropic')
+    if str(ensemble).lower() == 'npt':
+        npt_coupling = normalize_npt_coupling(npt_coupling)  # rejects anisotropic
+        if npt_coupling == 'semi-isotropic':
+            logger.warning(
+                "npt_coupling='semi-isotropic' is experimental; validate the cell "
+                "dynamics against isotropic NPT or a reference before production use."
+            )
 
     # Langevin thermostat parameters
     langevin_removecmmotion = all_settings.get('langevin_removecmmotion')
@@ -2360,10 +2066,8 @@ def perform_md(
         )
 
     # Format control
-    output_format = all_settings.get('output_format')
     save_buffer = all_settings.get('save_buffer')
     seed = all_settings.get('seed')
-    relax_before_run = all_settings.get('relax_before_run')
     observables = all_settings.get('observables', [])
     output_atom_indices = all_settings.get('output_atom_indices', None)
     dispersion_tail_correction = all_settings.get('dispersion_tail_correction', False)
@@ -2413,6 +2117,18 @@ def perform_md(
     restart_pysages_load_path = all_settings.get('restart_pysages_load_path')
     enforce_cartesian_coordinates = all_settings.get('enforce_cartesian_coordinates', False)
 
+    validate_md_counts(all_settings)
+
+    restart_pysages = do_enhanced_sampling and restart_pysages_load_path is not None
+    if restart_pysages and not restart:
+        raise ValueError(
+            "restart_pysages_load_path needs an SO3LR restart (restart_load_path; "
+            "restart=True when calling perform_md directly): the PySAGES state "
+            "continues the dynamics it was saved with."
+        )
+    if restart_pysages_load_path is not None and not do_enhanced_sampling:
+        logger.warning("restart_pysages_load_path is ignored: do_enhanced_sampling is off.")
+
     if do_enhanced_sampling and not HAS_PYSAGES:
         raise ImportError(
             "PySAGES is required for enhanced sampling but is not installed. "
@@ -2434,11 +2150,6 @@ def perform_md(
                 f"'{ensemble}' was selected. Methods that support all ensembles: "
                 f"{', '.join(sorted(PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS))}."
             )
-
-    if do_enhanced_sampling and restart_pysages_load_path is not None:
-        restart_pysages = True
-    else:
-        restart_pysages = False
 
     # Handling of restart
     if restart_save_path is not None:
@@ -2464,8 +2175,12 @@ def perform_md(
     if opt_structure is not None:
         initial_geometry.set_positions(opt_structure)
 
-    cell = initial_geometry.get_cell()
-    cell = check_cell(cell, lr_cutoff, kspace_electrostatics, kspace_smearing)
+    cell = cell_from_atoms_boundary_conditions(
+        initial_geometry,
+        lr_cutoff,
+        kspace_electrostatics,
+        kspace_smearing,
+    )
 
     if md_P is not None and cell is None:
         raise ValueError(
@@ -2571,45 +2286,7 @@ def perform_md(
         )
 
     save_buffer = min(md_cycles, save_buffer)
-    # Initialize HDF5 storage
     hdf5_store = None
-    if output_format == 'hdf5':
-        if output_atom_indices is None:
-            num_atoms = position.shape[0]
-        else:
-            num_atoms = len(output_atom_indices)
-
-        # Record initial cell (zeros if non-periodic) for self-describing attrs.
-        try:
-            _cell_a0 = np.asarray(initial_geometry.get_cell(), dtype=np.float32)
-        except Exception:
-            _cell_a0 = np.zeros((3, 3), dtype=np.float32)
-        try:
-            _atomic_numbers_attr = np.asarray(
-                initial_geometry.get_atomic_numbers(), dtype=np.int32
-            )
-        except Exception:
-            _atomic_numbers_attr = None
-        # md_dt is in picoseconds at this point (the CLI parser converts fs->ps).
-        # Record the user-facing femtosecond value as the root attr.
-        _md_dt_fs = float(md_dt) * 1000.0 if md_dt is not None else None
-        from .. import __version__ as _so3lr_version
-        hdf5_store = init_hdf5_store(
-            save_to=output_file,
-            batch_size=save_buffer,
-            num_atoms=num_atoms,
-            num_box_entries=box.shape[0],
-            exist_ok=True,
-            observables = observables,
-            so3lr_version=_so3lr_version,
-            ensemble=ensemble,
-            md_dt_fs=_md_dt_fs,
-            md_steps=md_steps,
-            atomic_numbers=_atomic_numbers_attr,
-            cell_a0=_cell_a0,
-            input_file=input_file,
-            model_path=model_path,
-        )
 
     current_cycle = 0
     # Loading restart
@@ -2623,8 +2300,16 @@ def perform_md(
                 fractional_coordinates=fractional_coordinates,
                 precision=dtype
             )
+            if str(ensemble).lower() == 'npt':
+                validate_npt_restart_coupling(state, box, npt_coupling)
             position = state.position
         except RestartInNewEnsembleError as e:
+            if restart_pysages and not e.reset_only:
+                raise ValueError(
+                    f"restart_pysages_load_path cannot continue in another ensemble "
+                    f"({e.loaded_state.get('ensemble')} -> {ensemble}): the PySAGES state "
+                    f"continues the dynamics it was saved with."
+                ) from e
             logger.warning(e)
             position = e.loaded_state['position']
             initial_geometry_dict['masses'] = e.loaded_state['mass']
@@ -2632,13 +2317,18 @@ def perform_md(
             box = e.loaded_state['box']
             if np.all(box == 0) or box is None:
                 box = jnp.array([0.0], dtype=jnp.float64 if precision == 'float64' else jnp.float32)
+            else:
+                # Resetting an integrator may discard thermostat/barostat
+                # history, but it must never smuggle a sheared legacy cell past
+                # the same orthorhombic restriction applied to input files.
+                validate_orthorhombic_restart_box(box)
             saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
             if saved_fractional and not fractional_coordinates:
                 logger.info('Converting restart positions from fractional to cartesian coordinates.')
-                position = transform(jnp.array(box), position)
+                position = positions_to_cartesian(position, jnp.array(box), True)
             elif not saved_fractional and fractional_coordinates:
                 logger.info('Converting restart positions from cartesian to fractional coordinates.')
-                position = transform(1.0 / jnp.array(box), position)
+                position = cartesian_to_positions(position, jnp.array(box), True)
             restart = False
         except RestartSchemaMismatchError as e:
             # Surface the full schema-mismatch message (missing field, ensemble,
@@ -2697,11 +2387,9 @@ def perform_md(
                     _to_run_precision, restart_data_pysages.snapshots
                 )
 
-    patched_potential_kwargs={}
-    if "partial_charges" in observables:
-            patched_potential_kwargs.update(output_intermediate_quantities=observables)
+    patched_potential_kwargs = intermediate_quantity_kwargs(observables)
 
-    # Loading the model. A bundled name (so3lr-s/m/l/so3lr) or a custom path; None
+    # Loading the model. A bundled name (so3lr-tauri-s/m/l/so3lr) or a custom path; None
     # falls back to the default model. load_model resolves names and paths alike.
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     selected_model = model_path if model_path is not None else DEFAULT_MODEL
@@ -2718,6 +2406,8 @@ def perform_md(
         kspace_interp_nodes=kspace_interp_nodes,
         kspace_dispersion=kspace_dispersion,
         kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
+        charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge,
         **patched_potential_kwargs
     )
 
@@ -2736,6 +2426,8 @@ def perform_md(
         minimum_cell_size_multiplier=minimum_cell_size_multiplier,
         has_aux=len(observables)>0,
     )
+    if cell is not None:
+        check_box_for_neighbour_lists(box, nbrs_cutoff(potential), 'MD box')  # also a box from a restart file
 
     k_grid, k_smearing = setup_kspace_grid(
         kspace_electrostatics=kspace_electrostatics,
@@ -2756,51 +2448,36 @@ def perform_md(
     energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False))
 
     # Allocating the neighbor lists
-    if neighbor_fn_lr is not None:
-        lr = True
-    else:
-        lr = False
-
     nbrs = neighbor_fn.allocate(position, box=box)
-    nbrs_lr = neighbor_fn_lr.allocate(position, box=box) if lr else None
+    nbrs_lr = neighbor_fn_lr.allocate(position, box=box)
 
     logger.info('Neighbor list allocated:')
     log_nbrs_info(nbrs, 'SR', box=box)
-    if nbrs_lr is not None:
-        log_nbrs_info(nbrs_lr, 'LR', box=box)
+    log_nbrs_info(nbrs_lr, 'LR', box=box)
 
     # --- Dispersion tail correction for NPT ---
     if dispersion_tail_correction and ensemble == 'npt':
         logger.info('Computing dispersion tail correction coefficients...')
 
         # Run one forward pass to get Hirshfeld and C6 ratios
-        if lr:
-            _energy, _aux = energy_or_obs_fn(
-                position, neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx,
-                box=box, k_grid=k_grid, k_grid_disp=k_grid_disp, has_aux=True
-            )
-        else:
-            _energy, _aux = energy_or_obs_fn(
-                position, neighbor=nbrs.idx,
-                box=box, k_grid=k_grid, k_grid_disp=k_grid_disp, has_aux=True
-            )
+        _, _aux = energy_or_obs_fn(
+            position, neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx,
+            box=box, k_grid=k_grid, k_grid_disp=k_grid_disp, has_aux=True
+        )
 
-        # New models expose the ratio as 'a0_ratios'; the legacy model uses
-        # 'hirshfeld_ratios'. Accept either so an explicit opt-in works for both.
-        _hirshfeld_ratios = _aux.get('a0_ratios', _aux.get('hirshfeld_ratios'))
-        if _hirshfeld_ratios is None or 'c6_ratios' not in _aux:
+        _hirshfeld_ratios, _c6_ratios = dispersion_ratios(_aux)
+        if _hirshfeld_ratios is None or _c6_ratios is None:
             raise KeyError(
                 "dispersion_tail_correction requires per-atom 'a0_ratios'/"
                 "'hirshfeld_ratios' and 'c6_ratios' in the model output; the "
                 "selected model does not provide them (the legacy model has no "
                 "C6 head). Disable dispersion_tail_correction for this model."
             )
-        _c6_ratios = _aux['c6_ratios']
         _species = initial_geometry_dict['species']
 
         # Log per-element diagnostics
         import numpy as _np
-        from so3lr.mlff.nn.observable.dispersion_ref_data import alphas as _alphas_ref, C6_coef as _C6_ref
+        from so3lr.mlff.nn.observable.dispersion_ref_data import C6_coef as _C6_ref
         for _z in _np.unique(_np.asarray(_species)):
             _mask = _np.asarray(_species) == _z
             _hr = _np.asarray(_hirshfeld_ratios)[_mask]
@@ -2922,36 +2599,16 @@ def perform_md(
         }
 
     # Setting up the thermostat and/or barostat jax functions
-
-    if ensemble == 'nve':
-        init_fn, step_md_fn = create_nve_fn(
-            energy_fn,
-            shift,
-            md_dt,
-            md_T,
-            box,
-            lr,
-        )
-    elif ensemble == 'nvt':
-        init_fn, step_md_fn = create_nhc_fn(
-            energy_fn,
-            shift,
-            md_dt,
-            md_T,
-            box,
-            nhc_kwargs,
-            lr
-        )
-    elif ensemble == 'nvt-langevin':
-        init_fn, step_md_fn = create_langevin_fn(
-            energy_fn,
-            shift,
-            md_dt,
-            md_T,
-            box,
-            langevin_kwargs,
-            lr
-        )
+    if ensemble in ('nve', 'nvt', 'nvt-langevin'):
+        if ensemble == 'nve':
+            simulate_fn, simulate_kwargs, apply_kwargs = jax_md.simulate.nve, {}, {}
+        elif ensemble == 'nvt':
+            simulate_fn, simulate_kwargs, apply_kwargs = jax_md.simulate.nvt_nose_hoover, nhc_kwargs, {'kT': md_T}
+        else:
+            simulate_fn, simulate_kwargs, apply_kwargs = jax_md.simulate.nvt_langevin, langevin_kwargs, {'kT': md_T}
+        init_fn, apply_fn = simulate_fn(energy_fn, shift, dt=md_dt, kT=md_T, **simulate_kwargs)
+        init_fn = jax.jit(init_fn)
+        step_md_fn = create_md_fn(jax.jit(apply_fn), **apply_kwargs)
     else:
         logger.info(f"NPT coupling mode:         {npt_coupling}")
         init_fn, step_md_fn = create_npt_nhc_fn(
@@ -2962,38 +2619,24 @@ def perform_md(
             md_P,
             nhc_kwargs,
             nhc_barostat_kwargs,
-            lr,
             npt_coupling=npt_coupling
         )
 
     rng_key = jax.random.PRNGKey(seed)
 
     if not restart:
-        if lr:
-            state = init_fn(
-                rng_key,
-                position,
-                box=box,
-                neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx,
-                kT=md_T,
-                mass=initial_geometry_dict['masses'],
-                momenta=initial_geometry_dict.get('momenta'),
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
-        else:
-            state = init_fn(
-                rng_key,
-                position,
-                box=box,
-                neighbor=nbrs.idx,
-                kT=md_T,
-                mass=initial_geometry_dict['masses'],
-                momenta=initial_geometry_dict.get('momenta'),
-                k_grid=k_grid,
-                k_grid_disp=k_grid_disp
-            )
+        state = init_fn(
+            rng_key,
+            position,
+            box=box,
+            neighbor=nbrs.idx,
+            neighbor_lr=nbrs_lr.idx,
+            kT=md_T,
+            mass=initial_geometry_dict['masses'],
+            momenta=initial_geometry_dict.get('momenta'),
+            k_grid=k_grid,
+            k_grid_disp=k_grid_disp
+        )
 
     # Setup additional observables
     obs_dict={}
@@ -3001,29 +2644,20 @@ def perform_md(
         obs_fn, obs_dict = create_obs_fn(
             energy_or_obs_fn,
             observables,
-            lr
         )
 
 
     # Running the MD
     logger.info('Starting MD simulation...')
-    pressure_unit = units.metal_unit_system()['pressure']
-    is_flex_npt = isinstance(state, jax_md.simulate.NPTNoseHooverFlexState)
     if ensemble == 'npt':
-        # Header tabs MUST mirror the data-line tab count (see ~line 2712 and
-        # ~line 2947). Data uses a single \t between every column; previously
-        # the header padded with \t\t\t around the Box column, which made the
-        # column titles slide three tabs right of their values.
-        if is_flex_npt:
-            p_header, _ = format_pressure_tensor(state, npt_coupling, pressure_unit)
-            logger.info(f'Step\tE [eV]\tKE\tPE\tH\tTemp [K]\t{p_header}\tBox [A]\ttime/step [s]')
-        else:
-            logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\tBox [A]\ttime/step [s]')
+        # One \t per column, as in format_md_row.
+        p_col = '\tP [bar] (xx,yy,zz)' if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState) else ''
+        logger.info(f'Step\tE [eV]\tKE\tPE\tH\tTemp [K]{p_col}\tBox [A]\ttime/step [s]')
     else:
         logger.info('Step\tE [eV]\tKE\tPE\tH\tTemp [K]\ttime/step [s]')
 
     # Calculate some quantities for printing
-    KE, PE, H, current_T, _ = compute_quantities(
+    KE, PE, H, current_T = compute_quantities(
         energy_fn,
         state,
         nbrs,
@@ -3036,19 +2670,8 @@ def perform_md(
         md_P,
         k_grid_disp=k_grid_disp
     )
-    if ensemble == 'npt':
-        p_str = ''
-        if is_flex_npt:
-            _, p_str = format_pressure_tensor(state, npt_coupling, pressure_unit)
-            p_str = f'\t{p_str}'
-        box_disp = box_to_diag(box)
-        if len(box_disp) == 1:
-            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t{box_disp[0]:.3f}\t{0.0:.2e}')
-        else:
-            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t'+
-                        f'({box_disp[0]:.3f},{box_disp[1]:.3f},{box_disp[2]:.3f})\t{0.0:.2e}')
-    else:
-        logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
+    logger.info(format_md_row(current_cycle * md_steps, KE, PE, H, current_T, 0.0,
+                              state if ensemble == 'npt' else None, box))
 
     # --- Conserved-quantity drift watchdog --------------------------------
     # For NVE the conserved quantity is the total energy E = KE+PE; for the
@@ -3085,6 +2708,7 @@ def perform_md(
     # is correctly loaded).
     total_time_for_steps = 0
     first_loop = True
+    last_checkpoint_cycle = None
 
     # PySAGES setup (pysages_set_dict was already parsed during validation)
     if do_enhanced_sampling:
@@ -3100,10 +2724,63 @@ def perform_md(
         else:
             pysages_result = None
 
-    # For npt_flex, the step function returns a [3,3] box matrix via npt_box_flex.
-    # Ensure the initial box matches this shape so fori_loop carry types are consistent.
-    if npt_coupling in ('semi-isotropic', 'anisotropic') and box.ndim == 1:
+    # For semi-isotropic NPT, the step function returns a diagonal [3,3] box
+    # matrix via npt_box_flex. Ensure the initial box matches this shape so the
+    # fori_loop carry types are consistent.
+    if npt_coupling == 'semi-isotropic' and box.ndim == 1:
         box = jnp.diag(box)
+
+    # Initialize trajectory storage only after restart loading and flexible-cell
+    # normalization.  Those paths can change a vector box into a full matrix;
+    # creating the HDF5 schema earlier permanently chose the wrong shape.
+    if output_format == 'hdf5':
+        if output_atom_indices is None:
+            num_atoms = position.shape[0]
+        else:
+            num_atoms = len(output_atom_indices)
+
+        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(dtype))
+        if not np.any(trajectory_box):
+            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(dtype))
+        elif trajectory_box.ndim == 1 and trajectory_box.shape == (3,):
+            _cell_a0 = np.diag(trajectory_box)
+        else:
+            _cell_a0 = trajectory_box
+
+        try:
+            _atomic_numbers_attr = np.asarray(
+                initial_geometry.get_atomic_numbers(), dtype=np.int32
+            )
+            if output_atom_indices is not None:
+                _atomic_numbers_attr = _atomic_numbers_attr[output_atom_indices]
+        except Exception:
+            _atomic_numbers_attr = None
+
+        # md_dt_ps remains the pre-unit-conversion value captured above.
+        _md_dt_fs = md_dt_ps * 1000.0
+        from .. import __version__ as _so3lr_version
+        _num_features = _model_num_features(model_path) if 'x' in observables else None
+        hdf5_store = init_hdf5_store(
+            save_to=output_file,
+            batch_size=save_buffer,
+            num_atoms=num_atoms,
+            num_box_entries=tuple(trajectory_box.shape),
+            exist_ok=overwrite,
+            observables=observables,
+            num_features=_num_features,
+            so3lr_version=_so3lr_version,
+            ensemble=ensemble,
+            md_dt_fs=_md_dt_fs,
+            md_steps=md_steps,
+            atomic_numbers=_atomic_numbers_attr,
+            cell_a0=_cell_a0,
+            input_file=input_file,
+            model_path=model_path,
+            dtype=np.dtype(dtype),
+            fractional_coordinates=(
+                fractional_coordinates and not output_cartesian_positions
+            ),
+        )
 
     sr_overflow_extra = 0
     lr_overflow_extra = 0
@@ -3127,7 +2804,6 @@ def perform_md(
         )
         step_md_fn = wrap_step_with_constraints(
             step_md_fn,
-            lr,
             mobile_mask,
             reference_position,
             fractional_coordinates,
@@ -3138,7 +2814,7 @@ def perform_md(
         old_time = time.time()
         if do_enhanced_sampling:
             generate_context = create_pysages_interface_fns(
-                lr, state, box, step_md_fn, md_dt, nbrs,
+                state, box, step_md_fn, md_dt, nbrs,
                 ensemble=ensemble, nbrs_lr=nbrs_lr,
                 k_grid=k_grid, k_grid_disp=k_grid_disp
             )
@@ -3155,28 +2831,19 @@ def perform_md(
 
             new_state, nbrs, nbrs_lr, new_box, k_grid, k_grid_disp = jax.block_until_ready(
                 update_so3lr_after_pysages(
-                    candidate_result, lr, init_fn, rng_key, md_T, md_dt,
+                    candidate_result, init_fn, rng_key, md_T, md_dt,
                     nbrs, ensemble=ensemble, nbrs_lr=nbrs_lr,
                     k_grid=k_grid, k_grid_disp=k_grid_disp
                 )
             )
 
-        elif lr:
+        else:
             new_state, nbrs, nbrs_lr, new_box, k_grid, k_grid_disp = jax.block_until_ready(
                 jax.lax.fori_loop(
                     0,
                     md_steps,
                     step_md_fn,
                     (state, nbrs, nbrs_lr, box, k_grid, k_grid_disp)
-                )
-            )
-        else:
-            new_state, nbrs, new_box, k_grid, k_grid_disp = jax.block_until_ready(
-                jax.lax.fori_loop(
-                    0,
-                    md_steps,
-                    step_md_fn,
-                    (state, nbrs, box, k_grid, k_grid_disp)
                 )
             )
 
@@ -3231,6 +2898,8 @@ def perform_md(
 
             state = new_state
             box = new_box
+            if ensemble == 'npt':
+                check_box_for_neighbour_lists(box, nbrs_cutoff(potential), f'NPT box after cycle {current_cycle}')
 
             if (ensemble == 'npt') and (kspace_npt_cycles is not None) and (current_cycle % kspace_npt_cycles == 0):
                 box_for_kgrid = box_to_diag(box)
@@ -3251,7 +2920,7 @@ def perform_md(
                     )
 
             # Calculate some quantities for printing
-            KE, PE, H, current_T, _ = compute_quantities(
+            KE, PE, H, current_T = compute_quantities(
                 energy_fn,
                 state,
                 nbrs,
@@ -3305,19 +2974,8 @@ def perform_md(
                                 f"to change the equilibration window; some drift early in the run is normal.)")
                             drift_warned = True
 
-            if ensemble == 'npt':
-                p_str = ''
-                if is_flex_npt:
-                    _, p_val = format_pressure_tensor(state, npt_coupling, pressure_unit)
-                    p_str = f'\t{p_val}'
-                box_disp = box_to_diag(box)
-                if len(box_disp) == 1:
-                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t{box_disp[0]:.3f}\t{time_per_step:.2e}')
-                else:
-                    logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}{p_str}\t'+
-                                f'({box_disp[0]:.3f},{box_disp[1]:.3f},{box_disp[2]:.3f})\t{time_per_step:.2e}')
-            else:
-                logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{time_per_step:.2e}')
+            logger.info(format_md_row(current_cycle * md_steps, KE, PE, H, current_T, time_per_step,
+                                      state if ensemble == 'npt' else None, box))
 
             out_pos = output_position_array(
                 state.position, box, fractional_coordinates, output_cartesian_positions
@@ -3325,7 +2983,7 @@ def perform_md(
             positions.append(np.array(out_pos))
             momenta.append(np.array(state.momentum))
             if box is not None:
-                boxes.append(np.array(box_to_diag(box)))
+                boxes.append(np.array(lattice_rows(box)))
 
             # Calculate observables
             if len(observables)>0:
@@ -3333,8 +2991,9 @@ def perform_md(
                 for key in obs_dict.keys():
                     obs_dict[key].append(obs_data[1][key])
 
-            if ((len(positions) % save_buffer == 0 and len(positions) > 0) or (len(positions) == md_cycles)):
-                # Saving the output
+            if len(positions) >= save_buffer:
+                # Write frames first, then checkpoint: a failed write must
+                # not leave the restart file ahead of the trajectory.
                 if output_format == 'hdf5':
                     positions, momenta, boxes, obs_dict = write_to_hdf5(
                         hdf5_store,
@@ -3353,21 +3012,80 @@ def perform_md(
                         positions,
                         obs_dict,
                         output_atom_indices,
-                        fractional_coordinates=fractional_coordinates
+                        fractional_coordinates=(
+                            fractional_coordinates and not output_cartesian_positions
+                        ),
+                        append=append_extxyz,
+                        overwrite=overwrite,
                     )
-                # Saving the state for restart
-                if create_restart:
-                    save_state(
+                    append_extxyz = True
+
+                if create_restart or (
+                    do_enhanced_sampling and restart_pysages_save_path is not None
+                ):
+                    save_restart_checkpoints(
                         state,
                         box,
                         current_cycle,
-                        restart_save_path,
                         ensemble=ensemble,
-                        fractional_coordinates=fractional_coordinates
+                        fractional_coordinates=fractional_coordinates,
+                        restart_save_path=restart_save_path if create_restart else None,
+                        pysages_result=pysages_result if do_enhanced_sampling else None,
+                        restart_pysages_save_path=(
+                            restart_pysages_save_path if do_enhanced_sampling else None
+                        ),
                     )
-                # Saving PySAGES state for restart
-                if do_enhanced_sampling and restart_pysages_save_path is not None:
-                    save_pysages_state(pysages_result, restart_pysages_save_path)
+                    last_checkpoint_cycle = current_cycle
+
+    # A frame-major HDF5 layout and extxyz both support arbitrary batch sizes,
+    # so flush the final short buffer instead of dropping or padding it.
+    if positions:
+        if output_format == 'hdf5':
+            positions, momenta, boxes, obs_dict = write_to_hdf5(
+                hdf5_store,
+                momenta,
+                positions,
+                boxes,
+                obs_dict,
+                output_atom_indices
+            )
+        elif output_format == 'extxyz':
+            positions, momenta, boxes, obs_dict = write_to_extxyz(
+                output_file,
+                initial_geometry,
+                boxes,
+                momenta,
+                positions,
+                obs_dict,
+                output_atom_indices,
+                fractional_coordinates=(
+                    fractional_coordinates and not output_cartesian_positions
+                ),
+                append=append_extxyz,
+                overwrite=overwrite,
+            )
+
+    # Then persist the final state, even when the number of cycles is not a
+    # multiple of save_buffer.
+    if (
+        last_checkpoint_cycle != current_cycle
+        and (
+            create_restart
+            or (do_enhanced_sampling and restart_pysages_save_path is not None)
+        )
+    ):
+        save_restart_checkpoints(
+            state,
+            box,
+            current_cycle,
+            ensemble=ensemble,
+            fractional_coordinates=fractional_coordinates,
+            restart_save_path=restart_save_path if create_restart else None,
+            pysages_result=pysages_result if do_enhanced_sampling else None,
+            restart_pysages_save_path=(
+                restart_pysages_save_path if do_enhanced_sampling else None
+            ),
+        )
 
     logger.info('Results saved to: ' + output_file)
     # The first cycle is excluded from timing (it includes JIT compilation /
@@ -3410,54 +3128,17 @@ def perform_md(
 
 
 def create_min_fn(
-    lr: bool,
     min_apply: callable,
     box=None
 ):
-    if lr:
-        @jax.jit
-        def step_min_fn_lr(i, state):
-
-            state, nbrs, nbrs_lr = state
-
-            state = min_apply(
-                state,
-                neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx,
-                box=box
-            )
-
-            nbrs = nbrs.update(
-                state.position,
-                neighbor=nbrs.idx
-            )
-
-            nbrs_lr = nbrs_lr.update(
-                state.position,
-                neighbor=nbrs_lr.idx
-            )
-
-            return state, nbrs, nbrs_lr
-        return step_min_fn_lr
-    else:
-        @jax.jit
-        def step_min_fn(i, state):
-
-            state, nbrs = state
-
-            state = min_apply(
-                state,
-                neighbor=nbrs.idx,
-                box=box
-            )
-
-            nbrs = nbrs.update(
-                state.position,
-                neighbor=nbrs.idx
-            )
-
-            return state, nbrs
-        return step_min_fn
+    @jax.jit
+    def step_min_fn(i, carry):
+        state, nbrs, nbrs_lr = carry
+        state = min_apply(state, neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, box=box)
+        nbrs = nbrs.update(state.position, neighbor=nbrs.idx)
+        nbrs_lr = nbrs_lr.update(state.position, neighbor=nbrs_lr.idx)
+        return state, nbrs, nbrs_lr
+    return step_min_fn
 
 
 def create_fire_fn(
@@ -3466,7 +3147,6 @@ def create_fire_fn(
     min_start_dt: float,
     min_max_dt: float,
     min_n_min: int,
-    lr: bool,
     box: jnp.ndarray,
 ) -> Tuple[callable, callable]:
     """
@@ -3479,7 +3159,6 @@ def create_fire_fn(
         min_start_dt (float): Starting time step for the minimization.
         min_max_dt (float): Maximum time step for the minimization.
         min_n_min (int): Number of minimization steps.
-        lr (bool): Whether to use long-range interactions.
         box (jnp.ndarray): Box of the system.
 
     Returns:
@@ -3496,7 +3175,7 @@ def create_fire_fn(
     fire_init = jax.jit(fire_init)
     fire_apply = jax.jit(fire_apply)
 
-    step_min_fn = create_min_fn(lr, fire_apply, box)
+    step_min_fn = create_min_fn(fire_apply, box)
 
     return fire_init, step_min_fn
 
@@ -3523,13 +3202,22 @@ def perform_min(
     )
 
     # Extract settings with defaults
-    input_file = all_settings.get('input_file')
     output_file = all_settings.get('output_file')
     output_format = all_settings.get('output_format')
     overwrite = bool(all_settings.get('overwrite', False))
 
+    if output_format == 'hdf5':
+        # Optimization currently writes EXTXYZ even when MD uses HDF5. Check
+        # the actual destination, not just the requested HDF5 name.
+        output_path = Path(output_file)
+        output_file = str(output_path.with_name(f'{output_path.stem}_opt.xyz'))
+        logger.warning(
+            f"Optimization trajectories use EXTXYZ; writing {output_file}."
+        )
+
     # Refuse to clobber existing output unless --overwrite was passed.
-    if output_file and Path(output_file).exists() and not overwrite:
+    if (output_file and _existing_regular_output_mode(Path(output_file)) is not None
+            and not overwrite):
         raise RuntimeError(
             f"Output file already exists: {output_file}. Refusing to overwrite. "
             f"Pass --overwrite to overwrite, or choose a different --output."
@@ -3548,9 +3236,11 @@ def perform_min(
 
     # Ewald electrostatics settings
     kspace_electrostatics = all_settings.get('kspace_electrostatics',None)
-    kspace_smearing = all_settings.get('kspace_smearing', 4.0)
-    kspace_spacing = all_settings.get('kspace_spacing', 2.0)
-    kspace_interp_nodes = all_settings.get('kspace_interp_nodes', 4)
+    kspace_smearing = all_settings.get('kspace_smearing', KS.DEFAULT_KSPACE_SMEARING)
+    kspace_spacing = all_settings.get('kspace_spacing', KS.DEFAULT_KSPACE_SPACING)
+    kspace_interp_nodes = all_settings.get('kspace_interp_nodes', KS.DEFAULT_KSPACE_INTERP_NODES)
+    charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
+    charge_equilibration_total_charge = all_settings.get('charge_equilibration_total_charge', None)
 
     # Settings for the minimization
     min_cycles = all_settings.get('min_cycles')
@@ -3594,8 +3284,15 @@ def perform_min(
                            total_charge=total_charge,
                            num_unpaired_electrons=num_unpaired_electrons,
                            verbose=log_input)
-    cell = initial_geometry.get_cell()
-    cell = check_cell(cell, lr_cutoff, kspace_electrostatics, kspace_smearing)
+    cell = cell_from_atoms_boundary_conditions(
+        initial_geometry, lr_cutoff, kspace_electrostatics, kspace_smearing,
+    )
+    if kspace_electrostatics is not None and cell is None:
+        raise ValueError(
+            f"kspace_electrostatics={kspace_electrostatics!r} requires a periodic "
+            "cell, but the input geometry has none. Either supply a cell, or "
+            "omit kspace_electrostatics."
+        )
 
     if cell is not None:
         shift_displacement = 'periodic'
@@ -3609,7 +3306,7 @@ def perform_min(
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
 
-    # Loading the model. A bundled name (so3lr-s/m/l/so3lr) or a custom path; None
+    # Loading the model. A bundled name (so3lr-tauri-s/m/l/so3lr) or a custom path; None
     # falls back to the default model. load_model resolves names and paths alike.
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     selected_model = model_path if model_path is not None else DEFAULT_MODEL
@@ -3624,6 +3321,8 @@ def perform_min(
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics,
         kspace_interp_nodes=kspace_interp_nodes,
+        charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge,
     )
 
     # Setting up the model
@@ -3648,17 +3347,15 @@ def perform_min(
         box=box
     )
 
+    if cell is not None:
+        check_box_for_neighbour_lists(box, nbrs_cutoff(potential), 'Input cell')
+
     energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False, k_grid=k_grid, k_smearing=k_smearing))
     force_fn = jax.jit(jax_md.quantity.force(energy_fn))
 
     # Allocating the neighbor lists
-    if neighbor_fn_lr is not None:
-        lr = True
-    else:
-        lr = False
-
     nbrs = neighbor_fn.allocate(position, box=box)
-    nbrs_lr = neighbor_fn_lr.allocate(position, box=box) if lr else None
+    nbrs_lr = neighbor_fn_lr.allocate(position, box=box)
 
     # Setting up the minimization functions
     min_init_fn, min_step_fn = create_fire_fn(
@@ -3667,23 +3364,15 @@ def perform_min(
         min_start_dt=min_start_dt,
         min_max_dt=min_max_dt,
         min_n_min=min_n_min,
-        lr=lr,
         box=box
     )
 
-    if lr:
-        min_state = min_init_fn(
-            position,
-            box=box,
-            neighbor=nbrs.idx,
-            neighbor_lr=nbrs_lr.idx
-        )
-    else:
-        min_state = min_init_fn(
-            position,
-            box=box,
-            neighbor=nbrs.idx
-        )
+    min_state = min_init_fn(
+        position,
+        box=box,
+        neighbor=nbrs.idx,
+        neighbor_lr=nbrs_lr.idx
+    )
 
     logger.info('Starting minimization...')
     logger.info('Step\tE [eV]\tF_max [eV/Å]')
@@ -3692,13 +3381,13 @@ def perform_min(
     E = energy_fn(
         position,
         neighbor=nbrs.idx,
-        neighbor_lr=nbrs_lr.idx if lr else None,
+        neighbor_lr=nbrs_lr.idx,
         box=box
     )
     F = force_fn(
         position,
         neighbor=nbrs.idx,
-        neighbor_lr=nbrs_lr.idx if lr else None,
+        neighbor_lr=nbrs_lr.idx,
         box=box
     )
     f_max = np.abs(F).max()
@@ -3715,46 +3404,26 @@ def perform_min(
     total_iter = 0
     i = 1
     while total_iter < min_cycles:
-        if lr:
-            min_state, nbrs, nbrs_lr = jax.lax.fori_loop(
-                0,
-                min_steps,
-                min_step_fn,
-                (min_state, nbrs, nbrs_lr)
-            )
+        min_state, nbrs, nbrs_lr = jax.lax.fori_loop(
+            0,
+            min_steps,
+            min_step_fn,
+            (min_state, nbrs, nbrs_lr)
+        )
 
-            E = energy_fn(
-                min_state.position,
-                neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx,
-                box=box
-            )
+        E = energy_fn(
+            min_state.position,
+            neighbor=nbrs.idx,
+            neighbor_lr=nbrs_lr.idx,
+            box=box
+        )
 
-            F = force_fn(
-                min_state.position,
-                neighbor=nbrs.idx,
-                neighbor_lr=nbrs_lr.idx,
-                box=box
-            )
-        else:
-            min_state, nbrs = jax.lax.fori_loop(
-                0,
-                min_steps,
-                min_step_fn,
-                (min_state, nbrs)
-            )
-
-            E = energy_fn(
-                min_state.position,
-                neighbor=nbrs.idx,
-                box=box
-            )
-
-            F = force_fn(
-                min_state.position,
-                neighbor=nbrs.idx,
-                box=box
-            )
+        F = force_fn(
+            min_state.position,
+            neighbor=nbrs.idx,
+            neighbor_lr=nbrs_lr.idx,
+            box=box
+        )
 
         f_max = np.abs(F).max()
         logger.info('{}\t {:.3f}\t {:.3f}'.format(i*min_steps, E, f_max))
@@ -3785,13 +3454,12 @@ def perform_min(
 
     # Save optimization result and return optimized geometry
     positions = minimization_trajectory
-    if output_format == 'extxyz':
-        write_to_extxyz(output_file, initial_geometry, boxes=box, momenta=None, positions=positions)
-    elif output_format == 'hdf5':
-        logger.warning(f"Output format is 'hdf5', changing output file extension to 'xyz' for minimization.") #TODO: Saving in xyz for simplicity for now, add hdf5 support
-        output_file = output_file.rsplit('.', 1)[0] + '_opt.xyz'
-        write_to_extxyz(output_file, initial_geometry, boxes=box, momenta=None, positions=positions)
-        # write_to_hdf5(hdf5_store, momenta=None, positions=positions, boxes=box)
+    if output_format in ('extxyz', 'hdf5'):
+        write_to_extxyz(
+            output_file, initial_geometry, boxes=box, momenta=None,
+            positions=positions, fractional_coordinates=fractional_coordinates,
+            append=False, overwrite=overwrite,
+        )
     
     logger.info(f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
 
@@ -3876,7 +3544,24 @@ def save_state(
         # stochastic trajectory continues deterministically across a restart.
         state_dict.update(rng=state.rng)
     state_dict.update(ensemble=ensemble)
-    np.savez(path_to_save, **state_dict)
+    # Preserve NumPy's historical suffix behavior while writing through a file
+    # handle, so a serialization failure cannot truncate the last checkpoint.
+    destination = Path(path_to_save)
+    if not str(destination).endswith('.npz'):
+        destination = Path(str(destination) + '.npz')
+    destination = Path(os.path.realpath(destination))
+    output_mode = _existing_regular_output_mode(destination)
+    with tempfile.TemporaryDirectory(
+        dir=destination.parent, prefix=f'.{destination.name}.',
+    ) as temporary_dir:
+        temporary_path = Path(temporary_dir) / destination.name
+        with temporary_path.open('wb') as stream:
+            np.savez(stream, **state_dict)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if output_mode is not None:
+            temporary_path.chmod(output_mode)
+        os.replace(temporary_path, destination)
 
 
 def load_state(
@@ -3907,7 +3592,10 @@ def load_state(
         Tuple: Tuple containing the state, the box and the cycle number.
     """
 
-    loaded_state = np.load(path_to_load, allow_pickle=True)
+    # SO3LR restart files are numeric/string NPZ archives written by
+    # save_state(); object arrays are neither needed nor accepted. Disabling
+    # pickle prevents an untrusted archive from executing Python during load.
+    loaded_state = np.load(path_to_load, allow_pickle=False)
 
     # Helper: enumerate which fields in the .npz are about to be dropped if
     # we cannot/won't reconstruct the integrator state (ensemble mismatch or
@@ -4097,13 +3785,13 @@ def load_state(
         # identically regardless of coordinate system — only positions differ.
         logger.info('Converting restart positions from fractional to cartesian coordinates.')
         state = state.set(
-            position=transform(jnp.array(box), state.position)
+            position=positions_to_cartesian(state.position, jnp.array(box), True)
         )
     elif not saved_fractional and fractional_coordinates:
         # Restart was saved in cartesian coords, current run uses fractional.
         logger.info('Converting restart positions from cartesian to fractional coordinates.')
         state = state.set(
-            position=transform(1.0 / jnp.array(box), state.position)
+            position=cartesian_to_positions(state.position, jnp.array(box), True)
         )
 
     # Normalize the reconstructed state/box to match the dtypes (and weak typing)
@@ -4173,15 +3861,14 @@ def run(
                             simulation and relaxation.
     """
 
+    settings = resolve_ensemble(settings)  # before the optional relaxation
     relax_before_run = settings.get('relax_before_run', True)
+    validate_md_counts(settings)
 
     setup_jax_globals(
         precision=settings.get('precision', 'float32'),
         matmul_precision=settings.get('matmul_precision', 'highest'),
     )
-    matmul_precision = _JAX_GLOBALS_CONFIGURED.get('matmul_precision', 'highest')
-
-    # Check for allowed atom types
     input_file_path = settings.get('input_file')
     if input_file_path is not None:
         try:
@@ -4195,24 +3882,45 @@ def run(
                                total_charge=settings.get('total_charge'),
                                num_unpaired_electrons=settings.get('num_unpaired_electrons'))
 
-        # allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
-        # current_atomic_numbers = {int(x) for x in initial_geometry.get_atomic_numbers()}
-        # if not current_atomic_numbers.issubset(allowed_atomic_numbers):
-        #     unsupported = current_atomic_numbers - allowed_atomic_numbers
-        #     logger.error(f"Input geometry contains unsupported element(s): {unsupported}. "
-        #                  f"Supported elements are: H(1), C(6), N(7), O(8), F(9), P(15), S(16), Cl(17).")
-        #     raise ValueError(f"Input geometry contains unsupported element(s): {unsupported}")
-
     # Load restart file if needed
     restart_load_path = settings.get('restart_load_path')
     if restart_load_path is not None:
         if os.path.exists(restart_load_path):
             restart = True
         else:
-            logger.error(f"Restart load path does not exist.")
+            logger.error("Restart load path does not exist.")
             sys.exit(1)
     else:
         restart = False
+
+    # The engine: SO3LR-Flash wherever it computes what the settings ask for, else the
+    # neighbour-list potential below (--engine flash / standard forces one). Flash relaxes
+    # with its own force (perform_min would build the full model).
+    from so3lr.flash.check import flash_problem, validate_options
+    validate_options(settings)
+    engine = settings.get('engine') or 'auto'
+    if engine == 'standard':
+        logger.info("Engine: neighbour-list potential (--engine standard)")
+    elif input_file_path is not None:
+        problem = flash_problem(settings, initial_geometry)
+        if problem is None:
+            try:
+                from so3lr.flash.md import FlashUnavailable, perform_md_flash
+            except Exception as exc:    # e.g. a JAX build without Pallas-Triton
+                problem = f"it does not import here ({type(exc).__name__}: {exc})"
+        if problem is None:
+            logger.info(f"Engine: flash ({'--engine flash' if engine == 'flash' else 'auto'})")
+            try:
+                perform_md_flash(settings, restart, atoms=initial_geometry)
+                return
+            except FlashUnavailable as exc:
+                if engine == 'flash':
+                    raise
+                problem = f"it failed to start: {exc}"
+            gc.collect()                # the failed engine's arrays, before the other one starts
+        if engine == 'flash':
+            raise ValueError(f"--engine flash: {problem}")
+        logger.info(f"Engine: neighbour-list potential (flash cannot: {problem})")
 
     # Relax the geometry
     if relax_before_run:
@@ -4220,12 +3928,21 @@ def run(
             logger.info('Restarting MD, skipping relaxation.')
             opt_structure = None
         else:
-            opt_structure = perform_min(settings, log_input=False)
-            # perform_min just wrote the optimization trajectory to output_file
-            # (extxyz). Mark it so the MD overwrite guard below does not refuse
-            # the file THIS run's own relax phase created. Stale output left by a
-            # previous run is still caught by perform_min's own guard above.
-            settings['_relax_wrote_output'] = True
+            # Validate the MD destination before writing a separate relaxation
+            # trajectory. Optimization frames are not accepted MD frames.
+            _validate_md_output_write_policy(
+                output_file=settings.get('output_file'),
+                output_format=settings.get('output_format'),
+                overwrite=bool(settings.get('overwrite', False)),
+                restart_load_path=None,
+            )
+            output_path = Path(settings['output_file'])
+            relaxation_settings = dict(settings)
+            relaxation_settings['output_file'] = str(
+                output_path.with_name(f'{output_path.stem}_opt.xyz')
+            )
+            relaxation_settings['output_format'] = 'extxyz'
+            opt_structure = perform_min(relaxation_settings, log_input=False)
             logger.info("=" * 60)
     else:
         opt_structure = None

@@ -29,20 +29,18 @@
 # (e.g. `temperature: 300`) to the canonical name before use. Unknown keys
 # trigger a warning with did-you-mean suggestions rather than silent fallback.
 #
-# Note: `so3lr eval` does not currently read a settings file — it is driven
-# entirely by CLI flags. A template for the eventual eval-settings schema
-# lives at so3lr/cli/eval_settings.yaml for reference.
+# Note: `so3lr eval` does not read a settings file; it is driven by CLI flags.
 
 ## General Settings
-ensemble: "nvt"                            # Ensemble type: "nvt", "nvt-langevin", "npt", "nve" [Default: "nvt"]
-                                           # Note: the Langevin ensemble is spelled "nvt-langevin" (hyphen) here and as a CLI
-                                           # subcommand, but Python identifiers and auto-generated log/trajectory file
-                                           # suffixes use "nvt_langevin" (underscore). The two refer to the same ensemble.
+ensemble: "nvt"                            # Ensemble type: "nvt", "nvt-langevin" (or "nvt_langevin"), "npt", "nve" [Default: "nvt"]
 total_charge: 0                            # Total charge of the system [Default: 0]
 num_unpaired_electrons: 0                  # Spin: number of unpaired electrons (2S). [Default: 0]
 seed: 52                                   # Random seed for MD and thermostat initialization [Default: 52]
 precision: "float32"                       # Numerical precision: "float32" or "float64" [Default: "float32"]
 matmul_precision: "highest"                # JAX matmul precision: "default" / "high" / "highest". "highest" forces full float32 and avoids TF32 drift on GPUs. [Default: "highest"]
+engine: "auto"                             # MD engine: "auto" (flash on an NVIDIA GPU when it covers the run, else the neighbour-list engine; the log says which), "flash" or "standard" [Default: "auto"]
+flash_mode: "auto"                         # Flash memory mode, fastest first: "fast", "default", "lean", "leanest", "minimal"; "auto" picks the fastest that fits [Default: "auto"]
+flash_mixed: true                          # Flash with float32: keep positions, momenta and energy sums in float64 [Default: true]
 
 ## Input/Output Settings
 input_file: "path/to/geometry.xyz"         # Path to the initial geometry file (required)
@@ -51,13 +49,14 @@ log_file: null                             # Log file path [Default: <output_ste
 save_buffer: 50                            # Number of MD CYCLES (not raw steps) to buffer before flushing to disk [Default: 50]
 observables: []                            # Observable quantities to compute and save (e.g. ["partial_charges", "dipole_vec"])
 output_atom_indices: null                  # Optional list of atom indices to include in output [Default: null]
+overwrite: false                           # Overwrite an existing trajectory instead of refusing [Default: false]
 
 ## Restart Settings
 restart_save_path: null                    # Path to save simulation state for restarting [Default: null]
 restart_load_path: null                    # Path to load simulation state from a previous run [Default: null]
 restart_reset: false                       # Reset accumulated thermostat/barostat state on restart [Default: false]
 
-## Enhanced Sampling (PySAGES) — optional, requires pip install so3lr[pysages]
+## Enhanced Sampling (PySAGES) — optional, requires: uv sync --locked --extra pysages
 do_enhanced_sampling: false                # Enable enhanced sampling via PySAGES [Default: false]
 pysages_input: "./pysages_input.yaml"      # Path to PySAGES settings file (CVs, method, grid) [Default: "./pysages_input.yaml"]
 enforce_cartesian_coordinates: false       # Integrator coordinate system: use Cartesian (not fractional) coordinates for periodic systems. Auto-enabled when do_enhanced_sampling is true. (NOT the trajectory output format — see output_cartesian_positions below.) [Default: false]
@@ -65,7 +64,7 @@ restart_pysages_save_path: null            # Path to save PySAGES state for rest
 restart_pysages_load_path: null            # Path to load PySAGES state from a previous run [Default: null]
 
 ## Model Settings
-model_path: null                           # Model: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) or a path to a custom MLFF model directory. If null, uses so3lr-m. [Default: so3lr-m]
+model_path: null                           # Model: a canonical bundled name (for example so3lr-tauri-m-2606), a floating alias (so3lr-tauri-s/m/l), or a custom MLFF directory. If null, uses the pinned so3lr-tauri-m-2606 default. [Default: null -> so3lr-tauri-m-2606]
 lr_cutoff: 12.0                            # Long-range cutoff distance in Å [Default: 12.0]  (CLI: --lr-cutoff)
 dispersion_damping: 2.0                    # Dispersion interactions start damping at (lr_cutoff - dispersion_damping) Å [Default: 2.0]  (CLI: --dispersion-damping)
 buffer_size_multiplier_sr: 1.25           # Buffer size multiplier for short-range neighbor list [Default: 1.25]  (CLI: --buffer-sr)
@@ -76,10 +75,14 @@ kspace_electrostatics: null               # K-space method: null / "ewald" / "pm
 kspace_smearing: 4.0                      # Smearing width for k-space summation in Å [Default: 4.0]
 kspace_spacing: 2.0                       # Grid spacing for k-space summation in Å [Default: 2.0]
 kspace_interp_nodes: 4                    # Number of interpolation nodes for PME/P3M [Default: 4]
-kspace_npt_cycles: null                   # Frequency (in MD cycles) to re-tune k-space grid in NPT [Default: null]
+kspace_npt_cycles: 100                    # Re-tune the k-space grid every this many MD cycles in NPT; null disables [Default: 100]
+
+## Charge overrides (optional; both default to following total_charge)
+charge_embed_total_charge: null            # Total charge seen by the charge EMBEDDING: null = follow total_charge, 0.0 = neutral embedding. [Default: null]  (CLI: --charge-embed-total-charge)
+charge_equilibration_total_charge: null    # Total charge that charge EQUILIBRATION conserves to: null = follow total_charge. Independent of the line above. [Default: null]  (CLI: --charge-equilibration-total-charge)
 
 ## K-space Dispersion (optional, for periodic systems — separate from electrostatics)
-kspace_dispersion: null                   # K-space method for dispersion: null / "pme" [Default: null]
+kspace_dispersion: null                   # K-space method for dispersion: null / "pme" / "ewald" [Default: null]
 kspace_dispersion_smearing: 2.0           # Smearing width for dispersion k-space summation in Å [Default: 2.0]
 kspace_dispersion_spacing: 3.0            # Grid spacing for dispersion k-space summation in Å [Default: 3.0]
 kspace_dispersion_interp_nodes: 4         # Number of interpolation nodes for dispersion PME [Default: 4]
@@ -109,7 +112,7 @@ cylinder_restraint_axial_force_constant: null  # Axial force constant k_z in eV/
 
 ## Minimization Settings (used before MD if relax_before_run: true, or with so3lr opt)
 relax_before_run: true                     # Perform geometry relaxation before MD run [Default: true]
-force_convergence: null                    # Force convergence criterion in eV/Å. Overrides min_cycles/min_steps if set. [Default: null]  (CLI: --force-conv)
+force_convergence: null                    # Force convergence criterion in eV/Å: stop early once max |F| falls below it; min_cycles stays the upper bound. [Default: null]  (CLI: --force-conv)
 min_cycles: 10                             # Number of minimization cycles [Default: 10]
 min_steps: 10                             # Number of minimization steps per cycle [Default: 10]
 min_start_dt: 0.05                         # FIRE minimizer initial timestep, in jax-md natural units (passed to FIRE as dt_start). Not in fs. [Default: 0.05]
@@ -130,10 +133,10 @@ nhc_steps: 2                               # Number of Nose-Hoover integration s
 nhc_thermo: 100.0                          # Nose-Hoover thermostat damping factor. Effective damping timescale tau is roughly nhc_thermo * md_dt (e.g. ~50 fs at the default md_dt=0.5 fs). The literal formula tau = md_dt * nhc_thermo holds only after the internal ps -> jax-md natural-units conversion. [Default: 100.0]
 
 ## NPT-specific Settings
-md_P: null                                 # Target pressure in bar. Setting this enables NPT. [Default: null]  (CLI: --pressure)
+md_P: null                                 # Target pressure in bar for NPT. Without `ensemble`, setting it selects NPT; ensemble "npt" without it uses 1.0. [Default: null]  (CLI: --pressure)
 nhc_baro: 1000.0                           # Nose-Hoover barostat damping factor. Effective damping timescale tau is roughly nhc_baro * md_dt (e.g. ~500 fs at the default md_dt=0.5 fs). The literal formula tau = md_dt * nhc_baro holds only after the internal ps -> jax-md natural-units conversion. [Default: 1000.0]
 nhc_sy_steps: 3                            # Number of Suzuki-Yoshida integration steps [Default: 3]
-npt_coupling: "isotropic"                  # NPT box coupling: "isotropic" (cubic scaling), "semi-isotropic" (independent in x/y vs z — bilayer-compatible), or "anisotropic" (full cell-vector flexibility). Requires the npt-anisotropic jax-md fork. [Default: "isotropic"]
+npt_coupling: "isotropic"                  # NPT box coupling: "isotropic" (uniform scaling) or "semi-isotropic" (EXPERIMENTAL: x/y scale together, z independently). "anisotropic" is experimental and rejected: neighbor-list, reciprocal-space and tail-correction paths assume an orthorhombic cell. [Default: "isotropic"]
 
 ## NVE Ensemble Settings
 init_T: 300.0                              # Initial temperature (K) for velocity initialization, NVE only [Default: 300.0]  (CLI: --temperature)
@@ -148,4 +151,4 @@ langevin_thermo: 1.0                       # Langevin timescale parameter (gamma
 # Set them only if you understand the implications.
 #
 # dispersion_tail_correction: false        # Add an analytic long-range dispersion (C6) tail correction to the energy. Currently supported only with ensemble="npt" and models that expose per-atom a0_ratios/C6_ratios. [Default: false]
-# minimum_cell_size_multiplier: 1.0        # Multiplier applied to the neighbor-list minimum cell size (both short- and long-range). Increase to coarsen the cell grid (fewer / larger cells), decrease to refine. [Default: 1.0]  (CLI: --langevin-thermo)
+# minimum_cell_size_multiplier: 1.0        # Multiplier applied to the neighbor-list minimum cell size (both short- and long-range). Increase to coarsen the cell grid (fewer / larger cells), decrease to refine. [Default: 1.0]

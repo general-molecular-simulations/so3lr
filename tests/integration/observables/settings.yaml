@@ -1,7 +1,7 @@
 # Observables test - dipole and partial charges output
 # Tests that observables are correctly computed and saved
 
-input_file: input.xyz
+input_file: acetone.xyz
 output_file: trajectory.hdf5
 log_file: so3lr.log
 

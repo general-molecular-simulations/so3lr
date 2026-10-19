@@ -8,6 +8,8 @@ The eval overwrite-refusal path is marked ``@pytest.mark.slow`` because the
 ``eval`` body calls ``setup_logger`` and ``get_hardware_info`` (both import the
 heavy stack) before reaching its refusal check, so it is not sub-second.
 """
+from pathlib import Path
+
 import pytest
 import yaml
 from click.testing import CliRunner
@@ -58,7 +60,7 @@ def test_eval_bad_model_name_suggests(runner):
     assert result.exit_code != 0
     assert "is not a bundled name" in result.output
     assert "Did you mean" in result.output
-    assert "so3lr-m" in result.output  # a bundled name appears as a suggestion
+    assert "so3lr-tauri-m" in result.output  # a bundled name appears as a suggestion
 
 
 def test_opt_bad_model_name_suggests(runner, tmp_xyz):
@@ -66,6 +68,33 @@ def test_opt_bad_model_name_suggests(runner, tmp_xyz):
     result = runner.invoke(cli, ["opt", "--model", "so3lr-mm", "--input", tmp_xyz])
     assert result.exit_code != 0
     assert "Did you mean" in result.output
+
+
+@pytest.mark.parametrize("flag", [
+    "--md-cycles", "--md-steps", "--save-buffer", "--kspace-npt-cycles",
+])
+def test_md_cli_rejects_zero_count_settings(runner, tmp_xyz, flag):
+    """Count/frequency options fail in Click before model initialization."""
+    result = runner.invoke(cli, ["npt", "--input", tmp_xyz, flag, "0"])
+    assert result.exit_code != 0
+    assert "0 is not in the range" in result.output
+
+
+@pytest.mark.parametrize("key", [
+    "md_cycles", "md_steps", "save_buffer", "kspace_npt_cycles",
+])
+def test_md_yaml_rejects_zero_count_settings(runner, tmp_xyz, tmp_path, key):
+    """The settings-file path enforces the same positive-integer contract."""
+    y = tmp_path / f"{key}.yaml"
+    y.write_text(yaml.safe_dump({
+        "input_file": tmp_xyz,
+        "output_file": str(tmp_path / f"{key}.xyz"),
+        key: 0,
+    }))
+    result = runner.invoke(cli, ["--settings", str(y)])
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
+    assert key in str(result.exception)
 
 
 # NOTE: eval reaches setup_logger() and get_hardware_info() before the
@@ -81,3 +110,16 @@ def test_eval_refuses_overwrite(runner, tmp_xyz, tmp_path):
     )
     assert result.exit_code != 0
     assert "Refusing to overwrite" in result.output
+
+
+@pytest.mark.slow
+def test_md_refuses_a_box_shorter_than_twice_the_cutoff(runner, tmp_path):
+    """A 12.4 A water box at lr_cutoff 12 would lose periodic images in the
+    neighbour lists; the run stops once the model's cutoff is known."""
+    water = tmp_path / "water.xyz"
+    water.write_text((Path(__file__).parent / "test_data" / "water_64.xyz").read_text())
+    result = runner.invoke(cli, ["nvt", "--input", str(water), "--no-relax", "--md-cycles", "1",
+                                 "--md-steps", "1", "--engine", "standard",
+                                 "--output", str(tmp_path / "out.xyz")])
+    assert isinstance(result.exception, ValueError)
+    assert "at least twice the" in str(result.exception)

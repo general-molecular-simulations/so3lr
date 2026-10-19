@@ -4,7 +4,7 @@ import logging
 import pathlib
 from typing import Optional
 
-import yaml
+from so3lr.md_settings_validation import load_settings_yaml
 from ml_collections import config_dict
 
 from so3lr.mlff.config import from_config
@@ -26,8 +26,7 @@ def train_so3lr(config_path: str, log_file: Optional[str] = None):
         with open(config, mode='r') as fp:
             cfg = config_dict.ConfigDict(json.load(fp=fp))
     elif config.suffix == '.yaml':
-        with open(config, mode='r') as fp:
-            cfg = config_dict.ConfigDict(yaml.load(fp, Loader=yaml.FullLoader))
+        cfg = config_dict.ConfigDict(load_settings_yaml(config))
     else:
         raise ValueError(f"Config file must be .json or .yaml, got: {config.suffix}")
 

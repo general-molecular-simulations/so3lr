@@ -21,7 +21,6 @@ import jax_md
 
 import yaml
 
-from jax_md.space import transform
 
 from so3lr.cli.so3lr_md import (
     save_state,
@@ -38,7 +37,6 @@ GEOMETRY_FILE = TEST_DATA_DIR / "benzoic_acid_aq_1.xyz"
 # Values mirror the historical basic_test/so3lr_vanilla/md_settings.yaml.
 # input_file/output_file/log_file are filled in at fixture time.
 _BASE_MD_SETTINGS = {
-    'use_so3lr': True,
     'precision': 'float64',
     'total_charge': 0.0,
     'lr_cutoff': 12.0,
@@ -48,12 +46,10 @@ _BASE_MD_SETTINGS = {
     'min_start_dt': 0.05,
     'min_max_dt': 0.1,
     'min_n_min': 2,
-    'min_print': True,
     'md_dt': 0.5,  # fs (the CLI/YAML convention; converted fs->ps internally)
     'md_T': 300,
     'md_cycles': 2,
     'md_steps': 500,
-    'hdf5_buffer_size': 50,
 }
 
 _PYSAGES_INPUT_UNBIASED = {
@@ -605,12 +601,8 @@ class TestNVECoordinateConversion:
 # ===========================================================================
 
 class TestEnsembleChangeWithCoordinateConversion:
-    """Verify that RestartInNewEnsembleError is raised when ensembles differ,
-    and that the exception handler's coordinate conversion logic (which lives
-    in perform_md, not load_state) works correctly.
-
-    These tests exercise the code path at so3lr_md.py lines 1751-1770.
-    """
+    """RestartInNewEnsembleError is raised when ensembles differ and carries
+    what perform_md's handler needs to rebuild the state in the new ensemble."""
 
     def test_nvt_to_npt_raises_error(self, tmp_path):
         """Loading an NVT restart with ensemble='npt' raises RestartInNewEnsembleError."""
@@ -630,6 +622,8 @@ class TestEnsembleChangeWithCoordinateConversion:
         # Verify the exception carries the loaded data
         e = exc_info.value
         np.testing.assert_allclose(e.loaded_state['position'], pos, atol=1e-10)
+        np.testing.assert_allclose(e.loaded_state['box'], box, atol=1e-10)
+        np.testing.assert_allclose(e.loaded_state['momentum'] / e.loaded_state['mass'], mom / mass, atol=1e-10)
         assert e.loaded_state.get('ensemble', None) == 'nvt'
         assert bool(e.loaded_state.get('fractional_coordinates', True)) is True
 
@@ -652,143 +646,9 @@ class TestEnsembleChangeWithCoordinateConversion:
         assert e.loaded_state.get('ensemble', None) == 'npt'
         assert bool(e.loaded_state.get('fractional_coordinates', True)) is False
 
-    def test_handler_frac_to_cart_nvt_to_npt(self, tmp_path):
-        """Simulate the perform_md exception handler: NVT(fractional) -> NPT(cartesian).
-
-        This mimics lines 1751-1770 of so3lr_md.py to verify the coordinate
-        conversion that happens in the exception handler path."""
-        box = jnp.array([25.0, 25.0, 25.0])
-        frac_pos = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
-        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
-        mass = jnp.array([[1.0], [16.0]])
-        state = _make_nvt_state(frac_pos, mom, force, mass)
-        path = str(tmp_path / "nvt_frac.npz")
-
-        save_state(state, box, 0, path, ensemble='nvt', fractional_coordinates=True)
-
-        # Current run wants NPT with cartesian coordinates
-        current_fractional = False
-        try:
-            load_state(path, ensemble='npt', fractional_coordinates=current_fractional)
-            pytest.fail("Expected RestartInNewEnsembleError")
-        except RestartInNewEnsembleError as e:
-            # --- Replicate the exception handler logic from perform_md ---
-            position = e.loaded_state['position']
-            loaded_box = e.loaded_state['box']
-            velocities = e.loaded_state['momentum'] / e.loaded_state['mass']
-
-            saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
-            if saved_fractional and not current_fractional:
-                position = transform(jnp.array(loaded_box), position)
-            elif not saved_fractional and current_fractional:
-                position = transform(1.0 / jnp.array(loaded_box), position)
-
-        # Positions should now be in cartesian
-        expected_cart = frac_pos * box
-        np.testing.assert_allclose(position, expected_cart, atol=1e-10)
-        # Velocities should be unchanged (coordinate-system-independent)
-        expected_vel = mom / mass
-        np.testing.assert_allclose(velocities, expected_vel, atol=1e-10)
-        np.testing.assert_allclose(loaded_box, box, atol=1e-10)
-
-    def test_handler_cart_to_frac_npt_to_nvt(self, tmp_path):
-        """Simulate the perform_md exception handler: NPT(cartesian) -> NVT(fractional)."""
-        box = jnp.array([25.0, 25.0, 25.0])
-        cart_pos = jnp.array([[2.5, 5.0, 7.5], [10.0, 12.5, 15.0]])
-        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
-        mass = jnp.array([[1.0], [16.0]])
-        state = _make_npt_state(cart_pos, mom, force, mass, box)
-        path = str(tmp_path / "npt_cart.npz")
-
-        save_state(state, box, 0, path, ensemble='npt', fractional_coordinates=False)
-
-        # Current run wants NVT with fractional coordinates
-        current_fractional = True
-        try:
-            load_state(path, ensemble='nvt', fractional_coordinates=current_fractional)
-            pytest.fail("Expected RestartInNewEnsembleError")
-        except RestartInNewEnsembleError as e:
-            position = e.loaded_state['position']
-            loaded_box = e.loaded_state['box']
-
-            saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
-            if saved_fractional and not current_fractional:
-                position = transform(jnp.array(loaded_box), position)
-            elif not saved_fractional and current_fractional:
-                position = transform(1.0 / jnp.array(loaded_box), position)
-
-        expected_frac = cart_pos / box
-        np.testing.assert_allclose(position, expected_frac, atol=1e-10)
-
-    def test_handler_same_coords_different_ensemble(self, tmp_path):
-        """Ensemble change with same coordinate system: no position conversion needed."""
-        box = jnp.array([25.0, 25.0, 25.0])
-        frac_pos = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
-        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
-        mass = jnp.array([[1.0], [16.0]])
-        state = _make_nvt_state(frac_pos, mom, force, mass)
-        path = str(tmp_path / "nvt_frac.npz")
-
-        save_state(state, box, 0, path, ensemble='nvt', fractional_coordinates=True)
-
-        # Current run wants NPT but also uses fractional — no coord conversion
-        current_fractional = True
-        try:
-            load_state(path, ensemble='npt', fractional_coordinates=current_fractional)
-            pytest.fail("Expected RestartInNewEnsembleError")
-        except RestartInNewEnsembleError as e:
-            position = e.loaded_state['position']
-            loaded_box = e.loaded_state['box']
-
-            saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
-            if saved_fractional and not current_fractional:
-                position = transform(jnp.array(loaded_box), position)
-            elif not saved_fractional and current_fractional:
-                position = transform(1.0 / jnp.array(loaded_box), position)
-
-        # Positions should be untouched
-        np.testing.assert_allclose(position, frac_pos, atol=1e-10)
-
-    def test_handler_nve_to_nvt_with_coord_change(self, tmp_path):
-        """NVE(cartesian) -> NVT(fractional): ensemble change + coord conversion."""
-        box = jnp.array([20.0, 20.0, 20.0])
-        cart_pos = jnp.array([[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]])
-        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
-        mass = jnp.array([[1.0], [16.0]])
-        state = _make_nve_state(cart_pos, mom, force, mass)
-        path = str(tmp_path / "nve_cart.npz")
-
-        save_state(state, box, 0, path, ensemble='nve', fractional_coordinates=False)
-
-        current_fractional = True
-        try:
-            load_state(path, ensemble='nvt', fractional_coordinates=current_fractional)
-            pytest.fail("Expected RestartInNewEnsembleError")
-        except RestartInNewEnsembleError as e:
-            position = e.loaded_state['position']
-            loaded_box = e.loaded_state['box']
-
-            saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
-            if saved_fractional and not current_fractional:
-                position = transform(jnp.array(loaded_box), position)
-            elif not saved_fractional and current_fractional:
-                position = transform(1.0 / jnp.array(loaded_box), position)
-
-        expected_frac = cart_pos / box
-        np.testing.assert_allclose(position, expected_frac, atol=1e-10)
-
-
-# ===========================================================================
-# Unit tests: restart_reset=True with coordinate conversion
-# ===========================================================================
 
 class TestRestartResetWithCoordinateConversion:
-    """Verify that restart_reset=True forces RestartInNewEnsembleError even
-    when ensembles match, and that coordinate conversion still works."""
+    """restart_reset=True forces RestartInNewEnsembleError even when ensembles match."""
 
     def test_restart_reset_same_ensemble_raises_error(self, tmp_path):
         """restart_reset=True with matching ensemble still raises the error."""
@@ -807,71 +667,6 @@ class TestRestartResetWithCoordinateConversion:
                 path, ensemble='nvt', restart_reset=True,
                 fractional_coordinates=True
             )
-
-    def test_restart_reset_frac_to_cart(self, tmp_path):
-        """restart_reset=True: NVT(frac) -> NVT(cart) forces exception handler path."""
-        box = jnp.array([25.0, 25.0, 25.0])
-        frac_pos = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
-        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
-        mass = jnp.array([[1.0], [16.0]])
-        state = _make_nvt_state(frac_pos, mom, force, mass)
-        path = str(tmp_path / "restart.npz")
-
-        save_state(state, box, 0, path, ensemble='nvt', fractional_coordinates=True)
-
-        # Even though ensembles match, restart_reset forces exception
-        current_fractional = False
-        try:
-            load_state(
-                path, ensemble='nvt', restart_reset=True,
-                fractional_coordinates=current_fractional
-            )
-            pytest.fail("Expected RestartInNewEnsembleError")
-        except RestartInNewEnsembleError as e:
-            position = e.loaded_state['position']
-            loaded_box = e.loaded_state['box']
-
-            saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
-            if saved_fractional and not current_fractional:
-                position = transform(jnp.array(loaded_box), position)
-            elif not saved_fractional and current_fractional:
-                position = transform(1.0 / jnp.array(loaded_box), position)
-
-        expected_cart = frac_pos * box
-        np.testing.assert_allclose(position, expected_cart, atol=1e-10)
-
-    def test_restart_reset_cart_to_frac(self, tmp_path):
-        """restart_reset=True: NVT(cart) -> NVT(frac) forces exception handler path."""
-        box = jnp.array([25.0, 25.0, 25.0])
-        cart_pos = jnp.array([[2.5, 5.0, 7.5], [10.0, 12.5, 15.0]])
-        mom = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        force = jnp.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
-        mass = jnp.array([[1.0], [16.0]])
-        state = _make_nvt_state(cart_pos, mom, force, mass)
-        path = str(tmp_path / "restart.npz")
-
-        save_state(state, box, 0, path, ensemble='nvt', fractional_coordinates=False)
-
-        current_fractional = True
-        try:
-            load_state(
-                path, ensemble='nvt', restart_reset=True,
-                fractional_coordinates=current_fractional
-            )
-            pytest.fail("Expected RestartInNewEnsembleError")
-        except RestartInNewEnsembleError as e:
-            position = e.loaded_state['position']
-            loaded_box = e.loaded_state['box']
-
-            saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
-            if saved_fractional and not current_fractional:
-                position = transform(jnp.array(loaded_box), position)
-            elif not saved_fractional and current_fractional:
-                position = transform(1.0 / jnp.array(loaded_box), position)
-
-        expected_frac = cart_pos / box
-        np.testing.assert_allclose(position, expected_frac, atol=1e-10)
 
 
 # ===========================================================================

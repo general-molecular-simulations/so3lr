@@ -4,16 +4,29 @@ import sys
 import time
 import yaml
 import click
+from so3lr import kspace_defaults as _KS
 import difflib
 import logging
 import warnings
 import platform
-import numpy as np
 
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Union, Any, Callable
+from typing import Dict, Optional, Any, Callable
 
 from .. import __version__
+# Import-cheap by design (no JAX): `so3lr --help` builds the --strategy
+# choices from this table at import time, and run_fine_tuning resolves the
+# same table into parameter keys, so the two cannot drift apart.
+from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
+from ..md_observables import MD_OBSERVABLES
+from ..md_settings_validation import DEFAULT_PRESSURE, load_settings_yaml, resolve_ensemble, validate_md_counts
+from ..flash.check import ENGINES, FLASH_MODES, reserve_gpu
+# Import-cheap (standard library only); the --model help is built from it so the
+# listed names and the default cannot go stale when a release lands.
+from ..model_registry import DEFAULT_MODEL, available_models
+
+MODEL_HELP = (f"Model to use: a bundled name ({', '.join(available_models())}) "
+              f"or a path to a custom MLFF model directory. [default: {DEFAULT_MODEL}]")
 
 # NOTE: heavy imports (jax, and the so3lr_eval/finetune/train/md/tune_ewald
 # submodules, which pull in jax/flax/jax-md/glp/orbax) are deferred so that
@@ -91,7 +104,6 @@ def get_hardware_info():
         logger.info("=" * 60)
         return
 
-    # logger.info("Hardware information")
     logger.info(f"JAX default backend:       {backend}")
     logger.info(f"Number of devices:         {len(devices)}")
 
@@ -146,10 +158,8 @@ DEFAULT_SPIN = 0  # number of unpaired electrons (multiplicity - 1)
 DEFAULT_DISPERSION_DAMPING = 2.0  # Angstrom
 DEFAULT_BUFFER_MULTIPLIER = 1.25
 DEFAULT_SAVE_BUFFER = 50
-DEFAULT_OUTPUT_FORMAT = 'extxyz'
 DEFAULT_TIMESTEP = 0.5  # femtoseconds
 DEFAULT_TEMPERATURE = 300  # Kelvin
-DEFAULT_PRESSURE = 1.0  # bar
 
 # Nose-Hoover chain parameters
 DEFAULT_MD_CYCLES = 100
@@ -173,9 +183,9 @@ DEFAULT_MIN_N_MIN = 2
 DEFAULT_SUZUKI_YOSHIDA_STEPS = 3
 
 # K-space electrostatics parameters
-DEFAULT_KSPACE_SMEARING = 4.0       # Å
-DEFAULT_KSPACE_SPACING = 2.0        # Å
-DEFAULT_KSPACE_INTERP_NODES = 4
+DEFAULT_KSPACE_SMEARING = _KS.DEFAULT_KSPACE_SMEARING
+DEFAULT_KSPACE_SPACING = _KS.DEFAULT_KSPACE_SPACING
+DEFAULT_KSPACE_INTERP_NODES = _KS.DEFAULT_KSPACE_INTERP_NODES
 
 # Additional parameters
 DEFAULT_OBSERVABLES = ()
@@ -263,209 +273,6 @@ Auto-tune k-space electrostatics parameters (Ewald/PME/P3M):
 
 """
 
-# Run with settings file:
-#   so3lr --settings md_settings.yaml
-# so3lr [options]         Run MD simulation with options specified via command line or settings file
-# 
-# ### Settings File Examples
-# Example settings file for NVT simulation (nvt_settings.yaml):
-# ```yaml
-# # Input/Output
-# input_file: "path/to/structure.xyz"    # Path to the initial geometry file
-# output_file: "nvt_trajectory.hdf5"           # Output trajectory file in 'hdf5' or 'extxyz' format
-# log_file: "nvt_md.log"                       # File to write logs to
-
-# # Model settings
-# model_path: "/path/to/model"                 # Optional path to custom MLFF model
-# precision: "float32"                         # Numerical precision: 'float32' or 'float64'
-# lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-# dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
-# buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
-# buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
-# save_buffer: 50                              # Number of frames to buffer before writing
-
-# # MD settings
-# md_dt: 0.5                                   # MD timestep in femtoseconds
-# md_T: 300.0                                  # Simulation temperature in Kelvin
-# md_cycles: 100                               # Number of MD cycles to run
-# md_steps: 100                                # Number of steps per MD cycle
-# relax_before_run: true                       # Whether to perform geometry relaxation before MD
-# force_convergence: 0.05                      # Force convergence criterion in eV/Å for initial relaxation
-
-# # Nose-Hoover thermostat settings
-# nhc_chain_length: 3                          # Length of the Nose-Hoover thermostat chain
-# nhc_steps: 2                                 # Number of integration steps per MD step
-# nhc_thermo: 100.0                            # Thermostat timescale in femtoseconds
-
-# # Langevin thermostat settings
-# langevin_removecmmotion: True                # Removal of the Center of Mass Motion
-# langevin_thermo: 1.0                         # Friction (Gamma) coefficient for the Langevin thermostat
-
-# # Restart options
-# restart_save_path: "restart.npz"             # Path to save restart data
-# restart_load_path: "previous.npz"            # Path to load restart data from previous run
-
-# # Additional settings
-# total_charge: 0                              # Total charge of the system
-# seed: 42                                     # Random seed for MD
-# observables: []                              # List of observable quantities to compute and save
-# output_atom_indices: null                    # Optional list of atom indices to include in output
-
-# # K-space electrostatics (optional, for periodic systems)
-# kspace_electrostatics: null                  # K-space method: null/"ewald"/"pme"/"p3m"
-# kspace_smearing: 4.0                         # Smearing width for k-space summation (Å)
-# kspace_spacing: 2.0                          # Grid spacing for k-space summation (Å)
-# kspace_interp_nodes: 4                       # Number of interpolation nodes for PME/P3M
-
-# # Restart settings
-# restart_save_path: "restart.npz"             # Path to save restart data
-# restart_load_path: "previous.npz"            # Path to load restart data from previous run
-# restart_reset: false                         # Reset accumulated thermostat/barostat state on restart
-# ```
-
-# Example settings file for NVE simulation (nve_settings.yaml):
-# ```yaml
-# # Input/Output
-# input_file: "path/to/structure.xyz"          # Path to the initial geometry file
-# output_file: "nve_trajectory.hdf5"           # Output trajectory file in 'hdf5' or 'extxyz' format
-# log_file: "nve_md.log"                       # File to write logs to
-
-# # Model settings
-# model_path: "/path/to/model"                 # Optional path to custom MLFF model
-# precision: "float32"                         # Numerical precision: 'float32' or 'float64'
-# lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-# dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
-# buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
-# buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
-# save_buffer: 50                              # Number of frames to buffer before writing
-
-# # MD settings
-# md_dt: 0.5                                   # MD timestep in femtoseconds
-# init_T: 300.0                                # Initial temperature for velocity initialization (NVE only)
-# md_cycles: 100                               # Number of MD cycles to run
-# md_steps: 100                                # Number of steps per MD cycle
-# relax_before_run: true                       # Whether to perform geometry relaxation before MD
-# force_convergence: 0.05                      # Force convergence criterion in eV/Å for initial relaxation
-
-# # Additional settings
-# total_charge: 0                              # Total charge of the system
-# seed: 42                                     # Random seed for MD
-# ```
-
-# Example settings file for NPT simulation (npt_settings.yaml):
-# ```yaml
-# # Input/Output
-# input_file: "path/to/structure.xyz"    # Path to the initial geometry file
-# output_file: "npt_trajectory.hdf5"           # Output trajectory file in 'hdf5' or 'xyz' format
-# log_file: "npt_md.log"                       # File to write logs to
-
-# # Model settings
-# model_path: "/path/to/model"                 # Optional path to custom MLFF model
-# precision: "float32"                         # Numerical precision: 'float32' or 'float64'
-# lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-# dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
-# buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
-# buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
-# save_buffer: 50                              # Number of frames to buffer before writing
-
-# # MD settings
-# md_dt: 0.5                                   # MD timestep in femtoseconds
-# md_T: 300.0                                  # Simulation temperature in Kelvin
-# md_P: 1.0                                    # Pressure in bar (enables NPT simulation)
-# md_cycles: 100                               # Number of MD cycles to run
-# md_steps: 100                                # Number of steps per MD cycle
-# relax_before_run: true                       # Whether to perform geometry relaxation before MD
-# force_convergence: 0.05                      # Force convergence criterion in eV/Å for initial relaxation
-
-# # Thermostat and barostat settings
-# nhc_chain_length: 3                          # Length of the Nose-Hoover thermostat chain
-# nhc_steps: 2                                 # Number of integration steps per MD step
-# nhc_thermo: 100.0                            # Thermostat damping factor in units of timestep
-# nhc_baro: 1000.0                             # Barostat damping factor in units of timestep
-# nhc_sy_steps: 3                              # Number of Suzuki-Yoshida integration steps
-
-# # Restart options
-# restart_save_path: "restart.npz"             # Path to save restart data
-# restart_load_path: "previous.npz"            # Path to load restart data from previous run
-
-# # Additional settings
-# total_charge: 0                              # Total charge of the system
-# seed: 42                                     # Random seed for MD
-# observables: []                              # List of observable quantities to compute and save
-# output_atom_indices: null                    # Optional list of atom indices to include in output
-
-# # K-space electrostatics (optional, for periodic systems)
-# kspace_electrostatics: null                  # K-space method: null/"ewald"/"pme"/"p3m"
-# kspace_smearing: 4.0                         # Smearing width for k-space summation (Å)
-# kspace_spacing: 2.0                          # Grid spacing for k-space summation (Å)
-# kspace_interp_nodes: 4                       # Number of interpolation nodes for PME/P3M
-# kspace_npt_cycles: 10                        # Frequency (in MD cycles) to re-tune k-space grid for NPT
-
-# # Restart settings
-# restart_save_path: "restart.npz"             # Path to save restart data
-# restart_load_path: "previous.npz"            # Path to load restart data from previous run
-# restart_reset: false                         # Reset accumulated thermostat/barostat state on restart
-# ```
-
-# Example settings file for geometry optimization (opt_settings.yaml):
-# ```yaml
-# # Input/Output
-# input_file: "path/to/structure.xyz"          # Path to the initial geometry file
-# output_file: "optimized.xyz"                 # Output file to save the optimized geometry
-# log_file: "opt.log"                          # File to write logs to
-
-# # Model settings
-# model_path: "/path/to/model"                 # Optional path to custom MLFF model
-# precision: "float32"                         # Numerical precision: 'float32' or 'float64'
-# lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-# dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
-# buffer_size_multiplier_sr: 1.25              # Buffer size multiplier for short-range interactions
-# buffer_size_multiplier_lr: 1.25              # Buffer size multiplier for long-range interactions
-
-# # Optimization settings
-# min_cycles: 10                               # Number of minimization cycles
-# min_steps: 10                                # Number of steps per minimization cycle
-# min_start_dt: 0.05                           # Initial timestep for minimization
-# min_max_dt: 0.1                              # Maximum timestep for minimization
-# min_n_min: 2                                 # Number of steps moving in correct direction before dt update
-# force_convergence: 0.05                      # Force convergence criterion in eV/Å
-
-# # Additional settings
-# total_charge: 0                              # Total charge of the system
-# ```
-
-# Example settings file for model evaluation (eval_settings.yaml):
-# ```yaml
-# # Input/Output
-# datafile: "path/to/dataset.extxyz"           # Path to data file for evaluation
-# save_to: "so3lr_eval.extxyz"                 # Output file to save predictions
-# log_file: "eval.log"                         # File to write logs to
-
-# # Model settings
-# model_path: "/path/to/model"                 # Optional path to custom MLFF model
-# precision: "float32"                         # Numerical precision: 'float32' or 'float64'
-# lr_cutoff: 12.0                              # Long-range cutoff distance in Å
-# dispersion_damping: 2.0                      # Dispersion interactions start to switch off at (lr_cutoff-dispersion_damping) Å
-
-# # Evaluation settings
-# batch_size: 10                               # Number of molecules per batch
-# targets: "forces,dipole_vec,hirshfeld_ratios" # Targets to evaluate
-# jit_compile: true                            # Use JIT compilation for speed
-
-# # Experimental settings
-#
-# Ewald electrostatics settings
-# kspace_electrostatics: null                  # K-space method for long-range electrostatics (null/"ewald"/"pme"/"p3m")
-# kspace_smearing: 4.0                         # Smearing width for k-space summation
-# kspace_spacing: 2.0                          # Grid spacing for k-space summation
-# kspace_interp_nodes: 4                       # Number of interpolation nodes for PME/P3M
-#
-# observables: ["partial_charges","dipole_vec","hirshfeld_ratios"]
-#
-# output_atom_indices: null                    # Optional list of atom indices to output
-# ```
-
-
 BASIC_HELP_STRING = """
 Run simulations using SO3LR Machine Learned Force Field.
 
@@ -508,9 +315,6 @@ Use --help-full to see all available options.
 
 """
 
-# so3lr [options]         Run with options specified via command line or settings file
-# Run with settings file:
-#   so3lr --settings md_settings.yaml
 
 def infer_output_format(output_file):
     """Determine output format based on file extension. Returns 'extxyz' for
@@ -602,10 +406,7 @@ def common_io_options(f: Callable) -> Callable:
 def common_model_options(f: Callable) -> Callable:
     """Common model options for all commands."""
     f = click.option('--model', '--model_path', '--model-path', 'model_path', type=str, default=None,
-                     callback=_validate_model_choice,
-                     help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
-                          'or a path to a custom MLFF model directory. '
-                          'If not provided, so3lr-m is used. [default: so3lr-m]')(f)
+                     callback=_validate_model_choice, help=MODEL_HELP)(f)
     f = click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
                      help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')(f)
     f = click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
@@ -622,6 +423,18 @@ def common_model_options(f: Callable) -> Callable:
                      help=f'Buffer size multiplier for long-range interactions. [default: {DEFAULT_BUFFER_MULTIPLIER}]')(f)
     f = click.option('--total-charge', default=DEFAULT_TOTAL_CHARGE, type=int,
                      help=f'Total charge of the system. [default: {DEFAULT_TOTAL_CHARGE}]')(f)
+    f = click.option('--charge-embed-total-charge', 'charge_embed_total_charge',
+                     default=None, type=float,
+                     help='Total charge seen by the charge EMBEDDING. Unset '
+                          '(default) follows --total-charge; 0 embeds a neutral '
+                          'system. [default: follow --total-charge]')(f)
+    f = click.option('--charge-equilibration-total-charge',
+                     'charge_equilibration_total_charge',
+                     default=None, type=float,
+                     help='Total charge that charge EQUILIBRATION conserves to. '
+                          'Unset (default) follows --total-charge; 0 conserves to '
+                          'neutral. Independent of --charge-embed-total-charge. '
+                          '[default: follow --total-charge]')(f)
     f = click.option('--spin', 'num_unpaired_electrons', default=DEFAULT_SPIN, type=int,
                      help=f'Spin: number of unpaired electrons (multiplicity - 1; equivalently, multiplicity = spin + 1). [default: {DEFAULT_SPIN}]')(f)
     return f
@@ -629,15 +442,15 @@ def common_model_options(f: Callable) -> Callable:
 
 def common_md_options(f: Callable) -> Callable:
     """Common MD options shared by all ensemble commands."""
-    f = click.option('--save-buffer', default=DEFAULT_SAVE_BUFFER, type=int,
+    f = click.option('--save-buffer', default=DEFAULT_SAVE_BUFFER, type=click.IntRange(min=1),
                      help=f'Number of frames to buffer before writing. [default: {DEFAULT_SAVE_BUFFER}]')(f)
     f = click.option('--temperature', default=DEFAULT_TEMPERATURE, type=float,
                      help=f'Simulation temperature in Kelvin. [default: {DEFAULT_TEMPERATURE}]')(f)
     f = click.option('--dt', default=DEFAULT_TIMESTEP, type=float,
                      help=f'MD timestep in femtoseconds. [default: {DEFAULT_TIMESTEP}]')(f)
-    f = click.option('--md-cycles', default=DEFAULT_MD_CYCLES, type=int,
+    f = click.option('--md-cycles', default=DEFAULT_MD_CYCLES, type=click.IntRange(min=1),
                      help=f'Number of MD cycles to run. [default: {DEFAULT_MD_CYCLES}]')(f)
-    f = click.option('--md-steps', default=DEFAULT_MD_STEPS_PER_CYCLE, type=int,
+    f = click.option('--md-steps', default=DEFAULT_MD_STEPS_PER_CYCLE, type=click.IntRange(min=1),
                      help=f'Number of steps per MD cycle. [default: {DEFAULT_MD_STEPS_PER_CYCLE}]')(f)
     f = click.option('--restart-save', type=click.Path(), default=None,
                      help='Path to save restart data.')(f)
@@ -650,19 +463,11 @@ def common_md_options(f: Callable) -> Callable:
     f = click.option('--seed', default=DEFAULT_SEED, type=int,
                      help=f'Random seed for MD. [default: {DEFAULT_SEED}]')(f)
     f = click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
-                     type=click.Choice([
-                         'nn_energy', 'partial_charges', 'electrostatic_energy',
-                         'dispersion_energy', 'zbl_repulsion',
-                         'nlh_repulsion',
-                         'electrostatic_energy_undamped', 'dispersion_energy_undamped',
-                         'x',
-                     ]),
+                     type=click.Choice(list(MD_OBSERVABLES)),
                      help='Observable to compute and save during MD. Repeatable. '
-                          'Allowed: nn_energy, partial_charges, electrostatic_energy, '
-                          'dispersion_energy, zbl_repulsion (legacy name) / nlh_repulsion '
-                          '(canonical for so3lr-s/m/l; same quantity, different model output key), '
-                          'electrostatic_energy_undamped, dispersion_energy_undamped, x. '
-                          '[default: none]')(f)
+                          'Note zbl_repulsion (legacy so3lr) and nlh_repulsion '
+                          '(so3lr-tauri-s/m/l) are the same quantity under the two '
+                          'model generations\' output keys. [default: none]')(f)
     f = click.option('--help', '-h', is_flag=True, help='Show brief command overview.')(f)
     return f
 
@@ -700,8 +505,32 @@ def langevin_options(f: Callable) -> Callable:
     return f
 
 
-def kspace_options(f: Callable) -> Callable:
-    """K-space electrostatics options for periodic systems."""
+def flash_options(f: Callable) -> Callable:
+    """The engine: SO3LR-Flash (millions of atoms) or the neighbour-list potential."""
+    f = click.option('--engine', 'engine', default='auto', type=click.Choice(list(ENGINES)),
+                     help='auto: the flash engine (GPU kernels with their own cell grid and '
+                          'no per-edge arrays: 2.5x faster, and tens of millions of atoms on one '
+                          'GPU) whenever it computes what the other options ask for -- an NVIDIA '
+                          'GPU, a periodic orthorhombic box, nve/nvt/nvt-langevin/isotropic npt, '
+                          'real-space long range or PME, so3lr-tauri-s/m/l -- else the neighbour-list '
+                          'potential; the log says which and why. flash or standard forces one. '
+                          '[default: auto]')(f)
+    f = click.option('--flash-mode', 'flash_mode', default='auto',
+                     type=click.Choice(list(FLASH_MODES)),
+                     help='SO3LR-Flash memory mode, fastest first; auto picks the fastest that fits. '
+                          '[default: auto]')(f)
+    f = click.option('--flash-mixed/--no-flash-mixed', 'flash_mixed', default=True,
+                     help='With --precision float32: keep the MD state (positions, momenta, '
+                          'energy sums) in float64 and form displacements in float64. [default: on]')(f)
+    f = click.option('--flash-devices', 'flash_devices', default=1, type=click.IntRange(min=1),
+                     help='SO3LR-Flash on this many GPUs of the node: each computes an equal share '
+                          'of the atoms, for systems that fit on one GPU but should run faster. '
+                          '[default: 1]')(f)
+    return f
+
+
+def kspace_electrostatics_options(f: Callable) -> Callable:
+    """Reciprocal-space electrostatics for periodic systems (shared by MD and eval)."""
     f = click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None,
                      type=click.Choice(['ewald', 'pme', 'p3m'], case_sensitive=False),
                      help='K-space method for long-range electrostatics: "ewald", "pme", or "p3m". [default: None]')(f)
@@ -711,8 +540,32 @@ def kspace_options(f: Callable) -> Callable:
                      help=f'Grid spacing for k-space summation in Å. [default: {DEFAULT_KSPACE_SPACING}]')(f)
     f = click.option('--kspace-interp-nodes', 'kspace_interp_nodes', default=DEFAULT_KSPACE_INTERP_NODES, type=int,
                      help=f'Number of interpolation nodes for PME/P3M. [default: {DEFAULT_KSPACE_INTERP_NODES}]')(f)
-    f = click.option('--kspace-npt-cycles', 'kspace_npt_cycles', default=None, type=int,
+    return f
+
+
+def kspace_options(f: Callable) -> Callable:
+    """K-space electrostatics options for MD: the shared set plus NPT re-tuning."""
+    f = kspace_electrostatics_options(f)
+    f = click.option('--kspace-npt-cycles', 'kspace_npt_cycles', default=None,
+                     type=click.IntRange(min=1),
                      help='Frequency (in MD cycles) to re-tune k-space grid in NPT. [default: None]')(f)
+    return f
+
+
+def kspace_dispersion_options(f: Callable) -> Callable:
+    """Reciprocal-space dispersion for periodic systems."""
+    f = click.option('--kspace-dispersion', 'kspace_dispersion', default=None,
+                     type=click.Choice(['ewald', 'pme'], case_sensitive=False),
+                     help='K-space method for long-range dispersion: "ewald" or "pme". [default: None]')(f)
+    f = click.option('--kspace-dispersion-smearing', 'kspace_dispersion_smearing',
+                     default=_KS.DEFAULT_KSPACE_DISPERSION_SMEARING, type=float,
+                     help=f'Smearing width for k-space dispersion in Å. [default: {_KS.DEFAULT_KSPACE_DISPERSION_SMEARING}]')(f)
+    f = click.option('--kspace-dispersion-spacing', 'kspace_dispersion_spacing',
+                     default=_KS.DEFAULT_KSPACE_DISPERSION_SPACING, type=float,
+                     help=f'Grid spacing for k-space dispersion in Å. [default: {_KS.DEFAULT_KSPACE_DISPERSION_SPACING}]')(f)
+    f = click.option('--kspace-dispersion-interp-nodes', 'kspace_dispersion_interp_nodes',
+                     default=_KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES, type=int,
+                     help=f'Interpolation nodes for PME dispersion. [default: {_KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES}]')(f)
     return f
 
 
@@ -787,6 +640,8 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     # K-space electrostatics
     'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing',
     'kspace_interp_nodes', 'kspace_npt_cycles',
+    # Charge overrides (default None -> follow total_charge)
+    'charge_embed_total_charge', 'charge_equilibration_total_charge',
     # K-space dispersion
     'kspace_dispersion', 'kspace_dispersion_smearing',
     'kspace_dispersion_spacing', 'kspace_dispersion_interp_nodes',
@@ -800,6 +655,8 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     'restart_pysages_save_path', 'restart_pysages_load_path',
     # Minimization (overrides cycles/steps if set)
     'force_convergence',
+    # flash engine
+    'engine', 'flash_mode', 'flash_mixed', 'flash_devices',
     # Eval keys (allowed in the same YAML even though `so3lr eval` does not use
     # --settings yet, since users often share a single YAML across runs)
     'datafile', 'save_to', 'targets', 'batch_size', 'jit_compile',
@@ -808,6 +665,17 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     # Trajectory-overwrite policy: refuse pre-existing output by default;
     # set true (CLI flag --overwrite) to permit truncation.
     'overwrite',
+    # `so3lr tune-ewald --settings` search ranges (read by cli/tune_ewald.py).
+    # These are honoured but were absent here, so the did-you-mean validator
+    # reported every legitimate tuning knob as an unknown key -- training users
+    # to ignore the typo warnings entirely.
+    'accuracy',
+    'cutoff_lo', 'cutoff_it', 'cutoff_hi',
+    'smear_lo', 'smear_hi', 'smear_it',
+    'ns_lo', 'ns_hi',
+    'nodes_lo', 'nodes_hi',
+    'mesh_lo', 'mesh_hi',
+    'dispersion_damping_lo', 'dispersion_damping_hi', 'dispersion_damping_it',
 }
 
 
@@ -881,20 +749,6 @@ def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Pa
         logger.warning(msg)
 
 
-def canonicalize_ensemble(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Determine ensemble from settings dict, defaulting to NVT.
-
-    Ensemble can be set explicitly via ``settings_dict['ensemble']`` (e.g. from a
-    YAML settings file), or is inferred: presence of ``md_P`` implies NPT, otherwise
-    NVT is used as the default.
-    """
-    if settings_dict.get('ensemble') is None:
-        if settings_dict.get('md_P') is not None:
-            settings_dict['ensemble'] = 'npt'
-        else:
-            settings_dict['ensemble'] = 'nvt'
-    return settings_dict
-
 @click.group(cls=CustomCommandClass, invoke_without_command=True,
              help="Run molecular dynamics using SO3LR Machine Learned Force Field.",
              context_settings={"help_option_names": []})
@@ -935,8 +789,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
 
     try:
         settings_path = Path(settings).expanduser().resolve()
-        with open(settings_path, 'r') as f:
-            settings_dict = yaml.safe_load(f) or {}
+        settings_dict = load_settings_yaml(settings_path)
     except (FileNotFoundError, yaml.YAMLError) as e:
         logger.error(f"Error loading settings file: {str(e)}")
         sys.exit(1)
@@ -963,7 +816,8 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     for key, default in YAML_DEFAULTS.items():
         settings_dict.setdefault(key, default)
 
-    settings_dict = canonicalize_ensemble(settings_dict)
+    settings_dict = resolve_ensemble(settings_dict)
+    validate_md_counts(settings_dict)
 
     # Fast-fail on missing required keys before setup_logger / banner /
     # get_hardware_info (which triggers a slow JAX init). `input_file` is the
@@ -985,9 +839,8 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     # YAML branch left output_file=None and immediately crashed in
     # infer_output_format. We compute the same `<input>_<ensemble>.xyz` here.
     if not settings_dict.get('output_file') and settings_dict.get('input_file'):
-        _suffix = {'nvt': 'nvt', 'nvt-langevin': 'nvt_langevin', 'npt': 'npt', 'nve': 'nve'}
-        _ens = settings_dict.get('ensemble', 'nvt')
-        settings_dict['output_file'] = f"{Path(settings_dict['input_file']).stem}_{_suffix.get(_ens, _ens)}.xyz"
+        settings_dict['output_file'] = (
+            f"{Path(settings_dict['input_file']).stem}_{settings_dict['ensemble'].replace('-', '_')}.xyz")
 
     settings_dict['output_format'] = infer_output_format(settings_dict.get('output_file', ''))
 
@@ -1001,6 +854,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     logger.info(f"Loading settings from {settings}")
 
     log_simulation_settings(settings_dict)
+    reserve_gpu(settings_dict)          # before JAX starts
     get_hardware_info()
 
     time_start = time.time()
@@ -1159,6 +1013,16 @@ def run_md_simulation(
     kspace_spacing: float = DEFAULT_KSPACE_SPACING,
     kspace_interp_nodes: int = DEFAULT_KSPACE_INTERP_NODES,
     kspace_npt_cycles: Optional[int] = None,
+    # Charge embedding: overrides only what the embedding sees, never
+    # equilibration. Must be declared here -- nvt_md(**kwargs) forwards every
+    # common_model_options flag straight into this explicit signature.
+    charge_embed_total_charge: Optional[float] = None,
+    charge_equilibration_total_charge: Optional[float] = None,
+    # the engine (SO3LR-Flash for nve / nvt / nvt-langevin / npt)
+    engine: str = 'auto',
+    flash_mode: str = 'auto',
+    flash_mixed: bool = True,
+    flash_devices: int = 1,
 ) -> None:
     """Shared runner for NVT, NVT-Langevin, NPT, and NVE MD simulations."""
     if not input_file or help:
@@ -1167,14 +1031,9 @@ def run_md_simulation(
         click.echo(ctx.get_help())
         return
 
-    # Default output filename uses ensemble-specific suffix.
-    # Note: NVT-Langevin uses the underscore form 'nvt_langevin' in filenames
-    # (and YAML `ensemble:` values) but the hyphen form 'nvt-langevin' as the
-    # CLI subcommand name (`so3lr nvt-langevin ...`); the mapping below keeps
-    # the two conventions in sync.
-    _suffix = {'nvt': 'nvt', 'nvt-langevin': 'nvt_langevin', 'npt': 'npt', 'nve': 'nve'}
+    # Default output filename: <input stem>_<ensemble with '_'>.xyz
     if output_file is None:
-        output_file = f"{Path(input_file).stem}_{_suffix[ensemble]}.xyz"
+        output_file = f"{Path(input_file).stem}_{ensemble.replace('-', '_')}.xyz"
 
     if log_file is None:
         # Use with_suffix so the log file lands next to --output, not in CWD.
@@ -1217,6 +1076,12 @@ def run_md_simulation(
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
+        'charge_embed_total_charge': charge_embed_total_charge,
+        'charge_equilibration_total_charge': charge_equilibration_total_charge,
+        'engine': engine,
+        'flash_mode': flash_mode,
+        'flash_mixed': flash_mixed,
+        'flash_devices': flash_devices,
     }
 
     # Only insert kspace_npt_cycles when the user explicitly passed
@@ -1252,6 +1117,7 @@ def run_md_simulation(
         settings['langevin_thermo'] = langevin_thermo
 
     log_simulation_settings(settings)
+    reserve_gpu(settings)               # before JAX starts
     get_hardware_info()
 
     time_start = time.time()
@@ -1304,6 +1170,8 @@ def fire_optimization(
     kspace_spacing: float,
     kspace_interp_nodes: int,
     kspace_npt_cycles: Optional[int],
+    charge_embed_total_charge: Optional[float],
+    charge_equilibration_total_charge: Optional[float],
     help: bool,
     overwrite: bool = False,
 ) -> None:
@@ -1358,7 +1226,7 @@ def fire_optimization(
     logger.info(f"Spin (unpaired e-):        {num_unpaired_electrons}")
     # Mirror the MD / eval banner: log the resolved short name even when the
     # user did not pass --model (otherwise the user has no record of which
-    # bundled checkpoint was loaded by default, e.g. so3lr-m vs. legacy v1).
+    # bundled checkpoint was loaded by default, e.g. so3lr-tauri-m vs. legacy v1).
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     _model = model_path or DEFAULT_MODEL
     _kind = 'bundled' if _model in available_models() else 'custom path'
@@ -1405,6 +1273,8 @@ def fire_optimization(
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
+        'charge_embed_total_charge': charge_embed_total_charge,
+        'charge_equilibration_total_charge': charge_equilibration_total_charge,
         'overwrite': overwrite,
     }
 
@@ -1429,6 +1299,7 @@ def fire_optimization(
 @kspace_options
 @common_md_options
 @thermostat_options
+@flash_options
 def nvt_md(**kwargs) -> None:
     """
     Run NVT (constant volume and temperature) MD simulation using the Nose-Hoover chain thermostat.
@@ -1446,6 +1317,7 @@ def nvt_md(**kwargs) -> None:
 @kspace_options
 @common_md_options
 @langevin_options
+@flash_options
 def nvt_langevin_md(**kwargs) -> None:
     """
     Run NVT (constant volume and temperature) MD simulation using the Langevin thermostat.
@@ -1457,13 +1329,16 @@ def nvt_langevin_md(**kwargs) -> None:
 
 
 # Define the 'npt' subcommand
-@cli.command(name='npt', help="Run NPT molecular dynamics simulation with `so3lr npt --input geometry.xyz`.")
+@cli.command(name='npt', help="Run NPT molecular dynamics simulation with `so3lr npt --input geometry.xyz`. "
+                              "Box coupling is isotropic; set `npt_coupling: semi-isotropic` in a settings "
+                              "YAML for the EXPERIMENTAL semi-isotropic mode (anisotropic is unsupported).")
 @common_io_options
 @common_model_options
 @kspace_options
 @common_md_options
 @thermostat_options
 @barostat_options
+@flash_options
 def npt_md(**kwargs) -> None:
     """
     Run NPT (constant pressure and temperature) MD simulation using the Nose-Hoover chain thermostat and barostat.
@@ -1482,6 +1357,7 @@ def npt_md(**kwargs) -> None:
 @common_model_options
 @kspace_options
 @common_md_options
+@flash_options
 def nve_md(**kwargs) -> None:
     """
     Run NVE (constant volume and energy) MD simulation with no thermostat.
@@ -1512,10 +1388,7 @@ def nve_md(**kwargs) -> None:
                    'Default is to refuse (rename your previous run, or pass --overwrite).')
 # Model settings group
 @click.option('--model', '--model_path', 'model_path', type=str, default=None,
-              callback=_validate_model_choice,
-              help='Model to use: a bundled name (so3lr-s, so3lr-m, so3lr-l, so3lr) '
-                   'or a path to a custom MLFF model directory. '
-                   'If not provided, so3lr-m is used. [default: so3lr-m]')
+              callback=_validate_model_choice, help=MODEL_HELP)
 @click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
               help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
@@ -1538,15 +1411,25 @@ def nve_md(**kwargs) -> None:
               help='Comma-separated list of targets to evaluate. '
                    'Standard targets: forces, energy, dipole_vec, hirshfeld_ratios '
                    '(canonical; aliases hirsh_ratios and a0_ratios are accepted, '
-                   'and the new so3lr-s/m/l models report ratios as a0_ratios). '
+                   'and the new so3lr-tauri-s/m/l models report ratios as a0_ratios). '
                    'Observables (saved to output, metrics only if ground truth exists): '
                    'nn_energy, partial_charges (alias: charges), electrostatic_energy, dispersion_energy, '
-                   'nlh_repulsion (canonical for so3lr-s/m/l; legacy models use zbl_repulsion), '
+                   'nlh_repulsion (canonical for so3lr-tauri-s/m/l; legacy models use zbl_repulsion), '
                    'electrostatic_energy_undamped, dispersion_energy_undamped. '
                    'Embeddings: x (final-layer per-atom features, saved to <output>_x.npz). '
                    '[default: forces,dipole_vec,hirshfeld_ratios]')
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
               help='Use JIT compilation for speed. [default: enabled]')
+@click.option('--charge-embed-total-charge', 'charge_embed_total_charge', default=None, type=float,
+              help='Total charge seen by the charge EMBEDDING only. Unset (default) '
+                   'follows --total-charge; 0 embeds a neutral system. Independent '
+                   'of --charge-equilibration-total-charge.')
+@click.option('--charge-equilibration-total-charge', 'charge_equilibration_total_charge', default=None, type=float,
+              help='Total charge that charge EQUILIBRATION conserves to. Unset (default) '
+                   'follows --total-charge; 0 conserves to neutral. Independent of '
+                   '--charge-embed-total-charge.')
+@kspace_electrostatics_options
+@kspace_dispersion_options
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def eval_model(
@@ -1561,10 +1444,21 @@ def eval_model(
     dispersion_damping: float,
     total_charge: Optional[int],
     num_unpaired_electrons: Optional[int],
+    charge_embed_total_charge: Optional[float],
+    charge_equilibration_total_charge: Optional[float],
     # Evaluation settings
     batch_size: int,
     targets: str,
     jit_compile: bool,
+    # K-space settings
+    kspace_electrostatics: Optional[str],
+    kspace_smearing: float,
+    kspace_spacing: float,
+    kspace_interp_nodes: int,
+    kspace_dispersion: Optional[str],
+    kspace_dispersion_smearing: float,
+    kspace_dispersion_spacing: float,
+    kspace_dispersion_interp_nodes: int,
     # Output policy
     overwrite: bool,
     # Help option
@@ -1613,7 +1507,7 @@ def eval_model(
     logger.info(f"Log file:                  {log_file}")
     logger.info(f"Batch size:                {batch_size}")
     # Mirror the MD-side banner: show the resolved short name (so the user knows
-    # which bundled checkpoint actually loaded — so3lr-s/m/l/so3lr — instead of
+    # which bundled checkpoint actually loaded — so3lr-tauri-s/m/l/so3lr — instead of
     # the generic 'SO3LR' label) and tag it as bundled vs. a custom-path model.
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     _model = model_path or DEFAULT_MODEL
@@ -1669,6 +1563,16 @@ def eval_model(
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
         overwrite=overwrite,
+        charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge,
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_smearing=kspace_smearing,
+        kspace_spacing=kspace_spacing,
+        kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion,
+        kspace_dispersion_smearing=kspace_dispersion_smearing,
+        kspace_dispersion_spacing=kspace_dispersion_spacing,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
     )
     logger.info("=" * 60)
     logger.info("Evaluation completed successfully!")
@@ -1683,11 +1587,13 @@ def eval_model(
 @click.option('--workdir', '--work-dir', '--workdir_path', 'workdir',
               type=click.Path(), help='Working directory for fine-tuned model checkpoints and logs.')
 @click.option('--datafile', '--data-file', '--datafile_path', 'datafile',
-              type=click.Path(), help='Path to dataset file (extxyz or tfds format) containing data used for finetuning.')
+              type=click.Path(), help='Required. Path to an ASE-readable dataset file (e.g. extxyz) or .npz used '
+                   'for finetuning. If --config lists TFDS shards under data.datasets, those are '
+                   'used instead and this path is not read.')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Finetuning settings.
-@click.option('--strategy', type=click.Choice(['full','final_mlp','final_mlp_and_hirshfeld','hirshfeld','last_layer','last_layer_and_final_mlp','first_layer','first_layer_and_last_layer','obs_0','obs_023','obs_23','obs_3','ll_fmlp','ll_obs_023','freeze_long_range','forces_only']),
+@click.option('--strategy', type=click.Choice(list(FINETUNING_STRATEGY_NAMES)),
               default='full', help='Strategy for finetuning. [default: full]')
 @click.option('--config', '--config_path', 'config_path', type=click.Path(exists=False), default=None,
               help='Path to the finetuning config (YAML only; unlike `so3lr train --config`, JSON is not supported here). '
@@ -1870,6 +1776,10 @@ def tune_ewald(
     kspace_spacing: float,
     kspace_interp_nodes: int,
     kspace_npt_cycles: Optional[int],
+    # Accepted because common_model_options supplies it; k-space tuning does
+    # not apply it, since what is being tuned is grid convergence.
+    charge_embed_total_charge: Optional[float],
+    charge_equilibration_total_charge: Optional[float],
     # Help option
     help: bool
 ) -> None:
@@ -1899,8 +1809,7 @@ def tune_ewald(
             if not settings_path.exists():
                 raise FileNotFoundError(f'Settings file not found: {settings}')
 
-            with open(settings_path, 'r') as f:
-                settings_dict = yaml.safe_load(f) or {}
+            settings_dict = load_settings_yaml(settings_path)
 
             logger.info(f"Loading settings from {settings}")
         except (FileNotFoundError, yaml.YAMLError) as e:
@@ -1984,7 +1893,9 @@ def main() -> None:
     """Entry point for the command line interface."""
     os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2') # Suppress TF logging
 
-    cli(standalone_mode=False)
+    # Standalone mode: click prints a usage error (missing file, bad choice,
+    # unknown flag) as one line and exits 2, instead of raising a traceback.
+    cli()
 
 
 if __name__ == '__main__':

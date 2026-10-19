@@ -1,4 +1,3 @@
-import os
 import re
 import subprocess
 import pathlib
@@ -60,6 +59,21 @@ def test_config_water(tmp_path):
     return config_path
 
 
+def _parse_param_counts(result):
+    """Pull (total, trainable) out of the parameter summary the trainer prints.
+
+    Exit code and final loss alone cannot tell a real fine-tune from a run in
+    which every parameter was frozen: a no-op run completes normally and reports
+    the pretrained loss. These counts can.
+    """
+    text = result.stdout + result.stderr
+    total = re.search(r'Total number of parameters:\s*([\d,]+)', text)
+    trainable = re.search(r'Trainable parameters:\s*([\d,]+)', text)
+    if total is None or trainable is None:
+        return None, None
+    return int(total.group(1).replace(',', '')), int(trainable.group(1).replace(',', ''))
+
+
 def _assert_finetuning_succeeded(result, workdir, max_loss=0.1):
     """Assert that fine-tuning completed and produced expected outputs."""
     assert result.returncode == 0, (
@@ -88,8 +102,13 @@ def _assert_finetuning_succeeded(result, workdir, max_loss=0.1):
     )
 
 
-def test_cli_finetune(workdir, test_config):
-    """Run `so3lr finetune` on ac.xyz with 90 train / 10 valid and verify it completes."""
+# 'final_mlp' and 'forces_only' pin this PR's fixes end to end: on the old code
+# final_mlp counted 0 trainable parameters (hierarchical keys never matched) and
+# forces_only reported everything trainable (frozen_keys were ignored), so the
+# count assertions below fail on the base branch for exactly those two.
+@pytest.mark.parametrize('strategy', ['full', 'last_layer', 'final_mlp', 'forces_only'])
+def test_cli_finetune(workdir, test_config, strategy):
+    """Run `so3lr finetune` on ac.xyz with 20 train / 5 valid and verify it completes."""
     result = subprocess.run(
         [
             'so3lr', 'finetune',
@@ -98,7 +117,7 @@ def test_cli_finetune(workdir, test_config):
             '--num-train', '20',
             '--num-valid', '5',
             '--config', str(test_config),
-            '--strategy', 'full',
+            '--strategy', strategy,
         ],
         capture_output=True,
         text=True,
@@ -107,6 +126,50 @@ def test_cli_finetune(workdir, test_config):
     )
 
     _assert_finetuning_succeeded(result, workdir, max_loss=0.1)
+
+    # Pin what the strategy actually selected. Asserting only on exit code and
+    # loss would pass even if `last_layer` resolved to a `layers_N` that does
+    # not exist: every parameter would be frozen, two epochs of zero updates
+    # would complete, and the pretrained loss would sit well under the bound.
+    total, trainable = _parse_param_counts(result)
+    assert total is not None, (
+        f"No parameter summary in output.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    if strategy == 'full':
+        assert trainable == total
+    else:
+        assert 0 < trainable < total, (
+            f"strategy={strategy} trained {trainable}/{total} parameters"
+        )
+
+
+def test_cli_finetune_refuses_a_strategy_that_freezes_everything(workdir, test_config):
+    """The headline fail-loudly behavior: a whitelist strategy matching nothing
+    must raise before any data is loaded, not run a full training job of zero
+    updates and exit 0. The legacy `so3lr` checkpoint has no `observables_3`,
+    so `--strategy obs_3` selects nothing there."""
+    result = subprocess.run(
+        [
+            'so3lr', 'finetune',
+            '--datafile', str(DATAFILE),
+            '--workdir', str(workdir),
+            '--num-train', '20',
+            '--num-valid', '5',
+            '--config', str(test_config),
+            '--model', 'so3lr',
+            '--strategy', 'obs_3',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=so3lr_subprocess_env(),
+    )
+    assert result.returncode != 0, (
+        f"obs_3 on the legacy checkpoint must fail, not run a no-op training.\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert 'would freeze every parameter' in (result.stdout + result.stderr)
+
 
 @pytest.mark.slow
 def test_cli_finetune_water_pbc(workdir, test_config_water):

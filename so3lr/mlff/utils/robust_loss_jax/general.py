@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Modified for SO3LR: the numerical implementation is adapted to JAX.
+
 r"""Implements the general form of the loss.
 
 This is the simplest way of using this loss. No parameters will be tuned

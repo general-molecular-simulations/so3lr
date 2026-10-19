@@ -11,6 +11,8 @@ import jraph
 import os
 from pathlib import Path
 
+from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
+
 import logging
 
 logger = logging.getLogger("SO3LR")
@@ -91,8 +93,12 @@ class AseDataLoaderSparse:
             def keep(idx: int):
                 return True
         else:
+            # Build the lookup once. `idx in pick_idx` on an ndarray is a full
+            # vectorised scan per structure, i.e. O(N*M) over the dataset.
+            pick_idx_set = set(np.asarray(pick_idx).tolist())
+
             def keep(idx: int):
-                return idx in pick_idx
+                return idx in pick_idx_set
 
         loaded_data = []
         max_num_of_nodes = 0
@@ -210,7 +216,7 @@ def ASE_to_jraph(
     if energy is None:
         energy = np.array([np.nan])
 
-    max_num_theory_levels = 16
+    max_num_theory_levels = MAX_NUM_THEORY_LEVELS
     theory_level = np.reshape(5, (1,))
     theory_mask = np.eye(max_num_theory_levels)[theory_level] # (1, num_theory_levels)
 
@@ -226,14 +232,20 @@ def ASE_to_jraph(
 
     # Read additional properties from .info and .arrays in Atoms object.
     total_charge = mol.info.get('charge')
+    # Spin multiplicity (2S+1). OMol25/OPoly26 extxyz store it under `spin=`,
+    # other datasets use `multiplicity=`. Prefer the canonical `multiplicity`,
+    # falling back to `spin` so open-shell structures are not silently read as
+    # closed-shell singlets (num_unpaired_electrons = multiplicity - 1).
     multiplicity = mol.info.get('multiplicity')
+    if multiplicity is None:
+        multiplicity = mol.info.get('spin')
     # The polarizability/volume-ratio label has been stored under several keys
     # over time. Accept any of them and pick the first that exists, so users
     # don't silently get NaN labels when their extxyz uses the canonical
     # 'hirshfeld_ratios' name or the new-model 'a0_ratios' name. Aliases
     # checked, in order of preference:
     #   'hirshfeld_ratios' (canonical) -> 'hirsh_ratios' (legacy short form)
-    #   -> 'a0_ratios' (so3lr-s/m/l output name).
+    #   -> 'a0_ratios' (so3lr-tauri-s/m/l output name).
     hirshfeld_ratios = None
     for _ratio_key in ('hirshfeld_ratios', 'hirsh_ratios', 'a0_ratios'):
         if _ratio_key in mol.arrays:
@@ -258,7 +270,15 @@ def ASE_to_jraph(
         hirshfeld_ratios[:] = np.nan
     else:
         hirshfeld_ratios = np.array(hirshfeld_ratios).reshape(num_atoms, )
-    
+
+    # C6 ratios (MBD-NL); set to NaN when not present.
+    c6_ratios = mol.arrays.get('c6_ratios')
+    if c6_ratios is None:
+        c6_ratios = np.empty((num_atoms, ))
+        c6_ratios[:] = np.nan
+    else:
+        c6_ratios = np.array(c6_ratios).reshape(num_atoms, )
+
     # Initialize monomer-specific information for dimer binding energy calculations,
     # as described in the Methods section of SO3LR paper.
     residue_charge = None
@@ -338,6 +358,10 @@ def ASE_to_jraph(
         "dipole_vec": dipole.reshape(1, 3),
         "total_charge": total_charge.reshape(-1),
         "num_unpaired_electrons": multiplicity.reshape(-1) - 1,
+        # ASE already used these axis-specific flags to construct the neighbor
+        # offsets. Preserve them so reciprocal-space callers can reject mixed
+        # PBC rather than silently promoting it to three-dimensional PBC.
+        "pbc": np.asarray(mol.get_pbc(), dtype=bool).reshape(1, 3),
     }
 
     if cell is not None:
@@ -355,7 +379,8 @@ def ASE_to_jraph(
             "positions": positions.reshape(num_atoms, 3),
             "atomic_numbers": atomic_numbers.reshape(num_atoms),
             "forces": forces.reshape(num_atoms, 3),
-            "hirshfeld_ratios": hirshfeld_ratios.reshape(num_atoms)
+            "hirshfeld_ratios": hirshfeld_ratios.reshape(num_atoms),
+            "c6_ratios": c6_ratios.reshape(num_atoms)
             }
 
     graph = jraph.GraphsTuple(

@@ -6,7 +6,10 @@ mass-weighted COM stays confined near the axis (and the run produced no NaNs, i.
 the on-axis safe-norm path is sound in a real simulation).
 """
 import sys
+
+import h5py
 import numpy as np
+from ase.io import read
 from validation_utils import Validator
 
 
@@ -27,38 +30,33 @@ def validate():
     v.validate_hdf5(
         'trajectory.hdf5',
         required_datasets=['positions'],
-        check_shapes={'positions': (n_cycles, 1, n_atoms, 3)},
+        check_shapes={'positions': (n_cycles, n_atoms, 3)},
     )
 
     # Physics check: mass-weighted COM stays within the cylinder (+margin), and no NaNs.
     ok = True
-    try:
-        import h5py
-        from ase.io import read
-        masses = read(settings['input_file']).get_masses()
-        idx = np.asarray(settings['cylinder_restraint_atom_indices'], dtype=int)
-        w = (masses[idx] / masses[idx].sum())[:, None]
-        radius = float(settings['cylinder_restraint_radius'])
-        origin = np.asarray(settings['cylinder_restraint_axis_origin'], dtype=float)
-        with h5py.File('trajectory.hdf5', 'r') as f:
-            pos = np.asarray(f['positions'])  # (n_cycles, 1, n_atoms, 3)
-        if not np.all(np.isfinite(pos)):
-            v.errors.append('trajectory positions contain non-finite values (NaN/Inf)')
-            ok = False
-        frames = pos.reshape(-1, n_atoms, 3)
-        com = np.einsum('ij,fjk->fik', w.T, frames[:, idx, :]).reshape(-1, 3)
-        r_perp = np.hypot(com[:, 0] - origin[0], com[:, 1] - origin[1])
-        margin = 0.5
-        if r_perp.max() > radius + margin:
-            v.errors.append(
-                f'COM perpendicular distance {r_perp.max():.3f} Å exceeded '
-                f'radius+margin ({radius + margin:.3f} Å)'
-            )
-            ok = False
-        else:
-            print(f'COM r_perp max = {r_perp.max():.4f} Å (radius={radius} Å) OK')
-    except ImportError as e:
-        v.warnings.append(f'Skipping COM check (missing dependency): {e}')
+    masses = read(settings['input_file']).get_masses()
+    idx = np.asarray(settings['cylinder_restraint_atom_indices'], dtype=int)
+    w = (masses[idx] / masses[idx].sum())[:, None]
+    radius = float(settings['cylinder_restraint_radius'])
+    origin = np.asarray(settings['cylinder_restraint_axis_origin'], dtype=float)
+    with h5py.File('trajectory.hdf5', 'r') as f:
+        pos = np.asarray(f['positions'])  # (n_cycles, n_atoms, 3)
+    if not np.all(np.isfinite(pos)):
+        v.errors.append('trajectory positions contain non-finite values (NaN/Inf)')
+        ok = False
+    frames = pos.reshape(-1, n_atoms, 3)
+    com = np.einsum('ij,fjk->fik', w.T, frames[:, idx, :]).reshape(-1, 3)
+    r_perp = np.hypot(com[:, 0] - origin[0], com[:, 1] - origin[1])
+    margin = 0.5
+    if r_perp.max() > radius + margin:
+        v.errors.append(
+            f'COM perpendicular distance {r_perp.max():.3f} Å exceeded '
+            f'radius+margin ({radius + margin:.3f} Å)'
+        )
+        ok = False
+    else:
+        print(f'COM r_perp max = {r_perp.max():.4f} Å (radius={radius} Å) OK')
 
     return v.report() and ok
 

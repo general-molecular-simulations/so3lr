@@ -13,24 +13,26 @@ import argparse
 import sys
 from pathlib import Path
 import numpy as np
-from ase.io import read, write
-from ase import Atoms
+from ase.io import write
 import logging
 from tqdm import tqdm
+
+from so3lr.model_registry import DEFAULT_MODEL
+from so3lr.mlff.nn.observable.dispersion_ref_data import (
+    supported_atomic_numbers_for_model as supported_elements_for_model,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-# Supported atomic numbers for the model (H, C, N, O, F, P, S, Cl)
-SUPPORTED_ATOMIC_NUMBERS = {1, 6, 7, 8, 9, 15, 16, 17}
 
-def check_supported_elements(atoms):
+def check_supported_elements(atoms, supported):
     """
     Check if all atoms in the structure have supported atomic numbers.
     Returns (is_supported, unsupported_elements).
     """
     atomic_numbers = set(atoms.get_atomic_numbers())
-    unsupported = atomic_numbers - SUPPORTED_ATOMIC_NUMBERS
+    unsupported = atomic_numbers - set(supported)
     return len(unsupported) == 0, unsupported
 
 def parse_selection_range(selection_str):
@@ -137,12 +139,22 @@ def add_dimer_properties(atoms, monomer_a_indices, monomer_b_indices, charge_a, 
     return atoms
 
 
-def process_dimer_file(input_file, output_file=None):
+def process_dimer_file(input_file, output_file=None, model=None):
     """
     Process a dimer XYZ file and create EXTXYZ with original and translated dimers.
     Processes all molecules in the input file.
     """
     from ase.io import iread
+
+    supported = supported_elements_for_model(model)
+    selected_model = DEFAULT_MODEL if model is None else str(model)
+    logging.info(
+        "Checking elements against model %s coverage (Z=%s..%s, %s elements)",
+        selected_model,
+        min(supported),
+        max(supported),
+        len(supported),
+    )
     
     input_path = Path(input_file)
     if not input_path.exists():
@@ -174,7 +186,9 @@ def process_dimer_file(input_file, output_file=None):
     try:
         for mol_idx, atoms in tqdm(enumerate(iread(input_file)), total=molecule_count):
             # Check if structure contains only supported elements
-            is_supported, unsupported_elements = check_supported_elements(atoms)
+            is_supported, unsupported_elements = check_supported_elements(
+                atoms, supported
+            )
             
             if not is_supported:
                 # Write to unsupported file
@@ -244,7 +258,11 @@ def process_dimer_file(input_file, output_file=None):
     
     if unsupported_count > 0:
         logging.warning(f"  {unsupported_count}/{molecule_count} structures with unsupported elements written to: {unsupported_output_file}")
-        logging.warning(f"  Model currently supports elements: H, C, N, O, F, P, S, Cl")
+        logging.warning(
+            "  Selected model %s supports atomic numbers: %s",
+            selected_model,
+            ", ".join(str(z) for z in sorted(supported)),
+        )
 
     if processed_count == 0:
         logging.warning("No structures with supported elements were found!")
@@ -280,11 +298,21 @@ def main():
         default=None,
         help='Output EXTXYZ file (default: input filename with .extxyz extension)'
     )
+
+    parser.add_argument(
+        '--model',
+        default=DEFAULT_MODEL,
+        help=(
+            'Bundled model name or custom model directory used to validate '
+            f'element coverage (default: {DEFAULT_MODEL}). Use so3lr for the '
+            'original eight-element v1 model.'
+        ),
+    )
     
     args = parser.parse_args()
     
     try:
-        process_dimer_file(args.datafile, args.output)
+        process_dimer_file(args.datafile, args.output, model=args.model)
         return 0
     except Exception as e:
         logging.error(f"Error processing dimer file: {e}")

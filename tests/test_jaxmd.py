@@ -24,10 +24,6 @@ buffer_size_multiplier_lr = 1.25
 minimum_cell_size_multiplier_sr = 1.0
 
 
-def test_jax_md_import():
-    import jax_md
-
-
 @pytest.mark.parametrize('name', ['dha'])
 def test_molecules_with_box(name: str):
     jax.config.update('jax_enable_x64', True)
@@ -264,14 +260,14 @@ def test_water():
 
 @pytest.mark.parametrize('name', ['dha'])
 def test_with_solar_potential_so3lr_s(name: str):
-    """jax-md energy/forces for bundled so3lr-s-2602 against saved references."""
+    """jax-md energy/forces for bundled so3lr-tauri-s-2602 against saved references."""
     from so3lr import So3lrPotential
 
     jax.config.update('jax_enable_x64', True)
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
-    target_predictions = np.load(package_dir / f'tests/test_data/{name}_so3lr_s_jaxmd.npz')
+    target_predictions = np.load(package_dir / f'tests/test_data/{name}_so3lr_s_ase.npz')
 
     mol = read(
         package_dir / f'tests/test_data/{name}.xyz'
@@ -285,7 +281,7 @@ def test_with_solar_potential_so3lr_s(name: str):
 
     neighbor_fn, neighbor_fn_lr, energy_fn = jaxmd_utils.to_jax_md(
         potential=So3lrPotential(
-            model="so3lr-s-2602",
+            model="so3lr-tauri-s-2602",
             dtype=np.float64
         ),
         displacement_or_metric=displacement,

@@ -6,12 +6,36 @@ import jaxpme
 
 logger = logging.getLogger("SO3LR")
 
+from so3lr.kspace_defaults import (  # noqa: F401  (re-exported)
+    DEFAULT_KSPACE_DISPERSION_INTERP_NODES, DEFAULT_KSPACE_DISPERSION_SMEARING,
+    DEFAULT_KSPACE_DISPERSION_SPACING, DEFAULT_KSPACE_INTERP_NODES,
+    DEFAULT_KSPACE_SMEARING, DEFAULT_KSPACE_SPACING)
+
+
+def kspace_grid_shape(kspace_method, kspace_spacing, box):
+    """Mesh shape the method would build for this cell, as a hashable tuple (or None).
+
+    The k-grid arrays themselves are pure shape carriers -- jaxpme returns
+    ``jnp.ones(shape)`` and every consumer reads only ``.shape``, regenerating the
+    k-vectors from each graph's own cell -- so the shape is exactly what a
+    JIT-compiled step depends on, and cells that share it can share a batch.
+    """
+    if kspace_method is None:
+        return None
+    cell = jnp.asarray(box)
+    if kspace_method == 'ewald':
+        return tuple(int(s) for s in jaxpme.kspace.get_kgrid_ewald_shape(
+            cell, lr_wavelength=jnp.array([kspace_spacing])))
+    return tuple(int(s) for s in jaxpme.kspace.get_kgrid_mesh_shape(
+        cell, mesh_spacing=jnp.array([kspace_spacing])))
+
 def setup_kspace_grid(
     kspace_electrostatics: str,
     kspace_smearing: float,
     kspace_spacing: float,
     box: jnp.ndarray,
-    k_grid: jnp.ndarray = None
+    k_grid: jnp.ndarray = None,
+    dtype=None,
 ) -> Tuple[Optional[jnp.ndarray], Optional[jnp.ndarray]]:
     """
     Setup the k-space grid for Ewald summation.
@@ -21,6 +45,10 @@ def setup_kspace_grid(
         kspace_spacing (float): Spacing for the k-space grid.
         box (jnp.ndarray): Box of the system. Shape (3, 3), (3,), or (1,).
         k_grid (jnp.ndarray): Existing k-space grid to reuse if shape matches.
+        dtype: Working dtype for the returned arrays. They are built from Python
+            floats, which become float64 whenever x64 is on -- even in a float32
+            run -- and a float64 smearing then promotes everything downstream.
+            None keeps the historical behaviour (no cast).
     Returns:
         Tuple[jnp.ndarray, jnp.ndarray]: k-space grid and smearing values.
     """
@@ -47,4 +75,7 @@ def setup_kspace_grid(
     else:
         k_grid = None
         k_smearing = None
+    if dtype is not None:
+        k_grid = None if k_grid is None else jnp.asarray(k_grid, dtype=dtype)
+        k_smearing = None if k_smearing is None else jnp.asarray(k_smearing, dtype=dtype)
     return k_grid, k_smearing

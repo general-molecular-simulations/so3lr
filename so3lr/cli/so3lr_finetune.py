@@ -1,30 +1,14 @@
 """Finetune utilities for SO3LR models."""
-import jax
-import jraph
-import numpy as np
-import jax.numpy as jnp
-import time
-import pprint
 import pathlib
 import logging
-from typing import Dict, List, Tuple, Union, Optional, Any
-from tqdm import tqdm
-import yaml
+from typing import Optional
+from so3lr.md_settings_validation import load_settings_yaml
 
-from ase.io import write
-from so3lr.mlff.utils import jraph_utils, evaluation_utils
-from so3lr.mlff.data import AseDataLoaderSparse
-from so3lr.mlff.utils import calculator_utils
 from so3lr.mlff.config import from_config
 
 from ml_collections import config_dict
-from pathlib import Path
-import json
-from collections import defaultdict
 
-from ..jraph_utils import jraph_to_ase_atoms
-from ..base_calculator import make_so3lr
-from .so3lr_md import load_model, setup_logger
+from .so3lr_md import setup_logger
 
 # Get logger
 logger = logging.getLogger("SO3LR")
@@ -64,8 +48,7 @@ def finetune_so3lr(
     else:
         logger.info(f"Using config for finetuning from: {config_path}")
     
-    with open(config_path, mode='r') as fp:
-        finetune_cfg = config_dict.ConfigDict(yaml.load(fp, Loader=yaml.FullLoader))
+    finetune_cfg = config_dict.ConfigDict(load_settings_yaml(config_path))
     
     finetune_cfg.workdir = workdir
     finetune_cfg.data.filepath = datafile

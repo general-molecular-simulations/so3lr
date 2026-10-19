@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """Validation script for NVE ensemble test."""
 import sys
+import h5py
+import numpy as np
 from validation_utils import Validator
 
 
@@ -28,9 +30,25 @@ def validate():
         'trajectory.hdf5',
         required_datasets=['positions'],
         check_shapes={
-            'positions': (n_cycles, 1, n_atoms, 3),
+            'positions': (n_cycles, n_atoms, 3),
         },
     )
+
+    with h5py.File(v.workdir / 'trajectory.hdf5', 'r') as trajectory:
+        expected_dtype = np.dtype(settings['precision'])
+        if trajectory['positions'].dtype != expected_dtype:
+            v.errors.append(
+                f"Trajectory dtype is {trajectory['positions'].dtype}; "
+                f"expected configured precision {expected_dtype}"
+            )
+
+    # The final restart must be independent of full trajectory buffers.
+    # md_cycles=3 and save_buffer=2 leaves a one-frame tail.
+    with np.load(v.workdir / 'nve_restart.npz', allow_pickle=False) as restart:
+        if int(restart['step']) != n_cycles:
+            v.errors.append(
+                f"Restart step is stale: expected {n_cycles}, got {restart['step']}"
+            )
 
     # Check all settings are reflected in logs
     v.check_settings_in_logs(settings)

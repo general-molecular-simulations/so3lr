@@ -1,16 +1,24 @@
 """Evaluation utilities for SO3LR models."""
+from contextlib import contextmanager
+import os
+import stat
+import tempfile
 import jax
 import jraph
 import numpy as np
 import jax.numpy as jnp
 import time
-import pprint
 import logging
-from typing import Dict, List, Tuple, Union, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any
 from tqdm import tqdm
 
 from ase.io import write
-from so3lr.mlff.utils import jraph_utils, evaluation_utils
+from so3lr.mlff.utils import jraph_utils
+from so3lr.mlff.utils.kspace_utils import (
+    DEFAULT_KSPACE_DISPERSION_INTERP_NODES, DEFAULT_KSPACE_DISPERSION_SMEARING,
+    DEFAULT_KSPACE_DISPERSION_SPACING, DEFAULT_KSPACE_INTERP_NODES,
+    DEFAULT_KSPACE_SMEARING, DEFAULT_KSPACE_SPACING, kspace_grid_shape,
+    setup_kspace_grid)
 from so3lr.mlff.data import AseDataLoaderSparse
 from pathlib import Path
 import json
@@ -18,7 +26,12 @@ from collections import defaultdict
 
 from ..jraph_utils import jraph_to_ase_atoms
 from ..base_calculator import make_so3lr
-from .so3lr_md import load_model, setup_logger
+from ..mlff.nn.observable.dispersion_ref_data import (
+    check_atomic_numbers_supported,
+    supported_atomic_numbers_for_config,
+)
+from .so3lr_md import setup_logger
+from ..pbc import is_fully_periodic
 
 # Get logger
 logger = logging.getLogger("SO3LR")
@@ -28,7 +41,7 @@ logger = logging.getLogger("SO3LR")
 OBSERVABLES = {
     'nn_energy', 'partial_charges', 'electrostatic_energy',
     'dispersion_energy', 'zbl_repulsion',
-    'nlh_repulsion',  # clear name for the so3lr-s/m/l repulsion (== zbl_repulsion)
+    'nlh_repulsion',  # clear name for the so3lr-tauri-s/m/l repulsion (== zbl_repulsion)
     'electrostatic_energy_undamped', 'dispersion_energy_undamped',
     'x',  # final-layer atom embeddings; saved to _x.npz, not extxyz
 }
@@ -86,12 +99,12 @@ def process_predictions(
     main_graph.globals['energy_so3lr'] = output_prediction['energy']
     main_graph.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
     # The polarizability/volume-ratio head is named 'hirshfeld_ratios' for the
-    # legacy 'so3lr' model and 'a0_ratios' for the new so3lr-s/m/l models.
+    # legacy 'so3lr' model and 'a0_ratios' for the new so3lr-tauri-s/m/l models.
     if 'hirshfeld_ratios' in output_prediction:
         main_graph.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
     if 'a0_ratios' in output_prediction:
         main_graph.nodes['a0_ratios_so3lr'] = output_prediction['a0_ratios']
-    # c6_ratios is only emitted by the so3lr-s/m/l models; the legacy 'so3lr'
+    # c6_ratios is only emitted by the so3lr-tauri-s/m/l models; the legacy 'so3lr'
     # model has no c6 head, so guard against its absence.
     if 'c6_ratios' in output_prediction:
         main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
@@ -174,10 +187,37 @@ def calculate_metrics(
     return metrics
 
 
+def _check_output_destination(destination: Path, *, overwrite: bool) -> None:
+    if destination.exists() and not destination.is_file():
+        raise RuntimeError(f"Output destination is not a regular file: {destination}")
+    if destination.exists() and not overwrite:
+        raise RuntimeError(
+            f"Output file already exists: {destination}. Refusing to overwrite. "
+            "Pass --overwrite or choose a different --save-to path."
+        )
+
+
+@contextmanager
+def _staged_output(destination: Path, *, overwrite: bool):
+    """Replace one complete file; this is not a multi-file transaction."""
+    destination = Path(os.path.realpath(destination))
+    _check_output_destination(destination, overwrite=overwrite)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.so3lr-eval-', dir=destination.parent) as folder:
+        temporary = Path(folder) / destination.name
+        yield temporary
+        _check_output_destination(destination, overwrite=overwrite)
+        if destination.exists():
+            temporary.chmod(stat.S_IMODE(destination.stat().st_mode))
+        os.replace(temporary, destination)
+
+
 def save_to_file(
     predicted_graphs: List,
     save_to: str,
-    num_data: int
+    num_data: int,
+    *,
+    overwrite: bool = True,
 ) -> None:
     """
     Save predictions to an extxyz file.
@@ -195,6 +235,8 @@ def save_to_file(
     
     # Convert the length to Python int to avoid JAX array issues with tqdm
     total = len(predicted_graphs)
+    if total == 0:
+        raise ValueError("Cannot save an empty prediction collection.")
 
     # Label keys that the dataloader fills with NaN when the source extxyz
     # info{} did not actually carry that ground-truth value. The real model
@@ -211,13 +253,13 @@ def save_to_file(
         except (TypeError, ValueError):
             return False
 
-    # Use tqdm for progress reporting
-    for predicted_graph in tqdm(predicted_graphs, desc="Saving predictions"):
-        atoms = jraph_to_ase_atoms(predicted_graph)
-        for _k in _label_keys_to_check:
-            if _k in atoms.info and _is_all_nan(atoms.info[_k]):
-                del atoms.info[_k]
-        write(save_to, images=atoms, append=True)
+    with _staged_output(Path(save_to), overwrite=overwrite) as temporary:
+        for index, predicted_graph in enumerate(tqdm(predicted_graphs, desc="Saving predictions")):
+            atoms = jraph_to_ase_atoms(predicted_graph)
+            for _k in _label_keys_to_check:
+                if _k in atoms.info and _is_all_nan(atoms.info[_k]):
+                    del atoms.info[_k]
+            write(temporary, images=atoms, format='extxyz', append=index > 0)
 
     logger.info(f'Successfully saved predictions for {total} structures')
 
@@ -236,6 +278,16 @@ def evaluate_so3lr_on(
         total_charge: Optional[int] = None,
         num_unpaired_electrons: Optional[int] = None,
         overwrite: bool = False,
+        kspace_electrostatics: Optional[str] = None,
+        kspace_smearing: float = DEFAULT_KSPACE_SMEARING,
+        kspace_spacing: float = DEFAULT_KSPACE_SPACING,
+        kspace_interp_nodes: int = DEFAULT_KSPACE_INTERP_NODES,
+        kspace_dispersion: Optional[str] = None,
+        kspace_dispersion_smearing: float = DEFAULT_KSPACE_DISPERSION_SMEARING,
+        kspace_dispersion_spacing: float = DEFAULT_KSPACE_DISPERSION_SPACING,
+        kspace_dispersion_interp_nodes: int = DEFAULT_KSPACE_DISPERSION_INTERP_NODES,
+        charge_embed_total_charge: Optional[float] = None,
+        charge_equilibration_total_charge: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset and calculate error metrics.
@@ -269,8 +321,9 @@ def evaluate_so3lr_on(
     log_file : str or None
         Path to log file. If None, logging only goes to console.
     overwrite : bool
-        If True and `save_to` already exists, truncate and overwrite it.
-        If False (default) a pre-existing `save_to` raises RuntimeError.
+        Replace existing predictions and/or embedding archives only when True.
+        Otherwise a pre-existing output raises RuntimeError. Each file is
+        replaced separately; the outputs are not a multi-file transaction.
         Matches the --overwrite policy used by perform_md / perform_min.
 
     Returns:
@@ -323,20 +376,8 @@ def evaluate_so3lr_on(
     if observable_targets:
         logger.info(f"Observable targets (no ground truth expected): {', '.join(observable_targets)}")
 
-    # Embeddings ('x') are large and saved to a separate compressed NPZ file.
-    # Destination: when --save-to is provided the NPZ lands next to it; when
-    # --save-to is None it lands next to --datafile, which may be a read-only
-    # location (e.g. a shared dataset directory) and fail at write time. The
-    # final path is logged via `Embeddings saved to: ...` when the write
-    # succeeds; pass --save-to under a writable directory to control it.
-    save_x_bool = 'x' in target_list
-    if save_x_bool:
-        base_path = save_to if save_to is not None else datafile
-        npz_path = Path(base_path).with_name(Path(base_path).stem + '_x.npz')
-        all_x = []  # accumulates (n_atoms_i, features) per structure
-
     # Process input file path
-    datafile = Path(datafile).resolve().expanduser()
+    datafile = Path(datafile).expanduser().resolve()
     if not datafile.exists():
         raise FileNotFoundError(f"Data file not found: {datafile}")
 
@@ -345,12 +386,8 @@ def evaluate_so3lr_on(
     # behave the same way: refuse to clobber by default, opt in explicitly.
     save_predictions_bool = save_to is not None
     if save_predictions_bool:
-        save_to = Path(save_to).resolve().expanduser()
-        if save_to.exists() and not overwrite:
-            raise RuntimeError(
-                f"Output file already exists: {save_to}. Refusing to overwrite. "
-                f"Pass --overwrite to overwrite, or choose a different --save-to."
-            )
+        save_to = Path(save_to).expanduser().absolute()
+        _check_output_destination(save_to, overwrite=overwrite)
 
         if save_to.suffix not in ('.xyz', '.extxyz'):
             raise ValueError(
@@ -358,6 +395,15 @@ def evaluate_so3lr_on(
 
         # Create parent directory if it doesn't exist
         save_to.parent.mkdir(parents=True, exist_ok=True)
+
+    # Embeddings use the same explicit overwrite policy as predictions. With
+    # no --save-to they live beside the input; check before loading the model.
+    save_x_bool = 'x' in target_list
+    if save_x_bool:
+        base_path = save_to if save_to is not None else datafile
+        npz_path = base_path.with_name(base_path.stem + '_x.npz')
+        _check_output_destination(npz_path, overwrite=overwrite)
+        all_x = []
 
     # Initialize the model. A registered name (see model_registry) or a custom
     # path; None falls back to the default model.
@@ -374,9 +420,8 @@ def evaluate_so3lr_on(
     # resolving the floating aliases here would log a redirect line for each.
     _bundled_paths = {resolve_model(n).dir for n in canonical_models()}
     if workdir_path in _bundled_paths:
-        # Prefer the user-typed short name when it is a registry key. Without
-        # this, legacy 'so3lr' and 'so3lr-o' both log as 'params' because they
-        # share the same on-disk directory (_PKG / 'params').
+        # Prefer the user-typed short name when it is a registry key, so a
+        # floating alias logs as typed rather than as its target's directory.
         if model_path is not None and model_path in available_models():
             _name = model_path
         elif model_path is None:
@@ -393,12 +438,21 @@ def evaluate_so3lr_on(
     from .so3lr_md import setup_jax_globals
     setup_jax_globals(precision=precision, matmul_precision='highest')
 
+    kspace_enabled = (kspace_electrostatics is not None
+                      or kspace_dispersion is not None)
+
     so3lr_calc = make_so3lr(
         workdir=workdir_path,
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
         lr_cutoff=lr_cutoff,
         dispersion_energy_cutoff_lr_damping=dispersion_damping,
         calculate_forces=True,
-        output_intermediate_quantities=output_intermediate_quantities
+        output_intermediate_quantities=output_intermediate_quantities,
+        charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge
     )
 
     # Read the short-range cutoff from the resolved model's hyperparameters.
@@ -409,9 +463,10 @@ def evaluate_so3lr_on(
     logger.info(f"Using cutoff: {cutoff} Å")
 
     # The ratio head is named 'hirshfeld_ratios' for the legacy model and
-    # 'a0_ratios' for the new so3lr-s/m/l models. Normalize the requested target
+    # 'a0_ratios' for the new so3lr-tauri-s/m/l models. Normalize the requested target
     # to the model's output key so metric names (e.g. a0_ratios_rmse) match.
     legacy_model = bool(cfg['model'].get('legacy_so3lr_bool', False))
+    supported_z = supported_atomic_numbers_for_config(cfg['model'])
     ratio_key = 'hirshfeld_ratios' if legacy_model else 'a0_ratios'
     _other_ratio = 'a0_ratios' if ratio_key == 'hirshfeld_ratios' else 'hirshfeld_ratios'
     if _other_ratio in target_list:
@@ -459,23 +514,18 @@ def evaluate_so3lr_on(
             _new_data.append((_graph._replace(globals=_new_globals), _lr_data))
         data = _new_data
 
-#   # Check for allowed atom types
-#   allowed_atomic_numbers = {1, 6, 7, 8, 9, 15, 16, 17}
-#   for i, (graph, _) in enumerate(data):
-#       if hasattr(graph, 'nodes') and isinstance(graph.nodes, dict) and 'atomic_numbers' in graph.nodes:
-#            atomic_nums = graph.nodes['atomic_numbers']
-#       elif isinstance(graph, dict) and 'nodes' in graph and 'atomic_numbers' in graph['nodes']:
-#            atomic_nums = graph['nodes']['atomic_numbers']
-#       else:
-#            # Fallback or skip if structure is unclear, but better to be safe
-#            continue
-#            
-#       current_atomic_numbers = {int(x) for x in atomic_nums}
-#       if not current_atomic_numbers.issubset(allowed_atomic_numbers):
-#            unsupported = current_atomic_numbers - allowed_atomic_numbers
-#            logger.error(f"Structure {i} contains unsupported element(s): {unsupported}. "
-#                         f"Supported elements are: H(1), C(6), N(7), O(8), F(9), P(15), S(16), Cl(17).")
-#            raise ValueError(f"Unsupported elements in structure {i}: {unsupported}")
+    # Refuse elements this model was never trained on, before any forward pass.
+    # The set is model-dependent: legacy v1 saw only the eight biomolecular
+    # elements, the v2 models Z = 1..85. Past that the reference tables are
+    # indexed out of bounds inside jit and JAX silently returns a value
+    # belonging to some other element rather than raising.
+    for i, (graph, _) in enumerate(data):
+        nodes = graph['nodes'] if isinstance(graph, dict) else graph.nodes
+        atomic_nums = nodes.get('atomic_numbers') if isinstance(nodes, dict) else None
+        if atomic_nums is None:
+            continue
+        check_atomic_numbers_supported(atomic_nums, supported_z,
+                                       context=f'{datafile} structure {i}')
 
     # Determine padding sizes
     n_node = stats['max_num_of_nodes'] * batch_size + 1
@@ -485,14 +535,68 @@ def evaluate_so3lr_on(
 
     logger.info(f"Batch size: n_node={n_node}, n_edge={n_edge}, n_graph={n_graph}, n_pairs={n_pairs}")
 
-    # Batch the graphs using MLFF's custom batch function that supports n_pairs
-    batched_graphs = jraph_utils.dynamically_batch_with_lr(
-        data,
-        n_node=n_node,
-        n_edge=n_edge,
-        n_graph=n_graph,
-        n_pairs=n_pairs
-    )
+    # --- K-space (Ewald/PME/P3M) long-range ---------------------------------
+    # The real-space neighbour list already sums over all images; the
+    # reciprocal-space term converges the Coulomb tail, which is what makes
+    # `so3lr eval` agree with the ASE calculator on periodic systems.
+    #
+    # A compiled step needs a fixed mesh shape, and the k-grid arrays carry
+    # nothing but that shape (each graph's own cell supplies the geometry), so
+    # structures are grouped by mesh shape: one compilation per distinct shape,
+    # and structures with different cells but the same mesh share a batch.
+    # Outputs are put back into dataset order afterwards.
+    work_dtype = jnp.float64 if precision == 'float64' else jnp.float32
+    if kspace_enabled:
+        buckets = {}                      # mesh-shape key -> [dataset index]
+        for idx, (_g, _) in enumerate(data):
+            cell = (_g.globals or {}).get('cell')
+            if cell is None or not np.any(cell):
+                raise ValueError(
+                    "--kspace-electrostatics/--kspace-dispersion require periodic "
+                    "structures, but a structure in the dataset has no cell. "
+                    "Drop the k-space flags for non-periodic data."
+                )
+            pbc = (_g.globals or {}).get('pbc')
+            if pbc is None:
+                raise ValueError(
+                    "K-space evaluation requires explicit PBC metadata for every "
+                    "structure; reload the data through the current ASE loader."
+                )
+            is_fully_periodic(pbc, context=f"K-space structure {idx}")
+            cell = np.asarray(cell).reshape(3, 3)
+            key = (kspace_grid_shape(kspace_electrostatics, kspace_spacing, cell),
+                   kspace_grid_shape(kspace_dispersion, kspace_dispersion_spacing, cell))
+            buckets.setdefault(key, []).append(idx)
+        logger.info(
+            f"K-space enabled: electrostatics={kspace_electrostatics} "
+            f"(smearing={kspace_smearing} A, spacing={kspace_spacing} A), "
+            f"dispersion={kspace_dispersion}. "
+            f"{len(buckets)} distinct mesh shape(s) -> {len(buckets)} compilation(s).")
+
+        groups = []
+        for idx_list in buckets.values():
+            box = jnp.asarray(data[idx_list[0]][0].globals['cell']).reshape(3, 3)
+            k_grid, k_smear = setup_kspace_grid(
+                kspace_electrostatics, kspace_smearing, kspace_spacing, box,
+                dtype=work_dtype)
+            k_grid_d, k_smear_d = setup_kspace_grid(
+                kspace_dispersion, kspace_dispersion_smearing,
+                kspace_dispersion_spacing, box, dtype=work_dtype)
+            groups.append(([data[i] for i in idx_list],
+                           {'k_grid': k_grid, 'k_smearing': k_smear,
+                            'k_grid_disp': k_grid_d, 'k_smearing_disp': k_smear_d}))
+        order = [i for idx_list in buckets.values() for i in idx_list]
+    else:
+        groups = [(data, None)]
+        order = None
+
+    # Batch the graphs using MLFF's custom batch function that supports n_pairs.
+    # Without k-space this is a single group with no constants.
+    batched_graphs = (
+        (batch, kconst)
+        for subset, kconst in groups
+        for batch in jraph_utils.dynamically_batch_with_lr(
+            subset, n_node=n_node, n_edge=n_edge, n_graph=n_graph, n_pairs=n_pairs))
 
     # JIT compilation if requested
     if jit_compile:
@@ -513,7 +617,8 @@ def evaluate_so3lr_on(
         try:
             dummy_batch = next(dummy_batched_graphs)
             _compile_out = jax.block_until_ready(
-                so3lr_calc(jraph_utils.graph_to_batch_fn(*dummy_batch))
+                so3lr_calc(jraph_utils.graph_to_batch_fn(
+                    *dummy_batch, kspace_constants=groups[0][1]))
             )
             compile_end = time.time()
             compile_time = compile_end - compile_start
@@ -541,10 +646,11 @@ def evaluate_so3lr_on(
         progress_bar = tqdm(total=num_data, desc="Processing structures", unit="structure",
                             smoothing=0.1, mininterval=0.5)
 
-        for graph_batch in batched_graphs:
+        for graph_batch, kspace_constants in batched_graphs:
             # Transform the batched graph to inputs dict
             # graph_batch is a tuple of (main_graph, long_range_graph)
-            inputs = jraph_utils.graph_to_batch_fn(*graph_batch)
+            inputs = jraph_utils.graph_to_batch_fn(
+                *graph_batch, kspace_constants=kspace_constants)
 
             # Run the model
             start = time.time()
@@ -589,6 +695,15 @@ def evaluate_so3lr_on(
         
         # Close the progress bar
         progress_bar.close()
+
+        # Grouping reordered the stream; restore dataset order for the
+        # per-structure outputs (metrics are order-independent sums).
+        if order is not None:
+            inverse = np.argsort(order)
+            if save_predictions_bool:
+                predicted = [predicted[i] for i in inverse]
+            if save_x_bool:
+                all_x = [all_x[i] for i in inverse]
         
         logger.info(f'Completed evaluation on {total_num_structures} / {num_data} structures')
         logger.info(f'Pure evaluation time: {total_time:.3f} seconds')
@@ -597,7 +712,8 @@ def evaluate_so3lr_on(
         if save_x_bool and all_x:
             x_concat = np.concatenate(all_x, axis=0)  # (total_atoms, features)
             n_atoms = np.array([xi.shape[0] for xi in all_x], dtype=np.int32)
-            np.savez_compressed(npz_path, embeddings=x_concat, n_atoms=n_atoms)
+            with _staged_output(npz_path, overwrite=overwrite) as temporary:
+                np.savez_compressed(temporary, embeddings=x_concat, n_atoms=n_atoms)
             logger.info(f'Embeddings saved to: {npz_path}  '
                         f'(shape: {x_concat.shape}, {len(all_x)} structures)')
 
@@ -677,7 +793,7 @@ def evaluate_so3lr_on(
 
         # Save predictions if requested
         if save_predictions_bool:
-            save_to_file(predicted, str(save_to), num_data)
+            save_to_file(predicted, str(save_to), num_data, overwrite=overwrite)
 
         total_time_end = time.time()
         logger.info(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')

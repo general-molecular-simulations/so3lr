@@ -1,4 +1,3 @@
-import jraph
 import numpy as np
 from typing import Dict, Sequence
 
@@ -18,6 +17,8 @@ def unit_conversion_graph(
 
     g.nodes['forces'] = g.nodes.get('forces') * _energy_unit / _length_unit
     g.nodes['positions'] = g.nodes.get('positions') * _length_unit
+    if g.globals.get('cell') is not None:
+        g.globals['cell'] = g.globals.get('cell') * _length_unit
 
     g.globals['dipole_vec'] = g.globals.get('dipole_vec') * _dipole_vec_unit
 
@@ -55,6 +56,8 @@ def unit_conversion(
 
         g.nodes['forces'] = g.nodes.get('forces') * _energy_unit / _length_unit
         g.nodes['positions'] = g.nodes.get('positions') * _length_unit
+        if g.globals.get('cell') is not None:
+            g.globals['cell'] = g.globals.get('cell') * _length_unit
         g.globals['dipole_vec'] = g.globals.get('dipole_vec') * _dipole_vec_unit
 
         yield _repack_item(g, lr)

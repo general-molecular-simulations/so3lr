@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from so3lr.mlff.calculators.potential import load_model_from_workdir
+from so3lr.mlff.calculators.potential import build_long_range_kwargs, load_model_from_workdir
 from so3lr.model_registry import resolve_model
 
 
@@ -11,45 +11,39 @@ def make_so3lr(
     calculate_forces=True,
     model=None,
     workdir=None,
-    output_intermediate_quantities=None
+    output_intermediate_quantities=None,
+    charge_embed_total_charge=None,
+    charge_equilibration_total_charge=None,
+    kspace_electrostatics=None,
+    kspace_interp_nodes=4,
+    kspace_dispersion=None,
+    kspace_dispersion_interp_nodes=4,
 ):
     # ``workdir`` (legacy arg) takes precedence over ``model``; either may be a
     # bundled model name or a filesystem path. None -> DEFAULT_MODEL.
     spec = resolve_model(workdir if workdir is not None else model)
 
+    long_range_kwargs = build_long_range_kwargs(
+        lr_cutoff, dispersion_energy_cutoff_lr_damping, 'sparse',
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
+    )
+
     model, params = load_model_from_workdir(
         spec.dir,
         model='so3krates', # or 'itp_net'
         from_file=spec.from_file,
-        long_range_kwargs=dict(
-            cutoff_lr=lr_cutoff,
-            dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
-            neighborlist_format_lr='sparse'
-        ),
-        output_intermediate_quantities=output_intermediate_quantities
+        long_range_kwargs=long_range_kwargs,
+        output_intermediate_quantities=output_intermediate_quantities,
+        charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge
     )
 
-    # Change shapes to allow for multiple theory levels, only needed for https://github.com/kabylda/mlff/tree/v1.0-tfds-pme version
-    if 'energy_offset' in params['params']['observables_0']:
-        num_theory_levels=16
-        old_energy_offset = params['params']['observables_0']['energy_offset']
-        if len(old_energy_offset.shape) == 1:
-            # print("\nOriginal energy_offset:")
-            # print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-            new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-            params['params']['observables_0']['energy_offset'] = new_energy_offset
-
-            old_atomic_scales = params['params']['observables_0']['atomic_scales']
-            new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-            params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-
-            old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-            new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-            params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-
-            # print("\nNew energy_offset:")
-            # print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-            # print("Values:", params['params']['observables_0']['energy_offset'])
+    # No theory-level expansion here: load_model_from_workdir above already did
+    # it. This used to hold a copy of the tiling that could never fire (the
+    # params are 2-D by then) and which omitted the final-bias case.
 
     def forward(
             positions,

@@ -118,6 +118,7 @@ def test_translation_invariance():
 
     geometry_embed_inputs = dict(
         positions=positions,
+        atomic_numbers=jnp.array([1, 1, 1]),
         idx_i=idx_i,
         idx_j=idx_j,
         cell=None,
@@ -126,6 +127,7 @@ def test_translation_invariance():
 
     geometry_embed_inputs_translated = dict(
         positions=positions + jnp.array([2.5, 1.0, -0.7])[None],
+        atomic_numbers=jnp.array([1, 1, 1]),
         idx_i=idx_i,
         idx_j=idx_j,
         cell=None,
@@ -211,7 +213,7 @@ def test_translation_invariance():
 
 
 def test_rotation_equivariance():
-    from so3lr.mlff.geometric import get_rotation_matrix
+    from scipy.spatial.transform import Rotation
 
     x = jnp.ones((3, 64))
     positions = jnp.array([
@@ -232,14 +234,16 @@ def test_rotation_equivariance():
 
     geometry_embed_inputs = dict(
         positions=positions,
+        atomic_numbers=jnp.array([1, 1, 1]),
         idx_i=idx_i,
         idx_j=idx_j,
         cell=None,
         cell_offset=None
     )
-    rot = get_rotation_matrix(euler_axes='xyz', angles=[87, 14, 156], degrees=True)
+    rot = Rotation.from_euler('xyz', [87, 14, 156], degrees=True).as_matrix()
     geometry_embed_inputs_rotated = dict(
         positions=positions@rot,
+        atomic_numbers=jnp.array([1, 1, 1]),
         idx_i=idx_i,
         idx_j=idx_j,
         cell=None,

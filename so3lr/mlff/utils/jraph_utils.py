@@ -47,6 +47,7 @@ def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict, kspace_constants
         idx_i=graph.receivers,
         idx_j=graph.senders,
         cell=graph.globals.get('cell'),
+        pbc=graph.globals.get('pbc'),
         cell_offset=graph.edges.get('cell_offset'),
         energy=graph.globals.get('energy'),
         forces=graph.nodes.get('forces'),
@@ -71,21 +72,6 @@ def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict, kspace_constants
     batch_info = batch_info_fn(graph)
     batch.update(batch_info)
     return batch
-
-
-def graph_to_inputs_fn(graph: jraph.GraphsTuple, lr_batch: dict):
-    """
-    Wrapper around graph_to_batch_fn.
-
-    Args:
-        graph: Batched jraph.GraphsTuple.
-        lr_batch: Dict with LR index arrays ('idx_i_lr', 'idx_j_lr', 'cell_offsets_lr').
-
-    Returns:
-        Dictionary representation of the graph.
-
-    """
-    return graph_to_batch_fn(graph, lr_batch)
 
 
 def dynamically_batch_with_lr(
@@ -116,7 +102,10 @@ def dynamically_batch_with_lr(
             'idx_j_lr': np.array([], dtype=np.int32),
             'cell_offsets_lr': None,
         }
-        graphs_only = [g for g, _ in data_iterator]
+        # Keep this as a generator.  TFDS training iterators may be large and
+        # used to be infinite; eagerly materializing them delayed the first
+        # batch until exhaustion and could consume all available memory.
+        graphs_only = (g for g, _ in data_iterator)
         for batched in jraph.dynamically_batch(
             iter(graphs_only), n_node=n_node, n_edge=n_edge, n_graph=n_graph
         ):
@@ -175,7 +164,7 @@ def _finalize_batch(items, n_node, n_edge, n_graph, n_pairs):
     lr_datas = [lr for _, lr in items]
 
     # Batch main graph (single batch + pad)
-    batched_graph = jraph.batch(graphs)
+    batched_graph = jraph.batch_np(graphs)  # numpy batch: jraph.batch uses jnp -> slow per-op under jax 0.10 in CPU worker
     batched_graph = jraph.pad_with_graphs(batched_graph, n_node, n_edge, n_graph)
 
     # Manually concatenate + offset LR indices

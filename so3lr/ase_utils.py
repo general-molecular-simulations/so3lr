@@ -11,6 +11,8 @@ def make_ase_calculator(
         calculate_hessian=False,
         dtype=np.float32,
         model=None,
+        charge_embed_total_charge=None,
+        charge_equilibration_total_charge=None,
         **kwargs
 ):
     # ``workdir`` (legacy kwarg) takes precedence over ``model``; either may be a
@@ -24,8 +26,14 @@ def make_ase_calculator(
         dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
         from_file=kwargs.pop('from_file', spec.from_file),
         calculate_stress=calculate_stress,
+        # Was silently dropped: accepted here but never forwarded, so
+        # So3lrCalculator(calculate_hessian=True) built a calculator that could
+        # not produce a hessian even though 'hessian' is in implemented_properties.
+        calculate_hessian=calculate_hessian,
         dtype=dtype,
         head_index=spec.head_index,
+        charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge,
         **kwargs
     )
 

@@ -56,6 +56,29 @@ def test_molecules(name: str):
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
+def test_bounding_cell_does_not_change_free_molecule():
+    """A pbc=False molecule with a tight bounding cell is still free."""
+    package_dir = pathlib.Path(__file__).parent.parent.resolve()
+    atoms = read(package_dir / 'tests/test_data/dha.xyz')
+    atoms.cell = None
+    atoms.pbc = False
+    atoms.calc = AseCalculatorSparse.create_from_workdir(
+        workdir=MODEL_DIR, lr_cutoff=12., dispersion_energy_cutoff_lr_damping=2.,
+        from_file=True, dtype=np.float64,
+    )
+    energy, forces = atoms.get_potential_energy(), atoms.get_forces()
+
+    boxed = atoms.copy()
+    boxed.center(vacuum=1.0)
+    boxed.pbc = False
+    boxed.calc = atoms.calc
+
+    # Tolerances cover float32 when x64 is off; the minimum-image error this
+    # guards against is ~1e-2 eV and ~1e-2 eV/A.
+    npt.assert_allclose(boxed.get_potential_energy(), energy, atol=1e-4)
+    npt.assert_allclose(boxed.get_forces(), forces, atol=1e-3)
+
+
 def test_water():
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
@@ -79,10 +102,12 @@ def test_water():
     energy = atoms.get_potential_energy()
     forces = atoms.get_forces()
 
+    # The reference is float64; without x64 the run is float32 (~1e-6 relative),
+    # so the tolerance must not depend on whether an earlier test enabled x64.
     npt.assert_allclose(
         target_predictions['energy'],
         energy,
-        rtol=1e-6,
+        rtol=5e-6,
     )
 
     npt.assert_allclose(
@@ -109,7 +134,7 @@ def test_so3lr_ase_calculator(name: str):
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
     # Reference predictions were generated with the legacy (v1) model, so pin to
-    # it explicitly; the no-arg default is so3lr-m-2606 (see test_default_model_*).
+    # it explicitly; the no-arg default is so3lr-tauri-m-2606 (see test_default_model_*).
     calc = So3lrCalculator(
         model="so3lr",
         dtype=np.float64
@@ -182,7 +207,7 @@ def test_so3lr_ase_calculator_stress(calculate_stress: bool):
 
 
 def test_so3lr_s_water():
-    """Regression check for so3lr-s-2602 on a periodic water box.
+    """Regression check for so3lr-tauri-s-2602 on a periodic water box.
 
     Pins the exact release the saved references were generated from -- a
     floating alias here would break whenever a new release is registered.
@@ -198,7 +223,7 @@ def test_so3lr_s_water():
     ) * [2, 2, 2]
 
     calc = So3lrCalculator(
-        model="so3lr-s-2602",
+        model="so3lr-tauri-s-2602",
         dtype=np.float64
     )
 
@@ -242,7 +267,7 @@ def test_default_model_is_current_m(name: str):
         return a.get_potential_energy(), a.get_forces()
 
     default_energy, default_forces = predict(None)        # no-arg default
-    m_energy, m_forces = predict("so3lr-m")
+    m_energy, m_forces = predict("so3lr-tauri-m")
     legacy_energy, _ = predict("so3lr")
 
     # Outputs must be finite.
@@ -260,7 +285,7 @@ def test_default_model_is_current_m(name: str):
 
 @pytest.mark.parametrize('name', ['dha'])
 def test_so3lr_s_ase_calculator(name: str):
-    """Regression check for bundled so3lr-s-2602 against saved references."""
+    """Regression check for bundled so3lr-tauri-s-2602 against saved references."""
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
@@ -270,7 +295,7 @@ def test_so3lr_s_ase_calculator(name: str):
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
     calc = So3lrCalculator(
-        model="so3lr-s-2602",
+        model="so3lr-tauri-s-2602",
         dtype=np.float64
     )
 
@@ -299,7 +324,7 @@ def test_so3lr_s_ase_calculator(name: str):
     # c6_ratios is a dedicated head of the new models; check it against the
     # saved reference via the aux observable output.
     calc_obs = So3lrCalculator(
-        model="so3lr-s-2602",
+        model="so3lr-tauri-s-2602",
         dtype=np.float64,
         has_aux=True,
         observables=['c6_ratios']
@@ -332,3 +357,24 @@ def test_so3lr_s_ase_calculator(name: str):
             target_predictions['forces'],
             np.zeros_like(forces)
         )
+
+
+def test_calculate_hessian_is_forwarded_by_make_ase_calculator():
+    """make_ase_calculator accepted calculate_hessian but never forwarded it, so
+    the public So3lrCalculator(calculate_hessian=True) silently produced no
+    hessian. The existing hessian tests call AseCalculatorSparse.create_from_workdir
+    directly, which is why this path was never covered.
+    """
+    from ase import Atoms
+    from so3lr.ase_utils import make_ase_calculator
+
+    water = Atoms('OHH',
+                  positions=[[0., 0., 0.], [0.96, 0., 0.], [-0.24, 0.93, 0.]],
+                  pbc=False)
+    water.calc = make_ase_calculator(calculate_hessian=True, dtype=np.float64)
+    _ = water.get_potential_energy()
+
+    assert 'hessian' in water.calc.results, (
+        'calculate_hessian=True produced no hessian'
+    )
+    assert water.calc.results['hessian'].shape == (3, 3, 3, 3)

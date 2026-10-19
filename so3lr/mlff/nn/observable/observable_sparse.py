@@ -14,7 +14,7 @@ from so3lr.mlff.nn.sub_module import BaseSubModule
 from so3lr.mlff.masking.mask import safe_mask
 from so3lr.mlff.nn.observable.dispersion_ref_data import alphas, C6_coef, alphas_legacy, C6_coef_legacy, NLH_AA, NLH_BB
 from so3lr.mlff.masking.mask import safe_scale
-from so3lr.mlff.nn.activation_function import softplus_inverse, softplus
+from jax.nn import softplus
 
 
 def _flat_to_padded(flat_array, batch_segments, num_graphs, max_atoms_per_graph, local_idx, pad_value=0.0):
@@ -61,13 +61,31 @@ def _vmap_kspace_per_graph(solve_fn, inputs, per_atom_arrays, output_key):
         for a in per_atom_arrays
     ]
 
-    has_pbc = jnp.any(cell.reshape(num_graphs, -1) != 0, axis=-1)  # (num_graphs,)
+    # Reciprocal-space solvers invert the cell before doing any useful work.
+    # A batched neighbor list represents non-periodic and padding graphs with a
+    # zero cell, so evaluating those entries and masking afterwards produces
+    # NaNs (NaN * 0 is still NaN).  Only full-rank cells belonging to real
+    # graphs are eligible for the solver; all other entries get a harmless
+    # finite stand-in before vmap.
+    graph_mask = inputs['graph_mask'].astype(bool)
+    cell_is_finite = jnp.all(jnp.isfinite(cell), axis=(-2, -1))
+    cell_is_full_rank = jnp.abs(jnp.linalg.det(cell)) > 0
+    has_pbc = graph_mask & cell_is_finite & cell_is_full_rank
+    # A vacuum structure may retain a finite simulation/visualization cell.
+    # Explicit boundary flags take precedence over that cell geometry.
+    pbc = inputs.get('pbc')
+    if pbc is not None:
+        has_pbc = has_pbc & jnp.all(pbc, axis=-1)
+    identity_cell = jnp.broadcast_to(jnp.eye(3, dtype=cell.dtype), cell.shape)
+    solver_cell = jnp.where(has_pbc[:, None, None], cell, identity_cell)
 
     # vmap the solver over graphs — solver must be pure JAX (no Flax state)
-    energies_padded = jax.vmap(solve_fn)(cell, *padded_arrays)
+    energies_padded = jax.vmap(solve_fn)(solver_cell, *padded_arrays)
 
     # Zero out non-PBC graphs and scatter back to flat array
-    energies_padded = energies_padded * has_pbc[:, None]
+    energies_padded = jnp.where(
+        has_pbc[:, None], energies_padded, jnp.zeros_like(energies_padded)
+    )
     energies_flat = _padded_to_flat(energies_padded, batch_segments, node_mask, local_idx)
 
     return {output_key: energies_flat}
@@ -107,6 +125,34 @@ def _batched_kspace_electrostatic(kspace_module, inputs):
     )
 
 
+def _effective_atomic_c6(atomic_numbers, c6_ratios, legacy=False, dtype=None):
+    """Return per-atom C6 values from the model generation's reference table.
+
+    Real-space mixing, reciprocal-space dispersion, and the real-space PME
+    subtraction must use the same free-atom coefficients.  Keeping this lookup
+    in one place prevents a legacy model from mixing its original real-space
+    coefficients with the refitted SO3LR-2 table in the PME terms.
+    """
+    if dtype is None:
+        dtype = c6_ratios.dtype
+    reference = C6_coef_legacy if legacy else C6_coef
+    reference = jnp.asarray(reference, dtype=dtype)
+    c6_ratios = jnp.asarray(c6_ratios, dtype=dtype)
+    return jnp.take(reference, atomic_numbers - 1, axis=0) * c6_ratios
+
+
+def _dispersion_charges(atomic_c6, node_mask):
+    """Zero padding before differentiating the square root of atomic C6.
+
+    Multiplying sqrt(0) by a padding mask afterwards leaves its infinite
+    derivative in the backward pass, producing NaN C6 gradients. Use a finite
+    stand-in inside the square root for absent atoms, then zero their charges.
+    """
+    active = node_mask != 0
+    safe_c6 = jnp.where(active, jnp.maximum(atomic_c6, 0.0), 1.0)
+    return jnp.where(active, jnp.sqrt(safe_c6), 0.0)
+
+
 def _batched_kspace_dispersion(kspace_module, inputs):
     """Run dispersion kspace per-graph using vmap on the solver, then scatter back."""
     k_grid_disp = inputs['k_grid_disp']
@@ -117,11 +163,12 @@ def _batched_kspace_dispersion(kspace_module, inputs):
 
     _Bohr = jnp.asarray(Bohr, dtype=inputs['positions'].dtype)
     _Hartree = jnp.asarray(Hartree, dtype=inputs['positions'].dtype)
-    C6_free = jnp.asarray(C6_coef, dtype=inputs['positions'].dtype)
 
     def _solve_single(cell_g, pos_g, z_g, mask_g, c6_g):
-        C6_i = C6_free[z_g - 1] * c6_g
-        q_disp = jnp.sqrt(jnp.maximum(C6_i, 0.0)) * mask_g
+        C6_i = _effective_atomic_c6(
+            z_g, c6_g, legacy=kspace_module.legacy, dtype=pos_g.dtype
+        )
+        q_disp = _dispersion_charges(C6_i, mask_g)
 
         pos_bohr = pos_g / _Bohr
         cell_bohr = cell_g / _Bohr
@@ -151,9 +198,7 @@ def _batched_kspace_dispersion(kspace_module, inputs):
             hirshfeld_ratios = kspace_module.hirshfeld_ratios(inputs)['hirshfeld_ratios']
         c6_ratios = hirshfeld_ratios ** 2
     else:
-        c6_ratios = inputs.get('c6_ratios')
-        if c6_ratios is None:
-            c6_ratios = kspace_module.c6_ratios(inputs)['c6_ratios']
+        c6_ratios = kspace_module.c6_ratios(inputs)['c6_ratios']
 
     return _vmap_kspace_per_graph(
         _solve_single, inputs,
@@ -571,12 +616,6 @@ class C6RatiosSparse(BaseSubModule):
                 name='c6_ratios_dense_final'
             )(x).squeeze(axis=-1)  # (num_nodes)
 
-        # qk = (q * k / jnp.sqrt(k.shape[-1])).sum(axis=-1)
-
-        # v_eff = v_shift + qk  # shape: (n)
-        # c6_ratios = safe_scale(jnp.abs(v_eff), node_mask)
-
-        # return dict(c6_ratios=c6_ratios)
         c6_ratios = safe_scale(jnp.abs(x_ + q), node_mask)
 
         return dict(c6_ratios=c6_ratios)
@@ -589,6 +628,19 @@ class PartialChargesSparse(BaseSubModule):
     regression_dim: int = None
     activation_fn: Callable[[Any], Any] = lambda u: u
     output_is_zero_at_init: bool = True
+    # Inference-time override for the charge that equilibration conserves to.
+    # None -> use the graph's ``total_charge`` (the default; behaviour
+    # unchanged). A float -> conserve to that value instead.
+    #
+    # Note this is a stronger statement than the embedding's counterpart: the
+    # embedding is a feature input, whereas this term *enforces* sum(q) = Q. An
+    # override here deliberately conserves to a charge the system does not have,
+    # which is a research knob rather than a correction. Left at None, nothing
+    # changes.
+    #
+    # Does not apply to the ``residue_charge`` path: when per-residue charges are
+    # supplied they keep taking precedence, as before.
+    total_charge_override: Optional[float] = None
     module_name: str = 'partial_charges_sparse'
 
     def setup(self):
@@ -631,6 +683,11 @@ class PartialChargesSparse(BaseSubModule):
         node_mask = inputs['node_mask']  # (num_nodes)
         graph_mask = inputs['graph_mask']  # (num_graphs)
         total_charge = inputs['total_charge']  # (num_graphs)
+
+        if self.total_charge_override is not None:
+            # Applied before the residue rebinding below, so residue_charge
+            # still wins when it is provided.
+            total_charge = jnp.full_like(total_charge, self.total_charge_override)
 
         num_graphs = len(graph_mask)
         num_nodes = len(node_mask)
@@ -1089,7 +1146,7 @@ def mixing_rules(
         c6_ratios: Per-atom C6 volume ratios, shape: (num_nodes).
         legacy: If True, use the legacy SO3LR (v1) free-atom reference
             coefficients (``alphas_legacy``/``C6_coef_legacy``) instead of the
-            refitted ones used by the so3lr-s/m/l models.
+            refitted ones used by the so3lr-tauri-s/m/l models.
 
     Returns:
         Tuple of (alpha_ij, C6_ij): mean polarizabilities and combined C6
@@ -1097,22 +1154,29 @@ def mixing_rules(
     """
     dtype = hirshfeld_ratios.dtype
 
-    # Free-atom reference coefficients: legacy v1 vs refitted (so3lr-s/m/l).
+    # Free-atom reference coefficients: legacy v1 vs refitted (so3lr-tauri-s/m/l).
     alphas_ref = alphas_legacy if legacy else alphas
-    C6_ref = C6_coef_legacy if legacy else C6_coef
-
     atomic_number_i = atomic_numbers[idx_i] - 1
     atomic_number_j = atomic_numbers[idx_j] - 1
     hirshfeld_ratio_i = hirshfeld_ratios[idx_i]
     hirshfeld_ratio_j = hirshfeld_ratios[idx_j]
 
-    C6_ratio_i = c6_ratios[idx_i]
-    C6_ratio_j = c6_ratios[idx_j]
-
-    alpha_i = jnp.asarray(jnp.take(alphas_ref, atomic_number_i, axis=0), dtype=dtype) * hirshfeld_ratio_i
-    C6_i = jnp.asarray(jnp.take(C6_ref, atomic_number_i, axis=0), dtype=dtype) * C6_ratio_i
-    alpha_j = jnp.asarray(jnp.take(alphas_ref, atomic_number_j, axis=0), dtype=dtype) * hirshfeld_ratio_j
-    C6_j = jnp.asarray(jnp.take(C6_ref, atomic_number_j, axis=0), dtype=dtype) * C6_ratio_j
+    # Cast the reference tables to the working dtype BEFORE indexing them.
+    # They are numpy constants captured at trace time, so their dtype used to
+    # follow whatever jax_enable_x64 was when this function was first traced;
+    # a later trace under the other setting then re-used the cached `_take`
+    # with a mismatched operand ("expected tensor<86xf64>, provided
+    # tensor<86xf32>"). Indexing an already-cast table makes the operand dtype
+    # part of the trace rather than a side effect of global state.
+    alphas_ref = jnp.asarray(alphas_ref, dtype=dtype)
+    alpha_i = jnp.take(alphas_ref, atomic_number_i, axis=0) * hirshfeld_ratio_i
+    C6_i = _effective_atomic_c6(
+        atomic_numbers[idx_i], c6_ratios[idx_i], legacy=legacy, dtype=dtype
+    )
+    alpha_j = jnp.take(alphas_ref, atomic_number_j, axis=0) * hirshfeld_ratio_j
+    C6_j = _effective_atomic_c6(
+        atomic_numbers[idx_j], c6_ratios[idx_j], legacy=legacy, dtype=dtype
+    )
     
     alpha_ij = (alpha_i + alpha_j) / 2
     C6_ij = 2 * C6_i * C6_j * alpha_j * alpha_i / (alpha_i ** 2 * C6_j + alpha_j ** 2 * C6_i)
@@ -1496,6 +1560,10 @@ def coulomb_erf_shifted_force_smooth_nosigma(
         0.0
     )
 
+def softplus_inverse(x):
+    return x + jnp.log(-jnp.expm1(-x))
+
+
 class ZBLRepulsionSparse(BaseSubModule):
     """
     Ziegler-Biersack-Littmark repulsion (original vanilla-SO3LR, learnable).
@@ -1569,7 +1637,7 @@ class ZBLRepulsionSparse(BaseSubModule):
 
 class NLHRepulsionSparse(BaseSubModule):
     """
-    NLH repulsion (used by the newer so3lr-s/m/l models).
+    NLH repulsion (used by the newer so3lr-tauri-s/m/l models).
     """
     prop_keys: Dict
     module_name: str = 'zbl_repulsion'
@@ -1597,14 +1665,14 @@ class NLHRepulsionSparse(BaseSubModule):
         zj = jnp.maximum(z_i, z_j)                       # (E,)
 
         # Get NLH coefficients
-        # First gather along Z_i (axis 0), then along Z_j (axis 1)
-        a = jnp.asarray(jnp.take(NLH_AA, zi, axis=0), dtype=dtype)   # (E, 93, 3)
-        a = jnp.take_along_axis(a, zj[:, None, None], axis=1)     # (E, 1, 3)
-        a = a.squeeze(1)                                           # (E, 3)
-
-        b = jnp.asarray(jnp.take(NLH_BB, zi, axis=0), dtype=dtype)   # (E, 93, 3)
-        b = jnp.take_along_axis(b, zj[:, None, None], axis=1)     # (E, 1, 3)
-        b = b.squeeze(1)                                           # (E, 3)
+        # Two-index lookup straight into the (92, 92, 3) tables. Gathering along
+        # axis 0 first materialised an (E, 92, 3) intermediate per table only to
+        # keep one row of it -- ~550 MB per table for a 5e5-edge system, twice
+        # over, plus the autodiff residuals. Result is numerically identical.
+        # NLH_AA/NLH_BB are numpy arrays, so they must become jnp arrays before
+        # being indexed with traced zi/zj (numpy would call __array__ on a tracer).
+        a = jnp.asarray(NLH_AA, dtype=dtype)[zi, zj]               # (E, 3)
+        b = jnp.asarray(NLH_BB, dtype=dtype)[zi, zj]               # (E, 3)
 
         # Coulomb factor ke * Z_i * Z_j / r (dtype-safe) 
         z_over_r = safe_mask(
@@ -1859,9 +1927,10 @@ class ElectrostaticEnergyKspace(BaseSubModule):
 class DispersionEnergyKspace(BaseSubModule):
     """K-space dispersion energy via PME or Ewald for the C6/r^6 interaction.
 
-    Uses geometric-mean charges q_i = sqrt(C6_free[Z_i] * c6_ratio_i) for PME,
-    with the Casimir-Polder mixing-rule residual handled in real space by
-    DispersionEnergySparse.
+    Uses geometric-mean charges q_i = sqrt(C6_free[Z_i] * c6_ratio_i) for PME.
+    ``C6_free`` comes from the legacy or refitted table to match the model
+    generation, with the Casimir-Polder residual handled in real space by
+    :class:`DispersionEnergySparse`.
     """
     prop_keys: Dict
     hirshfeld_ratios: Optional[Any] = None
@@ -1914,15 +1983,16 @@ class DispersionEnergyKspace(BaseSubModule):
                 hirshfeld_ratios = self.hirshfeld_ratios(inputs)['hirshfeld_ratios']
             c6_ratios = hirshfeld_ratios ** 2
         else:
-            c6_ratios = inputs.get('c6_ratios')
-            if c6_ratios is None:
-                c6_ratios = self.c6_ratios(inputs)['c6_ratios']
+            # Always the head's prediction: inputs['c6_ratios'] is a dataset label.
+            c6_ratios = self.c6_ratios(inputs)['c6_ratios']
 
-        # Dispersion charges: q_i = sqrt(C6_free[Z_i] * c6_ratio_i)
-        # C6_coef is indexed from 0, atomic_numbers from 1
-        C6_free = jnp.asarray(C6_coef, dtype=positions.dtype)
-        C6_i = C6_free[atomic_numbers - 1] * c6_ratios
-        q_disp = jnp.sqrt(jnp.maximum(C6_i, 0.0))
+        # Dispersion charges use the same generation-specific free-atom C6
+        # table as the real-space mixing rule and PME subtraction.
+        C6_i = _effective_atomic_c6(
+            atomic_numbers, c6_ratios, legacy=self.legacy,
+            dtype=positions.dtype
+        )
+        q_disp = _dispersion_charges(C6_i, node_mask)
 
         # Convert positions and cell from Angstrom to Bohr (C6 is in a.u.)
         _Bohr = jnp.asarray(Bohr, dtype=positions.dtype)
@@ -1975,6 +2045,23 @@ class DispersionEnergySparse(nn.Module):
     neighborlist_format: str = 'sparse'  # or 'ordered_sparse'
     module_name = 'dispersion_energy'
 
+    def _switch_off(self, energy_ij, d_ij_lr):
+        """Smoothly switch pair energies to zero at cutoff_lr (no-op without cutoff_lr)."""
+        if self.cutoff_lr is None:
+            return energy_ij
+        if self.cutoff_lr_damping is None:
+            raise ValueError(
+                f"cutoff_lr is set but cutoff_lr_damping is not. "
+                f"Received {self.cutoff_lr=} and {self.cutoff_lr_damping=}."
+            )
+        w = safe_mask(
+            d_ij_lr > 0,
+            partial(switching_fn, x_on=self.cutoff_lr - self.cutoff_lr_damping, x_off=self.cutoff_lr),
+            d_ij_lr,
+            0.
+        )
+        return safe_scale(energy_ij, w, 0.)
+
     @nn.compact
     def __call__(self, inputs: Dict, *args, **kwargs) -> Dict[str, jnp.ndarray]:
         """Compute per-atom dispersion energy using Hirshfeld-scaled QDO model.
@@ -1985,8 +2072,9 @@ class DispersionEnergySparse(nn.Module):
 
         When ``do_dispersion_kspace`` is True and ``k_smearing_disp`` is present in
         inputs, the C6 term is split: the real-space part becomes the short-range
-        residual (Casimir-Polder C6 minus geometric-mean C6 long-range), while
-        C8+C10 keep the switching function.
+        residual (Casimir-Polder C6 minus geometric-mean C6 long-range). The
+        complete C6+C8+C10 real-space residual is smoothly switched off before
+        the neighbor-list cutoff; reciprocal-space C6 remains untruncated.
 
         Args:
             inputs (Dict): Must contain ``node_mask``, ``idx_i_lr``, ``idx_j_lr``,
@@ -2021,9 +2109,8 @@ class DispersionEnergySparse(nn.Module):
             # mixing rule reproduces the original C6 = C6_free * h^2 exactly.
             c6_ratios = hirshfeld_ratios ** 2
         else:
-            c6_ratios = inputs.get('c6_ratios')
-            if c6_ratios is None:
-                c6_ratios = self.c6_ratios(inputs)['c6_ratios']
+            # Always the head's prediction: inputs['c6_ratios'] is a dataset label.
+            c6_ratios = self.c6_ratios(inputs)['c6_ratios']
 
         # Get atomic numbers (needed to link to the free-atom reference values)
         atomic_numbers = inputs['atomic_numbers']  # (num_nodes)
@@ -2065,10 +2152,17 @@ class DispersionEnergySparse(nn.Module):
             # Full damped C6 (Casimir-Polder mixing rule)
             V_C6_full = -C6_ij / (jnp.power(R_bohr, 6) + jnp.power(p, 6))
 
-            # Geometric-mean C6 for PME subtraction
-            C6_free = jnp.asarray(C6_coef, dtype=input_dtype)
-            C6_i = C6_free[atomic_numbers[idx_i_lr] - 1] * c6_ratios[idx_i_lr]
-            C6_j = C6_free[atomic_numbers[idx_j_lr] - 1] * c6_ratios[idx_j_lr]
+            # Geometric-mean C6 for PME subtraction.  It must use the same
+            # generation-specific table as both the Casimir-Polder term above
+            # and the reciprocal-space dispersion charges.
+            C6_i = _effective_atomic_c6(
+                atomic_numbers[idx_i_lr], c6_ratios[idx_i_lr],
+                legacy=self.legacy, dtype=input_dtype
+            )
+            C6_j = _effective_atomic_c6(
+                atomic_numbers[idx_j_lr], c6_ratios[idx_j_lr],
+                legacy=self.legacy, dtype=input_dtype
+            )
             C6_geom_ij = jnp.sqrt(C6_i * C6_j)
 
             # lr_r(sigma, R) from the c6_raw_potential: the long-range part that PME handles
@@ -2082,20 +2176,15 @@ class DispersionEnergySparse(nn.Module):
             # C6 residual = full damped C6 + geometric-mean * lr_r (subtract LR part that PME adds)
             V_C6_residual = V_C6_full + C6_geom_ij * lr_r_val
 
-            # C8 + C10 with switching (not in PME)
+            # C8 + C10 are not represented by PME.
             V_C8C10 = -C8_ij / (jnp.power(R_bohr, 8) + jnp.power(p, 8)) - C10_ij / (jnp.power(R_bohr, 10) + jnp.power(p, 10))
 
-            # Apply switching to C8+C10 only
-            if self.cutoff_lr is not None:
-                w = safe_mask(
-                    d_ij_lr > 0,
-                    partial(switching_fn, x_on=self.cutoff_lr - self.cutoff_lr_damping, x_off=self.cutoff_lr),
-                    d_ij_lr,
-                    0.
-                )
-                V_C8C10 = safe_scale(V_C8C10, w, 0.)
-
-            dispersion_energy_ij = c * (V_C6_residual + V_C8C10) * _Hartree
+            # The complete real-space residual disappears with the neighbor
+            # pair, so switch C6 together with C8+C10.  switching_fn is flat at
+            # both endpoints; multiplying the whole residual makes both its
+            # value and radial derivative vanish at cutoff_lr.
+            V_real_space_residual = self._switch_off(V_C6_residual + V_C8C10, d_ij_lr)
+            dispersion_energy_ij = c * V_real_space_residual * _Hartree
 
         else:
             # --- Original code path (no PME) ---
@@ -2118,22 +2207,7 @@ class DispersionEnergySparse(nn.Module):
                 self.neighborlist_format
                 )
 
-            # If long-range cutoff is given, damp dispersion smoothly to zero at cutoff_lr.
-            if self.cutoff_lr is not None:
-                if self.cutoff_lr_damping is None:
-                    raise ValueError(
-                        f"cutoff_lr is but cutoff_lr_damping is not set. "
-                        f"received {self.cutoff_lr=} and {self.cutoff_lr_damping=}."
-                    )
-
-                w = safe_mask(
-                    d_ij_lr > 0,
-                    partial(switching_fn, x_on=self.cutoff_lr - self.cutoff_lr_damping, x_off=self.cutoff_lr),
-                    d_ij_lr,
-                    0.
-                )
-
-                dispersion_energy_ij = safe_scale(dispersion_energy_ij, w, 0.)
+            dispersion_energy_ij = self._switch_off(dispersion_energy_ij, d_ij_lr)
 
         atomic_dispersion_energy = segment_sum(
             dispersion_energy_ij,

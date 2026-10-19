@@ -14,7 +14,7 @@ import jax_md.simulate
 import jax_md.quantity
 import jax_md.units
 from jax_md.space import transform
-import yaml
+from so3lr.md_settings_validation import load_settings_yaml
 from jax import jit
 
 try:
@@ -30,21 +30,21 @@ except ImportError:
 logger = logging.getLogger("SO3LR")
 
 
-def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
+def create_pysages_interface_fns(state, box, step_md_fn, md_dt, nbrs,
                                   ensemble='nvt', nbrs_lr=None, k_grid=None,
                                   k_grid_disp=None):
     """
     Create the PySAGES context generator function that wraps SO3LR's MD step.
 
     Args:
-        lr: Whether long-range interactions are used.
         state: Current MD state.
         box: Simulation box.
-        step_md_fn: The MD step function.
+        step_md_fn: The MD step function, over the carry
+            (state, nbrs, nbrs_lr, box, k_grid, k_grid_disp).
         md_dt: MD timestep.
         nbrs: Short-range neighbor list.
         ensemble: Ensemble type ('nvt', 'nve', or 'npt').
-        nbrs_lr: Long-range neighbor list (optional).
+        nbrs_lr: Long-range neighbor list.
         k_grid: K-space grid for Ewald/PME electrostatics (optional).
         k_grid_disp: K-space grid for dispersion PME (optional).
 
@@ -54,88 +54,37 @@ def create_pysages_interface_fns(lr, state, box, step_md_fn, md_dt, nbrs,
     if np.all(box == 0) or box is None:
         box = jnp.array([0.0, 0.0, 0.0])
 
-    if lr:
-        def init_fn_pysages():
-            state0 = state
-            if ensemble == 'npt':
-                state0 = state0.set(position=transform(jnp.array(box), state0.position))
-            return pb.JaxMDContextState(
-                state0,
-                dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box,
-                     k_grid=k_grid, k_grid_disp=k_grid_disp)
-            )
-    else:
-        def init_fn_pysages():
-            state0 = state
-            if ensemble == 'npt':
-                state0 = state0.set(position=transform(jnp.array(box), state0.position))
-            return pb.JaxMDContextState(
-                state0,
-                dict(nbrs=nbrs, box=box,
-                     k_grid=k_grid, k_grid_disp=k_grid_disp)
-            )
+    def init_fn_pysages():
+        state0 = state
+        if ensemble == 'npt':
+            state0 = state0.set(position=transform(jnp.array(box), state0.position))
+        return pb.JaxMDContextState(
+            state0,
+            dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box,
+                 k_grid=k_grid, k_grid_disp=k_grid_disp)
+        )
 
-    if lr:
-        def step_fn_pysages(context_state):
-            state = context_state.state
+    def step_fn_pysages(context_state):
+        state = context_state.state
+        extras = context_state.extras
 
-            nbrs = context_state.extras["nbrs"]
-            nbrs_lr = context_state.extras["nbrs_lr"]
-            box = context_state.extras["box"]
-            k_grid = context_state.extras["k_grid"]
-            k_grid_disp = context_state.extras["k_grid_disp"]
-            i = 0
+        if ensemble == 'npt':
+            # PySAGES works in Cartesian coordinates, the NPT integrator in fractional.
+            state = state.set(position=transform(1.0 / jnp.array(extras["box"]), state.position))
 
-            if ensemble == 'npt':
-                inv_box_vec = 1.0 / jnp.array(box)  # orthorhombic inverse
-                frac_positions = transform(inv_box_vec, state.position)  # Cartesian -> fractional
-                state = state.set(position=frac_positions)
+        state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = step_md_fn(
+            0, (state, extras["nbrs"], extras["nbrs_lr"], extras["box"],
+                extras["k_grid"], extras["k_grid_disp"])
+        )
 
+        if ensemble == 'npt':
+            state = state.set(position=transform(jnp.array(box), state.position))
 
-            state, nbrs, nbrs_lr, box, k_grid, k_grid_disp = step_md_fn(
-                i, (state, nbrs, nbrs_lr, box, k_grid, k_grid_disp)
-            )
-
-            if ensemble == 'npt':
-                box_vec_out = jnp.array(box)
-                cart_positions_out = transform(box_vec_out, state.position)
-                state = state.set(position=cart_positions_out)
-
-
-            return pb.JaxMDContextState(
-                state,
-                dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box,
-                     k_grid=k_grid, k_grid_disp=k_grid_disp)
-            )
-    else:
-        def step_fn_pysages(context_state):
-            state = context_state.state
-
-            nbrs = context_state.extras["nbrs"]
-            box = context_state.extras["box"]
-            k_grid = context_state.extras["k_grid"]
-            k_grid_disp = context_state.extras["k_grid_disp"]
-            i = 0
-
-            if ensemble == 'npt':
-                inv_box_vec = 1.0 / jnp.array(box)  # orthorhombic inverse
-                frac_positions = transform(inv_box_vec, state.position)  # Cartesian -> fractional
-                state = state.set(position=frac_positions)
-
-            state, nbrs, box, k_grid, k_grid_disp = step_md_fn(
-                i, (state, nbrs, box, k_grid, k_grid_disp)
-            )
-
-            if ensemble == 'npt':
-                box_vec_out = jnp.array(box)
-                cart_positions_out = transform(box_vec_out, state.position)
-                state = state.set(position=cart_positions_out)
-
-            return pb.JaxMDContextState(
-                state,
-                dict(nbrs=nbrs, box=box,
-                     k_grid=k_grid, k_grid_disp=k_grid_disp)
-            )
+        return pb.JaxMDContextState(
+            state,
+            dict(nbrs=nbrs, nbrs_lr=nbrs_lr, box=box,
+                 k_grid=k_grid, k_grid_disp=k_grid_disp)
+        )
 
     def generate_context_pysages():
         return pb.JaxMDContext(init_fn_pysages, step_fn_pysages, box, md_dt)
@@ -240,22 +189,21 @@ def re_init_so3lr_state_npt(chain_pos, chain_mom, chain_mass, chain_tau,
     return new_state
 
 
-def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T, dt,
-                                nbrs, ensemble='nvt', nbrs_lr=None,
+def update_so3lr_after_pysages(raw_result, init_fn, rng_key, md_T, dt,
+                                nbrs, nbrs_lr, ensemble='nvt',
                                 k_grid=None, k_grid_disp=None):
     """
     Extract the final state from PySAGES results and rebuild SO3LR state.
 
     Args:
         raw_result: PySAGES Result object.
-        lr: Whether long-range interactions are used.
         init_fn: SO3LR init function.
         rng_key: JAX random key.
         md_T: Target temperature.
         dt: MD timestep (used to apply the post-snapshot bias momentum kick).
         nbrs: Short-range neighbor list.
         ensemble: Ensemble type ('nvt', 'nve', or 'npt').
-        nbrs_lr: Long-range neighbor list (optional).
+        nbrs_lr: Long-range neighbor list.
         k_grid: K-space grid (passed through unchanged).
         k_grid_disp: Dispersion-PME k-space grid (passed through unchanged).
 
@@ -335,17 +283,9 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T, dt,
         raise ValueError(f"Unsupported ensemble for PySAGES: '{ensemble}'")
 
     # Update neighbor lists with the correct box
-    if ensemble == 'npt':
-        nbrs = nbrs.update(frac_positions, neighbor=nbrs.idx, box=new_box)
-        nbrs_lr = nbrs_lr.update(
-            frac_positions, neighbor=nbrs_lr.idx, box=new_box
-        ) if lr else None
-
-    else:
-        nbrs = nbrs.update(final_snapshot.positions, neighbor=nbrs.idx, box=new_box)
-        nbrs_lr = nbrs_lr.update(
-            final_snapshot.positions, neighbor=nbrs_lr.idx, box=new_box
-        ) if lr else None
+    position = frac_positions if ensemble == 'npt' else final_snapshot.positions
+    nbrs = nbrs.update(position, neighbor=nbrs.idx, box=new_box)
+    nbrs_lr = nbrs_lr.update(position, neighbor=nbrs_lr.idx, box=new_box)
 
     # Restore bias forces to avoid a discontinuity at the cycle boundary.
     # The snapshot stores unbiased forces (captured before PySAGES adds bias),
@@ -388,8 +328,7 @@ def update_so3lr_after_pysages(raw_result, lr, init_fn, rng_key, md_T, dt,
 
 def parse_pysages_input(input_path):
     """Read settings for choice of CVs, restraints, grid, sampling method."""
-    with open(input_path, 'r') as in_file:
-        settings_dict = yaml.load(in_file, Loader=yaml.SafeLoader)
+    settings_dict = load_settings_yaml(input_path)
 
     logger.info(f'Parsed settings for PySAGES: {settings_dict}')
     return settings_dict

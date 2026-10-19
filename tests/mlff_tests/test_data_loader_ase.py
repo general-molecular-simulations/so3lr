@@ -1,16 +1,19 @@
 import numpy as np
 import jraph
 import numpy.testing as npt
+from pathlib import Path
 from so3lr.mlff.data import AseDataLoaderSparse
 from so3lr.mlff.utils.jraph_utils import dynamically_batch_with_lr
-import pkg_resources
 import pytest
+
+
+TEST_DIR = Path(__file__).parent
 
 
 @pytest.mark.parametrize("calculate_neighbors_lr", [True, False])
 def test_data_load_no_pbc(calculate_neighbors_lr: bool):
     filename = 'test_data/data_set.xyz'
-    f = pkg_resources.resource_filename(__name__, filename)
+    f = TEST_DIR / filename
 
     loader = AseDataLoaderSparse(input_file=f)
     all_data, data_stats = loader.load(
@@ -77,6 +80,12 @@ def test_data_load_no_pbc(calculate_neighbors_lr: bool):
         hirshfeld_ratios_expected[:] = np.nan
         npt.assert_equal(hirshfeld_ratios, hirshfeld_ratios_expected)
 
+        # c6_ratios mirrors the hirshfeld_ratios handling: NaN-filled when the
+        # file has no c6_ratios column. Before it was read at all, training a
+        # c6_ratios loss term from a single .extxyz raised KeyError.
+        c6_ratios = graph.nodes['c6_ratios']
+        npt.assert_equal(c6_ratios, hirshfeld_ratios_expected)
+
         dipole_vec_expected = np.empty((1, 3))
         dipole_vec_expected[:] = np.nan
         npt.assert_equal(dipole_vec, dipole_vec_expected)
@@ -107,7 +116,7 @@ def test_data_load_no_pbc(calculate_neighbors_lr: bool):
 @pytest.mark.parametrize("calculate_neighbors_lr", [True, False])
 def test_data_load_with_pbc(calculate_neighbors_lr: bool):
     filename = 'test_data/data_set_pbc.xyz'
-    f = pkg_resources.resource_filename(__name__, filename)
+    f = TEST_DIR / filename
     sample_indices = np.arange(0, 50, 10)
 
     loader = AseDataLoaderSparse(input_file=f)
@@ -214,7 +223,7 @@ def test_jraph_dynamically_batch(calculate_neighbors_lr: bool):
 
     """
     filename = 'test_data/data_set.xyz'
-    f = pkg_resources.resource_filename(__name__, filename)
+    f = TEST_DIR / filename
 
     loader = AseDataLoaderSparse(input_file=f)
     all_data, data_stats = loader.load(

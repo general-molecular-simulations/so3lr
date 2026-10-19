@@ -4,16 +4,18 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
-import wandb
 
 from flax import traverse_util
 from flax.core.frozen_dict import unfreeze
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Callable, Dict
 
 from ..masking import mask as gradient_utils
 from ..utils import checkpoint_utils
-from ..utils.param_utils import print_param_shapes, count_params
+from ..utils.param_utils import (
+    MAX_NUM_THEORY_LEVELS,
+    path_matches_key,
+)
 from .jraph_utils import dynamically_batch_with_lr
 
 from .robust_loss_jax import distribution as robust_loss_dist
@@ -22,8 +24,120 @@ from .robust_loss_jax import general as robust_loss_general
 import logging
 logger = logging.getLogger("SO3LR")
 
+
+def _wandb_log(*args, **kwargs):
+    """Import and call W&B only from an explicitly enabled logging branch."""
+    import wandb
+    return wandb.log(*args, **kwargs)
+
 # Global distribution object for adaptive robust loss (handles partition function)
 ROBUST_LOSS_DIST = robust_loss_dist.Distribution()
+
+_TFDS_TRAINING_STATE_VERSION = 1
+# Checkpoints written before the fingerprint was dropped also carry a
+# ``restart_fingerprint`` leaf; the restore target is built from the saved
+# tree, so that extra leaf is restored and ignored.
+_TFDS_TRAINING_STATE_KEYS = frozenset({
+    'version', 'checkpoint_step',
+    'raw_params', 'optimizer_state', 'ema_params', 'jax_rng',
+    'epoch', 'batches_consumed', 'processed_graphs', 'processed_nodes',
+    'best_eval_loss', 'evals_without_improvement', 'stop_training',
+    'plateau_best_loss', 'plateau_wait', 'plateau_cooldown_counter',
+    'plateau_scale', 'plateau_active', 'reduce_lr_enabled', 'stage_two_active',
+    'header_printed', 'use_ema',
+})
+
+
+def _make_tfds_training_state(
+        *, step, raw_params, optimizer_state, ema_params,
+        jax_rng, epoch, batches_consumed, processed_graphs, processed_nodes,
+        best_eval_loss, evals_without_improvement, stop_training,
+        plateau_best_loss, plateau_wait, plateau_cooldown_counter,
+        plateau_scale, plateau_active, reduce_lr_enabled, stage_two_active,
+        header_printed, use_ema):
+    """Build the versioned, Orbax-compatible restart PyTree."""
+    return {
+        'version': _TFDS_TRAINING_STATE_VERSION,
+        'checkpoint_step': int(step),
+        'raw_params': raw_params,
+        'optimizer_state': optimizer_state,
+        'ema_params': ema_params,
+        'jax_rng': jax_rng,
+        'epoch': int(epoch),
+        'batches_consumed': int(batches_consumed),
+        'processed_graphs': int(np.asarray(jax.device_get(processed_graphs)).item()),
+        'processed_nodes': int(np.asarray(jax.device_get(processed_nodes)).item()),
+        'best_eval_loss': float(best_eval_loss),
+        'evals_without_improvement': int(evals_without_improvement),
+        'stop_training': bool(stop_training),
+        'plateau_best_loss': float(plateau_best_loss),
+        'plateau_wait': int(plateau_wait),
+        'plateau_cooldown_counter': int(plateau_cooldown_counter),
+        'plateau_scale': float(plateau_scale),
+        'plateau_active': bool(plateau_active),
+        'reduce_lr_enabled': bool(reduce_lr_enabled),
+        'stage_two_active': bool(stage_two_active),
+        'header_printed': bool(header_printed),
+        'use_ema': bool(use_ema),
+    }
+
+
+def _validate_tfds_training_state(state, step):
+    """Reject a training state this version cannot resume from."""
+    missing = sorted(_TFDS_TRAINING_STATE_KEYS.difference(state or {}))
+    if missing:
+        raise RuntimeError(
+            f'Checkpoint step {step} has incomplete training state; missing {missing}.'
+        )
+    if state['version'] != _TFDS_TRAINING_STATE_VERSION:
+        raise RuntimeError(
+            f'Checkpoint step {step} uses training-state version '
+            f'{state["version"]!r}; expected {_TFDS_TRAINING_STATE_VERSION}.'
+        )
+    if state['raw_params'] is None or state['optimizer_state'] is None:
+        raise RuntimeError(
+            f'Checkpoint step {step} lacks raw parameters or optimizer state.'
+        )
+
+
+def _restore_tfds_training_state(
+        checkpoint_manager, *, step, optimizer):
+    """Restore training state while preserving Optax namedtuple structure.
+
+    Returns ``None`` for a params-only checkpoint (written before the full
+    training state was saved); the caller then continues from its weights.
+    """
+    step_dir = Path(checkpoint_manager.directory) / f'ckpt_{step}'
+    if not (step_dir / 'training_state').exists():
+        return None
+    untyped = checkpoint_manager.restore(
+        step,
+        args=ocp.args.Composite(
+            training_state=ocp.args.StandardRestore()
+        ),
+    )['training_state']
+
+    _validate_tfds_training_state(untyped, step)
+
+    # Target-free Orbax restore turns Optax namedtuples into lists/dicts.  A
+    # fresh optimizer state supplies the exact container structure, then Orbax
+    # fills it with the saved values.  A changed optimizer structure therefore
+    # fails closed rather than producing a subtly invalid continuation.
+    restore_target = dict(untyped)
+    restore_target['optimizer_state'] = optimizer.init(untyped['raw_params'])
+    try:
+        restored = checkpoint_manager.restore(
+            step,
+            args=ocp.args.Composite(
+                training_state=ocp.args.StandardRestore(restore_target)
+            ),
+        )['training_state']
+    except Exception as exc:
+        raise RuntimeError(
+            f'Checkpoint step {step} training state is incompatible with the '
+            'current optimizer or parameter structure; refusing an inexact restart.'
+        ) from exc
+    return restored
 
 
 def init_adaptive_robust_loss_params(
@@ -64,6 +178,64 @@ def init_adaptive_robust_loss_params(
     }
 
 
+def ensure_adaptive_robust_loss_params(
+    params: Dict,
+    targets: list,
+    init_alpha: float = 1.5,
+    init_scale: float = 1.0
+) -> Dict:
+    """Attach adaptive robust loss parameters to an already-loaded ``params`` tree.
+
+    ``fit`` and ``fit_from_iterator`` only create these on the branch that
+    *initializes* a fresh model (``params is None``), which fine-tuning never
+    takes -- it always passes the restored checkpoint. Without this, enabling
+    ``use_adaptive_robust_loss`` while fine-tuning either silently did nothing
+    (checkpoint has no 'adaptive_robust_loss' key, so ``make_loss_fn`` falls
+    through to the plain loss) or, worse, reused the pretraining run's alphas
+    indexed by the *new* target order -- so `forces` could be scaled by whatever
+    alpha the pretraining had learned for its first target.
+
+    Existing entries are reused only when their length still matches
+    ``targets``; otherwise they are re-initialized, because the per-target index
+    is positional and a different target list makes the old values meaningless.
+    The checkpoint stores no target *names*, so a same-length but different (or
+    reordered) target list is indistinguishable from a genuine continuation and
+    is reused as-is -- the log line below states the assumption so such a run is
+    at least diagnosable.
+
+    Returns a new dict; ``params`` is not mutated.
+    """
+    existing = params.get('adaptive_robust_loss')
+    if existing is not None and existing['alpha_raw'].shape[0] == len(targets):
+        logger.info(
+            'Reusing the checkpoint\'s %d adaptive robust loss parameter(s), '
+            'assuming they correspond positionally to the targets %s. If the '
+            'run that wrote the checkpoint trained a different target list of '
+            'the same length, each target inherits the wrong alpha/scale.',
+            len(targets), targets
+        )
+        return params
+
+    if existing is not None:
+        logger.warning(
+            'Discarding adaptive robust loss parameters from the checkpoint: they '
+            'hold %d target(s) but this run trains %d (%s). The values are indexed '
+            'positionally, so keeping them would apply the wrong alpha/scale to '
+            'each target.',
+            existing['alpha_raw'].shape[0], len(targets), targets
+        )
+
+    adaptive_params = init_adaptive_robust_loss_params(
+        targets=targets,
+        init_alpha=init_alpha,
+        init_scale=init_scale
+    )
+    logger.info(
+        'Initialized adaptive robust loss params for targets: %s', targets
+    )
+    return {**params, **adaptive_params}
+
+
 def transform_adaptive_robust_params(alpha_raw: jnp.ndarray, scale_raw: jnp.ndarray):
     """Transform unconstrained parameters to valid alpha and scale values.
 
@@ -80,20 +252,16 @@ def transform_adaptive_robust_params(alpha_raw: jnp.ndarray, scale_raw: jnp.ndar
     return alpha, scale
 
 
-def set_seeds(seed=0):
-    """Set random seeds for reproducibility."""
-    try:
-        random.seed(seed)
-    except NameError:
-        import random
-        random.seed(seed)
-
-    np.random.seed(seed)
+def _display_metric_keys(eval_metrics):
+    """Metric keys shown in the printed table. Hide the adaptive-robust-loss
+    internal params (``*_robust_alpha`` / ``*_robust_scale``) -- they are still
+    computed and logged to wandb, just not printed in the per-eval table."""
+    return [k for k in eval_metrics if 'robust' not in k]
 
 
 def print_metrics_header(eval_metrics):
     """Print table header row. Call once before training loop."""
-    cols = ['epoch', 'step'] + [k.removeprefix('eval_') for k in eval_metrics]
+    cols = ['epoch', 'step'] + [k.removeprefix('eval_') for k in _display_metric_keys(eval_metrics)]
     header = ' | '.join(f'{c:>14s}' for c in cols)
     sep = '-+-'.join('-' * 14 for _ in cols)
     return f"\n{header}\n{sep}"
@@ -101,7 +269,8 @@ def print_metrics_header(eval_metrics):
 
 def print_metrics_row(epoch, step, eval_metrics):
     """Print one table row for a validation checkpoint."""
-    vals = [f'{epoch:>14d}', f'{step:>14d}'] + [f'{v:>14.4f}' for v in eval_metrics.values()]
+    vals = [f'{epoch:>14d}', f'{step:>14d}'] + [
+        f'{eval_metrics[k]:>14.4f}' for k in _display_metric_keys(eval_metrics)]
     return ' | '.join(vals)
 
 def graph_mse_loss(
@@ -479,7 +648,7 @@ property_to_loss = {
     'c6_ratios': node_mse_loss,
 }
 
-# Ratio-head alias: legacy SO3LR emits 'hirshfeld_ratios'; the new so3lr-s/m/l
+# Ratio-head alias: legacy SO3LR emits 'hirshfeld_ratios'; the new so3lr-tauri-s/m/l
 # models emit 'a0_ratios' (per-atom static-polarizability ratios). Loaded data
 # is always keyed 'hirshfeld_ratios'. We accept either spelling in loss_weights
 # and remap at the loss-fn entry point so users do not see a KeyError.
@@ -761,8 +930,15 @@ def make_training_step_fn(
             batch
         )
 
+        # Per-leaf gradient norms go under their own key: writing them to
+        # 'grad_norm' meant the unconditional global-norm assignment below
+        # overwrote them every step, making log_gradient_values a no-op.
         if log_gradient_values:
-            metrics['grad_norm'] = unfreeze(jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x.reshape(-1), axis=0), grads))
+            metrics['grad_norm_per_leaf'] = unfreeze(
+                jax.tree_util.tree_map(
+                    lambda x: jnp.linalg.norm(x.reshape(-1), axis=0), grads
+                )
+            )
 
         updates, opt_state = optimizer.update(
             grads,
@@ -816,13 +992,17 @@ def make_validation_step_fn(
 
     return validation_step_fn
 
-def expand_observables_to_theory_levels(params, num_theory_levels: int = 16):
+def expand_observables_to_theory_levels(
+        params,
+        num_theory_levels: int = MAX_NUM_THEORY_LEVELS
+):
     """Expand a restored single-theory-level checkpoint to ``num_theory_levels``.
 
     Tiles the per-atom energy-head parameters (``energy_offset``,
-    ``atomic_scales`` and the ``energy_dense_final`` kernel) of ``observables_0``
-    from one level of theory to ``num_theory_levels`` levels. Parameters that
-    are already multi-level are left unchanged. Mutates and returns ``params``.
+    ``atomic_scales`` and the ``energy_dense_final`` kernel plus its optional
+    ``bias``) of ``observables_0`` from one level of theory to
+    ``num_theory_levels`` levels. Parameters that are already multi-level are
+    left unchanged. Mutates and returns ``params``.
     """
     if 'params' not in params or 'observables_0' not in params['params']:
         return params
@@ -836,10 +1016,20 @@ def expand_observables_to_theory_levels(params, num_theory_levels: int = 16):
         obs0['atomic_scales'] = jnp.tile(obs0['atomic_scales'][:, None], (1, num_theory_levels))
         logger.debug('Tiled atomic_scales to %d theory levels.', num_theory_levels)
 
-    if 'energy_dense_final' in obs0 and obs0['energy_dense_final']['kernel'].shape[1] == 1:
-        kernel = obs0['energy_dense_final']['kernel']
-        obs0['energy_dense_final']['kernel'] = jnp.tile(kernel, (1, num_theory_levels))
-        logger.debug('Tiled energy_dense_final kernel to %d theory levels.', num_theory_levels)
+    if 'energy_dense_final' in obs0:
+        if obs0['energy_dense_final']['kernel'].shape[1] == 1:
+            kernel = obs0['energy_dense_final']['kernel']
+            obs0['energy_dense_final']['kernel'] = jnp.tile(kernel, (1, num_theory_levels))
+            logger.debug('Tiled energy_dense_final kernel to %d theory levels.', num_theory_levels)
+
+        # Tile the optional final bias too (use_final_bias_bool=True base models,
+        # e.g. the single-level legacy SO3LR). Mirrors potential.py so finetuning
+        # a 1-level model into num_theory_levels works; bias-free models
+        # (so3lr-tauri-s/m/l) have no 'bias' key and are left untouched.
+        bias = obs0['energy_dense_final'].get('bias')
+        if bias is not None and bias.shape[-1] == 1:
+            obs0['energy_dense_final']['bias'] = jnp.tile(bias, (num_theory_levels,))
+            logger.debug('Tiled energy_dense_final bias to %d theory levels.', num_theory_levels)
 
     return params
 
@@ -890,6 +1080,38 @@ def _reduce_lr_on_plateau_step(
     return opt_state, best_loss, wait, cooldown_counter, scale
 
 
+def _validation_metrics(validation_step_fn, params, batches, graph_to_batch_fn):
+    """Mean of each validation metric over the batches, keyed 'eval_<name>'."""
+    totals, n = {}, 0
+    for graph_batch, lr_batch in batches:
+        batch = jax.tree_util.tree_map(jnp.array, graph_to_batch_fn(graph_batch, lr_batch))
+        for k, v in validation_step_fn(params, batch).items():
+            totals[k] = totals.get(k, 0.0) + np.asarray(v).item()
+        n += 1
+    return {f'eval_{k}': float(v / n) for k, v in totals.items()}
+
+
+def _log_and_checkpoint(ckpt_mngr, step, epoch, eval_params, eval_metrics, print_header, use_wandb):
+    """Log the eval metrics (the table header first if asked) and save eval_params
+    when the loss is finite: orbax ranks checkpoints with best_fn/best_mode='min',
+    and a NaN comparison can leave a diverged step in the max_to_keep window as
+    'best', evicting the genuinely best weights."""
+    if print_header:
+        logger.info(print_metrics_header(eval_metrics))
+    logger.info(print_metrics_row(epoch, step, eval_metrics))
+    eval_loss = eval_metrics['eval_loss']
+    if jnp.isfinite(eval_loss):
+        ckpt_mngr.save(
+            step,
+            args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
+            metrics={'loss': eval_loss}
+        )
+    else:
+        logger.warning(f"Skipping checkpoint at step {step} because eval_loss={eval_loss}")
+    if use_wandb:
+        _wandb_log(eval_metrics, step=step)
+
+
 def fit(
         model,
         optimizer,
@@ -910,7 +1132,7 @@ def fit(
         allow_restart: bool = False,
         training_seed: int = 0,
         model_seed: int = 0,
-        use_wandb: bool = True,
+        use_wandb: bool = False,
         log_gradient_values: bool = False,
         use_robust_loss_validation: bool = False,
         robust_loss_alpha_validation: float = 1.99,
@@ -948,7 +1170,8 @@ def fit(
         # trackers (the loss scale changes between stages). ``None`` disables.
         stage_two_start_epoch: int = None,
         stage_two_loss_fn=None,
-        stage_two_val_fn=None
+        stage_two_val_fn=None,
+        on_training_ready=None,
 ):
     """
     Fit model.
@@ -964,8 +1187,8 @@ def fit(
         batch_max_num_edges (int): Maximal number of edges per batch.
         batch_max_num_graphs (int): Maximal number of graphs per batch.
         batch_max_num_pairs (int): Maximal number of pairs in long-range indices.
-        params: Parameters to start from during training. If not given, either new parameters are initialized randomly
-            or loaded from ckpt_dir if the checkpoint already exists and `allow_restart=True`.
+        params: Initial parameters for a new run. When a target checkpoint exists
+            and `allow_restart=True`, its weights take precedence over these parameters.
         val_fn (Callable, optional): Validation function to use for metrics during validation.
             If None, loss_fn will be used. Defaults to None.
         num_epochs (int): Number of training epochs.
@@ -983,6 +1206,8 @@ def fit(
         adaptive_robust_loss_targets (list): List of target names for adaptive robust loss.
         adaptive_robust_loss_init_alpha (float): Initial alpha for adaptive robust loss. Defaults to 1.5.
         adaptive_robust_loss_init_scale (float): Initial scale for adaptive robust loss. Defaults to 1.0.
+        on_training_ready (Callable, optional): Called after checkpoint validation
+            and restoration, before optimizer updates, to publish run metadata.
     Returns:
 
     """
@@ -1031,6 +1256,24 @@ def fit(
     step = 0
     header_printed = False
 
+    # Fine-tuning supplies initial parameters, but an existing target
+    # checkpoint takes precedence for a requested restart. Validate this
+    # before publishing new metadata or entering the optimizer loop.
+    latest_step = ckpt_mngr.latest_step()
+    if latest_step is not None:
+        if not allow_restart:
+            raise RuntimeError(
+                f'{ckpt_dir} already exists at step {latest_step}. If you want '
+                'to re-start training, set `allow_restart=True`.'
+            )
+        params = checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir)
+        params = expand_observables_to_theory_levels(params)
+        step = latest_step
+        logger.info('Loaded parameters from %s at step %s.', ckpt_dir, latest_step)
+
+    if on_training_ready is not None:
+        on_training_ready()
+
     opt_state = None
     # Shadow EMA copy of the parameters. Updated after every
     # optimizer step; used for validation + checkpoints when ``use_ema`` is set.
@@ -1071,6 +1314,16 @@ def fit(
         logger.info(f"Two-stage loss reweighting enabled (switch at epoch "
                     f"{stage_two_start_epoch}).")
 
+    def validation_batches():
+        return dynamically_batch_with_lr(
+            iter(validation_data),
+            n_node=batch_max_num_nodes,
+            n_edge=batch_max_num_edges,
+            n_graph=batch_max_num_graphs,
+            n_pairs=batch_max_num_pairs,
+        )
+
+    start_step = step
     for epoch in range(num_epochs):
         # Switch to the stage-two loss at the configured epoch boundary.
         if (stage_two_start_epoch is not None and stage_two_loss_fn is not None
@@ -1110,45 +1363,25 @@ def fit(
             # Training data is numpy arrays so we now transform them to jax.numpy arrays.
             batch_training = jax.tree_util.tree_map(jnp.array, batch_training)
 
-            # If params are None (in the first step), initialize the parameters or load from existing checkpoint.
+            # Initialize only when neither caller weights nor a restart were supplied.
             if params is None:
-                # Check if checkpoint already exists.
-                latest_step = ckpt_mngr.latest_step()
-                if latest_step is not None:
-                    if allow_restart:
-                        # params = ckpt_mngr.restore(
-                        #     latest_step,
-                        #     args=ocp.args.Composite(params=ocp.args.StandardRestore())
-                        # )['params']
-                        params = checkpoint_utils.load_params_from_checkpoint(
-                            ckpt_dir=ckpt_dir
-                        )
-                        logger.info(f"Loaded parameters from {ckpt_dir} (keys: {list(params.keys())}).")
-                        params = expand_observables_to_theory_levels(params)
-                        step += latest_step
+                params = model.init(jax_rng, batch_training)
 
-                        print(f'Re-start training from {latest_step}.')
-                    else:
-                        raise RuntimeError(f'{ckpt_dir} already exists at step {latest_step}. If you want to re-start '
-                                           f'training, set `allow_restart=True`.')
-                else:
-                    params = model.init(jax_rng, batch_training)
-
-                    # Initialize adaptive robust loss parameters if enabled
-                    if use_adaptive_robust_loss and adaptive_robust_loss_targets is not None:
-                        adaptive_params = init_adaptive_robust_loss_params(
-                            targets=adaptive_robust_loss_targets,
-                            init_alpha=adaptive_robust_loss_init_alpha,
-                            init_scale=adaptive_robust_loss_init_scale
-                        )
-                        params = {**params, **adaptive_params}
-                        print(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
-                        alpha, scale = transform_adaptive_robust_params(
-                            adaptive_params['adaptive_robust_loss']['alpha_raw'],
-                            adaptive_params['adaptive_robust_loss']['scale_raw']
-                        )
-                        print(f"  Initial alpha: {alpha}")
-                        print(f"  Initial scale: {scale}")
+                # Initialize adaptive robust loss parameters if enabled
+                if use_adaptive_robust_loss and adaptive_robust_loss_targets is not None:
+                    adaptive_params = init_adaptive_robust_loss_params(
+                        targets=adaptive_robust_loss_targets,
+                        init_alpha=adaptive_robust_loss_init_alpha,
+                        init_scale=adaptive_robust_loss_init_scale
+                    )
+                    params = {**params, **adaptive_params}
+                    print(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
+                    alpha, scale = transform_adaptive_robust_params(
+                        adaptive_params['adaptive_robust_loss']['alpha_raw'],
+                        adaptive_params['adaptive_robust_loss']['scale_raw']
+                    )
+                    print(f"  Initial alpha: {alpha}")
+                    print(f"  Initial scale: {scale}")
 
             # If optimizer state is None (in the first step), initialize from the parameter pyTree.
             if opt_state is None:
@@ -1181,68 +1414,20 @@ def fit(
 
             # Log training metrics.
             if use_wandb:
-                wandb.log(
+                _wandb_log(
                     {f'train_{k}': v for (k, v) in train_metrics_np.items()},
                     step=step
                 )
 
             # Start validation process.
             if step % eval_every_num_steps == 0:
-                iterator_validation = dynamically_batch_with_lr(
-                    iter(validation_data),
-                    n_node=batch_max_num_nodes,
-                    n_edge=batch_max_num_edges,
-                    n_graph=batch_max_num_graphs,
-                    n_pairs=batch_max_num_pairs,
-                )
-
-                # Use the EMA (deployed) weights for validation when enabled.
+                # Validate the deployed weights (the EMA copy when EMA is on).
                 eval_params = ema_params if use_ema else params
-
-                # Start iteration over validation batches.
-                eval_totals = {}
-                eval_counts = {}
-                for graph_batch_validation, lr_batch_validation in iterator_validation:
-                    batch_validation = graph_to_batch_fn(graph_batch_validation, lr_batch_validation)
-                    batch_validation = jax.tree_util.tree_map(jnp.array, batch_validation)
-
-                    eval_out = validation_step_fn(
-                        eval_params,
-                        batch_validation
-                    )
-
-                    for k, v in eval_out.items():
-                        eval_totals[k] = eval_totals.get(k, 0.0) + np.asarray(v).item()
-                        eval_counts[k] = eval_counts.get(k, 0) + 1
-
-                eval_metrics = {k: eval_totals[k] / eval_counts[k] for k in eval_totals}
-
-                # Convert to dict to log with weights and bias.
-                eval_metrics = {
-                    f'eval_{k}': float(v) for k, v in eval_metrics.items()
-                }
-
-                # Print eval_metrics as table
-                if not header_printed:
-                    logger.info(print_metrics_header(eval_metrics))
-                    header_printed = True
-                logger.info(print_metrics_row(epoch, step, eval_metrics))
-
-                # Save checkpoint (the EMA / deployed weights when EMA is on).
-                ckpt_mngr.save(
-                    step,
-                    args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
-                    metrics={
-                        'loss': eval_metrics['eval_loss']
-                    }
-                )
-
-                # Log to weights and bias.
-                if use_wandb:
-                    wandb.log(
-                        eval_metrics,
-                        step=step
-                    )
+                eval_metrics = _validation_metrics(
+                    validation_step_fn, eval_params, validation_batches(), graph_to_batch_fn)
+                _log_and_checkpoint(ckpt_mngr, step, epoch, eval_params, eval_metrics,
+                                    not header_printed, use_wandb)
+                header_printed = True
 
                 # Early stopping on the validation loss.
                 if early_stopping_patience is not None:
@@ -1278,6 +1463,15 @@ def fit(
         if stop_training:
             break  # exit the epoch loop
 
+    # Validate and save the final weights too when this call trained past the
+    # last multiple of eval_every_num_steps.
+    if step > start_step and step % eval_every_num_steps != 0:
+        eval_params = ema_params if use_ema else params
+        _log_and_checkpoint(
+            ckpt_mngr, step, epoch, eval_params,
+            _validation_metrics(validation_step_fn, eval_params, validation_batches(), graph_to_batch_fn),
+            not header_printed, use_wandb)
+
     # Wait until checkpoint manager completes all save operations.
     ckpt_mngr.wait_until_finished()
 
@@ -1301,7 +1495,7 @@ def fit_from_iterator(
         allow_restart: bool = False,
         training_seed: int = 0,
         model_seed: int = 0,
-        use_wandb: bool = True,
+        use_wandb: bool = False,
         log_gradient_values: bool = False,
         use_robust_loss_validation: bool = False,
         robust_loss_alpha_validation: float = 1.99,
@@ -1328,6 +1522,7 @@ def fit_from_iterator(
         stage_two_start_epoch: int = None,
         stage_two_loss_fn=None,
         stage_two_val_fn=None,
+        on_training_ready=None,
 ):
     """
     Fit model.
@@ -1364,10 +1559,11 @@ def fit_from_iterator(
         adaptive_robust_loss_init_scale (float): Initial scale for adaptive robust loss. Defaults to 1.0.
         dataset_info (dict): Per-dataset info from dataloader.dataset_info() with keys
             'names', 'sizes', 'weights'. Used to log effective epochs per dataset.
+        on_training_ready (Callable, optional): Called after checkpoint validation
+            and restoration, before optimizer updates, to publish run metadata.
     Returns:
 
     """
-    del training_seed
     jax_rng = jax.random.PRNGKey(seed=model_seed)
 
     # Create checkpoint directory.
@@ -1385,7 +1581,7 @@ def fit_from_iterator(
         **ckpt_manager_options
     )
 
-    ckpt_mngr = checkpoint_utils.make_checkpoint_manager(
+    ckpt_mngr = checkpoint_utils.make_training_checkpoint_manager(
         ckpt_dir=ckpt_dir,
         ckpt_mngr_options=options
     )
@@ -1404,7 +1600,7 @@ def fit_from_iterator(
     processed_nodes = 0
     step = 0
     header_printed = False
-
+    start_epoch = 0
     opt_state = None
     # Shadow EMA copy of the parameters; see fit().
     ema_params = None
@@ -1441,7 +1637,93 @@ def fit_from_iterator(
         logger.info(f"Two-stage loss reweighting enabled (switch at epoch "
                     f"{stage_two_start_epoch}).")
 
-    for epoch in range(num_epochs):
+    # Restore the raw training weights (not the EMA/deployed copy), optimizer
+    # and control state.  Params-only checkpoints from older versions continue
+    # from their weights with a fresh optimizer.
+    latest_step = ckpt_mngr.latest_step()
+    training_state = None
+    if latest_step is not None:
+        if not allow_restart:
+            raise RuntimeError(
+                f'{ckpt_dir} already exists at step {latest_step}. If you want '
+                f'to re-start training, set `allow_restart=True`.'
+            )
+        training_state = _restore_tfds_training_state(
+            ckpt_mngr,
+            step=latest_step,
+            optimizer=optimizer,
+        )
+        if training_state is None:
+            logger.warning(
+                'Checkpoint step %s has no training state (written by an older '
+                'version). Continuing from its parameters with a fresh optimizer '
+                'and epoch counter.', latest_step,
+            )
+            params = expand_observables_to_theory_levels(
+                checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir)
+            )
+            step = int(latest_step)
+    if training_state is not None:
+        params = training_state['raw_params']
+        opt_state = training_state['optimizer_state']
+        ema_params = training_state['ema_params']
+        jax_rng = training_state['jax_rng']
+        step = int(training_state['checkpoint_step'])
+        # Continue with the next epoch rather than replaying the batches this
+        # one already consumed: the replay runs the full input pipeline and
+        # costs about as long as training on them did (hours to days).
+        start_epoch = int(training_state['epoch'])
+        if int(training_state['batches_consumed']) > 0:
+            start_epoch += 1
+        processed_graphs = int(training_state['processed_graphs'])
+        processed_nodes = int(training_state['processed_nodes'])
+        best_eval_loss = float(training_state['best_eval_loss'])
+        evals_without_improvement = int(
+            training_state['evals_without_improvement']
+        )
+        stop_training = bool(training_state['stop_training'])
+        plateau_best_loss = float(training_state['plateau_best_loss'])
+        plateau_wait = int(training_state['plateau_wait'])
+        plateau_cooldown_counter = int(
+            training_state['plateau_cooldown_counter']
+        )
+        plateau_scale = float(training_state['plateau_scale'])
+        _plateau_active = bool(training_state['plateau_active'])
+        reduce_lr_on_plateau = bool(training_state['reduce_lr_enabled'])
+        _stage_two_active = bool(training_state['stage_two_active'])
+        header_printed = bool(training_state['header_printed'])
+
+        if _stage_two_active:
+            if stage_two_loss_fn is None:
+                raise RuntimeError(
+                    'Checkpoint is in stage two but no stage_two_loss_fn was provided.'
+                )
+            training_step_fn = make_training_step_fn(
+                optimizer, stage_two_loss_fn, log_gradient_values
+            )
+            validation_step_fn = make_validation_step_fn(
+                stage_two_val_fn
+                if stage_two_val_fn is not None else stage_two_loss_fn
+            )
+
+        logger.info(
+            'Restored TFDS training state from %s at step %s.',
+            ckpt_dir, latest_step,
+        )
+        print(
+            f'Re-start training from step {latest_step} at epoch {start_epoch}.'
+        )
+
+    if on_training_ready is not None:
+        on_training_ready()
+
+    for epoch in range(start_epoch, num_epochs):
+        if stop_training:
+            logger.info(
+                'Checkpoint step %s already reached its early-stopping condition; '
+                'no further optimizer updates will be applied.', step
+            )
+            break
         # Switch to the stage-two loss at the configured epoch boundary.
         if (stage_two_start_epoch is not None and stage_two_loss_fn is not None
                 and not _stage_two_active and epoch >= stage_two_start_epoch):
@@ -1461,10 +1743,16 @@ def fit_from_iterator(
             _stage_two_active = True
 
         if use_wandb:
-            wandb.log({"epoch": epoch})
+            _wandb_log({"epoch": epoch})
         print(f'Epoch {epoch} of {num_epochs}')
-        training_iterator_loop = training_iterator.next_epoch(split='train', mode='train')
-        for graph_batch_training, lr_batch_training in training_iterator_loop:
+        training_iterator_loop = training_iterator.next_epoch(
+            split='train',
+            mode='train',
+            epoch_index=epoch,
+        )
+        for batch_index, (graph_batch_training, lr_batch_training) in enumerate(
+                training_iterator_loop):
+            batches_consumed = batch_index + 1
             batch_training = graph_to_batch_fn(graph_batch_training, lr_batch_training)
             processed_graphs += batch_training['num_of_non_padded_graphs']
             processed_nodes += int(batch_max_num_nodes - jraph.get_number_of_padding_with_graphs_nodes(graph_batch_training))
@@ -1473,39 +1761,24 @@ def fit_from_iterator(
 
             # If params are None (in the first step), initialize the parameters or load from existing checkpoint.
             if params is None:
-                # Check if checkpoint already exists.
-                latest_step = ckpt_mngr.latest_step()
-                if latest_step is not None:
-                    if allow_restart:
-                        params = checkpoint_utils.load_params_from_checkpoint(
-                            ckpt_dir=ckpt_dir
-                        )
-                        logger.info(f"Loaded parameters from {ckpt_dir} (keys: {list(params.keys())}).")
-                        params = expand_observables_to_theory_levels(params)
-                        step += latest_step
-                        print(f'Re-start training from {latest_step}.')
-                    else:
-                        raise RuntimeError(f'{ckpt_dir} already exists at step {latest_step}. If you want to re-start '
-                                           f'training, set `allow_restart=True`.')
-                else:
-                    print(f'Initialize new parameters.')
-                    params = model.init(jax_rng, batch_training)
+                print(f'Initialize new parameters.')
+                params = model.init(jax_rng, batch_training)
 
-                    # Initialize adaptive robust loss parameters if enabled
-                    if use_adaptive_robust_loss and adaptive_robust_loss_targets is not None:
-                        adaptive_params = init_adaptive_robust_loss_params(
-                            targets=adaptive_robust_loss_targets,
-                            init_alpha=adaptive_robust_loss_init_alpha,
-                            init_scale=adaptive_robust_loss_init_scale
-                        )
-                        params = {**params, **adaptive_params}
-                        print(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
-                        alpha, scale = transform_adaptive_robust_params(
-                            adaptive_params['adaptive_robust_loss']['alpha_raw'],
-                            adaptive_params['adaptive_robust_loss']['scale_raw']
-                        )
-                        print(f"  Initial alpha: {alpha}")
-                        print(f"  Initial scale: {scale}")
+                # Initialize adaptive robust loss parameters if enabled
+                if use_adaptive_robust_loss and adaptive_robust_loss_targets is not None:
+                    adaptive_params = init_adaptive_robust_loss_params(
+                        targets=adaptive_robust_loss_targets,
+                        init_alpha=adaptive_robust_loss_init_alpha,
+                        init_scale=adaptive_robust_loss_init_scale
+                    )
+                    params = {**params, **adaptive_params}
+                    print(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
+                    alpha, scale = transform_adaptive_robust_params(
+                        adaptive_params['adaptive_robust_loss']['alpha_raw'],
+                        adaptive_params['adaptive_robust_loss']['scale_raw']
+                    )
+                    print(f"  Initial alpha: {alpha}")
+                    print(f"  Initial scale: {scale}")
 
             # If optimizer state is None (in the first step), initialize from the parameter pyTree.
             if opt_state is None:
@@ -1547,7 +1820,7 @@ def fit_from_iterator(
                         if size > 0:
                             eff_epoch = processed_graphs * weight / size
                             log_dict[f'effective_epoch/{name}'] = eff_epoch
-                wandb.log(log_dict, step=step)
+                _wandb_log(log_dict, step=step)
 
             # Start validation process.
             if step % eval_every_num_steps == 0:
@@ -1583,19 +1856,9 @@ def fit_from_iterator(
                 logger.info(print_metrics_row(epoch, step, eval_metrics))
                 eval_loss = eval_metrics['eval_loss']
 
-                # Only save if loss is finite (save the EMA weights when EMA is on).
-                if jnp.isfinite(eval_loss):
-                    ckpt_mngr.save(
-                        step,
-                        args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
-                        metrics={'loss': eval_loss}
-                    )
-                else:
-                    print(f"Skipping checkpoint at step {step} because eval_loss={eval_loss}")
-
                 # Log to weights and bias.
                 if use_wandb:
-                    wandb.log(
+                    _wandb_log(
                         eval_metrics,
                         step=step
                     )
@@ -1625,9 +1888,57 @@ def fit_from_iterator(
                         factor=reduce_lr_factor, patience=reduce_lr_patience,
                         min_scale=reduce_lr_min_scale, min_delta=reduce_lr_min_delta,
                         cooldown=reduce_lr_cooldown, step=step)
+
+                # Validation can update early-stop and plateau/optimizer state.
+                # Save only after those transitions so the restored next update
+                # sees exactly the same control state as uninterrupted training.
+                if jnp.isfinite(eval_loss):
+                    training_state = _make_tfds_training_state(
+                        step=step,
+                        raw_params=params,
+                        optimizer_state=opt_state,
+                        ema_params=ema_params,
+                        jax_rng=jax_rng,
+                        epoch=epoch,
+                        batches_consumed=batches_consumed,
+                        processed_graphs=processed_graphs,
+                        processed_nodes=processed_nodes,
+                        best_eval_loss=best_eval_loss,
+                        evals_without_improvement=evals_without_improvement,
+                        stop_training=stop_training,
+                        plateau_best_loss=plateau_best_loss,
+                        plateau_wait=plateau_wait,
+                        plateau_cooldown_counter=plateau_cooldown_counter,
+                        plateau_scale=plateau_scale,
+                        plateau_active=_plateau_active,
+                        reduce_lr_enabled=reduce_lr_on_plateau,
+                        stage_two_active=_stage_two_active,
+                        header_printed=header_printed,
+                        use_ema=use_ema,
+                    )
+                    checkpoint_started = ckpt_mngr.save(
+                        step,
+                        args=ocp.args.Composite(
+                            params=ocp.args.StandardSave(eval_params),
+                            training_state=ocp.args.StandardSave(training_state),
+                        ),
+                        metrics={'loss': eval_loss}
+                    )
+                    if checkpoint_started:
+                        ckpt_mngr.wait_until_finished()
+                else:
+                    print(
+                        f"Skipping checkpoint at step {step} because "
+                        f"eval_loss={eval_loss}"
+                    )
             # Finished validation process.
 
             if stop_training:
+                close_training_iterator = getattr(
+                    training_iterator_loop, 'close', None
+                )
+                if close_training_iterator is not None:
+                    close_training_iterator()
                 break  # exit the batch loop
 
         if stop_training:
@@ -1757,39 +2068,9 @@ def freeze_parameters(optimizer, trainable_subset_keys=None, frozen_subset_keys=
     )
 
 
-def _path_matches_key(path, key):
-    """Return True if a parameter ``path`` (tuple of nested module/leaf names)
-    matches a selection ``key``.
-
-    Supported key forms:
-      * Plain component, e.g. ``'observables_0'`` — matches if it equals ANY
-        single component of ``path`` (the historical behaviour).
-      * Hierarchical, e.g. ``'observables_0/energy_dense_final'`` — matches if
-        its '/'-separated parts appear as a CONTIGUOUS subsequence of ``path``.
-        (The previous ``set(keys) & set(path)`` test silently matched nothing
-        for slashed keys, so strategies like ``final_mlp`` froze everything.)
-      * Trailing ``*`` on any component for prefix matching, e.g.
-        ``'observables_0/energy_dense*'`` matches ``energy_dense_regression``,
-        ``energy_dense_hidden_0``, ``energy_dense_final``, ...
-    """
-    def _component_matches(component, pattern):
-        if pattern.endswith('*'):
-            return component.startswith(pattern[:-1])
-        return component == pattern
-
-    parts = key.split('/')
-    n = len(parts)
-    if n == 1:
-        return any(_component_matches(c, parts[0]) for c in path)
-    for i in range(len(path) - n + 1):
-        if all(_component_matches(path[i + j], parts[j]) for j in range(n)):
-            return True
-    return False
-
-
 def make_annotation_fn(keys):
     return lambda params: traverse_util.path_aware_map(
-        lambda path, v: 'trainable' if any(_path_matches_key(path, k) for k in keys) else 'frozen', params
+        lambda path, v: 'trainable' if any(path_matches_key(path, k) for k in keys) else 'frozen', params
     )
 
 
@@ -1797,7 +2078,7 @@ def make_freeze_annotation_fn(keys):
     """Inverse of make_annotation_fn: parameters whose path matches any of
     ``keys`` are 'frozen', everything else is 'trainable'."""
     return lambda params: traverse_util.path_aware_map(
-        lambda path, v: 'frozen' if any(_path_matches_key(path, k) for k in keys) else 'trainable', params
+        lambda path, v: 'frozen' if any(path_matches_key(path, k) for k in keys) else 'trainable', params
     )
 
 

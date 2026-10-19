@@ -23,7 +23,7 @@ def test_ase_example(name: str):
     atoms.pbc = False
 
     calc = So3lrCalculator(
-        model="so3lr-m",  # mirrors the README example
+        model="so3lr-tauri-m-2606",
         calculate_stress=False,
         dtype=np.float32
     )
@@ -61,7 +61,7 @@ def test_jax_md_example(name):
     displacement, shift = space.free()
 
     neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
-        potential=So3lrPotential(model="so3lr-m"),  # mirrors the README example
+        potential=So3lrPotential(model="so3lr-tauri-m-2606"),
         displacement_or_metric=displacement,
         box_size=box,
         species=atomic_numbers,

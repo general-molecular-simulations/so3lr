@@ -1,9 +1,8 @@
-from ase.units import *
 import functools
+from contextlib import closing
 import json
 from so3lr.mlff import nn
 from so3lr.mlff import training_utils
-from so3lr.mlff import evaluation_utils
 from so3lr.mlff import data
 from so3lr.mlff import jraph_utils
 from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_force_fn_sparse
@@ -18,9 +17,52 @@ import os
 import jax.numpy as jnp
 
 from ..utils import checkpoint_utils
-from ..utils.param_utils import print_param_shapes, count_params, count_trainable_params
+from ..utils.param_utils import (
+    count_params,
+    count_trainable_params,
+    print_param_shapes,
+    unmatched_param_keys,
+)
+from ...finetuning_strategies import resolve_finetuning_strategy
+from ...pbc import is_fully_periodic
+from .unit_parser import parse_unit_expression
+from .wandb_utils import initialize_wandb
 
 logger = logging.getLogger("SO3LR")
+
+
+def _publish_training_metadata(workdir, metadata):
+    """Publish prepared metadata only after the loop accepts its restart."""
+    for filename, content in metadata.items():
+        (workdir / filename).write_text(content)
+
+
+def _record_split_metadata(workdir, split_metadata, pending_metadata):
+    content = json.dumps(split_metadata)
+    if pending_metadata is None:
+        (workdir / 'data_splits.json').write_text(content)
+    else:
+        pending_metadata['data_splits.json'] = content
+
+
+def _validate_kspace_graph_pbc(graph):
+    """Check each graph before entering the jitted reciprocal-space model."""
+    pbc = graph.globals.get('pbc')
+    if pbc is not None:
+        flags = np.asarray(pbc, dtype=bool)
+        if flags.shape != (len(graph.n_node), 3):
+            raise ValueError('K-space training expects PBC flags of shape (num_graphs, 3).')
+        for graph_flags in flags:
+            is_fully_periodic(graph_flags, context='K-space training')
+
+
+def _graph_to_kspace_batch(graph, lr_batch, *, kspace_constants):
+    # Check every training and validation batch, not just the first structure
+    # used to choose a reciprocal grid. Later TFDS records can have other PBC.
+    _validate_kspace_graph_pbc(graph)
+    return jraph_utils.graph_to_batch_fn(
+        graph, lr_batch, kspace_constants=kspace_constants
+    )
 
 
 def _compute_kspace_constants(config, training_data, tf_record_present):
@@ -38,28 +80,35 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
 
     # Get a cell from the first periodic structure in training data.
     if tf_record_present:
-        # For TFDS, peek at the first batch to get the cell.
-        first_iter = training_data.next_epoch(split='train', mode='train')
-        for graph_batch, _ in first_iter:
-            cell = graph_batch.globals.get('cell')
-            if cell is not None:
-                # cell shape: (num_graphs, 3, 3) — take the first non-zero cell
-                for g in range(cell.shape[0]):
-                    c = cell[g]
-                    if np.any(c != 0):
-                        cell_3x3 = jnp.array(c)
-                        break
-                else:
-                    continue
-                break
-        else:
-            raise ValueError(
-                "kspace_electrostatics is enabled but no periodic cell found in training data."
-            )
+        # For TFDS, peek synchronously so a one-batch metadata read does not
+        # start the multiprocessing pipeline.
+        first_iter = training_data.next_epoch(
+            split='train', mode='train', parallel=False
+        )
+        # Also release the probe when invalid boundary flags raise an error.
+        with closing(first_iter):
+            for graph_batch, _ in first_iter:
+                _validate_kspace_graph_pbc(graph_batch)
+                cell = graph_batch.globals.get('cell')
+                if cell is not None:
+                    # cell shape: (num_graphs, 3, 3) — take the first non-zero cell
+                    for g in range(cell.shape[0]):
+                        c = cell[g]
+                        if np.any(c != 0):
+                            cell_3x3 = jnp.array(c)
+                            break
+                    else:
+                        continue
+                    break
+            else:
+                raise ValueError(
+                    "kspace_electrostatics is enabled but no periodic cell found in training data."
+                )
     else:
         # For ASE/Npz data, training_data is a list of (graph, lr_data) tuples.
         cell_3x3 = None
         for graph, _ in training_data:
+            _validate_kspace_graph_pbc(graph)
             cell = graph.globals.get('cell')
             if cell is not None and np.any(cell != 0):
                 # cell shape: (1, 3, 3) for a single graph
@@ -97,7 +146,7 @@ def _make_graph_to_batch_fn(config, training_data, tf_record_present):
     kspace_constants = _compute_kspace_constants(config, training_data, tf_record_present)
     if kspace_constants is not None:
         return functools.partial(
-            jraph_utils.graph_to_batch_fn,
+            _graph_to_kspace_batch,
             kspace_constants=kspace_constants,
         )
     return jraph_utils.graph_to_batch_fn
@@ -146,6 +195,8 @@ def make_so3krates_sparse_from_config(
         output_is_zero_at_init=model_config.output_is_zero_at_init,
         input_convention=model_config.input_convention,
         use_charge_embed=model_config.use_charge_embed,
+        charge_embed_total_charge=getattr(config, 'charge_embed_total_charge', None),
+        charge_equilibration_total_charge=getattr(config, 'charge_equilibration_total_charge', None),
         use_spin_embed=model_config.use_spin_embed,
         energy_regression_dim=model_config.energy_regression_dim,
         energy_final_mlp_widths=model_config.get('energy_final_mlp_widths', None),
@@ -170,6 +221,21 @@ def make_so3krates_sparse_from_config(
     )
 
 
+
+
+def _reduce_lr_kwargs(config):
+    """The loop's reduce-LR-on-plateau settings from config.training, with the
+    config defaults (fit()'s own defaults differ). make_optimizer_from_config
+    installs the knob these turn."""
+    t = config.training
+    return dict(
+        reduce_lr_on_plateau=t.get('reduce_lr_on_plateau', False),
+        reduce_lr_factor=t.get('reduce_lr_factor', 0.75),
+        reduce_lr_patience=t.get('reduce_lr_patience', 1000),
+        reduce_lr_min_scale=t.get('reduce_lr_min_scale', 0.0),
+        reduce_lr_min_delta=t.get('reduce_lr_min_delta', 1e-4),
+        reduce_lr_cooldown=t.get('reduce_lr_cooldown', 0),
+    )
 
 
 def make_optimizer_from_config(config: config_dict.ConfigDict = None):
@@ -211,6 +277,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     """
     workdir = workdir_from_config(config=config)
     workdir.mkdir(exist_ok=config.training.allow_restart)
+    pending_metadata = {}
 
     # Update the workdir in config with absolute path.
     config.workdir = str(workdir)
@@ -226,7 +293,8 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     training_data, validation_data, data_stats = prepare_training_and_validation_data(
         config=config,
         loader=loader,
-        tf_record_present=tf_record_present
+        tf_record_present=tf_record_present,
+        pending_metadata=pending_metadata,
     )
 
     # If messages are normalized by the average number of neighbors, we need to calculate this quantity from the
@@ -235,7 +303,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
         try:
             config.data.avg_num_neighbors
         except AttributeError:
-            logging.warning(
+            logger.warning(
                 'Passing a config without data.avg_num_neighbors is deprecated and will raise an error in the future.'
                 'Add data.avg_num_neighbors: null to the config to disable the warning. For now, we automatically set '
                 'data.avg_num_neighbors: null.'
@@ -368,17 +436,16 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     logger.info(f"  num_epochs:              {config.training.num_epochs}")
     logger.info("=" * 60)
 
-    with open(workdir / 'hyperparameters.json', 'w') as fp:
-        json.dump(config.to_dict(), fp)
+    pending_metadata['hyperparameters.json'] = json.dumps(config.to_dict())
+    pending_metadata['hyperparameters.yaml'] = yaml.dump(
+        config.to_dict(), default_flow_style=False
+    )
+    publish_metadata = functools.partial(
+        _publish_training_metadata, workdir, pending_metadata
+    )
 
-    with open(workdir / "hyperparameters.yaml", "w") as yaml_file:
-        yaml.dump(config.to_dict(), yaml_file, default_flow_style=False)
-
-    # Initialize wandb if needed.
-    use_wandb = config.training.use_wandb
-    if use_wandb is True:
-        import wandb
-        wandb.init(config=config.to_dict(), **config.training.wandb_init_args)
+    # Initialize wandb only if training.use_wandb is explicitly true.
+    use_wandb = initialize_wandb(config)
 
     # Adaptive robust loss settings
     adaptive_robust_loss_targets = list(config.training.loss_weights.keys()) if use_adaptive_robust_loss else None
@@ -402,6 +469,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             training_data=training_data,
             validation_data=validation_data,
             ckpt_dir=workdir / 'checkpoints',
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             num_epochs=config.training.num_epochs,
@@ -421,12 +489,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             early_stopping_patience=config.training.get('early_stopping_patience', None),
             early_stopping_min_delta=config.training.get('early_stopping_min_delta', 1e-4),
             # Reduce LR on plateau.
-            reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False),
-            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.75),
-            reduce_lr_patience=config.training.get('reduce_lr_patience', 1000),
-            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 0.0),
-            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 1e-4),
-            reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
+            **_reduce_lr_kwargs(config),
             # Two-stage loss reweighting.
             stage_two_start_epoch=stage_two_start_epoch,
             stage_two_loss_fn=stage_two_loss_fn,
@@ -446,6 +509,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             training_iterator=training_data,
             validation_iterator=validation_data,
             ckpt_dir=workdir / 'checkpoints',
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             training_seed=config.training.training_seed,
@@ -465,12 +529,7 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             early_stopping_patience=config.training.get('early_stopping_patience', None),
             early_stopping_min_delta=config.training.get('early_stopping_min_delta', 1e-4),
             # Reduce LR on plateau.
-            reduce_lr_on_plateau=config.training.get('reduce_lr_on_plateau', False),
-            reduce_lr_factor=config.training.get('reduce_lr_factor', 0.75),
-            reduce_lr_patience=config.training.get('reduce_lr_patience', 1000),
-            reduce_lr_min_scale=config.training.get('reduce_lr_min_scale', 0.0),
-            reduce_lr_min_delta=config.training.get('reduce_lr_min_delta', 1e-4),
-            reduce_lr_cooldown=config.training.get('reduce_lr_cooldown', 0),
+            **_reduce_lr_kwargs(config),
             # Two-stage loss reweighting.
             stage_two_start_epoch=stage_two_start_epoch,
             stage_two_loss_fn=stage_two_loss_fn,
@@ -479,229 +538,6 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
             dataset_info=training_data.dataset_info() if hasattr(training_data, 'dataset_info') else None,
         )
     logger.info('Training has finished!')
-
-
-def run_evaluation(
-        config,
-        model: str = 'so3krates',
-        num_test: int = None,
-        testing_targets: Sequence[str] = None,
-        pick_idx: np.ndarray = None,
-        on_split: str = None,
-        write_batch_metrics_to: str = None
-):
-    """Run evaluation, given the config and additional args.
-
-    Args:
-        config (): The config file.
-        model (): The model to evaluate. Defaults to SO3krates.
-        num_test (): Number of testing points. If not given, is determined from config using
-            num_test = num_data - num_train - num_valid. Note that still the whole data set is loaded. If one wants to
-            only load subparts of the data, one has to use pick_idx.
-        testing_targets (): Targets used for computing metrics. Defaults to the ones found in
-            config.training.loss_weights.
-        pick_idx (): Indices to evaluate the model on. Loads only the data at the given indices.
-        on_split (): On which split to evaluate (training, validation, test). Only needed for TFDS data set since it does not
-            support efficient loading from indices yet.
-        write_batch_metrics_to (str): Path to file where metrics per batch should be written to. If not given,
-            batch metrics are not written to a file. Note, that the metrics are written per batch, so one-to-one
-            correspondence to the original data set can only be achieved when `batch_max_num_nodes = 2` which allows
-            one graph per batch, following the `jraph` logic that one graph in used as padding graph.
-
-    Returns:
-        The metrics on `testing_targets`.
-    """
-    energy_unit = energy_unit_from_config(config=config)
-    length_unit = length_unit_from_config(config=config)
-    dipole_vec_unit = dipole_vec_unit_from_config(config=config)
-
-    data_filepath = config.data.filepath
-    data_filepath = Path(data_filepath).expanduser().resolve()
-
-    targets = testing_targets if testing_targets is not None else list(config.training.loss_weights.keys())
-
-    loader, tf_record_present = data_loader_from_config(
-        config=config
-    )
-
-    if not tf_record_present:
-        eval_data, data_stats = loader.load(
-            # We need to do the inverse transforms, since in config everything is in ASE default units.
-            cutoff=config.model.cutoff / length_unit,
-            cutoff_lr=config.data.neighbors_lr_cutoff / length_unit if config.data.neighbors_lr_bool is True else None,
-            calculate_neighbors_lr=config.data.neighbors_lr_bool,
-            pick_idx=pick_idx
-        )
-    else:
-        training_data, validation_data, test_data = loader.load(
-            cutoff=config.model.cutoff / length_unit,
-            num_train=config.training.num_train,
-            num_valid=config.training.num_valid,
-            cutoff_lr=config.data.neighbors_lr_cutoff / length_unit if config.data.neighbors_lr_bool is True else None,
-            calculate_neighbors_lr=config.data.neighbors_lr_bool,
-            num_test=num_test,
-            return_test=True,
-        )
-        assert on_split is not None
-        if on_split == 'training':
-            eval_data = training_data
-        elif on_split == 'validation':
-            eval_data = validation_data
-        elif on_split == 'test':
-            eval_data = test_data
-        elif on_split == 'full':
-            raise NotImplementedError(
-                'on_split=full is not supported for TFDS data set yet.'
-            )
-        else:
-            raise ValueError(
-                f'{on_split} is not a valid split string. Choose one of (training, validation, test, full).'
-            )
-
-    if not tf_record_present:
-        num_data = len(eval_data)
-    else:
-        num_data = len([1 for _ in eval_data.as_numpy_iterator()])
-
-    if num_test is not None:
-        if num_test > num_data:
-            raise RuntimeError(f'num_test = {num_test} > num_data = {num_data} in data set {data_filepath}.')
-
-        # We assume the tensorflow data set is already shuffled.
-        if not tf_record_present:
-            # Only shuffle when num_test is not None, since one is then evaluating on a subset of the data.
-            numpy_rng = np.random.RandomState(0)
-            numpy_rng.shuffle(eval_data)
-
-    if config.training.batch_max_num_nodes is None:
-        assert config.training.batch_max_num_edges is None
-
-        if tf_record_present:
-            raise ValueError(
-                'When reading TFDSDataSet, `max_num_nodes`, `max_num_edges` and `max_num_pairs` can not be auto- '
-                'determined. Please set the corresponding values in the config file via '
-                'training.batch_max_num_nodes and training.batch_max_num_edges.'
-            )
-
-        batch_max_num_nodes = data_stats['max_num_of_nodes'] * (config.training.batch_max_num_graphs - 1) + 1
-        batch_max_num_edges = data_stats['max_num_of_edges'] * (config.training.batch_max_num_graphs - 1) + 1
-
-        config.training.batch_max_num_nodes = batch_max_num_nodes
-        config.training.batch_max_num_edges = batch_max_num_edges
-
-    if config.training.batch_max_num_pairs is None:
-        if config.data.neighbors_lr_bool is True:
-            if tf_record_present:
-                raise ValueError(
-                    'When reading TFDSDataSet, `max_num_pairs` can not be auto- '
-                    'determined. Please set the corresponding values in the config file via '
-                    'training.batch_max_num_nodes and training.batch_max_num_edges.'
-                )
-
-            batch_max_num_pairs = data_stats['max_num_of_pairs'] * (config.training.batch_max_num_graphs - 1) + 1
-        else:
-            batch_max_num_pairs = 0
-
-        config.training.batch_max_num_pairs = batch_max_num_pairs
-
-    if not tf_record_present:
-        testing_data = data.transformations.subtract_atomic_energy_shifts(
-            data.transformations.unit_conversion(
-                eval_data[:num_test],
-                energy_unit=energy_unit,
-                length_unit=length_unit,
-                dipole_vec_unit=dipole_vec_unit
-            ),
-            atomic_energy_shifts={int(k): v for (k, v) in config.data.energy_shifts.items()}
-        )
-    else:
-        testing_data = eval_data.map(
-            lambda graph: data.transformations.unit_conversion_graph(
-                graph,
-                energy_unit=energy_unit,
-                length_unit=length_unit,
-                dipole_vec_unit=dipole_vec_unit
-            )
-        )
-
-    ckpt_dir = Path(config.workdir) / 'checkpoints'
-    ckpt_dir = ckpt_dir.expanduser().resolve()
-    logger.info(f'Restore parameters from {ckpt_dir} ...')
-
-    params = checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir)
-
-
-    print("\nParameter shapes:")
-
-    # Modify parameters to handle theory levels
-    if 'params' in params and 'observables_0' in params['params']:
-        num_theory_levels = 16
-
-        # Modify energy_offset
-        if 'energy_offset' in params['params']['observables_0']:
-            old_energy_offset = params['params']['observables_0']['energy_offset']
-
-            # Only tile if shape is 1D
-            if len(old_energy_offset.shape) == 1:
-                new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-                params['params']['observables_0']['energy_offset'] = new_energy_offset
-
-        # Modify atomic_scales
-        if 'atomic_scales' in params['params']['observables_0']:
-            old_atomic_scales = params['params']['observables_0']['atomic_scales']
-
-            # Only tile if shape is 1D
-            if len(old_atomic_scales.shape) == 1:
-                new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-                params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-
-        # Modify energy_dense_final
-        if 'energy_dense_final' in params['params']['observables_0']:
-            old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-
-            # Check the shape to determine if tiling is needed
-            if old_kernel.shape[1] == 1:
-                new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-                params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-
-            # Tile the optional final bias too (use_final_bias_bool=True base models, e.g.
-            # the single-level SO3LR base / v1). Mirrors potential.py so finetuning a
-            # 1-level model into num_theory_levels works; bias-free models (so3lr-s/m/l)
-            # have no 'bias' key and are left untouched.
-            old_bias = params['params']['observables_0']['energy_dense_final'].get('bias')
-            if old_bias is not None and old_bias.shape[-1] == 1:
-                new_bias = jnp.tile(old_bias, (num_theory_levels,))
-                params['params']['observables_0']['energy_dense_final']['bias'] = new_bias
-
-    print("=" * 50)
-    print_param_shapes(params)
-    print("=" * 50)
-
-    total_params = count_params(params)
-    print(f"\nTotal number of parameters: {total_params:,}")
-
-    logger.info(f'... done.')
-
-    if model == 'so3krates':
-        net = make_so3krates_sparse_from_config(config)
-    else:
-        raise ValueError(
-            f'{model=} is not a valid model.'
-        )
-    logger.info(f'Evaluate on {data_filepath} for targets {targets}.')
-
-    return evaluation_utils.evaluate(
-        model=net,
-        params=params,
-        graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
-        testing_data=testing_data,
-        testing_targets=targets,
-        batch_max_num_nodes=config.training.batch_max_num_nodes,
-        batch_max_num_edges=config.training.batch_max_num_edges,
-        batch_max_num_graphs=config.training.batch_max_num_graphs,
-        batch_max_num_pairs=config.training.batch_max_num_pairs,
-        write_batch_metrics_to=write_batch_metrics_to
-    )
 
 
 def run_fine_tuning(
@@ -734,108 +570,58 @@ def run_fine_tuning(
         )
     
     # Load the config in the workdir to obtain the model hyperparameters and other important statistics.
+    # Read once: this object also supplies `config.model` below and is what the
+    # network is built from, so a second read later would shadow it with a
+    # different (but equal) ConfigDict and silently split the two.
     hyperparams_path = start_from_workdir / 'hyperparameters.json'
     with open(hyperparams_path, mode='r') as fp:
         config_start_from_workdir = config_dict.ConfigDict(json.load(fp=fp))
 
-    # Select a fine-tuning strategy.
+    # The net is built from `config_start_from_workdir` (see below), so forcing
+    # 'sparse' on `config` alone was dead: a checkpoint saved with
+    # `neighborlist_format_lr: ordered_sparse` would have been rebuilt with
+    # ordered_sparse long-range indexing while the data loader emits plain
+    # sparse pairs -- and the finetune workdir would then advertise 'sparse' in
+    # its own hyperparameters.json. Override the value the model is actually
+    # built with, and add the key when the source config predates it.
+    if config_start_from_workdir.get('neighborlist_format_lr', None) != 'sparse':
+        with config_start_from_workdir.unlocked():
+            config_start_from_workdir.neighborlist_format_lr = 'sparse'
+
+    # Select a fine-tuning strategy. The name -> keys table lives in
+    # so3lr.finetuning_strategies so that the CLI's --strategy choices and this
+    # dispatch cannot drift apart (they had: `freeze_all_but_final_mlp` was
+    # implemented here but rejected by click, and `final_mlp_and_hirshfeld` was
+    # missing from the unknown-strategy message).
+    #
     # trainable_subset_keys: whitelist (train only these). frozen_subset_keys:
     # blacklist (freeze only these, train the rest). At most one is set.
-    frozen_subset_keys = None
-    if strategy == 'full':
-        # All parameters are re-fined.
-        trainable_subset_keys = None
-    elif strategy in ('freeze_long_range', 'forces_only'):
-        # Forces-only fine-tuning: train the short-range representation + energy
-        # head, but FREEZE the long-range heads (dipole/partial-charges,
-        # a0/hirshfeld, c6) so the (unlabelled) electrostatics and dispersion
-        # keep their physically-meaningful pretrained predictions.
-        trainable_subset_keys = None
-        frozen_subset_keys = ['observables_1', 'observables_2', 'observables_3']
-    elif strategy == 'obs_0':
-        # Only the final MLP is refined
-        trainable_subset_keys = ['observables_0']
-    elif strategy in ('final_mlp', 'freeze_all_but_final_mlp'):
-        # Freeze EVERYTHING (the SO3krates backbone and the partial-charge /
-        # Hirshfeld / C6 heads) and refine ONLY the per-atom energy readout MLP:
-        # the regression layer, any deeper 'energy_dense_hidden_*' layers, and the
-        # final projection, plus the atomic scales/offsets. This keeps the
-        # physically-meaningful charge & ratio predictions untouched.
-        # ('energy_dense*' is a prefix match — see _path_matches_key.)
-        trainable_subset_keys = [
-            'observables_0/atomic_scales',
-            'observables_0/energy_dense*',
-            'observables_0/energy_offset'
-        ]
-    elif strategy == 'll_fmlp':
-        # Last MP layer + the full energy readout MLP (incl. deeper head layers).
-        trainable_subset_keys = [
-            f'layers_{config.model.num_layers - 1}',
-            'observables_0/atomic_scales',
-            'observables_0/energy_dense*',
-            'observables_0/energy_offset'
-        ]
-    elif strategy == 'final_mlp_and_hirshfeld':
-        # Only the final MLP and the Hirshfeld are refined
-        trainable_subset_keys = ['observables_0', 'observables_2']
-    elif strategy == 'obs_023':
-        # Only the final MLP and the Hirshfeld are refined
-        trainable_subset_keys = ['observables_0', 'observables_2', 'observables_3']
-    elif strategy == 'obs_23':
-        # Only the final MLP and the Hirshfeld are refined
-        trainable_subset_keys = ['observables_2', 'observables_3']
-    elif strategy == 'hirshfeld':
-        # Only the Hirshfeld is refined
-        trainable_subset_keys = ['observables_2']
-    elif strategy == 'obs_3':
-        # Only the C6 ratios are refined
-        trainable_subset_keys = ['observables_3']
-    elif strategy == 'last_layer':
-        # Only the last MP layer is refined.
-        trainable_subset_keys = [f'layers_{config.model.num_layers - 1}']
-    elif strategy == 'last_layer_and_final_mlp':
-        # Only the last layer and the final MLP are refined.
-        trainable_subset_keys = [f'layers_{config.model.num_layers - 1}', 'observables_0']
-    #elif strategy == 'last_layer_and_final_mlp023':
-    elif strategy == 'll_obs_023':
-        # Only the last layer and the final MLP are refined.
-        trainable_subset_keys = [f'layers_{config.model.num_layers - 1}', 'observables_0', 'observables_2', 'observables_3']
-    elif strategy == 'first_layer':
-        # Only the first layer is refined.
-        trainable_subset_keys = ['layers_0']
-    elif strategy == 'first_layer_and_last_layer':
-        # Only the first and layer MP layer are refined.
-        trainable_subset_keys = ['layers_0', f'layers_{config.model.num_layers - 1}']
-    else:
-        raise ValueError(
-            f'--strategy {strategy} is unknown. Select one of '
-            f'(`full`, '
-            f'`freeze_long_range` (alias `forces_only`), '
-            f'`final_mlp`, '
-            f'`last_layer`, '
-            f'`last_layer_and_final_mlp`, '
-            f'`first_layer`, '
-            f'`first_layer_and_last_layer`, '
-            f'`obs_0`, '
-            f'`obs_023`, '
-            f'`obs_23`, '
-            f'`obs_3`, '
-            f'`hirshfeld`, '
-            f'`ll_fmlp`, '
-            f'`ll_obs_023`)'
-        )
-    
+    #
+    # `num_layers` must come from the checkpoint, not from the user's finetune
+    # config: the last-layer strategies index the module by name, and an
+    # off-by-one selects a `layers_N` that does not exist.
+    trainable_subset_keys, frozen_subset_keys = resolve_finetuning_strategy(
+        strategy,
+        num_layers=config_start_from_workdir.model.num_layers
+    )
+
     # Finalize the config for IO.
     # The fine-tuned model's architecture is fully determined by the
     # checkpoint we are starting from, so any `model:` block in the user's
     # finetune YAML cannot actually take effect — the saved hyperparameters
     # are authoritative. Previously this assignment was silent; now warn
     # loudly so users notice that their model: overrides are being dropped.
+    #
+    # Capture the values the checkpoint is about to overwrite FIRST: the
+    # consistency checks below have to compare the user's request against the
+    # checkpoint. Running them after the assignment compared the checkpoint
+    # against itself, so the message-normalization guard could never fire and
+    # the avg_num_neighbors warning fired on every single run.
+    user_message_normalization = None
+    user_avg_num_neighbors = config.data.get('avg_num_neighbors', None)
     if 'model' in config and config.model is not None:
-        try:
-            user_model_keys = sorted(config.model.keys())
-        except Exception:
-            user_model_keys = []
+        user_model_keys = sorted(config.model.keys())
+        user_message_normalization = config.model.get('message_normalization', None)
         if user_model_keys:
             logger.warning(
                 'Ignoring user-supplied `model:` block in finetune config; '
@@ -844,80 +630,124 @@ def run_fine_tuning(
                 start_from_workdir,
                 user_model_keys,
             )
+
+    # Check that message normalization has not changed from the original model
+    # to the fine-tuning model. Fails before any data is loaded.
+    message_normalization = config_start_from_workdir.model.message_normalization
+    if (user_message_normalization is not None
+            and user_message_normalization != message_normalization):
+        raise ValueError(
+            f'Message normalization must be the same. '
+            f'Found {message_normalization} for the original config '
+            f'and {user_message_normalization} for the fine tuning config.'
+        )
+
     config.model = config_start_from_workdir.model
+
     # For average number of neighbors message normalization, we have to overwrite the average
     # number of neighbors in case a finetuned model will serve as starting point for another finetuning run.
     # Otherwise the second finetuned model, will use the average number of neighbors from the first finetuning run, 
     # not corresponding to the trained message normalization.
-    if config_start_from_workdir.model.message_normalization == 'avg_num_neighbors':
+    if message_normalization == 'avg_num_neighbors':
+        if user_avg_num_neighbors is not None:
+            logger.warning(
+                'Running fine tuning with config.model.message_normalization: avg_num_neighbors does not allow to '
+                'reset the avg_num_neighbors in the fine tuning config and must be set to null. It will be loaded from '
+                'the config in the workdir that is starting point for the fine tuning.'
+            )
+
         config.data.avg_num_neighbors = config_start_from_workdir.data.avg_num_neighbors
+        logger.info(
+            f'Read average number of neighbors = {config.data.avg_num_neighbors} from original config at '
+            f'{start_from_workdir}.'
+        )
 
     # Workdir for fine-tuning experiments.
     workdir = workdir_from_config(config=config)
     workdir.mkdir(exist_ok=True)
+    pending_metadata = {}
 
     # Update the workdir in config with absolute path.
     config.workdir = str(workdir)
 
-    # Save fine-tuning hyper-parameters.
-    with open(workdir / 'fine_tuning.json', mode='w') as fp:
-        json.dump(
-            {
-                'start_from_workdir': start_from_workdir.as_posix(),
-                'strategy': strategy
-            },
-            fp=fp
+    pending_metadata['fine_tuning.json'] = json.dumps({
+        'start_from_workdir': start_from_workdir.as_posix(),
+        'strategy': strategy,
+    })
+
+    # Robust loss configuration. Read before the parameters are counted: the
+    # adaptive variant adds learnable parameters to the tree and has to be part
+    # of the trainable selection.
+    use_robust_loss = config.training.get('use_robust_loss', False)
+    robust_loss_alpha = config.training.get('robust_loss_alpha', 1.0)
+    use_adaptive_robust_loss = config.training.get('use_adaptive_robust_loss', False)
+
+    # Validate: can't use both fixed and adaptive robust loss
+    if use_robust_loss and use_adaptive_robust_loss:
+        raise ValueError(
+            "Cannot use both 'use_robust_loss' (fixed) and 'use_adaptive_robust_loss' (learned). "
+            "Please enable only one."
         )
+
+    adaptive_robust_loss_targets = list(config.training.loss_weights.keys()) if use_adaptive_robust_loss else None
+    adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)
+    adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
 
     # Load the parameters from the model for fine-tuning.
     params = checkpoint_utils.load_params_from_workdir(start_from_workdir)
 
-    # Modify parameters to handle theory levels
-    if 'params' in params and 'observables_0' in params['params']:
-        num_theory_levels = 16 
+    # Expand a single-theory-level checkpoint to the multi-head energy readout.
+    # Shared with fit()/fit_from_iterator() so the three call sites cannot drift.
+    params = training_utils.expand_observables_to_theory_levels(params)
 
-        # Modify energy_offset
-        if 'energy_offset' in params['params']['observables_0']:
-            old_energy_offset = params['params']['observables_0']['energy_offset']
+    # A selection key that matches nothing is never intentional. As a whitelist
+    # it contributes no trainable parameters -- and if NO key matches, every
+    # parameter is frozen, so training runs to completion, writes checkpoints
+    # and exits 0 without having updated anything. Fail instead.
+    selection_keys = trainable_subset_keys if trainable_subset_keys is not None else frozen_subset_keys
+    if selection_keys:
+        available_modules = sorted(params.get('params', params).keys())
+        unmatched = unmatched_param_keys(params, selection_keys)
+        if unmatched:
+            logger.warning(
+                'Fine-tuning strategy %r selects %s, which match no parameter in the '
+                'checkpoint at %s. Available top-level modules: %s.',
+                strategy, unmatched, start_from_workdir, available_modules
+            )
+        if trainable_subset_keys is not None and len(unmatched) == len(trainable_subset_keys):
+            raise ValueError(
+                f'Fine-tuning strategy {strategy!r} would freeze every parameter: none of '
+                f'{list(trainable_subset_keys)} match a parameter in the checkpoint at '
+                f'{start_from_workdir}, so training would run to completion without '
+                f'updating anything. Available top-level modules: {available_modules}.'
+            )
 
-            # Only tile if shape is 1D
-            if len(old_energy_offset.shape) == 1:
-                new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
-                params['params']['observables_0']['energy_offset'] = new_energy_offset
-
-        # Modify atomic_scales
-        if 'atomic_scales' in params['params']['observables_0']:
-            old_atomic_scales = params['params']['observables_0']['atomic_scales']
-
-            # Only tile if shape is 1D
-            if len(old_atomic_scales.shape) == 1:
-                new_atomic_scales = jnp.tile(old_atomic_scales[:, None], (1, num_theory_levels))
-                params['params']['observables_0']['atomic_scales'] = new_atomic_scales
-
-        # Modify energy_dense_final
-        if 'energy_dense_final' in params['params']['observables_0']:
-            old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
-
-            # Check the shape to determine if tiling is needed
-            if old_kernel.shape[1] == 1:
-                new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
-                params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-
-            # Tile the optional final bias too (use_final_bias_bool=True base models, e.g.
-            # the single-level SO3LR base / v1). Mirrors potential.py so finetuning a
-            # 1-level model into num_theory_levels works; bias-free models (so3lr-s/m/l)
-            # have no 'bias' key and are left untouched.
-            old_bias = params['params']['observables_0']['energy_dense_final'].get('bias')
-            if old_bias is not None and old_bias.shape[-1] == 1:
-                new_bias = jnp.tile(old_bias, (num_theory_levels,))
-                params['params']['observables_0']['energy_dense_final']['bias'] = new_bias
+    if use_adaptive_robust_loss:
+        # fit()/fit_from_iterator() only create these when they initialize a
+        # fresh model, which fine-tuning never does -- so without this the
+        # feature silently did nothing (or reused the pretraining run's alphas
+        # under the new target ordering).
+        params = training_utils.ensure_adaptive_robust_loss_params(
+            params,
+            targets=adaptive_robust_loss_targets,
+            init_alpha=adaptive_robust_loss_init_alpha,
+            init_scale=adaptive_robust_loss_init_scale
+        )
+        if trainable_subset_keys is not None:
+            # A whitelist strategy would otherwise freeze the learnable
+            # alpha/scale, leaving 'adaptive' robust loss fixed at its init.
+            trainable_subset_keys = list(trainable_subset_keys) + ['adaptive_robust_loss']
 
     print("=" * 50)
     print_param_shapes(params)
     print("=" * 50)
 
     total_params = count_params(params)
-    trainable_params = count_trainable_params(params, trainable_subset_keys)
+    trainable_params = count_trainable_params(
+        params,
+        trainable_keys=trainable_subset_keys,
+        frozen_keys=frozen_subset_keys
+    )
 
     print(f"\nTotal number of parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
@@ -934,44 +764,16 @@ def run_fine_tuning(
     data_filepath = data_path_from_config(config=config)
 
     # Create a loader and check if tf records are present.
-    loader, tf_record_present = data_loader_from_config(
-        config=config
-    )
+    loader, tf_record_present = data_loader_from_config(config=config)
 
     # Prepare training and validation data and load the data set statistics.
     training_data, validation_data, data_stats = prepare_training_and_validation_data(
         config=config,
         model_config=None,
         loader=loader,
-        tf_record_present=tf_record_present
+        tf_record_present=tf_record_present,
+        pending_metadata=pending_metadata,
     )
-
-    # Check that message normalization has not change from original model to fine-tuning model.
-    hyperparams_path = start_from_workdir / 'hyperparameters.json'
-    with open(hyperparams_path, mode='r') as fp:
-        config_start_from_workdir = config_dict.ConfigDict(json.load(fp=fp))
-
-    if config_start_from_workdir.model.message_normalization != config.model.message_normalization:
-        raise ValueError(
-            f'Message normalization must be the same. '
-            f'Found {config_start_from_workdir.model.message_normalization} for the original config '
-            f'and {config.model.message_normalization} for the fine tuning config.'
-        )
-
-    # If messages are normalized by the average number of neighbors, we need to load it from the old config file.
-    if config.model.message_normalization == 'avg_num_neighbors':
-        if config.data.avg_num_neighbors is not None:
-            logging.warning(
-                'Running fine tuning with config.model.message_normalization: avg_num_neighbors does not allow to '
-                'reset the avg_num_neighbors in the fine tuning config and must be set to null. It will be loaded from '
-                'the config in the workdir that is starting point for the fine tuning.'
-            )
-
-        config.data.avg_num_neighbors = config_start_from_workdir.data.avg_num_neighbors
-        logger.info(
-            f'Read average number of neighbors = {config.data.avg_num_neighbors} from original config at '
-            f'{start_from_workdir}.'
-        )
 
     opt = make_optimizer_from_config(config)
 
@@ -993,18 +795,6 @@ def run_fine_tuning(
     else:
         raise ValueError(
             f'{model=} is not a valid model.'
-        )
-
-    # Robust loss configuration
-    use_robust_loss = config.training.get('use_robust_loss', False)
-    robust_loss_alpha = config.training.get('robust_loss_alpha', 1.0)
-    use_adaptive_robust_loss = config.training.get('use_adaptive_robust_loss', False)
-
-    # Validate: can't use both fixed and adaptive robust loss
-    if use_robust_loss and use_adaptive_robust_loss:
-        raise ValueError(
-            "Cannot use both 'use_robust_loss' (fixed) and 'use_adaptive_robust_loss' (learned). "
-            "Please enable only one."
         )
 
     loss_fn = training_utils.make_loss_fn(
@@ -1077,26 +867,20 @@ def run_fine_tuning(
     logger.info(f"  num_epochs:              {config.training.num_epochs}")
     logger.info("=" * 60)
 
-    with open(workdir / 'hyperparameters.json', 'w') as fp:
-        json.dump(config.to_dict(), fp)
+    pending_metadata['hyperparameters.json'] = json.dumps(config.to_dict())
+    pending_metadata['hyperparameters.yaml'] = yaml.dump(
+        config.to_dict(), default_flow_style=False
+    )
+    publish_metadata = functools.partial(
+        _publish_training_metadata, workdir, pending_metadata
+    )
 
-    with open(workdir / "hyperparameters.yaml", "w") as yaml_file:
-        yaml.dump(config.to_dict(), yaml_file, default_flow_style=False)
-
-    # Initialize wandb if needed.
-    use_wandb = config.training.use_wandb
-    if use_wandb is True:
-        import wandb
-        wandb.init(config=config.to_dict(), **config.training.wandb_init_args)
+    # Initialize wandb only if training.use_wandb is explicitly true.
+    use_wandb = initialize_wandb(config)
 
     logger.info(
         f'Fine tuning model from {start_from_workdir} on {data_filepath}!'
     )
-
-    # Adaptive robust loss settings for fine-tuning
-    adaptive_robust_loss_targets = list(config.training.loss_weights.keys()) if use_adaptive_robust_loss else None
-    adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)
-    adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
 
     ckpt_dir = workdir / 'checkpoints'
     if Path(ckpt_dir).exists() and not config.training.allow_restart:
@@ -1123,6 +907,7 @@ def run_fine_tuning(
             validation_iterator=validation_data,
             params=params,
             ckpt_dir=ckpt_dir,
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             training_seed=config.training.training_seed,
@@ -1137,6 +922,7 @@ def run_fine_tuning(
             adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale,
             # Dataset info for effective epoch tracking
             dataset_info=training_data.dataset_info() if hasattr(training_data, 'dataset_info') else None,
+            **_reduce_lr_kwargs(config),
         )
     else:
         training_utils.fit(
@@ -1153,6 +939,7 @@ def run_fine_tuning(
             validation_data=validation_data,
             params=params,
             ckpt_dir=ckpt_dir, #TODO: or ckpt_dir=workdir / 'checkpoints',?
+            on_training_ready=publish_metadata,
             eval_every_num_steps=config.training.eval_every_num_steps,
             allow_restart=config.training.allow_restart,
             num_epochs=config.training.num_epochs,
@@ -1164,7 +951,8 @@ def run_fine_tuning(
             use_adaptive_robust_loss=use_adaptive_robust_loss,
             adaptive_robust_loss_targets=adaptive_robust_loss_targets,
             adaptive_robust_loss_init_alpha=adaptive_robust_loss_init_alpha,
-            adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale
+            adaptive_robust_loss_init_scale=adaptive_robust_loss_init_scale,
+            **_reduce_lr_kwargs(config),
         )
     logger.info('Training has finished!')
 
@@ -1196,7 +984,8 @@ def data_loader_from_config(config):
                 "config.data.datasets (multi-dataset training) is only supported by the TFDS "
                 "dataloader, but no .tfrecord shards were found in one or more of: "
                 f"{[str(p) for p in dataset_paths]}. Either convert each dataset to TFDS shards "
-                "(see README), or use a single dataset via config.data.filepath."
+                "(see https://so3lr.github.io/training/from-scratch/), or use a single dataset via "
+                "config.data.filepath."
             )
     else:
         # Single dataset case (original functionality)
@@ -1204,6 +993,7 @@ def data_loader_from_config(config):
 
     energy_unit = energy_unit_from_config(config=config)
     length_unit = length_unit_from_config(config=config)
+    dipole_vec_unit = dipole_vec_unit_from_config(config=config)
 
     if tf_record_present:
         loader = data.QCMLDataLoaderSparseParallel(
@@ -1211,7 +1001,8 @@ def data_loader_from_config(config):
             input_folders=dataset_paths,
             dataset_weights=dataset_weights,
             length_unit=length_unit,
-            energy_unit=energy_unit
+            energy_unit=energy_unit,
+            dipole_vec_unit=dipole_vec_unit,
         )
     else:
         # config.data.filter.min_distance / max_force are honoured only by the TFDS loader.
@@ -1248,7 +1039,9 @@ def data_loader_from_config(config):
     return loader, tf_record_present
 
 
-def prepare_training_and_validation_data(config, loader, tf_record_present, model_config: Optional = None):
+def prepare_training_and_validation_data(config, loader, tf_record_present,
+                                         model_config: Optional = None,
+                                         pending_metadata=None):
     # Lock the config.
     config = config.lock()
     # If model config is not None, lock it. Otherwise, use model config from the config. 
@@ -1272,22 +1065,15 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
     else:
         dataset_weights = [1.0]  # Default weight for single dataset
 
-    num_train = config.training.num_train
-    num_valid = config.training.num_valid
-
-    # Get the total number of data points.
     if not tf_record_present:
+        num_train = config.training.num_train
+        num_valid = config.training.num_valid
         num_data = loader.cardinality()
-    else:
-        num_data = loader.cardinality()
-        print(f"Number of points in train tfds split: {num_data}")
-
-    if num_train + num_valid > num_data:
-        raise ValueError(
-            f"num_train + num_valid = {num_train + num_valid} exceeds the number of data points {num_data}"
-            f" in {data_filepaths}."
-        )
-    if not tf_record_present:
+        if num_train + num_valid > num_data:
+            raise ValueError(
+                f"num_train + num_valid = {num_train + num_valid} exceeds the number of data points {num_data}"
+                f" in {data_filepaths}."
+            )
         split_seed = config.data.split_seed
         numpy_rng = np.random.RandomState(split_seed)
 
@@ -1330,14 +1116,16 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
         validation_indices = training_and_validation_indices[internal_validation_indices]
         assert len(train_indices) == num_train
         assert len(validation_indices) == num_valid
-        with open(workdir / 'data_splits.json', 'w') as fp:
-            j = dict(
-                training=train_indices.tolist(),
-                validation=validation_indices.tolist(),
-                test=test_indices.tolist()
-            )
-            json.dump(j, fp)
+        _record_split_metadata(workdir, dict(
+            training=train_indices.tolist(),
+            validation=validation_indices.tolist(),
+            test=test_indices.tolist(),
+        ), pending_metadata)
     else:
+        # Prepared TFDS datasets already contain train/validation splits and
+        # use their per-dataset caps. Global counts belong to the ASE/NPZ
+        # random split; they may be null (fine-tuning defaults), or unrelated
+        # to the selected TFDS records.
         # For parallel data loading, we need to ensure batch parameters are set
         if config.training.batch_max_num_nodes is None or config.training.batch_max_num_edges is None:
             raise ValueError(
@@ -1369,13 +1157,9 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
 
         data_stats = None
         # Save the splits.
-        with open(workdir / 'data_splits.json', 'w') as fp:
-            j = dict(
-                training='tfds',
-                validation='tfds',
-                test='tfds',
-            )
-            json.dump(j, fp)
+        _record_split_metadata(workdir, dict(
+            training='tfds', validation='tfds', test='tfds',
+        ), pending_metadata)
 
     # Explicitly unlock the config.
     config = config.unlock()
@@ -1432,7 +1216,9 @@ def prepare_training_and_validation_data(config, loader, tf_record_present, mode
             raise NotImplementedError(
                 'For TFDSDataSets, energy shifting is not supported yet.'
             )
-        # TODO: Handle unit conversion inside the dataloader
+        # Unit conversion is performed by the TFDS loader before filters and
+        # neighbor construction.  Applying it here would convert every batch a
+        # second time.
             
 
     return training_data, validation_data, data_stats
@@ -1465,60 +1251,16 @@ def data_path_from_config(config):
 
 
 def dipole_vec_unit_from_config(config):
-    dipole_vec_unit = config.data.dipole_vec_unit
+    return parse_unit_expression(config.data.dipole_vec_unit, 'data.dipole_vec_unit')
 
-    # We need to define elementary charge, as it is not defined in ase.units.
-    e = 1.
-
-    try:
-        return eval(dipole_vec_unit)
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {dipole_vec_unit!r} for data.dipole_vec_unit. "
-            f"Use ASE.units expressions like 'e * Angstrom' or 'Debye' "
-            f"(note the spaces around operators)."
-        ) from exc
-
-
-def charge_unit_from_config(config):
-    electric_charge_unit = config.data.electric_charge_unit
-
-    # We need to define elementary charge, as it is not defined in ase.units.
-    e = 1.
-
-    try:
-        return eval(electric_charge_unit)
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {electric_charge_unit!r} for data.electric_charge_unit. "
-            f"Use ASE.units expressions like 'e' or '1.0' "
-            f"(note the spaces around operators)."
-        ) from exc
 
 def energy_unit_from_config(config):
-    energy_unit_str = config.data.energy_unit
-    try:
-        energy_unit = eval(energy_unit_str)
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {energy_unit_str!r} for data.energy_unit. "
-            f"Use ASE.units expressions like 'kcal / mol' or 'eV' "
-            f"(note the spaces around operators)."
-        ) from exc
-    return energy_unit
+    return parse_unit_expression(config.data.energy_unit, 'data.energy_unit')
 
 
 def length_unit_from_config(config):
-    length_unit_str = config.data.length_unit
-    try:
-        length_unit = eval(length_unit_str)
-    except Exception as exc:
-        raise ValueError(
-            f"Could not parse unit string {length_unit_str!r} for data.length_unit. "
-            f"Use ASE.units expressions like 'Angstrom' or 'Bohr' "
-            f"(note the spaces around operators)."
-        ) from exc
-    return length_unit
+    return parse_unit_expression(config.data.length_unit, 'data.length_unit')
+
 
 def check_config(config):
     neighbors_lr_cutoff = config.data.neighbors_lr_cutoff

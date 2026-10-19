@@ -7,7 +7,7 @@
 #   model.electrostatic_energy_bool: true
 #   model.dispersion_energy_bool: true
 #   model.zbl_repulsion_bool: true      # already true by default
-# See README "Training from Scratch" for details.
+# See https://so3lr.github.io/training/from-scratch/ for details.
 # =============================================================================
 workdir: first_experiment  # Output directory for checkpoints and hyperparameters.
 data:
@@ -32,8 +32,8 @@ data:
   neighbors_lr_cutoff: null  # Cutoff distance in Angstrom for long-range neighbor list construction during data loading. Independent from the model's cutoff_lr.
   avg_num_neighbors: null  # Average number of (short-range) neighbors per atom. Auto-computed from data if null. Only needed when message_normalization is avg_num_neighbors.
   filter:
-    min_distance: 0.75  # Structures with any pairwise distance below this value (in Angstrom) are removed from the dataset.
-    max_force: 25.  # Structures with any force component above this value (in eV/Angstrom) are removed from the dataset.
+    min_distance: 0.5  # Remove structures whose closest distinct-atom distance is smaller (Angstrom); TFDS uses the minimum image on configured PBC axes.
+    max_force: 25.  # Remove structures with non-finite forces or any absolute force component above this value (eV/Angstrom).
 model:
   num_layers: 2  # Number of SO3krates message passing layers.
   num_features: 128  # Dimension of the invariant feature vectors.
@@ -45,11 +45,11 @@ model:
     - 3
     - 4
   cutoff: 5.0  # Short-range cutoff in Angstrom. Defines the local neighborhood for message passing.
-  cutoff_fn: phys  # Cutoff function applied to short-range edges. Options: phys, cosine, polynomial, exponential.
+  cutoff_fn: phys  # Cutoff function applied to short-range edges. Options: phys, cosine, exponential.
   cutoff_lr: null  # Long-range cutoff in Angstrom for electrostatic and dispersion modules. Set to null to disable long-range truncation.
   cutoff_lr_damping: 2.0  # Damping width in Angstrom for the long-range cutoff function. Controls how smoothly interactions decay near cutoff_lr.
   num_radial_basis_fn: 32  # Number of radial basis functions for encoding interatomic distances.
-  radial_basis_fn: bernstein  # Type of radial basis functions. Options: physnet, bernstein, bessel (resolved via e3x.nn).
+  radial_basis_fn: bernstein  # Type of radial basis functions. Options: bernstein, physnet, gaussian, fourier.
   activation_fn: silu  # Activation function for MLPs in the message passing layers. Options: silu, gelu, swish, etc. (resolved via jax.nn).
   qk_non_linearity: identity  # Non-linearity applied to query and key vectors before computing attention weights. Options: identity (none), silu, etc.
   residual_mlp_1: true  # Apply a residual MLP to invariant features after the attention update within each layer.
@@ -140,8 +140,8 @@ training:
   model_seed: 42  # Random seed for model parameter initialization.
   training_seed: 42  # Random seed for shuffling training batches each epoch.
   log_gradient_values: false  # Log the L2 norm of gradients for each parameter group to WandB. Useful for debugging training dynamics.
-  use_wandb: true  # Enable Weights & Biases logging for training metrics and validation results.
-  wandb_init_args:  # Keyword arguments passed to wandb.init(). The full config dict is also passed as the wandb config.
+  use_wandb: false  # Opt in to sending metrics and the effective config to Weights & Biases (requires `pip install .[wandb]`). No W&B calls are made while false/absent.
+  wandb_init_args:  # Keyword arguments passed to wandb.init() only when use_wandb is true. Put credentials in the W&B environment/login, never in this file.
     name: first_experiment  # Name of this run in the WandB dashboard.
     project: mlff  # WandB project name.
     group: null  # Optional group name for organizing related runs.

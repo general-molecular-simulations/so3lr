@@ -34,7 +34,8 @@ KNOWN_SLOW_TEST_DURATIONS = {
     'tests/test_integration.py::test_integration_case[nve_ensemble]': 29.0,
     'tests/test_integration.py::test_integration_case[nvt_ensemble]': 28.0,
     'tests/test_integration.py::test_integration_case[nvt_langevin]': 28.0,
-    'tests/test_integration.py::TestSO3LRCLIOptions::test_nvt_with_relax': 49.0,
+    'tests/test_integration.py::TestSO3LRCLIOptions::test_nvt_with_relax[trajectory.hdf5]': 49.0,
+    'tests/test_integration.py::TestSO3LRCLIOptions::test_nvt_with_relax[trajectory.xyz]': 49.0,
     'tests/test_integration.py::TestSO3LRCLIOptions::test_nvt_xyz_output': 28.0,
     'tests/test_integration.py::TestSO3LRCLIOptions::test_eval_with_targets': 15.0,
     'tests/test_integration.py::TestSO3LRCLISubcommands::test_opt_subcommand': 30.0,
@@ -42,12 +43,20 @@ KNOWN_SLOW_TEST_DURATIONS = {
     'tests/test_integration.py::TestSO3LRCLISubcommands::test_nve_subcommand': 26.0,
     'tests/test_integration.py::TestSO3LRCLISubcommands::test_eval_subcommand': 16.0,
     # other suites
+    # CLI subprocess runs: each spawns a real `so3lr nvt`, so they dominate the
+    # charge-embed file. Measured locally 2026-08-19.
+    'tests/test_charge_embed_override.py::TestChargeEmbedOverrideCLI::test_settings_yaml_route': 20.0,
+    'tests/test_charge_embed_override.py::TestChargeEmbedOverrideCLI::test_command_line_flag_matches_settings_yaml': 10.0,
+    'tests/test_charge_embed_override.py::TestChargeEmbedOverrideCLI::test_command_line_flag_changes_the_run': 10.0,
     'tests/mlff_tests/test_data_loader_ase.py::test_data_load_with_pbc[True]': 198.23,
     'tests/test_cli_train.py::test_cli_train_water_pbc_with_long_range': 112.14,
     'tests/test_cli_train.py::test_cli_train_forces_and_energy_with_lse_shifts': 91.94,
     'tests/test_cli_train.py::test_cli_train_water_pbc_forces_only': 91.76,
     'tests/test_cli_train.py::test_cli_train_forces_only': 84.79,
-    'tests/test_cli_finetune.py::test_cli_finetune': 80.94,
+    'tests/test_cli_finetune.py::test_cli_finetune[full]': 80.94,
+    'tests/test_cli_finetune.py::test_cli_finetune[last_layer]': 80.94,
+    'tests/test_cli_finetune.py::test_cli_finetune[final_mlp]': 80.94,
+    'tests/test_cli_finetune.py::test_cli_finetune[forces_only]': 80.94,
 }
 
 # Cost assumed for a test with no entry above.

@@ -13,11 +13,11 @@ data:
   neighbors_lr_cutoff: 100  # Cutoff for calculating the long-range neighborhoods in Angstrom. Is converted to the
   # data set units internally. Note that it is not required to be equal to the lr_cutoff of the model.
   # E.g. one can calculate neighbors up to 50 Ang and use no long-range cutoff in the model during training at all.
-  # More details see README.
+  # More details: https://so3lr.github.io/training/finetuning/
   avg_num_neighbors: null  # Average number of neighbors per atom in the data set. If not set, it will be calculated from the data.
   filter:
-    min_distance: 0.25  # Minimal allowed distance in Angstrom. Is converted to the data set units internally.
-    max_force: 25.  # Maximal allowed force component in eV/Angstrom. Is converted to the data set units internally.
+    min_distance: 0.25  # Minimum distinct-atom distance in Angstrom; TFDS applies the minimum image on configured PBC axes.
+    max_force: 25.  # Maximum absolute force component in eV/Angstrom; TFDS also rejects non-finite forces.
 optimizer:
   name: adamw  # Name of the optimizer. See https://optax.readthedocs.io/en/latest/api.html#common-optimizers for available ones.
   optimizer_args: null
@@ -56,8 +56,8 @@ training:
   model_seed: 42  # Seed used for the initialization of the model parameters.
   training_seed: 42  # Seed used for shuffling the batches during training.
   log_gradient_values: False  # Log the norm of the gradients for each set of weights.
-  use_wandb: true  # Use wandb for logging.
-  wandb_init_args:  # Arguments to wandb.init(). See https://docs.wandb.ai/ref/python/init. The config itself is passed as config to wandb.init().
+  use_wandb: false  # Opt in to sending metrics and the effective config to W&B (requires `pip install .[wandb]`). No W&B calls are made while false/absent.
+  wandb_init_args:  # Arguments to wandb.init(), used only when use_wandb is true. Keep credentials outside this file.
     # Uncomment `name:` to pin the run name in the WandB dashboard; if left
     # commented out, wandb.init() auto-generates a random run name. A common
     # convention is to set it to the --workdir basename so the WandB run and
