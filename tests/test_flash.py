@@ -216,6 +216,22 @@ def test_engine_choice_every_structure(monkeypatch):
     assert problem.startswith("structure 2: it needs a box periodic"), problem
 
 
+def test_eval_auto_takes_a_few_engines(monkeypatch):
+    """so3lr eval builds an engine per set of atoms: auto declines more than
+    EVAL_AUTO_ENGINES of them, engine flash takes any number."""
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    water = _water((3, 3, 3))
+    frames = []
+    for k in range(check.EVAL_AUTO_ENGINES + 1):
+        a = water.copy()
+        a.numbers[3 * k + 1] = 9                # a different hydrogen each time
+        frames.append(a)
+    settings = dict(model_path=None, lr_cutoff=12.0, targets="energy,forces")
+    assert check.flash_problem(settings, frames[:-1], task="eval") is None
+    assert "different sets of atoms" in check.flash_problem(settings, frames, task="eval")
+    assert check.flash_problem(dict(settings, engine="flash"), frames, task="eval") is None
+
+
 def test_every_settings_key_classified():
     """A settings key added to the CLI must be sorted into what flash handles, ignores
     or declines; until then auto declines whenever it is set."""
@@ -588,6 +604,19 @@ def test_several_gpus_give_one_gpus_forces(precision, tol):
         assert eng.K > 16
         _check("energy, rows widened on 2 GPUs", e, e_ref, 1e-12)
         _check("forces, rows widened on 2 GPUs", f, f_ref, 1e-10)
+
+
+@GPUS
+def test_ase_calculator_on_two_gpus():
+    """FlashCalculator(flash_devices=2) gives one GPU's energy and forces (float64)."""
+    from so3lr import FlashCalculator
+    out = []
+    for devices in (1, 2):
+        atoms = _water((3, 3, 3))
+        atoms.calc = FlashCalculator(precision="float64", flash_devices=devices)
+        out.append((atoms.get_potential_energy(), atoms.get_forces()))
+    _check("energy on 2 GPUs", out[1][0], out[0][0], 1e-12)
+    _check("forces on 2 GPUs", out[1][1], out[0][1], 1e-10)
 
 
 @GPUS

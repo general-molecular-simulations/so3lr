@@ -23,6 +23,9 @@ FLASH_MODES = ("auto", "fast", "default", "lean", "leanest", "minimal")     # en
 TASKS = ("md", "opt", "eval", "ase")
 # what so3lr eval can take from the engine
 EVAL_TARGETS = ("energy", "forces")
+# so3lr eval builds (and compiles) an engine per set of atoms: auto takes this many at most
+# (the neighbour-list model compiles once for the whole dataset); engine flash any number
+EVAL_AUTO_ENGINES = 16
 
 # settings flash honours (aliases included)
 HANDLED = {
@@ -295,4 +298,15 @@ def flash_problem(settings, atoms, task="md"):
     needed), then the device."""
     frames = atoms if isinstance(atoms, (list, tuple)) else [atoms]
     return (settings_problem(settings, task) or model_problem(settings.get("model_path"))
-            or frames_problem(settings, frames) or device_problem())
+            or frames_problem(settings, frames) or _engines_problem(settings, frames, task) or device_problem())
+
+
+def _engines_problem(settings, frames, task):
+    """Why auto does not run so3lr eval on flash for these structures: too many engines."""
+    if task != "eval" or (settings.get("engine") or "auto") != "auto":
+        return None
+    n = len({atoms.numbers.tobytes() for atoms in frames})
+    if n > EVAL_AUTO_ENGINES:
+        return (f"the structures have {n} different sets of atoms, an engine to build and compile for "
+                f"each (auto takes up to {EVAL_AUTO_ENGINES}; --engine flash runs any number)")
+    return None

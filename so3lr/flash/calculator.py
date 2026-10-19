@@ -8,8 +8,8 @@ For periodic orthorhombic cells at least twice the long-range cutoff across, on 
 GPU (``check.flash_problem`` with task "ase"); anything else raises, naming the reason
 (``so3lr.So3lrCalculator``, the neighbour-list model, takes any structure). The engine is
 built at the first call and kept while the atoms, charge and spin stay the same
-(``md.SinglePoints``): a new cell is laid out again only where it leaves the cell grid's
-margin or gets another PME mesh, and other atoms build a new engine (and compile). The
+(``md.SinglePoints``): a new cell is laid out again (and compiles), and other atoms build a
+new engine (and compile). The
 charge and spin come from ``atoms.info`` as for ``So3lrCalculator`` (``charge``, default
 0; ``multiplicity`` - 1, default 0). No stress: the engine's strain derivative is
 isotropic only.
@@ -53,6 +53,7 @@ class FlashCalculator(Calculator):
             engine="flash", flash_mode=flash_mode, flash_mixed=flash_mixed, flash_devices=flash_devices)
         validate_options(settings)
         from .md import SinglePoints
+        # no grid margin: a cell that changes is laid out again (and compiles)
         self.points = SinglePoints(settings, task="ase", matmul_precision=matmul_precision)
 
     def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):

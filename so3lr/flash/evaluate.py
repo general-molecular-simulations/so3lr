@@ -3,8 +3,9 @@
 ``so3lr_eval.evaluate_so3lr_on`` runs it when every structure is periodic and orthorhombic
 (and wide enough for the cell grid), the targets are energy and/or forces, and flash takes
 the other settings (``check.flash_problem`` with task "eval"); else the neighbour-list model.
-The structures run one at a time (``md.SinglePoints``), grouped by atoms, charge and spin
-and then by PME mesh, so each engine is built, and each mesh laid out, once.
+The structures run one at a time (``md.SinglePoints``), grouped by atoms, charge and spin,
+then by PME mesh and box, so each engine is built once and the boxes it is laid out for
+come in order.
 """
 import time
 from collections import defaultdict
@@ -12,9 +13,12 @@ from collections import defaultdict
 import numpy as np
 
 from so3lr.mlff.data.dataloader_sparse_ase import charge_and_multiplicity
+from so3lr.mlff.nn.observable.dispersion_ref_data import (
+    check_atomic_numbers_supported, supported_atomic_numbers_for_model)
 
-from .md import FlashUnavailable, SinglePoints, _pme
+from .check import NPT_BOX_MARGIN
 from .engine import pme_mesh_shape
+from .md import FlashUnavailable, SinglePoints, _pme
 
 
 def charge_and_spin(atoms, total_charge=None, num_unpaired_electrons=None):
@@ -27,13 +31,18 @@ def charge_and_spin(atoms, total_charge=None, num_unpaired_electrons=None):
 
 
 def _order(frames, systems, settings):
-    """The structures by atoms, charge and spin (in order of first appearance), then PME mesh."""
+    """The structures by atoms, charge and spin (in order of first appearance), then PME mesh
+    and box; and whether a group has more than one box."""
     pme = [p for p in _pme(settings) if p]
-    groups, keys = {}, []
+    groups, meshes, boxes, keys = {}, {}, {}, []
     for atoms, system in zip(frames, systems):
         group = groups.setdefault((atoms.numbers.tobytes(),) + system, len(groups))
-        keys.append((group, tuple(pme_mesh_shape(np.diag(atoms.cell[:]), p[1]) for p in pme)))
-    return sorted(range(len(frames)), key=keys.__getitem__)
+        L = tuple(float(v) for v in np.diag(atoms.cell[:]))
+        if L not in meshes:
+            meshes[L] = tuple(pme_mesh_shape(L, p[1]) for p in pme)
+        boxes.setdefault(group, set()).add(L)
+        keys.append((group, meshes[L], L))
+    return sorted(range(len(frames)), key=keys.__getitem__), any(len(b) > 1 for b in boxes.values())
 
 
 def evaluate_flash(frames, settings, targets, keep_predictions=False):
@@ -46,17 +55,25 @@ def evaluate_flash(frames, settings, targets, keep_predictions=False):
     in place, its labels as energy and forces instead of a calculator. Raises
     ``FlashUnavailable`` if the first structure fails, before any result."""
     s = settings
+    # every structure's elements first, as the neighbour-list path checks them
+    supported = supported_atomic_numbers_for_model(s.get("model_path"))
+    for i, atoms in enumerate(frames):
+        check_atomic_numbers_supported(atoms.numbers, supported, context=f"structure {i}")
     systems = [charge_and_spin(a, s.get("total_charge"), s.get("num_unpaired_electrons")) for a in frames]
+    order, boxes_move = _order(frames, systems, s)
     tot_abs, tot_sq, tot_n = defaultdict(float), defaultdict(float), defaultdict(int)
+    for target in targets:
+        tot_n[target] += 0           # a target without labels reports NaN, as on neighbour lists
     t_first = t_rest = 0.0
     n_rest = 0
     points = None
-    for k, i in enumerate(_order(frames, systems, s)):
+    for k, i in enumerate(order):
         atoms, (charge, spin) = frames[i], systems[i]
         t0 = time.time()
         try:
             if points is None:
-                points = SinglePoints(s, task="eval")
+                # the margin only where a group's box moves: it costs a cell per side
+                points = SinglePoints(s, task="eval", box_margin=NPT_BOX_MARGIN if boxes_move else 0.0)
             e, F, compiled = points(atoms, charge, spin)
         except Exception as exc:
             if k == 0:

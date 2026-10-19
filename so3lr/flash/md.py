@@ -112,7 +112,8 @@ def build_engine(atoms, settings, dtype, box_margin=None):
     embed = settings.get("charge_embed_total_charge")
     equil = settings.get("charge_equilibration_total_charge")
     kw, staged, _ = MODES[mode]
-    eng = FlashSO3LR(params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]),
+    # the sides only: structure_problem takes a cell with off-diagonals up to 1e-9 as orthorhombic
+    eng = FlashSO3LR(params, statics, atoms.get_atomic_numbers(), np.diag(L),
                      total_charge=total_charge if embed is None else float(embed),
                      total_spin=float(settings.get("num_unpaired_electrons") or 0),
                      equilibration_charge=total_charge if equil is None else float(equil),
@@ -199,11 +200,11 @@ def _two_call_step(apply_fn):
 
 def relax_flash(eng, staged, position, shift, box, settings, atoms, start, opt_file):
     """FIRE as ``perform_min`` runs it (same settings and log, the trajectory to
-    ``opt_file``) from ``position``, where (energy, forces) are ``start``; returns the
-    relaxed positions."""
+    ``opt_file`` unless None) from ``position``, where (energy, forces) are ``start``;
+    returns the relaxed positions."""
     s = settings
     overwrite = bool(s.get("overwrite", False))
-    if _existing_regular_output_mode(opt_file) is not None and not overwrite:
+    if opt_file is not None and _existing_regular_output_mode(opt_file) is not None and not overwrite:
         raise RuntimeError(f"Output file already exists: {opt_file}. Refusing to overwrite. "
                            f"Pass --overwrite to overwrite, or choose a different --output.")
     init, apply = jax_md.minimize.fire_descent(
@@ -238,9 +239,10 @@ def relax_flash(eng, staged, position, shift, box, settings, atoms, start, opt_f
                            f"steps) without reaching force_convergence={fconv:.3f} eV/Å (last Fmax = "
                            f"{f_max:.3f} eV/Å). Increase --min-cycles or relax --force-conv if tighter "
                            f"convergence is required.")
-    write_to_extxyz(opt_file, atoms, boxes=np.asarray(box), momenta=None, positions=frames,
-                    fractional_coordinates=False, append=False, overwrite=overwrite)
-    logger.info(f"Optimization trajectory with {len(frames)} frames saved to {opt_file}")
+    if opt_file is not None:
+        write_to_extxyz(opt_file, atoms, boxes=np.asarray(box), momenta=None, positions=frames,
+                        fractional_coordinates=False, append=False, overwrite=overwrite)
+        logger.info(f"Optimization trajectory with {len(frames)} frames saved to {opt_file}")
     return state.position
 
 
@@ -274,7 +276,10 @@ def perform_min_flash(all_settings, atoms):
         raise FlashUnavailable(f"{type(exc).__name__}: {exc}") from exc
     logger.info(f"Flash precision: model {jnp.dtype(dtype).name}, positions {jnp.dtype(sdt).name}")
     _, shift = jax_md.space.periodic(box)
-    return relax_flash(eng, staged, position, shift, box, s, atoms, start=start, opt_file=Path(s["output_file"]))
+    # as perform_min: a trajectory only for an extxyz (or hdf5, renamed .xyz) output
+    out = s.get("output_file")
+    opt_file = Path(out) if out and s.get("output_format") in ("extxyz", "hdf5") else None
+    return relax_flash(eng, staged, position, shift, box, s, atoms, start=start, opt_file=opt_file)
 
 
 class SinglePoints:
@@ -282,13 +287,15 @@ class SinglePoints:
     engine is built for the atoms, charge and spin of the structure and kept while they stay
     the same; a new box is laid out again only outside the cell grid's margin or for another
     PME mesh (so each box gets the mesh a single point of it builds). The settings, model and
-    device are checked here, a structure when its atoms or box are new."""
+    device are checked here, a structure when its atoms or box are new. box_margin: as for
+    build_engine (the cell grid for a box that much smaller, so boxes within it compile
+    nothing; none for a box that stays the same, which keeps every cell)."""
 
-    def __init__(self, settings, task, matmul_precision="highest"):
+    def __init__(self, settings, task, matmul_precision="highest", box_margin=0.0):
         problem = flash_problem(settings, [], task=task)
         if problem:
             raise ValueError(f"flash: {problem}")
-        self.settings, self.matmul_precision = settings, matmul_precision
+        self.settings, self.matmul_precision, self.box_margin = settings, matmul_precision, box_margin
         self.dtype, self.position_dtype = dtypes(settings)
         self.supported = supported_atomic_numbers_for_model(settings.get("model_path"))
         self.rc = model_cutoff(settings.get("model_path"))
@@ -307,17 +314,18 @@ class SinglePoints:
         with jax.default_matmul_precision(self.matmul_precision):
             if key != self._key:
                 check_atomic_numbers_supported(atoms.numbers, self.supported)
-                self.engine = self._ef = None
+                self.engine = self._ef = self._key = None    # until the new engine exists
                 gc.collect()                 # the last engine's arrays, before the next one's
                 self.engine, staged = build_engine(
                     atoms, dict(self.settings, total_charge=key[1], num_unpaired_electrons=key[2]), self.dtype,
-                    box_margin=NPT_BOX_MARGIN)
+                    box_margin=self.box_margin)
                 self._ef = self.engine.energy_forces_staged if staged else self.engine.energy_forces
                 self._key, self._builds = key, 0
             elif box != self._box:
                 self.engine.set_box(np.diag(cell), exact_mesh=True)
             self._box = box
-            e, F = self._ef(jnp.asarray(np.mod(atoms.positions, np.diag(cell)), self.position_dtype))
+            R = jnp.asarray(np.mod(atoms.positions, np.diag(cell)), self.position_dtype)
+            e, F = self._ef(replicated(self.engine, R))
         compiled, self._builds = self.engine.builds != self._builds, self.engine.builds
         return float(e), np.asarray(F, np.float64), compiled
 

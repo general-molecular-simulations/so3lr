@@ -463,8 +463,12 @@ def evaluate_so3lr_on(
     flash_settings['targets'] = target_list
     frames = []
     if (engine or 'auto') != 'standard' and flash_problem(flash_settings, [], task='eval') is None:
+        # the first structure, then the rest only if flash takes it (most datasets it declines
+        # are gas phase: the loader below reads them)
         from ase.io import read
-        frames = read(str(datafile), index=':')
+        frames = [read(str(datafile), index=0)]
+        if flash_problem(flash_settings, frames, task='eval') is None:
+            frames = read(str(datafile), index=':')
 
     def eval_on_flash(flash_md):
         from ..flash.evaluate import evaluate_flash
@@ -473,6 +477,9 @@ def evaluate_so3lr_on(
     if ran:
         (tot_abs, tot_sq, tot_n), (t_first, t_rest, n_rest) = result
         logger.info(f'Completed evaluation on {len(frames)} / {len(frames)} structures (flash)')
+        # the compile time includes each engine's first call, which cannot be timed apart
+        logger.info(f'Engine builds and the calls that compiled: {t_first:.3f} seconds; '
+                    f'the other {n_rest} calls: {t_rest:.3f} seconds')
         logger.info('-' * 50)
         return _finish_evaluation(
             target_list=target_list, tot_abs=tot_abs, tot_sq=tot_sq, tot_n=tot_n, total_time=t_rest,
@@ -791,8 +798,8 @@ def _finish_evaluation(*, target_list, tot_abs, tot_sq, tot_n, total_time, compi
         test_metrics[f'{t}_rmse'] = float(rmse)
 
     # Compile timing metrics
-    time_per_batch = total_time / n_batches if n_batches > 0 else float('nan')
-    time_per_structure = total_time / n_structures if n_structures > 0 else float('nan')
+    time_per_batch = total_time / n_batches if n_batches > 0 else 0
+    time_per_structure = total_time / n_structures if n_structures > 0 else 0
 
     metrics = {
         'time_per_batch': float(time_per_batch),
