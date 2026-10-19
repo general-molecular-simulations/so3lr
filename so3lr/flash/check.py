@@ -123,6 +123,8 @@ def reserve_gpu(settings, task="md"):
 
 def settings_problem(settings, task="md"):
     """Why flash cannot run these settings for task (one of TASKS; None if it can)."""
+    if task not in TASKS:
+        raise ValueError(f"task must be one of {', '.join(TASKS)} (received {task!r})")
     s = settings
     ens = s.get("ensemble")
     if task == "md" and ens not in ("nve", "nvt", "nvt-langevin", "npt"):
@@ -226,9 +228,9 @@ def box_problem(L, rc, rc_lr):
     return None
 
 
-def structure_problem(settings, atoms, rc=None):
+def structure_problem(settings, atoms, rc):
     """Why flash cannot take this structure, or the restart's box (None if it can); rc: the
-    model's cutoff, if known."""
+    model's cutoff (``model_cutoff``)."""
     if not atoms.pbc.all() or atoms.cell.rank < 3:
         return "it needs a box periodic in all three directions"
     cell = np.asarray(atoms.cell[:])
@@ -240,7 +242,6 @@ def structure_problem(settings, atoms, rc=None):
             box = np.asarray(saved["box"]) if "box" in saved.files else None
         if box is not None and np.any(box):
             sides = np.diag(box) if box.ndim == 2 else np.broadcast_to(box.reshape(-1), (3,))
-    rc = model_cutoff(settings.get("model_path")) if rc is None else rc
     shrink = 1.0 - (NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0)
     return box_problem([float(v) * shrink for v in sides], rc, float(settings.get("lr_cutoff") or 12.0))
 

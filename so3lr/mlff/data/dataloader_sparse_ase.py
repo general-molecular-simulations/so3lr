@@ -159,6 +159,20 @@ class AseDataLoaderSparse:
         return loaded_data, {'max_num_of_nodes': max_num_of_nodes, 'max_num_of_edges': max_num_of_edges, 'max_num_of_pairs': max_num_of_pairs}
 
 
+def charge_and_multiplicity(mol: Atoms):
+    """The total charge and spin multiplicity in ``mol.info``, None where absent.
+
+    Spin multiplicity (2S+1): OMol25/OPoly26 extxyz store it under `spin=`, other
+    datasets use `multiplicity=`. Prefer the canonical `multiplicity`, falling back
+    to `spin` so open-shell structures are not silently read as closed-shell
+    singlets (num_unpaired_electrons = multiplicity - 1).
+    """
+    multiplicity = mol.info.get('multiplicity')
+    if multiplicity is None:
+        multiplicity = mol.info.get('spin')
+    return mol.info.get('charge'), multiplicity
+
+
 def ASE_to_jraph(
         mol: Atoms,
         cutoff: float,
@@ -231,14 +245,7 @@ def ASE_to_jraph(
         stress[:] = np.nan
 
     # Read additional properties from .info and .arrays in Atoms object.
-    total_charge = mol.info.get('charge')
-    # Spin multiplicity (2S+1). OMol25/OPoly26 extxyz store it under `spin=`,
-    # other datasets use `multiplicity=`. Prefer the canonical `multiplicity`,
-    # falling back to `spin` so open-shell structures are not silently read as
-    # closed-shell singlets (num_unpaired_electrons = multiplicity - 1).
-    multiplicity = mol.info.get('multiplicity')
-    if multiplicity is None:
-        multiplicity = mol.info.get('spin')
+    total_charge, multiplicity = charge_and_multiplicity(mol)
     # The polarizability/volume-ratio label has been stored under several keys
     # over time. Accept any of them and pick the first that exists, so users
     # don't silently get NaN labels when their extxyz uses the canonical

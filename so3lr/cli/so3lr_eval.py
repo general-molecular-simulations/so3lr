@@ -343,6 +343,9 @@ def evaluate_so3lr_on(
         Dictionary containing evaluation metrics (MAE, MSE, RMSE for each target)
         and timing information.
     """
+    # every option, for the flash engine's check (which declines one it does not know)
+    flash_settings = dict(locals())
+
     # Setup logging
     setup_logger(log_file)
 
@@ -454,24 +457,12 @@ def evaluate_so3lr_on(
 
     # The engine: SO3LR-Flash where it computes what is asked, else the neighbour-list
     # model below (engine='flash' / 'standard' forces one). The structures are read for
-    # it only if these settings could run on it.
+    # it only if the settings, model and device allow it.
     from .so3lr_md import run_on_flash
-    from ..flash.check import settings_problem
-    flash_settings = dict(
-        model_path=model_path, precision=precision, lr_cutoff=lr_cutoff,
-        dispersion_damping=dispersion_damping, total_charge=total_charge,
-        num_unpaired_electrons=num_unpaired_electrons,
-        charge_embed_total_charge=charge_embed_total_charge,
-        charge_equilibration_total_charge=charge_equilibration_total_charge,
-        kspace_electrostatics=kspace_electrostatics, kspace_smearing=kspace_smearing,
-        kspace_spacing=kspace_spacing, kspace_interp_nodes=kspace_interp_nodes,
-        kspace_dispersion=kspace_dispersion, kspace_dispersion_smearing=kspace_dispersion_smearing,
-        kspace_dispersion_spacing=kspace_dispersion_spacing,
-        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
-        targets=target_list, engine=engine, flash_mode=flash_mode, flash_mixed=flash_mixed,
-        flash_devices=flash_devices)
+    from ..flash.check import flash_problem
+    flash_settings['targets'] = target_list
     frames = []
-    if (engine or 'auto') != 'standard' and settings_problem(flash_settings, 'eval') is None:
+    if (engine or 'auto') != 'standard' and flash_problem(flash_settings, [], task='eval') is None:
         from ase.io import read
         frames = read(str(datafile), index=':')
 
@@ -480,15 +471,13 @@ def evaluate_so3lr_on(
         return evaluate_flash(frames, flash_settings, target_list, keep_predictions=save_predictions_bool)
     ran, result = run_on_flash(flash_settings, frames, 'eval', eval_on_flash)
     if ran:
-        sums, predicted, (t_first, t_rest, n_rest) = result
+        (tot_abs, tot_sq, tot_n), (t_first, t_rest, n_rest) = result
         logger.info(f'Completed evaluation on {len(frames)} / {len(frames)} structures (flash)')
-        logger.info(f'Engine builds and their first calls (which compile): {t_first:.3f} seconds; '
-                    f'the other {n_rest} calls: {t_rest:.3f} seconds')
         logger.info('-' * 50)
         return _finish_evaluation(
-            target_list, {t: v[0] for t, v in sums.items()}, {t: v[1] for t, v in sums.items()},
-            {t: v[2] for t, v in sums.items() if v[2] > 0}, t_rest, t_first, n_rest, n_rest, datafile,
-            save_to if save_predictions_bool else None, predicted, len(frames), overwrite, total_time_start)
+            target_list=target_list, tot_abs=tot_abs, tot_sq=tot_sq, tot_n=tot_n, total_time=t_rest,
+            compile_time=t_first, n_batches=n_rest, n_structures=n_rest, datafile=datafile, save_to=save_to,
+            predicted=frames, overwrite=overwrite, total_time_start=total_time_start)
     del frames
 
     so3lr_calc = make_so3lr(
@@ -769,17 +758,18 @@ def evaluate_so3lr_on(
 
         logger.info('-' * 50)
 
-        return _finish_evaluation(target_list, tot_abs, tot_sq, tot_n, total_time, compile_time, i,
-                                  total_num_structures, datafile, save_to if save_predictions_bool else None,
-                                  predicted, num_data, overwrite, total_time_start)
+        return _finish_evaluation(
+            target_list=target_list, tot_abs=tot_abs, tot_sq=tot_sq, tot_n=tot_n, total_time=total_time,
+            compile_time=compile_time, n_batches=i, n_structures=total_num_structures, datafile=datafile,
+            save_to=save_to, predicted=predicted, overwrite=overwrite, total_time_start=total_time_start)
 
     except Exception as e:
         logger.error(f"Error during evaluation: {str(e)}")
         raise
 
 
-def _finish_evaluation(target_list, tot_abs, tot_sq, tot_n, total_time, compile_time, n_batches,
-                       n_structures, datafile, save_to, predicted, num_data, overwrite, total_time_start):
+def _finish_evaluation(*, target_list, tot_abs, tot_sq, tot_n, total_time, compile_time, n_batches,
+                       n_structures, datafile, save_to, predicted, overwrite, total_time_start):
     """The metrics from the per-target sums, the report, and the predictions saved (if
     save_to): the end of ``evaluate_so3lr_on`` for either engine. total_time: seconds of
     the n_batches timed calls, over n_structures structures."""
@@ -857,7 +847,7 @@ def _finish_evaluation(target_list, tot_abs, tot_sq, tot_n, total_time, compile_
 
     # Save predictions if requested
     if save_to is not None:
-        save_to_file(predicted, str(save_to), num_data, overwrite=overwrite)
+        save_to_file(predicted, str(save_to), len(predicted), overwrite=overwrite)
 
     total_time_end = time.time()
     logger.info(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')

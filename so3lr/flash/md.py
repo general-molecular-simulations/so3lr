@@ -23,6 +23,7 @@ NPT runs every step in two calls: the engine evaluates in the box the step reach
 (``set_box``), and the step takes the force and dE/d(strain) through an energy whose
 gradients they are (``_surrogate``).
 """
+import gc
 import logging
 import time
 from pathlib import Path
@@ -58,7 +59,7 @@ from so3lr.md_settings_validation import validate_md_counts
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported, supported_atomic_numbers_for_model)
 
-from .check import NPT_BOX_MARGIN, flash_problem
+from .check import NPT_BOX_MARGIN, flash_problem, model_cutoff, structure_problem
 from .engine import MODES, FlashSO3LR, mode_kib, pick_mode, pme_bytes
 from .loader import load_params
 
@@ -78,6 +79,15 @@ def _pme(settings):
              get("kspace_dispersion_spacing", K.DEFAULT_KSPACE_DISPERSION_SPACING))
             if s.get("kspace_dispersion") == "pme" else None)
     return el, disp
+
+
+def dtypes(settings):
+    """(the model's dtype, the positions'): float64 positions (and MD state) around a float32
+    model unless flash_mixed is off or x64 is (float32 coordinates of a 500 A box round to
+    6e-5 A)."""
+    dtype = jnp.float64 if settings.get("precision", "float32") == "float64" else jnp.float32
+    mixed = dtype == jnp.float32 and bool(settings.get("flash_mixed", True)) and jax.config.jax_enable_x64
+    return dtype, (jnp.float64 if mixed else dtype)
 
 
 def build_engine(atoms, settings, dtype, box_margin=None):
@@ -253,11 +263,8 @@ def perform_min_flash(all_settings, atoms):
                                         s.get("kspace_smearing"))
     atoms = atoms.copy()
     atoms.wrap()
-    precision = s.get("precision", "float32")
-    dtype = jnp.float64 if precision == "float64" else jnp.float32
-    # positions in float64 around a float32 model, as in MD (perform_md_flash)
-    sdt = jnp.float64 if dtype == jnp.float32 and bool(s.get("flash_mixed", True)) else dtype
-    position = atoms_to_jnp(atoms, precision=sdt)["positions"]
+    dtype, sdt = dtypes(s)
+    position = jnp.asarray(atoms.get_positions(), sdt)
     box = jnp.asarray(np.diag(np.asarray(atoms.cell[:])), sdt)
     try:
         eng, staged = build_engine(atoms, s, dtype)
@@ -265,9 +272,54 @@ def perform_min_flash(all_settings, atoms):
         start = (eng.energy_forces_staged if staged else eng.energy_forces)(position)
     except Exception as exc:
         raise FlashUnavailable(f"{type(exc).__name__}: {exc}") from exc
-    logger.info(f"Flash precision: model {precision}, positions {jnp.dtype(sdt).name}")
+    logger.info(f"Flash precision: model {jnp.dtype(dtype).name}, positions {jnp.dtype(sdt).name}")
     _, shift = jax_md.space.periodic(box)
     return relax_flash(eng, staged, position, shift, box, s, atoms, start=start, opt_file=Path(s["output_file"]))
+
+
+class SinglePoints:
+    """Energy and forces of one structure after another (so3lr eval, the ASE calculator). The
+    engine is built for the atoms, charge and spin of the structure and kept while they stay
+    the same; a new box is laid out again only outside the cell grid's margin or for another
+    PME mesh (so each box gets the mesh a single point of it builds). The settings, model and
+    device are checked here, a structure when its atoms or box are new."""
+
+    def __init__(self, settings, task, matmul_precision="highest"):
+        problem = flash_problem(settings, [], task=task)
+        if problem:
+            raise ValueError(f"flash: {problem}")
+        self.settings, self.matmul_precision = settings, matmul_precision
+        self.dtype, self.position_dtype = dtypes(settings)
+        self.supported = supported_atomic_numbers_for_model(settings.get("model_path"))
+        self.rc = model_cutoff(settings.get("model_path"))
+        self.engine = self._ef = self._key = self._box = None
+        self._builds = 0
+
+    def __call__(self, atoms, charge=0.0, spin=0.0):
+        """(energy, forces, compiled): compiled if the call built or laid out the engine again."""
+        key = (atoms.numbers.tobytes(), float(charge), float(spin))
+        cell = np.asarray(atoms.cell[:])
+        box = (cell.tobytes(), tuple(bool(p) for p in atoms.pbc))
+        if key != self._key or box != self._box:
+            problem = structure_problem(self.settings, atoms, self.rc)
+            if problem:
+                raise ValueError(f"flash: {problem}")
+        with jax.default_matmul_precision(self.matmul_precision):
+            if key != self._key:
+                check_atomic_numbers_supported(atoms.numbers, self.supported)
+                self.engine = self._ef = None
+                gc.collect()                 # the last engine's arrays, before the next one's
+                self.engine, staged = build_engine(
+                    atoms, dict(self.settings, total_charge=key[1], num_unpaired_electrons=key[2]), self.dtype,
+                    box_margin=NPT_BOX_MARGIN)
+                self._ef = self.engine.energy_forces_staged if staged else self.engine.energy_forces
+                self._key, self._builds = key, 0
+            elif box != self._box:
+                self.engine.set_box(np.diag(cell), exact_mesh=True)
+            self._box = box
+            e, F = self._ef(jnp.asarray(np.mod(atoms.positions, np.diag(cell)), self.position_dtype))
+        compiled, self._builds = self.engine.builds != self._builds, self.engine.builds
+        return float(e), np.asarray(F, np.float64), compiled
 
 
 def perform_md_flash(all_settings, restart=False, atoms=None):
@@ -302,11 +354,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                                         s.get("kspace_smearing"))
     atoms.wrap()
     precision = s.get("precision", "float32")
-    dtype = jnp.float64 if precision == "float64" else jnp.float32
-    # the MD state (positions, momenta, energy sums) in float64 around a float32 model
-    # unless flash_mixed is off: float32 coordinates of a 500 A box round to 6e-5 A
-    mixed = dtype == jnp.float32 and bool(s.get("flash_mixed", True))
-    sdt = jnp.float64 if mixed else dtype
+    dtype, sdt = dtypes(s)
+    mixed = sdt != dtype
     geo = atoms_to_jnp(atoms, precision=sdt)
     position = geo["positions"]
     box = jnp.asarray(np.diag(np.asarray(atoms.cell[:])), sdt)

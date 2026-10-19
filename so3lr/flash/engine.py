@@ -1264,6 +1264,7 @@ class FlashSO3LR:
         # the long-range kernel's resident programs: 16 per streaming multiprocessor
         self.lr_programs = 16 * (getattr(jax.devices()[0], "core_count", None) or 132)
         self.maxh = int(lr_scratch)
+        self.builds = 0
         self._build_jit()
 
     def _layout(self, L):
@@ -1281,11 +1282,14 @@ class FlashSO3LR:
         self.L, self.L_lo = L, small
         self.box = jnp.asarray(L, jnp.float64 if jax.config.jax_enable_x64 else self.dtype)
         self.nc, self.kc = cell_grid(small, self.rc, self.rc_lr)
-        self.mesh_el = pme_mesh_shape(L, self.pme_el[1]) if self.pme_el else None
-        self.mesh_disp = pme_mesh_shape(L, self.pme_disp[1]) if self.pme_disp else None
+        self.mesh_el, self.mesh_disp = self._meshes(L)
         for m in (self.mesh_el, self.mesh_disp):
             if m and math.prod(m) >= 2 ** 31:
                 raise ValueError(f"PME mesh {m} has 2^31 points or more: a larger spacing")
+
+    def _meshes(self, L):
+        """The PME meshes (electrostatics, dispersion) for a box of sides L, None where off."""
+        return tuple(pme_mesh_shape(L, p[1]) if p else None for p in (self.pme_el, self.pme_disp))
 
     # ---- the embedding, per element -----------------------------------------
     def _embed_table(self, zu, counts, total_charge, total_spin):
@@ -1970,6 +1974,7 @@ class FlashSO3LR:
                 self._Lt = keep
         self._jit = jax.jit(ef)
         self._stage_cache = None
+        self.builds += 1                 # programs to compile at the next call
         # programs others build on this engine's force (md's jitted step loops): they
         # hold the old tables and grid, so a rebuild drops them
         self.loops = {}
@@ -1995,8 +2000,7 @@ class FlashSO3LR:
         so each box gets the mesh a single point of it builds (so3lr eval, ASE)."""
         L = [float(v) for v in np.asarray(L, np.float64).reshape(-1)[:3]]
         hi = 1.0 + self.box_margin
-        same_mesh = not exact_mesh or all((pme_mesh_shape(L, p[1]) if p else None) == mesh for p, mesh in
-                                          ((self.pme_el, self.mesh_el), (self.pme_disp, self.mesh_disp)))
+        same_mesh = not exact_mesh or self._meshes(L) == (self.mesh_el, self.mesh_disp)
         if same_mesh and all(lo <= v <= hi * b for v, lo, b in zip(L, self.L_lo, self.L)):
             self.box = jnp.asarray(L, jnp.float64 if jax.config.jax_enable_x64 else self.dtype)
             return

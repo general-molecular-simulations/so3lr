@@ -1534,11 +1534,20 @@ def eval_model(
     logger.info(f"Targets:                   {targets}")
     logger.info("=" * 60)
 
+    settings = dict(
+        datafile=datafile, batch_size=batch_size, lr_cutoff=lr_cutoff, dispersion_damping=dispersion_damping,
+        jit_compile=jit_compile, save_to=save_to, model_path=model_path, precision=precision, targets=targets,
+        log_file=log_file, total_charge=total_charge, num_unpaired_electrons=num_unpaired_electrons,
+        overwrite=overwrite, charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge,
+        kspace_electrostatics=kspace_electrostatics, kspace_smearing=kspace_smearing,
+        kspace_spacing=kspace_spacing, kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion, kspace_dispersion_smearing=kspace_dispersion_smearing,
+        kspace_dispersion_spacing=kspace_dispersion_spacing,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
+        engine=engine, flash_mode=flash_mode, flash_mixed=flash_mixed, flash_devices=flash_devices)
     # before JAX starts: what flash may run (the structures are checked once read)
-    reserve_gpu(dict(engine=engine, model_path=model_path, flash_devices=flash_devices, targets=targets,
-                     lr_cutoff=lr_cutoff, kspace_electrostatics=kspace_electrostatics,
-                     kspace_interp_nodes=kspace_interp_nodes, kspace_dispersion=kspace_dispersion,
-                     kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes), task='eval')
+    reserve_gpu(settings, task='eval')
     # Log hardware info
     get_hardware_info()
 
@@ -1563,35 +1572,7 @@ def eval_model(
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Call the evaluate_so3lr_on function from so3lr_eval.py
-    evaluate_so3lr_on(
-        datafile=datafile,
-        batch_size=batch_size,
-        lr_cutoff=lr_cutoff,
-        dispersion_damping=dispersion_damping,
-        jit_compile=jit_compile,
-        save_to=save_to,
-        model_path=model_path,
-        precision=precision,
-        targets=targets,
-        log_file=log_file,
-        total_charge=total_charge,
-        num_unpaired_electrons=num_unpaired_electrons,
-        overwrite=overwrite,
-        charge_embed_total_charge=charge_embed_total_charge,
-        charge_equilibration_total_charge=charge_equilibration_total_charge,
-        kspace_electrostatics=kspace_electrostatics,
-        kspace_smearing=kspace_smearing,
-        kspace_spacing=kspace_spacing,
-        kspace_interp_nodes=kspace_interp_nodes,
-        kspace_dispersion=kspace_dispersion,
-        kspace_dispersion_smearing=kspace_dispersion_smearing,
-        kspace_dispersion_spacing=kspace_dispersion_spacing,
-        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
-        engine=engine,
-        flash_mode=flash_mode,
-        flash_mixed=flash_mixed,
-        flash_devices=flash_devices,
-    )
+    evaluate_so3lr_on(**settings)
     logger.info("=" * 60)
     logger.info("Evaluation completed successfully!")
 
