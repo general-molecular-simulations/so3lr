@@ -1987,13 +1987,17 @@ class FlashSO3LR:
         """(energy, forces). Rebuilds with wider tables if a row or scratch overflowed."""
         return self.energy_forces_strain(R)[:2]
 
-    def set_box(self, L):
+    def set_box(self, L, exact_mesh=False):
         """A new orthorhombic box (sides L) for the next calls, e.g. an NPT step. Within
         the margin the cell grid was laid out for, nothing compiles; outside it the
-        grid (and the PME mesh, as so3lr_dev's re-tuning would) is laid out again for L."""
+        grid (and the PME mesh, as so3lr_dev's re-tuning would) is laid out again for L.
+        exact_mesh: also lay out again where L's PME mesh differs from the current one,
+        so each box gets the mesh a single point of it builds (so3lr eval, ASE)."""
         L = [float(v) for v in np.asarray(L, np.float64).reshape(-1)[:3]]
         hi = 1.0 + self.box_margin
-        if all(lo <= v <= hi * b for v, lo, b in zip(L, self.L_lo, self.L)):
+        same_mesh = not exact_mesh or all((pme_mesh_shape(L, p[1]) if p else None) == mesh for p, mesh in
+                                          ((self.pme_el, self.mesh_el), (self.pme_disp, self.mesh_disp)))
+        if same_mesh and all(lo <= v <= hi * b for v, lo, b in zip(L, self.L_lo, self.L)):
             self.box = jnp.asarray(L, jnp.float64 if jax.config.jax_enable_x64 else self.dtype)
             return
         self._layout(L)

@@ -511,17 +511,18 @@ def flash_options(f: Callable) -> Callable:
                      help='auto: the flash engine (GPU kernels with their own cell grid and '
                           'no per-edge arrays: 2.5x faster, and tens of millions of atoms on one '
                           'GPU) whenever it computes what the other options ask for -- an NVIDIA '
-                          'GPU, a periodic orthorhombic box, nve/nvt/nvt-langevin/isotropic npt, '
-                          'real-space long range or PME, so3lr-tauri-s/m/l -- else the neighbour-list '
-                          'potential; the log says which and why. flash or standard forces one. '
-                          '[default: auto]')(f)
+                          'GPU, a periodic orthorhombic box, real-space long range or PME, '
+                          'so3lr-tauri-s/m/l; for MD nve/nvt/nvt-langevin/isotropic npt, for eval '
+                          'the targets energy and forces -- else the neighbour-list potential; the '
+                          'log says which and why. flash or standard forces one. [default: auto]')(f)
     f = click.option('--flash-mode', 'flash_mode', default='auto',
                      type=click.Choice(list(FLASH_MODES)),
                      help='SO3LR-Flash memory mode, fastest first; auto picks the fastest that fits. '
                           '[default: auto]')(f)
     f = click.option('--flash-mixed/--no-flash-mixed', 'flash_mixed', default=True,
-                     help='With --precision float32: keep the MD state (positions, momenta, '
-                          'energy sums) in float64 and form displacements in float64. [default: on]')(f)
+                     help='With --precision float32: keep the positions (and the MD state: '
+                          'momenta, energy sums) in float64 and form displacements in float64. '
+                          '[default: on]')(f)
     f = click.option('--flash-devices', 'flash_devices', default=1, type=click.IntRange(min=1),
                      help='SO3LR-Flash on this many GPUs of the node: each computes an equal share '
                           'of the atoms, for systems that fit on one GPU but should run faster. '
@@ -1140,6 +1141,7 @@ def run_md_simulation(
               help='Minimum number of steps moving in the correct direction before dt is updated. [default: 2]')
 @click.option('--force-conv', default=None, type=float,
               help='Force convergence criterion in eV/Å, overrides --min-cycles and --min-steps. [default: None]')
+@flash_options
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def fire_optimization(
     input_file: Optional[str],
@@ -1168,6 +1170,10 @@ def fire_optimization(
     charge_equilibration_total_charge: Optional[float],
     help: bool,
     overwrite: bool = False,
+    engine: str = 'auto',
+    flash_mode: str = 'auto',
+    flash_mixed: bool = True,
+    flash_devices: int = 1,
 ) -> None:
     """
     Run geometry optimization using the FIRE algorithm.
@@ -1242,9 +1248,6 @@ def fire_optimization(
     logger.info(f"Long-range buffer:         {buffer_lr}")
     logger.info("=" * 60)
 
-    # Log hardware info
-    get_hardware_info()
-
     # Create settings dictionary
     settings = {
         'input_file': input_file,
@@ -1270,7 +1273,13 @@ def fire_optimization(
         'charge_embed_total_charge': charge_embed_total_charge,
         'charge_equilibration_total_charge': charge_equilibration_total_charge,
         'overwrite': overwrite,
+        'engine': engine,
+        'flash_mode': flash_mode,
+        'flash_mixed': flash_mixed,
+        'flash_devices': flash_devices,
     }
+    reserve_gpu(settings, task='opt')   # before JAX starts
+    get_hardware_info()
 
     # Add log settings to the settings dictionary
     settings['log_file'] = log_file
@@ -1424,6 +1433,7 @@ def nve_md(**kwargs) -> None:
                    '--charge-embed-total-charge.')
 @kspace_electrostatics_options
 @kspace_dispersion_options
+@flash_options
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def eval_model(
@@ -1456,7 +1466,12 @@ def eval_model(
     # Output policy
     overwrite: bool,
     # Help option
-    help: bool
+    help: bool,
+    # the engine (SO3LR-Flash for energies and forces of periodic structures)
+    engine: str = 'auto',
+    flash_mode: str = 'auto',
+    flash_mixed: bool = True,
+    flash_devices: int = 1,
 ) -> None:
     """
     Evaluate SO3LR model on a dataset.
@@ -1519,6 +1534,11 @@ def eval_model(
     logger.info(f"Targets:                   {targets}")
     logger.info("=" * 60)
 
+    # before JAX starts: what flash may run (the structures are checked once read)
+    reserve_gpu(dict(engine=engine, model_path=model_path, flash_devices=flash_devices, targets=targets,
+                     lr_cutoff=lr_cutoff, kspace_electrostatics=kspace_electrostatics,
+                     kspace_interp_nodes=kspace_interp_nodes, kspace_dispersion=kspace_dispersion,
+                     kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes), task='eval')
     # Log hardware info
     get_hardware_info()
 
@@ -1567,6 +1587,10 @@ def eval_model(
         kspace_dispersion_smearing=kspace_dispersion_smearing,
         kspace_dispersion_spacing=kspace_dispersion_spacing,
         kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
+        engine=engine,
+        flash_mode=flash_mode,
+        flash_mixed=flash_mixed,
+        flash_devices=flash_devices,
     )
     logger.info("=" * 60)
     logger.info("Evaluation completed successfully!")

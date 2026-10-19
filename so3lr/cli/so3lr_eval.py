@@ -12,6 +12,7 @@ import logging
 from typing import Dict, List, Tuple, Optional, Any
 from tqdm import tqdm
 
+from ase import Atoms
 from ase.io import write
 from so3lr.mlff.utils import jraph_utils
 from so3lr.mlff.utils.kspace_utils import (
@@ -255,7 +256,8 @@ def save_to_file(
 
     with _staged_output(Path(save_to), overwrite=overwrite) as temporary:
         for index, predicted_graph in enumerate(tqdm(predicted_graphs, desc="Saving predictions")):
-            atoms = jraph_to_ase_atoms(predicted_graph)
+            # graphs from the neighbour-list model, Atoms from the flash engine
+            atoms = predicted_graph if isinstance(predicted_graph, Atoms) else jraph_to_ase_atoms(predicted_graph)
             for _k in _label_keys_to_check:
                 if _k in atoms.info and _is_all_nan(atoms.info[_k]):
                     del atoms.info[_k]
@@ -288,6 +290,10 @@ def evaluate_so3lr_on(
         kspace_dispersion_interp_nodes: int = DEFAULT_KSPACE_DISPERSION_INTERP_NODES,
         charge_embed_total_charge: Optional[float] = None,
         charge_equilibration_total_charge: Optional[float] = None,
+        engine: str = 'auto',
+        flash_mode: str = 'auto',
+        flash_mixed: bool = True,
+        flash_devices: int = 1,
 ) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset and calculate error metrics.
@@ -325,6 +331,11 @@ def evaluate_so3lr_on(
         Otherwise a pre-existing output raises RuntimeError. Each file is
         replaced separately; the outputs are not a multi-file transaction.
         Matches the --overwrite policy used by perform_md / perform_min.
+    engine : str
+        'auto': SO3LR-Flash where it computes what is asked (every structure periodic
+        and orthorhombic, the targets energy and/or forces; see so3lr.flash.evaluate),
+        else the neighbour-list model; 'flash' or 'standard' forces one. flash_mode,
+        flash_mixed and flash_devices as for MD.
 
     Returns:
     --------
@@ -440,6 +451,45 @@ def evaluate_so3lr_on(
 
     kspace_enabled = (kspace_electrostatics is not None
                       or kspace_dispersion is not None)
+
+    # The engine: SO3LR-Flash where it computes what is asked, else the neighbour-list
+    # model below (engine='flash' / 'standard' forces one). The structures are read for
+    # it only if these settings could run on it.
+    from .so3lr_md import run_on_flash
+    from ..flash.check import settings_problem
+    flash_settings = dict(
+        model_path=model_path, precision=precision, lr_cutoff=lr_cutoff,
+        dispersion_damping=dispersion_damping, total_charge=total_charge,
+        num_unpaired_electrons=num_unpaired_electrons,
+        charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge,
+        kspace_electrostatics=kspace_electrostatics, kspace_smearing=kspace_smearing,
+        kspace_spacing=kspace_spacing, kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion, kspace_dispersion_smearing=kspace_dispersion_smearing,
+        kspace_dispersion_spacing=kspace_dispersion_spacing,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
+        targets=target_list, engine=engine, flash_mode=flash_mode, flash_mixed=flash_mixed,
+        flash_devices=flash_devices)
+    frames = []
+    if (engine or 'auto') != 'standard' and settings_problem(flash_settings, 'eval') is None:
+        from ase.io import read
+        frames = read(str(datafile), index=':')
+
+    def eval_on_flash(flash_md):
+        from ..flash.evaluate import evaluate_flash
+        return evaluate_flash(frames, flash_settings, target_list, keep_predictions=save_predictions_bool)
+    ran, result = run_on_flash(flash_settings, frames, 'eval', eval_on_flash)
+    if ran:
+        sums, predicted, (t_first, t_rest, n_rest) = result
+        logger.info(f'Completed evaluation on {len(frames)} / {len(frames)} structures (flash)')
+        logger.info(f'Engine builds and their first calls (which compile): {t_first:.3f} seconds; '
+                    f'the other {n_rest} calls: {t_rest:.3f} seconds')
+        logger.info('-' * 50)
+        return _finish_evaluation(
+            target_list, {t: v[0] for t, v in sums.items()}, {t: v[1] for t, v in sums.items()},
+            {t: v[2] for t, v in sums.items() if v[2] > 0}, t_rest, t_first, n_rest, n_rest, datafile,
+            save_to if save_predictions_bool else None, predicted, len(frames), overwrite, total_time_start)
+    del frames
 
     so3lr_calc = make_so3lr(
         workdir=workdir_path,
@@ -719,91 +769,101 @@ def evaluate_so3lr_on(
 
         logger.info('-' * 50)
 
-        # Compute final metrics from totals (only for targets with ground truth)
-        test_metrics = {}
-        for t in target_list:
-            if t not in tot_n:
-                continue
-            n = tot_n[t]
-            if n <= 0:
-                # Avoid division by zero; report NaNs if nothing was counted
-                mae = float('nan'); mse = float('nan'); rmse = float('nan')
-            else:
-                mae = tot_abs[t] / n
-                mse = tot_sq[t]  / n
-                rmse = float(np.sqrt(mse))
-            test_metrics[f'{t}_mae']  = float(mae)
-            test_metrics[f'{t}_mse']  = float(mse)
-            test_metrics[f'{t}_rmse'] = float(rmse)
-
-        # Compile timing metrics
-        time_per_batch = total_time / i if i > 0 else 0
-        time_per_structure = total_time / total_num_structures if total_num_structures > 0 else 0
-
-        metrics = {
-            'time_per_batch': float(time_per_batch),
-            'time_per_structure': float(time_per_structure),
-            'time_evaluation': float(total_time),
-            'time_compile': float(compile_time),
-            **test_metrics
-        }
-
-        # Convert numpy types to Python types for serialization
-        metrics = jax.tree_util.tree_map(lambda x: float(x), metrics)
-        metrics['datafile'] = str(datafile.as_uri())
-
-        # Display results: a per-target table (MAE / RMSE / N + unit) is much
-        # easier to read than a flat pprint dict where *_mae / *_mse / *_rmse
-        # keys interleave with timing fields. The returned `metrics` dict is
-        # unchanged so downstream callers keep working.
-        _UNIT_MAP = {
-            'energy': 'eV',
-            'forces': 'eV/Ang',
-            'dipole_vec': 'e*Ang',
-            'stress': 'eV/Ang^3',
-            'hirshfeld_ratios': 'dimensionless',
-            'a0_ratios': 'dimensionless',
-            'c6_ratios': 'dimensionless',
-        }
-        # Targets that actually have ground-truth counts (skip observables
-        # which have no MAE/RMSE because no label is available).
-        _scored_targets = [t for t in target_list if t in tot_n and tot_n[t] > 0]
-        logger.info('Evaluation metrics:')
-        if _scored_targets:
-            _hdr = f"  {'target':<20}  {'MAE':>12}  {'RMSE':>12}  {'N':>10}  unit"
-            logger.info(_hdr)
-            logger.info('  ' + '-' * (len(_hdr) - 2))
-            for t in _scored_targets:
-                mae = metrics.get(f'{t}_mae', float('nan'))
-                rmse = metrics.get(f'{t}_rmse', float('nan'))
-                n = tot_n[t]
-                unit = _UNIT_MAP.get(t, '')
-                logger.info(
-                    f"  {t:<20}  {mae:>12.3e}  {rmse:>12.3e}  {n:>10d}  {unit}"
-                )
-        else:
-            logger.info('  (no labelled targets evaluated)')
-        logger.info(
-            f"  Timing: total={metrics['time_evaluation']:.3f}s, "
-            f"compile={metrics['time_compile']:.3f}s, "
-            f"per-batch={metrics['time_per_batch']:.3f}s, "
-            f"per-structure={metrics['time_per_structure']:.3f}s"
-        )
-        logger.info('-' * 50)
-
-        # Save predictions if requested
-        if save_predictions_bool:
-            save_to_file(predicted, str(save_to), num_data, overwrite=overwrite)
-
-        total_time_end = time.time()
-        logger.info(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
-        logger.info('Evaluation completed successfully')
-
-        return metrics
+        return _finish_evaluation(target_list, tot_abs, tot_sq, tot_n, total_time, compile_time, i,
+                                  total_num_structures, datafile, save_to if save_predictions_bool else None,
+                                  predicted, num_data, overwrite, total_time_start)
 
     except Exception as e:
         logger.error(f"Error during evaluation: {str(e)}")
         raise
+
+
+def _finish_evaluation(target_list, tot_abs, tot_sq, tot_n, total_time, compile_time, n_batches,
+                       n_structures, datafile, save_to, predicted, num_data, overwrite, total_time_start):
+    """The metrics from the per-target sums, the report, and the predictions saved (if
+    save_to): the end of ``evaluate_so3lr_on`` for either engine. total_time: seconds of
+    the n_batches timed calls, over n_structures structures."""
+    # Compute final metrics from totals (only for targets with ground truth)
+    test_metrics = {}
+    for t in target_list:
+        if t not in tot_n:
+            continue
+        n = tot_n[t]
+        if n <= 0:
+            # Avoid division by zero; report NaNs if nothing was counted
+            mae = float('nan'); mse = float('nan'); rmse = float('nan')
+        else:
+            mae = tot_abs[t] / n
+            mse = tot_sq[t]  / n
+            rmse = float(np.sqrt(mse))
+        test_metrics[f'{t}_mae']  = float(mae)
+        test_metrics[f'{t}_mse']  = float(mse)
+        test_metrics[f'{t}_rmse'] = float(rmse)
+
+    # Compile timing metrics
+    time_per_batch = total_time / n_batches if n_batches > 0 else float('nan')
+    time_per_structure = total_time / n_structures if n_structures > 0 else float('nan')
+
+    metrics = {
+        'time_per_batch': float(time_per_batch),
+        'time_per_structure': float(time_per_structure),
+        'time_evaluation': float(total_time),
+        'time_compile': float(compile_time),
+        **test_metrics
+    }
+
+    # Convert numpy types to Python types for serialization
+    metrics = jax.tree_util.tree_map(lambda x: float(x), metrics)
+    metrics['datafile'] = str(datafile.as_uri())
+
+    # Display results: a per-target table (MAE / RMSE / N + unit) is much
+    # easier to read than a flat pprint dict where *_mae / *_mse / *_rmse
+    # keys interleave with timing fields. The returned `metrics` dict is
+    # unchanged so downstream callers keep working.
+    _UNIT_MAP = {
+        'energy': 'eV',
+        'forces': 'eV/Ang',
+        'dipole_vec': 'e*Ang',
+        'stress': 'eV/Ang^3',
+        'hirshfeld_ratios': 'dimensionless',
+        'a0_ratios': 'dimensionless',
+        'c6_ratios': 'dimensionless',
+    }
+    # Targets that actually have ground-truth counts (skip observables
+    # which have no MAE/RMSE because no label is available).
+    _scored_targets = [t for t in target_list if t in tot_n and tot_n[t] > 0]
+    logger.info('Evaluation metrics:')
+    if _scored_targets:
+        _hdr = f"  {'target':<20}  {'MAE':>12}  {'RMSE':>12}  {'N':>10}  unit"
+        logger.info(_hdr)
+        logger.info('  ' + '-' * (len(_hdr) - 2))
+        for t in _scored_targets:
+            mae = metrics.get(f'{t}_mae', float('nan'))
+            rmse = metrics.get(f'{t}_rmse', float('nan'))
+            n = tot_n[t]
+            unit = _UNIT_MAP.get(t, '')
+            logger.info(
+                f"  {t:<20}  {mae:>12.3e}  {rmse:>12.3e}  {n:>10d}  {unit}"
+            )
+    else:
+        logger.info('  (no labelled targets evaluated)')
+    logger.info(
+        f"  Timing: total={metrics['time_evaluation']:.3f}s, "
+        f"compile={metrics['time_compile']:.3f}s, "
+        f"per-batch={metrics['time_per_batch']:.3f}s, "
+        f"per-structure={metrics['time_per_structure']:.3f}s"
+    )
+    logger.info('-' * 50)
+
+    # Save predictions if requested
+    if save_to is not None:
+        save_to_file(predicted, str(save_to), num_data, overwrite=overwrite)
+
+    total_time_end = time.time()
+    logger.info(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
+    logger.info('Evaluation completed successfully')
+
+    return metrics
 
 
 def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:

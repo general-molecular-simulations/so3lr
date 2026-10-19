@@ -1,9 +1,12 @@
-"""Whether the flash engine can run a simulation: settings, model, box, device.
+"""Whether the flash engine can run a task: settings, model, box, device.
 
-Imports no kernels, so ``so3lr_md.run`` can decide cheaply and fall back without
+Imports no kernels, so ``so3lr_md.run_on_flash`` can decide cheaply and fall back without
 touching Pallas. Every check fails closed: a setting or a model hyperparameter flash
 does not know makes it decline (with the reason), rather than run something it might
 not compute.
+
+The tasks (``TASKS``): ``md`` (``so3lr nve|nvt|nvt-langevin|npt``), ``opt`` (``so3lr opt``),
+``eval`` (``so3lr eval``: energies and forces only) and ``ase`` (``calculator.FlashCalculator``).
 """
 import dataclasses
 import json
@@ -17,6 +20,9 @@ import numpy as np
 NPT_BOX_MARGIN = 0.03
 ENGINES = ("auto", "flash", "standard")
 FLASH_MODES = ("auto", "fast", "default", "lean", "leanest", "minimal")     # engine.MODES and auto
+TASKS = ("md", "opt", "eval", "ase")
+# what so3lr eval can take from the engine
+EVAL_TARGETS = ("energy", "forces")
 
 # settings flash honours (aliases included)
 HANDLED = {
@@ -103,11 +109,11 @@ def validate_options(settings):
             raise ValueError(f"flash_devices {n}: only {len(jax.local_devices())} visible")
 
 
-def reserve_gpu(settings):
+def reserve_gpu(settings, task="md"):
     """Let XLA take 97% of the GPU (unless set) when flash may run these settings and this
     model: its largest systems need nearly all of it. Called before JAX starts, so before
     the structure is read: a run that falls back for its structure still reserves it."""
-    if ((settings.get("engine") or "auto") != "standard" and settings_problem(settings) is None
+    if ((settings.get("engine") or "auto") != "standard" and settings_problem(settings, task) is None
             and model_problem(settings.get("model_path")) is None):
         # several GPUs: room outside XLA's pool for NCCL's buffers
         n = settings.get("flash_devices")
@@ -115,12 +121,18 @@ def reserve_gpu(settings):
         os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90" if several else "0.97")
 
 
-def settings_problem(settings):
-    """Why flash cannot run these settings (None if it can)."""
+def settings_problem(settings, task="md"):
+    """Why flash cannot run these settings for task (one of TASKS; None if it can)."""
     s = settings
     ens = s.get("ensemble")
-    if ens not in ("nve", "nvt", "nvt-langevin", "npt"):
+    if task == "md" and ens not in ("nve", "nvt", "nvt-langevin", "npt"):
         return f"it runs nve, nvt, nvt-langevin and npt, not {ens}"
+    if task == "eval":
+        other = [t for t in _targets(s.get("targets")) if t not in EVAL_TARGETS]
+        if other:
+            return f"it evaluates {' and '.join(EVAL_TARGETS)}, not {', '.join(other)}"
+    if s.get("lr_cutoff", 12.0) is None:
+        return "it needs a long-range cutoff"
     kspace = s.get("kspace_electrostatics") or s.get("kspace_dispersion")
     for key, value in s.items():
         if key in UNSUPPORTED:
@@ -144,6 +156,13 @@ def settings_problem(settings):
     if ens == "npt" and not _jax_md_keeps_dudv():
         return "its NPT needs a jax-md whose NPT state carries dUdV from the previous step"
     return None
+
+
+def _targets(targets):
+    """so3lr eval's targets, a comma-separated string or a sequence, as a list."""
+    if isinstance(targets, str):
+        targets = targets.split(",")
+    return [t.strip() for t in targets or () if t.strip()]
 
 
 def _jax_md_keeps_dudv():
@@ -207,8 +226,9 @@ def box_problem(L, rc, rc_lr):
     return None
 
 
-def structure_problem(settings, atoms):
-    """Why flash cannot take this structure, or the restart's box (None if it can)."""
+def structure_problem(settings, atoms, rc=None):
+    """Why flash cannot take this structure, or the restart's box (None if it can); rc: the
+    model's cutoff, if known."""
     if not atoms.pbc.all() or atoms.cell.rank < 3:
         return "it needs a box periodic in all three directions"
     cell = np.asarray(atoms.cell[:])
@@ -220,9 +240,7 @@ def structure_problem(settings, atoms):
             box = np.asarray(saved["box"]) if "box" in saved.files else None
         if box is not None and np.any(box):
             sides = np.diag(box) if box.ndim == 2 else np.broadcast_to(box.reshape(-1), (3,))
-    from so3lr.model_registry import resolve_model
-    with open(resolve_model(settings.get("model_path")).dir / "hyperparameters.json") as fp:
-        rc = float(json.load(fp)["model"]["cutoff"])
+    rc = model_cutoff(settings.get("model_path")) if rc is None else rc
     shrink = 1.0 - (NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0)
     return box_problem([float(v) * shrink for v in sides], rc, float(settings.get("lr_cutoff") or 12.0))
 
@@ -248,8 +266,32 @@ def device_problem():
     return None
 
 
-def flash_problem(settings, atoms):
-    """Why the flash engine cannot run this simulation (None if it can): the settings,
-    the model and the structure first (no device needed), then the device."""
-    return (settings_problem(settings) or model_problem(settings.get("model_path"))
-            or structure_problem(settings, atoms) or device_problem())
+def model_cutoff(model_path):
+    """The model's short-range cutoff in A."""
+    from so3lr.model_registry import resolve_model
+    with open(resolve_model(model_path).dir / "hyperparameters.json") as fp:
+        return float(json.load(fp)["model"]["cutoff"])
+
+
+def frames_problem(settings, frames):
+    """Why flash cannot take one of these structures (None if it can take them all): each
+    distinct box checked once."""
+    rc, seen = model_cutoff(settings.get("model_path")), set()
+    for i, atoms in enumerate(frames):
+        key = (tuple(bool(p) for p in atoms.pbc), np.asarray(atoms.cell[:]).tobytes())
+        if key in seen:
+            continue
+        seen.add(key)
+        problem = structure_problem(settings, atoms, rc)
+        if problem:
+            return problem if len(frames) == 1 else f"structure {i}: {problem}"
+    return None
+
+
+def flash_problem(settings, atoms, task="md"):
+    """Why the flash engine cannot run task (one of TASKS) on atoms, a structure or a list of
+    them (None if it can): the settings, the model and the structures first (no device
+    needed), then the device."""
+    frames = atoms if isinstance(atoms, (list, tuple)) else [atoms]
+    return (settings_problem(settings, task) or model_problem(settings.get("model_path"))
+            or frames_problem(settings, frames) or device_problem())
