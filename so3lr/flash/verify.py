@@ -7,7 +7,8 @@ and dE/d(strain) (the NPT pressure's virial).
 Builds the neighbour-list potential exactly as ``perform_md`` does (fractional
 coordinates, jax-md neighbour lists) and the flash engine as ``--engine flash`` does, on the
 structure as given and on a copy with 40 hydrogens pushed into contact with oxygens
-(the descriptor floor), and prints the differences. Run on an NVIDIA GPU; the box must
+(the descriptor floor), and prints the differences. Run on a GPU flash runs on
+(``check.device_problem``); the box must
 be at least 2 x lr_cutoff and 7 grid cells across (12,288 waters: 49.7 A).
 """
 import argparse

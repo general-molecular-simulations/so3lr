@@ -9,6 +9,7 @@ The tasks (``TASKS``): ``md`` (``so3lr nve|nvt|nvt-langevin|npt``), ``opt`` (``s
 ``eval`` (``so3lr eval``: energies and forces only) and ``ase`` (``calculator.FlashCalculator``).
 """
 import dataclasses
+import functools
 import json
 import math
 import os
@@ -19,6 +20,8 @@ import numpy as np
 # a compile (and is laid out again if it leaves the margin)
 NPT_BOX_MARGIN = 0.03
 ENGINES = ("auto", "flash", "standard")
+# the AMD GPUs (gfx targets) flash is tested on: the MI355X
+ROCM_TARGETS = ("gfx950",)
 FLASH_MODES = ("auto", "fast", "default", "lean", "leanest", "minimal")     # engine.MODES and auto
 TASKS = ("md", "opt", "eval", "ase")
 # what so3lr eval can take from the engine
@@ -249,6 +252,17 @@ def structure_problem(settings, atoms, rc):
     return box_problem([float(v) * shrink for v in sides], rc, float(settings.get("lr_cutoff") or 12.0))
 
 
+@functools.cache
+def is_rocm():
+    """Whether JAX runs on AMD's ROCm (HIP) here."""
+    import jax
+    try:
+        version = str(jax.devices()[0].client.platform_version).lower()
+    except Exception:
+        return False
+    return "rocm" in version or "hip" in version
+
+
 def device_problem():
     """Why this process has no GPU the kernels (Pallas-Triton) run on, or None."""
     import jax
@@ -257,16 +271,20 @@ def device_problem():
     except Exception as exc:                     # no backend at all
         return f"no JAX device ({exc})"
     if dev.platform != "gpu":
-        return f"its kernels run on NVIDIA GPUs, and this process has {dev.platform}"
-    try:
-        version = str(dev.client.platform_version).lower()
-    except Exception:
-        version = ""
-    if "rocm" in version or "hip" in version:
-        return "its kernels are tested on NVIDIA GPUs only, and this is ROCm"
+        return f"its kernels run on NVIDIA and AMD GPUs, and this process has {dev.platform}"
     cc = getattr(dev, "compute_capability", None)
-    if cc is not None and float(cc) < 8.0:
-        return f"its kernels are tested on compute capability 8.0 and newer (A100, H100), and this GPU is {cc}"
+    if is_rocm():
+        # as measured on the MI355X: XLA's command buffers off (HIP graph capture fails)
+        if str(cc).split(":")[0] not in ROCM_TARGETS:
+            return f"on AMD its kernels are tested on {', '.join(ROCM_TARGETS)} (MI355X), and this GPU is {cc}"
+        if "--xla_gpu_enable_command_buffer=" not in os.environ.get("XLA_FLAGS", ""):
+            return 'on AMD it needs XLA_FLAGS="--xla_gpu_enable_command_buffer=" (set before JAX starts)'
+        return None
+    try:
+        if cc is not None and float(cc) < 8.0:
+            return f"its kernels are tested on compute capability 8.0 and newer (A100, H100), and this GPU is {cc}"
+    except ValueError:
+        return f"it does not know this GPU (compute capability {cc!r})"
     return None
 
 

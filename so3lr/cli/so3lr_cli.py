@@ -511,7 +511,7 @@ def flash_options(f: Callable) -> Callable:
                      help='auto: the flash engine (GPU kernels with their own cell grid and '
                           'no per-edge arrays: 2.5x faster, and tens of millions of atoms on one '
                           'GPU) whenever it computes what the other options ask for -- an NVIDIA '
-                          'GPU, a periodic orthorhombic box, real-space long range or PME, '
+                          'GPU or an AMD MI355X, a periodic orthorhombic box, real-space long range or PME, '
                           'so3lr-tauri-s/m/l; for MD nve/nvt/nvt-langevin/isotropic npt, for eval '
                           'the targets energy and forces -- else the neighbour-list potential; the '
                           'log says which and why. flash or standard forces one. [default: auto]')(f)
