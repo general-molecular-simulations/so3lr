@@ -1,5 +1,5 @@
-"""SO3LR-Flash (``so3lr/flash``): the parts that run without a GPU here, and on an NVIDIA GPU
-the engine against the neighbour-list potential.
+"""SO3LR-Flash (``so3lr/flash``): the parts that run without a GPU here, and on a GPU it runs on
+(NVIDIA, AMD Instinct) the engine against the neighbour-list potential.
 
 Without a GPU: PME's mesh part and its strain derivative against jaxpme, the real-space
 tables against so3lr_dev's pair functions, the reasons the engine choice gives (every
@@ -255,9 +255,9 @@ def test_flash_modes_match_the_engine():
     assert tuple(E.MODES) == check.FLASH_MODES[1:]
 
 
-@pytest.mark.skipif(check.device_problem() is None, reason="this test is for machines without an NVIDIA GPU")
+@pytest.mark.skipif(check.device_problem() is None, reason="this test is for machines without a GPU flash runs on")
 def test_auto_falls_back_without_gpu(tmp_path):
-    """Without an NVIDIA GPU, `so3lr nvt` runs the neighbour-list potential and says why."""
+    """Without a GPU flash runs on, `so3lr nvt` runs the neighbour-list potential and says why."""
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
     from subprocess_env import so3lr_subprocess_env
     (tmp_path / "in.xyz").write_text((DATA / "acetone.xyz").read_text())
@@ -298,7 +298,7 @@ def test_flash_refuses_untrained_elements(monkeypatch):
         flash_md.perform_md_flash(SETTINGS, atoms=atoms)
 
 
-GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA GPU")
+GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA or AMD Instinct GPU")
 
 
 @GPU
@@ -415,7 +415,7 @@ def test_auto_falls_back_when_flash_fails_to_start(tmp_path, monkeypatch):
 
 
 GPUS = pytest.mark.skipif(check.device_problem() is not None or len(jax.local_devices()) < 2,
-                          reason="several GPUs: needs two NVIDIA GPUs or more")
+                          reason="several GPUs: needs two GPUs flash runs on or more")
 
 
 @GPUS

@@ -6,6 +6,7 @@ does not know makes it decline (with the reason), rather than run something it m
 not compute.
 """
 import dataclasses
+import functools
 import json
 import math
 import os
@@ -227,6 +228,17 @@ def structure_problem(settings, atoms):
     return box_problem([float(v) * shrink for v in sides], rc, float(settings.get("lr_cutoff") or 12.0))
 
 
+@functools.cache
+def is_rocm():
+    """Whether JAX runs on AMD's ROCm (HIP) here."""
+    import jax
+    try:
+        version = str(jax.devices()[0].client.platform_version).lower()
+    except Exception:
+        return False
+    return "rocm" in version or "hip" in version
+
+
 def device_problem():
     """Why this process has no GPU the kernels (Pallas-Triton) run on, or None."""
     import jax
@@ -235,13 +247,16 @@ def device_problem():
     except Exception as exc:                     # no backend at all
         return f"no JAX device ({exc})"
     if dev.platform != "gpu":
-        return f"its kernels run on AMD and NVIDIA GPUs, and this process has {dev.platform}"
+        return f"its kernels run on NVIDIA and AMD GPUs, and this process has {dev.platform}"
     cc = getattr(dev, "compute_capability", None)
-    try:
-        if cc is not None and float(cc) < 8.0:
-            return f"its kernels are tested on AMD Instinct (MI355X) and NVIDIA A100+, and this GPU is {cc}"
-    except (ValueError, TypeError):
-        pass
+    if is_rocm():
+        # the launches take 64-lane wavefronts (engine._warps): AMD Instinct (CDNA, gfx9xx),
+        # tested on the MI355X (gfx950)
+        if cc is not None and not str(cc).startswith("gfx9"):
+            return f"its kernels are tested on AMD Instinct GPUs (gfx9xx), and this GPU is {cc}"
+        return None
+    if cc is not None and float(cc) < 8.0:
+        return f"its kernels are tested on compute capability 8.0 and newer (A100, H100), and this GPU is {cc}"
     return None
 
 
