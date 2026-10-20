@@ -42,8 +42,8 @@ def test_cli_eval(eval_dir):
     result = subprocess.run(
         [
             'so3lr', 'eval',
-            # EXPECTED_RMSE was produced with the legacy (v1) model; pin to it.
-            # The no-arg default is so3lr-tauri-m-2606 (see test_cli_eval_default_model).
+            # The legacy (v1) model, whose ratio head is 'hirshfeld_ratios'; the
+            # no-arg default is so3lr-tauri-m-2606 (see test_cli_eval_default_model).
             '--model', 'so3lr',
             '--datafile', str(datafile),
             '--lr-cutoff', '100.0',

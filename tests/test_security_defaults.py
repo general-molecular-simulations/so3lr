@@ -1,10 +1,14 @@
-"""W&B opt-in and pickle-free MD restart files."""
+"""W&B telemetry is opt-in.
+
+MD restart files are pickle-free because load_state reads them with
+allow_pickle=False, so every restart round trip (test_md_output_integrity.py,
+test_restart_coordinates.py) fails if a field needs pickle.
+"""
 
 import pathlib
 import sys
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import yaml
 
@@ -59,21 +63,3 @@ def test_wandb_opt_in_without_client_is_actionable(monkeypatch):
     monkeypatch.setitem(sys.modules, 'wandb', None)
     with pytest.raises(ImportError, match=r'so3lr\[wandb\]'):
         initialize_wandb({'training': {'use_wandb': True}})
-
-
-def test_md_restart_round_trip_without_pickle(tmp_path):
-    from so3lr.cli.so3lr_md import load_state, save_state
-
-    position = np.array([[0.1, 0.2, 0.3]])
-    state = SimpleNamespace(position=position, momentum=position + 1, force=position + 2, mass=np.ones((1, 1)))
-    path = tmp_path / 'restart.npz'
-    save_state(state, np.array([10.0, 11.0, 12.0]), 7, str(path), ensemble='nve', fractional_coordinates=False)
-
-    with np.load(path, allow_pickle=False) as archive:
-        for name in archive.files:
-            archive[name]  # raises if any field needs pickle
-
-    loaded, box, cycle = load_state(str(path), ensemble='nve', fractional_coordinates=False)
-    np.testing.assert_allclose(loaded.position, position)
-    np.testing.assert_allclose(box, [10.0, 11.0, 12.0])
-    assert int(cycle) == 7

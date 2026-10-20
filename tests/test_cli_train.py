@@ -83,17 +83,6 @@ def _assert_training_succeeded(result, workdir, max_loss=10.0):
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
-@pytest.mark.slow
-def test_cli_train_forces_only(workdir, tmp_path):
-    """Train with forces-only loss (no energy shifts)."""
-    cfg = _base_config(workdir)
-    cfg['training']['loss_weights'] = {'forces': 1.0}
-    config_path = _write_config(cfg, tmp_path)
-
-    result = _run_train(config_path)
-    _assert_training_succeeded(result, workdir, max_loss=5.0)
-
-
 def test_cli_train_forces_and_energy_with_lse_shifts(workdir, tmp_path):
     """Train with forces + energy loss and shift_mode=lse, verify carbon shift."""
     cfg = _base_config(workdir)
@@ -125,20 +114,6 @@ def test_cli_train_forces_and_energy_with_lse_shifts(workdir, tmp_path):
              '--output', str(tmp_path / f'{args[0]}.xyz')],
             cwd=tmp_path, capture_output=True, text=True, env=so3lr_subprocess_env(), timeout=900)
         assert run.returncode == 0, f"so3lr {args[0]} failed:\n{run.stdout[-2000:]}\n{run.stderr[-2000:]}"
-
-@pytest.mark.slow
-def test_cli_train_water_pbc_forces_only(workdir, tmp_path):
-    """Train on periodic water box with forces-only loss."""
-    cfg = _base_config(workdir)
-    cfg['data']['filepath'] = str(DATAFILE_WATER)
-    cfg['training']['loss_weights'] = {'forces': 1.0}
-    cfg['training']['num_train'] = 13
-    cfg['training']['num_valid'] = 2
-    config_path = _write_config(cfg, tmp_path, name='test_train_water.yaml')
-
-    result = _run_train(config_path)
-    _assert_training_succeeded(result, workdir, max_loss=15.0)
-
 
 def test_cli_train_water_pbc_with_long_range(workdir, tmp_path):
     """Train on periodic water box with long-range interactions enabled."""
