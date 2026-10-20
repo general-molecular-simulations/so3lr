@@ -51,14 +51,30 @@ MEASURED = {
 }
 
 # Pairs whose bare-dimer onset rmin cannot reach -- see the comment block in
-# embed_sparse.py for why only P-S is a real problem. For C-H the onset and the
-# closest real contact are 0.011 A apart, so no global energy protects it
-# without flooring real C-H contacts; 5 eV takes the non-intruding side.
+# embed_sparse.py for why only P-S is a real problem. C-H is a choice, not a
+# necessity: 4.4-4.6 eV would put rmin past its 0.680 A onset and still below
+# every closest real contact, but only 3, 4 and 5 eV were evaluated, and 5 eV is
+# what the paper used.
 UNPROTECTED = {('P', 'P'), ('P', 'S'), ('C', 'H')}
 
+# Outermost severe failure (NaN, |E_nn| > 100 eV or |F| > 1e3 eV/A) per pair
+# from the first scan: 18 pairs x 4 checkpoints, legacy so3lr included, 0.01 A
+# steps. Broader than MEASURED in models and failure criterion.
+SEVERE_EDGE = {('H', 'H'): 0.28, ('C', 'H'): 0.68, ('N', 'H'): 0.63,
+               ('O', 'H'): 0.60, ('F', 'H'): 0.51, ('S', 'H'): 0.56,
+               ('Cl', 'H'): 0.62, ('P', 'H'): 0.61, ('C', 'C'): 0.77,
+               ('C', 'N'): 0.76, ('C', 'O'): 0.80, ('N', 'N'): 0.48,
+               ('N', 'O'): 0.48, ('O', 'O'): 0.59, ('C', 'S'): 0.80,
+               ('S', 'S'): 1.05, ('C', 'Cl'): 0.89, ('P', 'O'): 0.62}
+
+# Closest approach anywhere in the 300-673 K / 1-250 bar NPT water series.
+WATER_CLOSEST = {('O', 'H'): 0.863, ('H', 'H'): 1.239, ('O', 'O'): 2.180}
+
 # Pairs whose closest real contact lies inside the handover shoulder
-# (rmin < real < rmin + PAIR_FLOOR_WIDTH): the floor bends those contacts, by
-# under 0.005 A. That shoulder is the whole cost of the width.
+# (rmin < real < rmin + PAIR_FLOOR_WIDTH). The floor moves those distances by
+# under 0.005 A, but its slope there is 0.65-0.95, so the network's radial
+# derivative on those contacts is scaled down by up to 35%. That shoulder is the
+# whole cost of the width.
 SHOULDER = {('B', 'H'), ('C', 'H'), ('F', 'H'), ('N', 'H'), ('O', 'H')}
 
 # Equilibrium bond lengths [A]. The floor must be exactly inert at and above
@@ -100,13 +116,26 @@ def test_inert_at_and_above_every_real_bond():
     assert not bad, 'floor perturbs normal geometries:\n  ' + '\n  '.join(bad)
 
 
+def test_inert_at_the_closest_approach_real_simulations_reach():
+    """The binding constraint for MD is not the equilibrium bond but the
+    shortest contact hot compressed water actually samples: O-H reaches 0.863 A
+    at 673 K / 250 bar. Compared in the array's own dtype -- a float32 input
+    against a float64 literal differs by 2e-8 for reasons unrelated to the floor."""
+    for (e1, e2), closest in WATER_CLOSEST.items():
+        assert _handover(e1, e2) < closest, (e1, e2)
+        d = jnp.array([closest])
+        npt.assert_array_equal(np.asarray(_floor(e1, e2, d)), np.asarray(d))
+
+
 def test_does_not_intrude_on_labelled_data():
     """The binding constraint, and the reason this is 5 eV rather than 3.
 
     Below the closest contact the labelled data actually contains, the model is
-    interpolating; flooring there overrides trained physics and measurably
-    worsens forces. Must hold for EVERY pair, with no exceptions -- so every
-    violation is reported at once rather than one per run.
+    interpolating; clamping there overrides trained physics and measurably
+    worsens forces. rmin must sit below that contact for EVERY pair, with no
+    exceptions, so every violation is reported at once rather than one per run.
+    The handover shoulder above rmin does reach a few X-H contacts; that is
+    pinned separately in test_width_adds_intrusion_and_no_protection.
     """
     bad = [f'{e1}-{e2}: clamp {_rmin(e1, e2):.3f} >= closest real contact {real:.3f}'
            for (e1, e2), (_, real) in MEASURED.items() if _rmin(e1, e2) >= real]
@@ -130,11 +159,21 @@ def test_reaches_past_the_measured_failure_onset():
         f'now protected (remove from UNPROTECTED): {sorted(UNPROTECTED - unreached)}')
 
 
+def test_reaches_past_the_four_checkpoint_scan():
+    """The floor also runs in legacy so3lr, so it must clear that scan's edges
+    too. C-H is the documented gap."""
+    bad = [f'{e1}-{e2}: clamp {_rmin(e1, e2):.3f} <= edge {edge}'
+           for (e1, e2), edge in SEVERE_EDGE.items()
+           if (e1, e2) != ('C', 'H') and _rmin(e1, e2) <= edge]
+    assert not bad, 'floor lands inside a severe band for:\n  ' + '\n  '.join(bad)
+
+
 @pytest.mark.parametrize('pair', [('P', 'P'), ('P', 'S')])
-def test_phosphorus_pairs_are_beyond_any_global_energy(pair):
-    """Even at 1 eV -- already five times more intrusive than the shipped
-    setting, and enough to floor real contacts across the board -- rmin still
-    falls short, so these need a per-pair floor or a stronger P repulsion."""
+def test_phosphorus_pairs_are_beyond_any_usable_global_energy(pair):
+    """Even at 1 eV -- five times more intrusive than the shipped setting, and
+    enough to floor real contacts across the board -- rmin still falls short;
+    reaching the onsets would take ~0.13 eV (P-S) and ~0.03 eV (P-P). These need
+    a per-pair floor or a stronger P repulsion."""
     onset = MEASURED[pair][0]
     at_1ev = _rmin(*pair, energy=1.0)
     assert at_1ev < onset, (
@@ -143,9 +182,10 @@ def test_phosphorus_pairs_are_beyond_any_global_energy(pair):
 
 
 def test_the_energy_threshold_is_the_only_knob_and_it_is_thermally_unreachable():
-    """PAIR_FLOOR_ENERGY is the whole calibration. At 5 eV the handover costs
-    ~58 kT at 1000 K in a single pair coordinate, so 'the model is extrapolating
-    here' is a statement about the input rather than a guess."""
+    """PAIR_FLOOR_ENERGY is the whole calibration. Reaching rmin costs 5 eV,
+    ~58 kT at 1000 K, in a single pair coordinate; the handover starts 0.05 A
+    further out, where the repulsion is 2.4-3.5 eV (28-40 kT). Either way 'the
+    model is extrapolating here' is a statement about the input, not a guess."""
     assert PAIR_FLOOR_ENERGY == 5.0
     kT_1000K = 0.0861733  # eV
     assert PAIR_FLOOR_ENERGY / kT_1000K > 50
