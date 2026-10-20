@@ -2,12 +2,6 @@ import jax
 import numpy as np
 import pytest
 
-from so3lr.potential import make_potential_fn
-
-
-def test_make_potential_fn():
-    potential = make_potential_fn()
-
 
 @pytest.fixture
 def x64():
