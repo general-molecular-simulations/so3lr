@@ -146,6 +146,14 @@ def load_model_from_workdir(
         params = mngr_state.get('params')
         loaded_mngr.close()
 
+    # Auto-detect legacy (v1) hirshfeld head: the v1 attention head stores a
+    # query embedding under 'Embed_1' in observables_2, while the v2 scalar
+    # head does not.  When not set in the config, infer from checkpoint shape.
+    if not cfg.model.get('legacy_so3lr_bool', False):
+        obs2 = params.get('params', params).get('observables_2', {})
+        if 'Embed_1' in obs2:
+            cfg.model.legacy_so3lr_bool = True
+
     if model == 'so3krates':
         net = from_config.make_so3krates_sparse_from_config(
             cfg,
