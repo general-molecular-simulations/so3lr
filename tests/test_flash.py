@@ -251,6 +251,43 @@ def test_bad_engine_options_raise(bad):
     check.validate_options(dict(engine="standard", flash_mode="lean", flash_devices=4096))
 
 
+def test_rocm_launches(monkeypatch):
+    """The launches measured on the MI355X on ROCm, the NVIDIA ones elsewhere."""
+    from types import SimpleNamespace
+
+    def rows(n, warps):
+        return E.FlashSO3LR._row_grid(SimpleNamespace(nl=n, atoms_per_program=None), warps)
+    monkeypatch.setattr(E, "is_rocm", lambda: True)
+    assert E._att_launch(32) == {"fwd": (16, 1), "bwd_heads": (16, 1), "bwd_degrees": (8, 1)}
+    assert E._att_launch(64) == {"fwd": (16, 2), "bwd_heads": (32, 2), "bwd_degrees": (16, 2)}
+    assert E._warps(E.NUM_WARPS) == 1
+    assert rows(12_288, 1) == (12_288, 1)
+    assert rows(84_283_392, 1) == (42_141_696, 2)
+    assert rows(84_283_392, 2) == (28_094_464, 3)
+    monkeypatch.setattr(E, "is_rocm", lambda: False)
+    assert E._att_launch(32) == E.ATT_LAUNCH[32] and E._att_launch(64) == E.ATT_LAUNCH[64]
+    assert E._warps(E.NUM_WARPS) == E.NUM_WARPS
+    assert rows(84_283_392, 1) == (84_283_392, 1)
+
+
+@pytest.mark.parametrize("rocm,cc,flags,reason", [
+    (True, "gfx950", "--xla_gpu_enable_command_buffer=", None),
+    (True, "gfx950", "", "XLA_FLAGS"),
+    (True, "gfx942", "--xla_gpu_enable_command_buffer=", "tested on gfx950"),
+    (False, "9.0", "", None),
+    (False, "7.5", "", "compute capability 8.0"),
+    (False, "gfx950", "", "does not know this GPU"),
+])
+def test_device_check(monkeypatch, rocm, cc, flags, reason):
+    """NVIDIA from compute capability 8.0; on ROCm the MI355X with XLA's command buffers off."""
+    from types import SimpleNamespace
+    monkeypatch.setattr(check, "is_rocm", lambda: rocm)
+    monkeypatch.setattr(jax, "devices", lambda *args: [SimpleNamespace(platform="gpu", compute_capability=cc)])
+    monkeypatch.setenv("XLA_FLAGS", flags)
+    problem = check.device_problem()
+    assert (problem is None) if reason is None else (reason in problem), problem
+
+
 def test_flash_modes_match_the_engine():
     assert tuple(E.MODES) == check.FLASH_MODES[1:]
 
@@ -317,8 +354,8 @@ def test_flash_matches_neighbour_lists(tmp_path, model, pme):
 @pytest.mark.parametrize("model", ["so3lr-tauri-m-2606", "so3lr-tauri-l-2606"])
 def test_float32_follows_float64(model):
     """float32 (each model's attention launch; the backward's filter products as TF32x3 on
-    tensor cores, which float64 never runs) gives float64's energy and forces to float32
-    accuracy."""
+    tensor cores, which float64 never runs; plain float32 on ROCm) gives float64's energy and
+    forces to float32 accuracy."""
     from so3lr.flash.loader import load_params
     atoms = _water((3, 3, 3))
     out = {}
@@ -347,6 +384,22 @@ def test_narrow_neighbour_rows_widen():
         assert eng.K > 16
         _check("energy", e, e_ref, 1e-12)
         _check("forces", f, f_ref, 1e-10)
+
+
+@GPU
+@pytest.mark.parametrize("app", [2, 5])
+def test_atoms_per_program(app):
+    """Several atoms per program, as on HIP for the largest systems (5 leaves a tail), give one
+    atom per program's energy and forces (float64)."""
+    from so3lr.flash.loader import load_params
+    atoms = _water((3, 3, 3))
+    params, statics = load_params(None, precision="float64", lr_cutoff=12.0)
+    args = (params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]))
+    R = jnp.asarray(atoms.get_positions())
+    e_ref, f_ref = E.FlashSO3LR(*args).energy_forces(R)
+    e, f = E.FlashSO3LR(*args, atoms_per_program=app).energy_forces(R)
+    _check("energy", e, e_ref, 1e-13)
+    _check("forces", f, f_ref, 1e-12)
 
 
 @GPU

@@ -1,7 +1,7 @@
 """SO3LR-Flash in ``so3lr nve|nvt|nvt-langevin|npt``: jax-md dynamics with the flash engine.
 
 ``so3lr_md.run`` runs the flash engine whenever it computes what the settings ask for
-(``check.flash_problem`` is None: an NVIDIA GPU, a periodic orthorhombic box, nve / nvt /
+(``check.flash_problem`` is None: an NVIDIA GPU or an AMD MI355X, a periodic orthorhombic box, nve / nvt /
 nvt-langevin / isotropic npt, no k-space other than PME, so3lr-tauri-s, -m or -l), else the
 neighbour-list potential of ``perform_md``. ``--engine flash`` or ``--engine standard``
 forces one.

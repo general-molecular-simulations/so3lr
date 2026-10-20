@@ -17,6 +17,8 @@ import numpy as np
 # a compile (and is laid out again if it leaves the margin)
 NPT_BOX_MARGIN = 0.03
 ENGINES = ("auto", "flash", "standard")
+# the AMD GPUs (gfx targets) flash is tested on: the MI355X
+ROCM_TARGETS = ("gfx950",)
 FLASH_MODES = ("auto", "fast", "default", "lean", "leanest", "minimal")     # engine.MODES and auto
 
 # settings flash honours (aliases included)
@@ -250,13 +252,17 @@ def device_problem():
         return f"its kernels run on NVIDIA and AMD GPUs, and this process has {dev.platform}"
     cc = getattr(dev, "compute_capability", None)
     if is_rocm():
-        # the launches take 64-lane wavefronts (engine._warps): AMD Instinct (CDNA, gfx9xx),
-        # tested on the MI355X (gfx950)
-        if cc is not None and not str(cc).startswith("gfx9"):
-            return f"its kernels are tested on AMD Instinct GPUs (gfx9xx), and this GPU is {cc}"
+        # as measured on the MI355X: XLA's command buffers off (HIP graph capture fails)
+        if str(cc).split(":")[0] not in ROCM_TARGETS:
+            return f"on AMD its kernels are tested on {', '.join(ROCM_TARGETS)} (MI355X), and this GPU is {cc}"
+        if "--xla_gpu_enable_command_buffer=" not in os.environ.get("XLA_FLAGS", ""):
+            return 'on AMD it needs XLA_FLAGS="--xla_gpu_enable_command_buffer=" (set before JAX starts)'
         return None
-    if cc is not None and float(cc) < 8.0:
-        return f"its kernels are tested on compute capability 8.0 and newer (A100, H100), and this GPU is {cc}"
+    try:
+        if cc is not None and float(cc) < 8.0:
+            return f"its kernels are tested on compute capability 8.0 and newer (A100, H100), and this GPU is {cc}"
+    except ValueError:
+        return f"it does not know this GPU (compute capability {cc!r})"
     return None
 
 

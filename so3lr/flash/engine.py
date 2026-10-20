@@ -80,10 +80,15 @@ AXIS = "atoms"       # the device axis of the several-GPU mesh
 
 
 def _warps(n):
-    """Warps for a launch tuned with n on NVIDIA: on ROCm half as many (at least one), since a
-    wavefront has 64 lanes to a warp's 32, which keeps the threads and register pressure (the
-    MI355X runs)."""
+    """Warps for a launch tuned with n on NVIDIA: half on ROCm (64-lane wavefronts), as measured
+    on the MI355X."""
     return max(1, n // 2) if is_rocm() else n
+
+
+def _att_launch(width):
+    """ATT_LAUNCH for this filter width (the nearest wider tabulated), warps for this platform."""
+    launch = ATT_LAUNCH[min((w for w in ATT_LAUNCH if w >= width), default=max(ATT_LAUNCH))]
+    return {k: (be, _warps(w)) for k, (be, w) in launch.items()}
 
 
 def _cp(num_warps):
@@ -93,7 +98,7 @@ def _cp(num_warps):
 def _mm(a, b, x3=False):
     """A float32 dot: FMAs (the forward), or x3: on tensor cores as three TF32 products (the
     backward), whose float32 energies and forces are as close to float64."""
-    # TF32 is NVIDIA's: on ROCm the backward's products are plain float32
+    # no TF32 on ROCm
     precision = lax.DotAlgorithmPreset.TF32_TF32_F32_X3 if x3 and not is_rocm() else lax.Precision.HIGHEST
     return jnp.dot(a, b, precision=precision, preferred_element_type=a.dtype)
 
@@ -350,17 +355,18 @@ def _row(acc, h):
 # neighbour table
 # =========================================================================== #
 def _each_atom(rows, N, APP, atom):
-    """atom(a) for this program's atoms among the N rows from rows[0]: one, or APP where N
-    programs would pass HIP's 2^32 threads per launch (the last program's tail guarded)."""
+    """atom(a) for this program's atom, or its APP atoms (guarded) where N programs would pass
+    HIP's 2^32 threads a launch."""
     if APP == 1:
         atom(rows[0] + _i32(pl.program_id(0)))
         return
+    assert N > 0, "APP > 1 needs the number of rows N"
     for i in range(APP):
         a = rows[0] + _i32(pl.program_id(0)) * APP + i
         pl.when(a < rows[0] + N)(partial(atom, a))
 
 
-def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, rows, nbr, count, *, NX, NY, NZ, K, BLE, N=0, APP=1):
+def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, rows, nbr, count, *, NX, NY, NZ, K, BLE, N, APP):
     def atom(a):
         Lx, Ly, Lz, rc2 = boxl[0], boxl[1], boxl[2], geo[0]
         ax, ay, az = px[a], py[a], pz[a]
@@ -400,8 +406,8 @@ def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, rows, nbr, co
 # =========================================================================== #
 def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
                     t1v, t1d, t2v, t2d, wa1, ba1, wb1, bb1, wa2, ba2, wb2, bb2, mdeg, cdeg, scal,
-                    x_in, ev_in, boxl, rows, x_out, ev_out, *, G, ND, MP, ZMAX, YS, CH=0, BE=BE, H0=0, NH=4, N=0,
-                    APP=1):
+                    x_in, ev_in, boxl, rows, x_out, ev_out, *, G, ND, MP, ZMAX, YS, CH=0, BE=BE, H0=0, NH=4, N,
+                    APP):
     # CH 0: both channels; 1: heads only (x_out); 2: degrees only (ev_out). The outputs
     # alias the inputs, so a channel not run leaves its output as it was.
     def atom(a):
@@ -657,7 +663,7 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
 # short-range pairs: the NLH repulsion (per-atom energy, forces)
 # =========================================================================== #
 def _sr_kernel(px, py, pz, z, nbr, cnt, nlh_a, nlh_b, scal, fx_in, fy_in, fz_in, fw_in, boxl, rows,
-               energy, fx_o, fy_o, fz_o, fw_o, *, ZMAX, NK, NKP, N=0, APP=1):
+               energy, fx_o, fy_o, fz_o, fw_o, *, ZMAX, NK, NKP, N, APP):
     """Per-atom NLH energy (half of each pair) and its forces."""
     def atom(a):
         n_a = jnp.minimum(cnt[a], nbr.shape[1])         # an overflowed row holds K entries
@@ -1177,7 +1183,7 @@ class FlashSO3LR:
                  equilibration_charge=None, tile=1 << 17, max_neighbours=None, lr_scratch=1024,
                  keep_layer_inputs=True, keep_attention=False, split_channels=False,
                  split_blocks=False, pme_electrostatics=None, pme_dispersion=None, box_margin=0.0,
-                 devices=1):
+                 devices=1, atoms_per_program=None):
         degrees = [int(d) for d in statics["degrees"]]
         self.nh = int(statics["num_heads"])
         # one head per degree entry, each on its own block of G features (so3lr-tauri-s/m: 4 x 32,
@@ -1235,8 +1241,7 @@ class FlashSO3LR:
         # the attention kernels' launch for this width of the spherical filters' hidden
         # layer: the nearest wider one tabulated (the widest if none is)
         sh = int(params["layers_0"]["attention_block"]["spherical_filter1_layer_1"]["kernel"].shape[1])
-        launch = ATT_LAUNCH[min((w for w in ATT_LAUNCH if w >= sh), default=max(ATT_LAUNCH))]
-        self.launch = {k: (be, _warps(w)) for k, (be, w) in launch.items()}
+        self.launch = _att_launch(sh)
         self.par = jnp.asarray([(-1.0) ** d for d in degrees], dt)
         self.z = jnp.asarray(z)
         # x0 depends on the element only: one row per element present
@@ -1291,6 +1296,7 @@ class FlashSO3LR:
         # the long-range kernel's resident programs: 16 per streaming multiprocessor
         self.lr_programs = 16 * (getattr(jax.devices()[0], "core_count", None) or 132)
         self.maxh = int(lr_scratch)
+        self.atoms_per_program = atoms_per_program
         self._build_jit()
 
     def _layout(self, L):
@@ -1415,9 +1421,10 @@ class FlashSO3LR:
         return jnp.reshape(jnp.asarray(self._r0, jnp.int32), (1,))
 
     def _row_grid(self, warps):
-        """(programs, atoms per program) of a kernel over this device's rows: an atom each, or
-        on ROCm as many as keep the launch under HIP's 2^32 threads (64 a wavefront)."""
-        app = max(1, -(-self.nl // ((2 ** 32 - 1) // (warps * 64) - 1))) if is_rocm() else 1
+        """(programs, atoms per program) of a row kernel: one atom each, or on ROCm as many as
+        keep it under 2^32 threads (atoms_per_program: forced, for tests)."""
+        app = self.atoms_per_program or (
+            max(1, -(-self.nl // ((2 ** 32 - 1) // (warps * 64) - 1))) if is_rocm() else 1)
         return -(-self.nl // app), app
 
     def _mine(self, a):
@@ -1654,6 +1661,7 @@ class FlashSO3LR:
         order, cell_start, cell_of = self.build_grid(pos3)
         # rows of other devices' atoms are left unwritten (never read here)
         progs, app = self._row_grid(1)
+        # one warp, one wavefront on ROCm (as measured)
         nbr, cnt = pl.pallas_call(
             partial(_ell_kernel, NX=nx, NY=ny, NZ=nz, K=self.K, BLE=16, N=self.nl, APP=app), grid=(progs,),
             compiler_params=_cp(1),
@@ -1734,6 +1742,7 @@ class FlashSO3LR:
         order, cell_start, cell_of = grid
         px, py, pz = pos3
         shp = jax.ShapeDtypeStruct
+        # two warps, two wavefronts on ROCm (as measured)
         nprog = min(self.lr_programs, self.nl)
         scratch = jnp.zeros((nprog, self.maxh), jnp.int32)
         e_atom, gq, ga0, gc6, fx, fy, fz, fw, _, most = pl.pallas_call(
