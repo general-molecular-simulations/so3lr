@@ -3,8 +3,8 @@
 
 Without a GPU: PME's mesh part and its strain derivative against jaxpme, the real-space
 tables against so3lr_dev's pair functions, the reasons the engine choice gives (every
-settings key and model hyperparameter classified), and ``so3lr nvt`` falling back to
-the neighbour-list potential. With one:
+settings key and model hyperparameter classified), and ``so3lr nvt`` logging the engine
+it picked and, falling back to the neighbour-list potential, why. With one:
 ``python -m so3lr.flash.verify`` on 12,288 waters (energy, forces, dE/d(strain), with and
 without PME); ``so3lr opt``, ``so3lr eval`` and the ASE calculator against the
 neighbour-list potential. With two or more: the same on several GPUs as on one, and MD on two.
@@ -385,35 +385,27 @@ def test_flash_modes_match_the_engine():
     assert tuple(E.MODES) == check.FLASH_MODES[1:]
 
 
-@pytest.mark.skipif(check.device_problem() is None, reason="this test is for machines without a GPU flash runs on")
-def test_auto_falls_back_without_gpu(tmp_path):
-    """Without a GPU flash runs on, `so3lr nvt` runs the neighbour-list potential and says why."""
-    sys.path.insert(0, str(pathlib.Path(__file__).parent))
-    from subprocess_env import so3lr_subprocess_env
-    (tmp_path / "in.xyz").write_text((DATA / "acetone.xyz").read_text())
-    result = subprocess.run(
-        ["so3lr", "nvt", "--input", "in.xyz", "--no-relax", "--md-cycles", "1", "--md-steps", "2",
-         "--output", "out.hdf5"],
-        cwd=tmp_path, capture_output=True, text=True, env=so3lr_subprocess_env())
-    assert result.returncode == 0, result.stdout + result.stderr
-    log = (tmp_path / "out.log").read_text()
-    assert "Engine: neighbour-list potential (flash cannot:" in log, log[-2000:]
-
-
-def test_standard_engine_is_logged(tmp_path, monkeypatch):
-    """`--engine standard` names the engine in the log, as auto and flash do (the line
-    comes before perform_md, so no MD runs)."""
+@pytest.mark.parametrize("engine,line", [
+    ("standard", "Engine: neighbour-list potential (--engine standard)"),
+    # acetone has no box, so auto runs the neighbour-list potential on any machine
+    ("auto", "Engine: neighbour-list potential (flash cannot:"),
+])
+def test_md_logs_its_engine(tmp_path, monkeypatch, engine, line):
+    """`so3lr nvt` names the engine in the log, and when auto runs the neighbour-list
+    potential it says why (the line comes before perform_md, so no MD runs)."""
     from click.testing import CliRunner
-    from so3lr.cli import so3lr_md
-    from so3lr.cli.so3lr_cli import cli
+    from so3lr.cli import so3lr_cli, so3lr_md
     monkeypatch.setattr(so3lr_md, "setup_jax_globals", lambda **kwargs: None)
     monkeypatch.setattr(so3lr_md, "perform_md", lambda *args, **kwargs: None)
+    # auto would set XLA_PYTHON_CLIENT_MEM_FRACTION in this process, and so in every
+    # subprocess the session starts after this test
+    monkeypatch.setattr(so3lr_cli, "reserve_gpu", lambda *args, **kwargs: None)
     log = tmp_path / "out.log"
-    result = CliRunner().invoke(cli, ["nvt", "--input", str(DATA / "acetone.xyz"), "--no-relax",
-                                      "--output", str(tmp_path / "out.hdf5"), "--log-file", str(log),
-                                      "--engine", "standard"])
+    result = CliRunner().invoke(so3lr_cli.cli, ["nvt", "--input", str(DATA / "acetone.xyz"), "--no-relax",
+                                                "--output", str(tmp_path / "out.hdf5"), "--log-file", str(log),
+                                                "--engine", engine])
     assert result.exit_code == 0, result.output
-    assert "Engine: neighbour-list potential (--engine standard)" in log.read_text()
+    assert line in log.read_text(), log.read_text()[-2000:]
 
 
 def test_flash_refuses_untrained_elements(monkeypatch):

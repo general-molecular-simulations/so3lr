@@ -102,11 +102,14 @@ def _assert_finetuning_succeeded(result, workdir, max_loss=0.1):
     )
 
 
-# 'final_mlp' and 'forces_only' pin this PR's fixes end to end: on the old code
-# final_mlp counted 0 trainable parameters (hierarchical keys never matched) and
-# forces_only reported everything trainable (frozen_keys were ignored), so the
-# count assertions below fail on the base branch for exactly those two.
-@pytest.mark.parametrize('strategy', ['full', 'last_layer', 'final_mlp', 'forces_only'])
+# What every strategy selects, and how many parameters that trains, is checked against
+# every bundled model in test_finetuning_strategies.py, without a training run. These
+# two runs cover what only `so3lr finetune` shows: `last_layer` must name its block from
+# the *pretrained* model's num_layers, not the finetune config's (#15), and
+# `forces_only` is the frozen-keys (blacklist) path, which once reported everything
+# trainable because frozen_keys were ignored. `full` still runs in
+# test_cli_finetune_water_pbc (--full).
+@pytest.mark.parametrize('strategy', ['last_layer', 'forces_only'])
 def test_cli_finetune(workdir, test_config, strategy):
     """Run `so3lr finetune` on ac.xyz with 20 train / 5 valid and verify it completes."""
     result = subprocess.run(
@@ -135,12 +138,9 @@ def test_cli_finetune(workdir, test_config, strategy):
     assert total is not None, (
         f"No parameter summary in output.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    if strategy == 'full':
-        assert trainable == total
-    else:
-        assert 0 < trainable < total, (
-            f"strategy={strategy} trained {trainable}/{total} parameters"
-        )
+    assert 0 < trainable < total, (
+        f"strategy={strategy} trained {trainable}/{total} parameters"
+    )
 
 
 def test_cli_finetune_refuses_a_strategy_that_freezes_everything(workdir, test_config):

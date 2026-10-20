@@ -105,15 +105,17 @@ def test_cli_train_forces_and_energy_with_lse_shifts(workdir, tmp_path):
 
     # The default config trains a model without long-range parts; it must run
     # relaxation and MD too (its long-range list is built at the short-range cutoff).
+    # One `so3lr nvt` covers both: its relaxation before MD is `so3lr opt`'s
+    # perform_min (the default 10 x 10 FIRE steps; nvt has no --min-* flags).
     assert hyp['model']['electrostatic_energy_bool'] is False
     assert hyp['model']['dispersion_energy_bool'] is False
     acetone = PROJECT_ROOT / 'tests' / 'test_data' / 'acetone.xyz'
-    for args in (['opt'], ['nvt', '--no-relax', '--md-cycles', '1', '--md-steps', '2']):
-        run = subprocess.run(
-            ['so3lr', *args, '--input', str(acetone), '--model', str(workdir),
-             '--output', str(tmp_path / f'{args[0]}.xyz')],
-            cwd=tmp_path, capture_output=True, text=True, env=so3lr_subprocess_env(), timeout=900)
-        assert run.returncode == 0, f"so3lr {args[0]} failed:\n{run.stdout[-2000:]}\n{run.stderr[-2000:]}"
+    run = subprocess.run(
+        ['so3lr', 'nvt', '--input', str(acetone), '--model', str(workdir), '--relax',
+         '--md-cycles', '1', '--md-steps', '2', '--output', str(tmp_path / 'nvt.xyz')],
+        cwd=tmp_path, capture_output=True, text=True, env=so3lr_subprocess_env(), timeout=900)
+    assert run.returncode == 0, f"so3lr nvt failed:\n{run.stdout[-2000:]}\n{run.stderr[-2000:]}"
+    assert (tmp_path / 'nvt_opt.xyz').exists(), "the relaxation before MD wrote no trajectory"
 
 def test_cli_train_water_pbc_with_long_range(workdir, tmp_path):
     """Train on periodic water box with long-range interactions enabled."""

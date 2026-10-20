@@ -1,14 +1,17 @@
 """Fine-tuning strategies resolve to keys that exist in the shipped checkpoints.
 
 These are the fast counterpart to `tests/test_cli_finetune.py`: they pin the
-strategy -> parameter-key mapping against every bundled model in milliseconds,
-so an off-by-one in `layers_{num_layers - 1}` (or a head that was renamed) is
-caught on every PR without paying for a subprocess training run.
+strategy -> parameter-key mapping against every bundled architecture in
+milliseconds, so an off-by-one in `layers_{num_layers - 1}` (or a head that was
+renamed) is caught on every PR without paying for a subprocess training run.
 """
+import functools
 import json
 import pathlib
 import pickle
+from collections.abc import Mapping
 
+import numpy as np
 import pytest
 
 from so3lr.finetuning_strategies import (
@@ -22,7 +25,6 @@ from so3lr.mlff.utils.param_utils import (
 )
 
 MODELS_DIR = pathlib.Path(__file__).resolve().parent.parent / 'so3lr' / 'models'
-BUNDLED_MODELS = sorted(p.name for p in MODELS_DIR.iterdir() if (p / 'params.pkl').exists())
 
 # `so3lr` is the legacy checkpoint: it has no C6 head, so every strategy naming
 # `observables_3` legitimately selects nothing there.
@@ -34,13 +36,35 @@ _OBS_3_STRATEGIES = {'obs_3', 'obs_23', 'obs_023', 'll_obs_023'}
 UNSUPPORTED = {('so3lr', 'obs_3')}
 
 
+@functools.lru_cache(maxsize=None)
 def _load(model_name):
+    """(params, num_layers) of a bundled model, read once per session; callers only read it."""
     model_dir = MODELS_DIR / model_name
     with open(model_dir / 'params.pkl', 'rb') as fp:
         params = pickle.load(fp)
     with open(model_dir / 'hyperparameters.json') as fp:
         num_layers = json.load(fp)['model']['num_layers']
     return params, num_layers
+
+
+def _parameter_shapes(tree, path=()):
+    """(path, shape) of every parameter: what a strategy's keys select from."""
+    if isinstance(tree, Mapping):
+        return tuple(leaf for key in sorted(tree) for leaf in _parameter_shapes(tree[key], path + (key,)))
+    return ((path, np.shape(tree)),)
+
+
+def _one_model_per_architecture():
+    """The bundled models, one per parameter tree. Releases of one size (2602, 2606)
+    differ in their weights, not in the keys and shapes a strategy selects (their
+    params.pkl hashes differ, so a file hash cannot tell); the latest of each is kept."""
+    latest = {}
+    for name in sorted(p.name for p in MODELS_DIR.iterdir() if (p / 'params.pkl').exists()):
+        latest[_parameter_shapes(_load(name)[0])] = name
+    return sorted(latest.values())
+
+
+BUNDLED_MODELS = _one_model_per_architecture()
 
 
 def test_cli_choices_match_the_strategy_table():
