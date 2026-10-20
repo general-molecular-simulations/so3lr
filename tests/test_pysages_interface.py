@@ -9,10 +9,7 @@ Tests cover:
 6. Integration: trajectory comparison between vanilla and unbiased runs
 """
 
-import os
-import shutil
 import pathlib
-import subprocess
 
 import pytest
 
@@ -30,27 +27,8 @@ from so3lr.cli.so3lr_md import handle_box, HAS_PYSAGES
 # Paths and shared settings
 # ---------------------------------------------------------------------------
 
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 TEST_DATA_DIR = pathlib.Path(__file__).resolve().parent / "test_data"
 GEOMETRY_FILE = TEST_DATA_DIR / "benzoic_acid_aq_1.xyz"
-
-# Base MD settings shared by all integration runs.  The geometry path is
-# filled in at fixture time so it points to the temp-directory copy.
-_BASE_MD_SETTINGS = {
-    'precision': 'float64',
-    'total_charge': 0.0,
-    'lr_cutoff': 12.0,
-    'relax_before_run': True,
-    'min_cycles': 10,
-    'min_steps': 20,
-    'min_start_dt': 0.05,
-    'min_max_dt': 0.1,
-    'min_n_min': 2,
-    'md_dt': 0.5,
-    'md_T': 300,
-    'md_cycles': 2,
-    'md_steps': 500,
-}
 
 _PYSAGES_INPUT_UNBIASED = {
     'method': 'unbiased',
@@ -84,30 +62,6 @@ _PYSAGES_INPUT_ABF = {
 def _write_yaml(path, data):
     with open(path, 'w') as f:
         yaml.dump(data, f)
-
-
-def _prepare_run_dir(tmp_path, name, md_overrides=None, pysages_input=None):
-    """Create a simulation directory with geometry, settings, and optionally pysages input."""
-    run_dir = tmp_path / name
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    # Copy geometry
-    shutil.copy2(GEOMETRY_FILE, run_dir / "benzoic_acid_aq_1.xyz")
-
-    # Build settings
-    settings = dict(_BASE_MD_SETTINGS)
-    settings['input_file'] = 'benzoic_acid_aq_1.xyz'
-    settings['output_file'] = 'traj.xyz'
-    settings['log_file'] = 'out.log'
-    if md_overrides:
-        settings.update(md_overrides)
-    _write_yaml(run_dir / "md_settings.yaml", settings)
-
-    # PySAGES input (if needed)
-    if pysages_input is not None:
-        _write_yaml(run_dir / "pysages_input.yaml", pysages_input)
-
-    return run_dir
 
 
 # ===========================================================================
@@ -1428,136 +1382,56 @@ class TestPerformMdEnforceCartesianGating:
 # ===========================================================================
 # 6. Integration: run simulations and compare trajectories
 # ===========================================================================
-
-def _parse_md_observables(log_path):
-    """Parse MD observables from an out.log file.
-
-    The log format is:
-      TIMESTAMP - SO3LR - INFO - STEP\tE\tKE\tPE\tH\tTemp\ttime/step
-
-    Returns a list of dicts with keys: step, E, KE, PE, H, T
-    """
-    results = []
-    with open(log_path) as f:
-        for line in f:
-            # Strip the logger prefix (everything up to and including "INFO - ")
-            if "INFO - " in line:
-                content = line.split("INFO - ", 1)[1]
-            else:
-                content = line
-            parts = content.strip().split('\t')
-            # MD output lines have 7 tab-separated fields: step, E, KE, PE, H, T, time/step
-            if len(parts) == 7:
-                try:
-                    step = int(parts[0])
-                    E = float(parts[1])
-                    KE = float(parts[2])
-                    PE = float(parts[3])
-                    H = float(parts[4])
-                    T = float(parts[5])
-                    results.append({
-                        'step': step, 'E': E, 'KE': KE,
-                        'PE': PE, 'H': H, 'T': T
-                    })
-                except (ValueError, IndexError):
-                    continue
-    return results
+# The `so3lr` CLI runs are shared with tests/test_restart_coordinates.py through
+# the session fixture ``pysages_cli_runs`` in tests/conftest.py (4 cycles x 100
+# steps, no relaxation, float64). The logs print E/KE/PE/H with 3 decimals and
+# T with 1, so the 1e-6 tolerances below mean the printed rows are identical.
 
 
-def _run_so3lr_simulation(workdir, settings_file='md_settings.yaml'):
-    """Run an SO3LR simulation in the given directory.
-
-    Returns the subprocess result. Raises AssertionError if the run fails.
-    """
-    result = subprocess.run(
-        ['so3lr', '--settings', settings_file],
-        cwd=workdir,
-        capture_output=True,
-        text=True,
-        env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
-    )
-    assert result.returncode == 0, (
-        f"SO3LR simulation failed in {workdir} with return code {result.returncode}\n"
-        f"STDERR:\n{result.stderr}"
-    )
-    return result
+def _assert_rows_match(reference, other, label):
+    for c, r in zip(reference, other):
+        np.testing.assert_allclose(c['E'], r['E'], atol=1e-6,
+            err_msg=f"{label}: total energy mismatch at step {c['step']}")
+        np.testing.assert_allclose(c['KE'], r['KE'], atol=1e-6,
+            err_msg=f"{label}: kinetic energy mismatch at step {c['step']}")
+        np.testing.assert_allclose(c['PE'], r['PE'], atol=1e-6,
+            err_msg=f"{label}: potential energy mismatch at step {c['step']}")
+        np.testing.assert_allclose(c['H'], r['H'], atol=1e-6,
+            err_msg=f"{label}: Hamiltonian mismatch at step {c['step']}")
+        np.testing.assert_allclose(c['T'], r['T'], atol=0.1,
+            err_msg=f"{label}: temperature mismatch at step {c['step']}")
 
 
 @pytest.mark.slow
 class TestTrajectoryComparison:
     """Integration tests: run simulations and compare MD observables."""
 
-    @pytest.fixture(scope="class")
-    def simulation_results(self, tmp_path_factory):
-        """Run vanilla and unbiased simulations in temp directories."""
-        tmp_path = tmp_path_factory.mktemp("pysages_integration")
-
-        if not GEOMETRY_FILE.exists():
-            pytest.skip(f"Test geometry not found: {GEOMETRY_FILE}")
-
-        # Vanilla NVT (no PySAGES)
-        vanilla_dir = _prepare_run_dir(tmp_path, "vanilla", md_overrides={
-            'restart_save_path': './restart2.npz',
-        })
-
-        # Unbiased PySAGES
-        unbiased_dir = _prepare_run_dir(tmp_path, "unbiased", md_overrides={
-            'do_enhanced_sampling': True,
-            'enforce_cartesian_coordinates': True,
-            'restart_save_path': './restart2.npz',
-        }, pysages_input=_PYSAGES_INPUT_UNBIASED)
-
-        # ABF PySAGES
-        abf_dir = _prepare_run_dir(tmp_path, "abf", md_overrides={
-            'do_enhanced_sampling': True,
-            'enforce_cartesian_coordinates': True,
-            'restart_save_path': './restart2.npz',
-        }, pysages_input=_PYSAGES_INPUT_ABF)
-
-        _run_so3lr_simulation(vanilla_dir)
-        _run_so3lr_simulation(unbiased_dir)
-        _run_so3lr_simulation(abf_dir)
-
-        return {
-            'vanilla_log': vanilla_dir / "out.log",
-            'unbiased_log': unbiased_dir / "out.log",
-            'abf_log': abf_dir / "out.log",
-        }
-
-    def test_vanilla_and_unbiased_match(self, simulation_results):
+    def test_vanilla_and_unbiased_match(self, pysages_cli_runs):
         """All MD observables should be identical between vanilla and unbiased."""
-        vanilla = _parse_md_observables(simulation_results['vanilla_log'])
-        unbiased = _parse_md_observables(simulation_results['unbiased_log'])
+        vanilla = pysages_cli_runs('vanilla_4')
+        unbiased = pysages_cli_runs('unbiased_4')
 
         assert len(vanilla) > 0, "No MD data found in vanilla log"
         assert len(unbiased) > 0, "No MD data found in unbiased log"
         assert len(vanilla) == len(unbiased), (
             f"Different number of MD output lines: vanilla={len(vanilla)}, unbiased={len(unbiased)}"
         )
-
         for v, u in zip(vanilla, unbiased):
             assert v['step'] == u['step'], f"Step mismatch: {v['step']} vs {u['step']}"
-            np.testing.assert_allclose(v['E'], u['E'], atol=1e-6,
-                err_msg=f"Total energy mismatch at step {v['step']}")
-            np.testing.assert_allclose(v['KE'], u['KE'], atol=1e-6,
-                err_msg=f"Kinetic energy mismatch at step {v['step']}")
-            np.testing.assert_allclose(v['PE'], u['PE'], atol=1e-6,
-                err_msg=f"Potential energy mismatch at step {v['step']}")
-            np.testing.assert_allclose(v['H'], u['H'], atol=1e-6,
-                err_msg=f"Hamiltonian mismatch at step {v['step']}")
-            np.testing.assert_allclose(v['T'], u['T'], atol=0.1,
-                err_msg=f"Temperature mismatch at step {v['step']}")
+        _assert_rows_match(vanilla, unbiased, "vanilla vs unbiased")
 
-    def test_abf_diverges_from_vanilla(self, simulation_results):
+    def test_abf_diverges_from_vanilla(self, pysages_cli_runs):
         """ABF should produce different observables than vanilla (bias is applied)."""
-        vanilla = _parse_md_observables(simulation_results['vanilla_log'])
-        abf = _parse_md_observables(simulation_results['abf_log'])
+        vanilla = pysages_cli_runs('vanilla_4')
+        abf = pysages_cli_runs('abf_4')
 
         assert len(vanilla) > 0 and len(abf) > 0
 
-        # At least the last step should differ (ABF applies bias forces)
+        # The last rows are the same step of the same-length runs, and should
+        # differ (ABF applies bias forces).
         last_v = vanilla[-1]
         last_a = abf[-1]
+        assert last_v['step'] == last_a['step']
         # Check that at least one observable differs by more than numerical noise
         diffs = [
             abs(last_v['E'] - last_a['E']),
@@ -1575,79 +1449,15 @@ class TestTrajectoryComparison:
 class TestRestart:
     """Integration test: verify restart produces identical results to continuous run."""
 
-    @pytest.fixture(scope="class")
-    def restart_results(self, tmp_path_factory):
-        """Run continuous 4-cycle and 2+2 restart simulations, return parsed logs."""
-        tmp_path = tmp_path_factory.mktemp("pysages_restart")
-
-        if not GEOMETRY_FILE.exists():
-            pytest.skip(f"Test geometry not found: {GEOMETRY_FILE}")
-
-        # --- Continuous 4-cycle run ---
-        continuous_dir = _prepare_run_dir(tmp_path, "continuous", md_overrides={
-            'md_cycles': 4,
-            'do_enhanced_sampling': True,
-            'enforce_cartesian_coordinates': True,
-        })
-
-        # --- First 2 cycles with restart save ---
-        first_dir = _prepare_run_dir(tmp_path, "first", md_overrides={
-            'md_cycles': 2,
-            'do_enhanced_sampling': True,
-            'enforce_cartesian_coordinates': True,
-            'restart_save_path': './restart_so3lr.npz',
-            'restart_pysages_save_path': './restart_pysages.pkl',
-        }, pysages_input=_PYSAGES_INPUT_UNBIASED)
-
-        # Write pysages_input.yaml for continuous run too
-        _write_yaml(continuous_dir / "pysages_input.yaml", _PYSAGES_INPUT_UNBIASED)
-
-        _run_so3lr_simulation(continuous_dir)
-        _run_so3lr_simulation(first_dir)
-
-        # --- Restart for 2 more cycles ---
-        restart_dir = _prepare_run_dir(tmp_path, "restart", md_overrides={
-            'md_cycles': 2,
-            'do_enhanced_sampling': True,
-            'enforce_cartesian_coordinates': True,
-            'restart_load_path': './restart_so3lr.npz',
-            'restart_save_path': './restart_so3lr_2.npz',
-            'restart_pysages_load_path': './restart_pysages.pkl',
-            'restart_pysages_save_path': './restart_pysages_2.pkl',
-        }, pysages_input=_PYSAGES_INPUT_UNBIASED)
-
-        # Copy restart files from first run
-        shutil.copy2(first_dir / "restart_so3lr.npz", restart_dir)
-        shutil.copy2(first_dir / "restart_pysages.pkl", restart_dir)
-
-        _run_so3lr_simulation(restart_dir)
-
-        return {
-            'continuous_log': continuous_dir / "out.log",
-            'restart_log': restart_dir / "out.log",
-        }
-
-    def test_restart_matches_continuous(self, restart_results):
-        """The last 2 cycles from restart should match cycles 3-4 of the continuous run."""
-        continuous = _parse_md_observables(restart_results['continuous_log'])
-        restarted = _parse_md_observables(restart_results['restart_log'])
+    def test_restart_matches_continuous(self, pysages_cli_runs):
+        """A 2+2-cycle run that restarts both the SO3LR and the PySAGES state
+        must match cycles 3-4 of the continuous 4-cycle PySAGES run."""
+        continuous = pysages_cli_runs('unbiased_4')
+        restarted = pysages_cli_runs('restart_unbiased_with_state')
 
         assert len(continuous) >= 4, f"Expected >= 4 data points in continuous, got {len(continuous)}"
         # Restarted run has: initial line (from restart) + 2 cycle outputs
         assert len(restarted) >= 2, f"Expected >= 2 data points in restart, got {len(restarted)}"
 
         # Compare the last 2 cycles: continuous[-2:] vs restarted[-2:]
-        cont_last2 = continuous[-2:]
-        rest_last2 = restarted[-2:]
-
-        for c, r in zip(cont_last2, rest_last2):
-            np.testing.assert_allclose(c['E'], r['E'], atol=1e-6,
-                err_msg=f"Total energy mismatch at continuous step {c['step']}")
-            np.testing.assert_allclose(c['KE'], r['KE'], atol=1e-6,
-                err_msg=f"Kinetic energy mismatch at continuous step {c['step']}")
-            np.testing.assert_allclose(c['PE'], r['PE'], atol=1e-6,
-                err_msg=f"Potential energy mismatch at continuous step {c['step']}")
-            np.testing.assert_allclose(c['H'], r['H'], atol=1e-6,
-                err_msg=f"Hamiltonian mismatch at continuous step {c['step']}")
-            np.testing.assert_allclose(c['T'], r['T'], atol=0.1,
-                err_msg=f"Temperature mismatch at continuous step {c['step']}")
+        _assert_rows_match(continuous[-2:], restarted[-2:], "restart vs continuous")

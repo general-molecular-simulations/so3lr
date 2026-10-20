@@ -10,7 +10,8 @@ import pytest
 
 # A CLI run that stalls must fail on its own, with its so3lr.log on disk, rather
 # than take the whole shard to the 60-minute cancel with nothing to read.
-# ~4x the slowest measured case (kspace_electrostatics_p3m, 411 s in conftest).
+# ~4x the slowest case ever measured (kspace_electrostatics_p3m at 411 s, when it
+# still ran a 3072-atom water box).
 SUBPROCESS_TIMEOUT = 1500
 
 from subprocess_env import so3lr_subprocess_env

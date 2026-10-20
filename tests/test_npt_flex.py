@@ -1,4 +1,9 @@
-"""Test flexible cell NPT (anisotropic/semi-isotropic/isotropic coupling)."""
+"""Test flexible cell NPT (anisotropic/semi-isotropic/isotropic coupling).
+
+The anisotropic mode is rejected by the CLI and by create_npt_nhc_fn
+(tests/test_npt_coupling_safety.py), so its case here only checks the jax-md
+integrator and runs with --full.
+"""
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -74,10 +79,27 @@ def _setup_system():
     return energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr
 
 
-@pytest.mark.parametrize('coupling', ['isotropic', 'semi-isotropic', 'anisotropic'])
-def test_npt_flex_coupling_modes(coupling):
+@pytest.fixture(scope='module')
+def water_system():
+    """The water_64 system, built (model loaded) once for every coupling mode.
+
+    The energy function is jitted here, not each integrator step: every
+    coupling mode builds a different step, so a jitted step would compile
+    three times to run two steps each, while the shared jitted energy (and its
+    gradient) compiles once and serves all modes.
+    """
+    energy_fn, *rest = _setup_system()
+    return (jax.jit(energy_fn), *rest)
+
+
+@pytest.mark.parametrize('coupling', [
+    'isotropic',
+    'semi-isotropic',
+    pytest.param('anisotropic', marks=pytest.mark.slow),
+])
+def test_npt_flex_coupling_modes(coupling, water_system):
     """Test that NPT flex runs without error for each coupling mode."""
-    energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr = _setup_system()
+    energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr = water_system
 
     # Unit conversion (jax-md metal units)
     unit_system = units.metal_unit_system()

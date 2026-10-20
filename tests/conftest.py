@@ -170,3 +170,134 @@ def pytest_collection_modifyitems(config, items):
 def full_test(request):
     """Fixture that returns True if --full flag is set."""
     return request.config.getoption("--full")
+
+
+@pytest.fixture(scope="session")
+def pysages_cli_runs(tmp_path_factory):
+    """Shared `so3lr` CLI runs for the PySAGES and restart-coordinate tests.
+
+    tests/test_pysages_interface.py and tests/test_restart_coordinates.py
+    compare the MD log rows of these runs (vanilla vs unbiased PySAGES,
+    restart vs continuous). They used to launch 12 subprocesses, four of them
+    duplicates; here each distinct run happens at most once per session, on
+    first use. A restart run first launches the run whose files it loads.
+
+    Every run: one benzoic acid molecule in a periodic 25 A box, float64,
+    100 steps per cycle and no relaxation (a restart skips relaxation anyway,
+    so the continuous runs it is compared with must not relax either).
+
+    Returns ``run(name)`` -> list of ``{step, E, KE, PE, H, T}`` rows parsed
+    from that run's log.
+    """
+    import os
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    import yaml
+
+    geometry = Path(__file__).resolve().parent / 'test_data' / 'benzoic_acid_aq_1.xyz'
+    base_settings = {
+        'precision': 'float64',
+        'total_charge': 0.0,
+        'lr_cutoff': 12.0,
+        'relax_before_run': False,
+        'md_dt': 0.5,  # fs (the CLI/YAML convention; converted fs->ps internally)
+        'md_T': 300,
+        'md_steps': 100,
+        'input_file': geometry.name,
+        'output_file': 'traj.xyz',
+        'log_file': 'out.log',
+    }
+    cv = [{
+        'type': 'coordinationnumber',
+        'indices': [4, 7],
+        'cn_exps': [6, 30],
+        'species': 1,
+        'grid_min': 0.0,
+        'grid_max': 1.5,
+        'grid_stride': 64,
+        'periodic': False,
+    }]
+    pysages = {'do_enhanced_sampling': True, 'enforce_cartesian_coordinates': True}
+    # name -> (settings overrides, PySAGES method or None, run whose restart files it loads)
+    specs = {
+        'vanilla_4': ({'md_cycles': 4}, None, None),
+        'unbiased_4': ({'md_cycles': 4, **pysages}, 'unbiased', None),
+        'abf_4': ({'md_cycles': 4, **pysages}, 'abf', None),
+        'vanilla_2_saved': (
+            {'md_cycles': 2, 'restart_save_path': './restart.npz'}, None, None),
+        'unbiased_2_saved': (
+            {'md_cycles': 2, **pysages, 'restart_save_path': './restart.npz',
+             'restart_pysages_save_path': './restart_pysages.pkl'}, 'unbiased', None),
+        # Fractional-coordinate (vanilla) restart loaded into a Cartesian PySAGES run.
+        'restart_vanilla_to_unbiased': (
+            {'md_cycles': 2, **pysages, 'restart_load_path': './restart.npz',
+             'restart_save_path': './restart2.npz'}, 'unbiased', 'vanilla_2_saved'),
+        # Cartesian (PySAGES) restart loaded into a fractional-coordinate vanilla run.
+        'restart_unbiased_to_vanilla': (
+            {'md_cycles': 2, 'restart_load_path': './restart.npz',
+             'restart_save_path': './restart2.npz'}, None, 'unbiased_2_saved'),
+        # PySAGES restart that also resumes the saved PySAGES state.
+        'restart_unbiased_with_state': (
+            {'md_cycles': 2, **pysages, 'restart_load_path': './restart.npz',
+             'restart_save_path': './restart2.npz',
+             'restart_pysages_load_path': './restart_pysages.pkl',
+             'restart_pysages_save_path': './restart_pysages_2.pkl'},
+            'unbiased', 'unbiased_2_saved'),
+    }
+    run_dirs = {}
+    rows = {}
+
+    def parse_md_rows(log_path):
+        # Log rows: "<prefix> INFO - step\tE\tKE\tPE\tH\tT\ttime/step"
+        parsed = []
+        for line in Path(log_path).read_text().splitlines():
+            content = line.split("INFO - ", 1)[1] if "INFO - " in line else line
+            parts = content.strip().split('\t')
+            if len(parts) != 7:
+                continue
+            try:
+                parsed.append({
+                    'step': int(parts[0]), 'E': float(parts[1]),
+                    'KE': float(parts[2]), 'PE': float(parts[3]),
+                    'H': float(parts[4]), 'T': float(parts[5]),
+                })
+            except ValueError:
+                continue
+        return parsed
+
+    def run(name):
+        if name in rows:
+            return rows[name]
+        overrides, method, restart_from = specs[name]
+        run_dir = tmp_path_factory.mktemp(f"pysages_{name}")
+        shutil.copy2(geometry, run_dir / geometry.name)
+        if restart_from is not None:
+            run(restart_from)
+            for key in ('restart_load_path', 'restart_pysages_load_path'):
+                if key in overrides:
+                    restart_file = Path(overrides[key]).name
+                    shutil.copy2(run_dirs[restart_from] / restart_file, run_dir / restart_file)
+        with open(run_dir / 'md_settings.yaml', 'w') as f:
+            yaml.dump({**base_settings, **overrides}, f)
+        if method is not None:
+            with open(run_dir / 'pysages_input.yaml', 'w') as f:
+                yaml.dump({'method': method, 'cv': cv}, f)
+        result = subprocess.run(
+            ['so3lr', '--settings', 'md_settings.yaml'],
+            cwd=run_dir,
+            capture_output=True,
+            text=True,
+            env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
+            timeout=1500,
+        )
+        assert result.returncode == 0, (
+            f"SO3LR run '{name}' failed in {run_dir} with return code "
+            f"{result.returncode}\nSTDERR:\n{result.stderr}"
+        )
+        run_dirs[name] = run_dir
+        rows[name] = parse_md_rows(run_dir / 'out.log')
+        return rows[name]
+
+    return run

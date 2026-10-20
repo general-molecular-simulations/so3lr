@@ -1,7 +1,7 @@
 # Settings for generating the initial restart file
 # Run: so3lr --settings setup_settings.yaml
 
-input_file: input.xyz
+input_file: benzoic_acid_aq_1.xyz  # from tests/test_data
 output_file: setup_trajectory.hdf5
 log_file: setup.log
 

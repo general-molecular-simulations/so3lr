@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 """Validation script for NPT ensemble test."""
 import sys
+import h5py
+import numpy as np
+from ase.io import read
 from validation_utils import Validator
 
 
@@ -29,6 +32,18 @@ def validate():
         'stderr.log',
         required_strings=['NPT', 'completed successfully'],
     )
+
+    # The barostat must actually move the cell: compare the last saved box
+    # with the input cell. The 15-atom box sits far from 1 bar, so 4 steps
+    # move it well above this 1e-9 A floor.
+    if (v.workdir / 'trajectory.hdf5').exists():
+        initial_lengths = read(v.workdir / settings['input_file']).cell.lengths()
+        with h5py.File(v.workdir / 'trajectory.hdf5', 'r') as trajectory:
+            final_box = np.asarray(trajectory['box'][-1])
+        if np.max(np.abs(final_box - initial_lengths)) <= 1e-9:
+            v.errors.append(
+                f"NPT box did not change: input {initial_lengths}, last frame {final_box}"
+            )
 
     # Check all settings are reflected in logs
     v.check_settings_in_logs(settings)
