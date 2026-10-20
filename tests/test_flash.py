@@ -6,7 +6,8 @@ tables against so3lr_dev's pair functions, the reasons the engine choice gives (
 settings key and model hyperparameter classified), and ``so3lr nvt`` falling back to
 the neighbour-list potential. With one:
 ``python -m so3lr.flash.verify`` on 12,288 waters (energy, forces, dE/d(strain), with and
-without PME). With two or more: the same on several GPUs as on one, and MD on two.
+without PME); ``so3lr opt``, ``so3lr eval`` and the ASE calculator against the
+neighbour-list potential. With two or more: the same on several GPUs as on one, and MD on two.
 """
 import json
 import pathlib
@@ -182,6 +183,53 @@ def test_engine_choice(monkeypatch, change, reason):
 def test_engine_choice_small_box(monkeypatch):
     monkeypatch.setattr(check, "device_problem", lambda: None)
     assert "narrower than twice the cutoff" in check.flash_problem(SETTINGS, _water((1, 1, 1)))
+
+
+@pytest.mark.parametrize("task,change,reason", [
+    ("opt", dict(), None),
+    ("ase", dict(kspace_electrostatics="pme", kspace_dispersion="pme"), None),
+    ("eval", dict(targets="energy,forces"), None),
+    ("eval", dict(targets=["forces"]), None),
+    ("eval", dict(targets="forces,dipole_vec,hirshfeld_ratios"), "not dipole_vec, hirshfeld_ratios"),
+    ("eval", dict(targets="energy", kspace_electrostatics="ewald"), "PME but not ewald"),
+    ("opt", dict(lr_cutoff=None), "long-range cutoff"),
+    ("opt", dict(model_path="so3lr"), "legacy"),
+])
+def test_engine_choice_other_tasks(monkeypatch, task, change, reason):
+    """so3lr opt, so3lr eval and the ASE calculator take what MD takes, with no ensemble;
+    eval only for energies and forces."""
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    problem = check.flash_problem(dict(dict(model_path=None, lr_cutoff=12.0), **change), _water((3, 3, 3)), task=task)
+    assert (problem is None) if reason is None else (reason in problem), problem
+
+
+def test_engine_choice_every_structure(monkeypatch):
+    """so3lr eval: flash takes a dataset only if it takes every structure, and names the
+    first it cannot take."""
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    settings = dict(model_path=None, lr_cutoff=12.0, targets="energy,forces")
+    water = _water((3, 3, 3))
+    gas = water.copy()
+    gas.pbc = False
+    assert check.flash_problem(settings, [water, water.copy()], task="eval") is None
+    problem = check.flash_problem(settings, [water, water, gas], task="eval")
+    assert problem.startswith("structure 2: it needs a box periodic"), problem
+
+
+def test_eval_auto_takes_a_few_engines(monkeypatch):
+    """so3lr eval builds an engine per set of atoms: auto declines more than
+    EVAL_AUTO_ENGINES of them, engine flash takes any number."""
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    water = _water((3, 3, 3))
+    frames = []
+    for k in range(check.EVAL_AUTO_ENGINES + 1):
+        a = water.copy()
+        a.numbers[3 * k + 1] = 9                # a different hydrogen each time
+        frames.append(a)
+    settings = dict(model_path=None, lr_cutoff=12.0, targets="energy,forces")
+    assert check.flash_problem(settings, frames[:-1], task="eval") is None
+    assert "different sets of atoms" in check.flash_problem(settings, frames, task="eval")
+    assert check.flash_problem(dict(settings, engine="flash"), frames, task="eval") is None
 
 
 def test_every_settings_key_classified():
@@ -422,6 +470,101 @@ def test_box_shrinks_to_the_smallest_grid():
     _check("forces", f, f_ref, 1e-10)
 
 
+def _scaled(atoms, f):
+    out = atoms.copy()
+    out.set_cell(atoms.cell[:] * f, scale_atoms=True)
+    return out
+
+
+@GPU
+@pytest.mark.parametrize("pme", [None, "pme"])
+def test_ase_calculator_matches_neighbour_lists(pme):
+    """FlashCalculator gives So3lrCalculator's energy and forces (float64, 37 A of water,
+    with and without PME electrostatics), again after the cell grows (the engine's box
+    moves) and after a water is removed (a new engine)."""
+    from so3lr import FlashCalculator, So3lrCalculator
+    from so3lr.mlff.utils.kspace_utils import DEFAULT_KSPACE_SMEARING, DEFAULT_KSPACE_SPACING
+    kspace = dict(kspace_electrostatics=pme, kspace_smearing=DEFAULT_KSPACE_SMEARING,
+                  kspace_spacing=DEFAULT_KSPACE_SPACING)
+    calc = FlashCalculator(model="so3lr-tauri-m-2606", lr_cutoff=12.0, precision="float64", **kspace)
+    flash = _water((3, 3, 3))
+    flash.calc = calc
+    for step in ("first", "cell", "atoms"):
+        if step == "cell":
+            flash.set_cell(flash.cell[:] * 1.01, scale_atoms=True)
+        elif step == "atoms":
+            del flash[[0, 1, 2]]
+        other = flash.copy()
+        # a new reference each time: So3lrCalculator does not take other atoms after its first
+        other.calc = So3lrCalculator(model="so3lr-tauri-m-2606", lr_cutoff=12.0, dtype=np.float64, **kspace)
+        e_ref, f_ref = other.get_potential_energy(), other.get_forces()
+        e, f = flash.get_potential_energy(), flash.get_forces()
+        assert abs(e - e_ref) / len(flash) < 1e-9, (step, e, e_ref)
+        assert np.abs(f - f_ref).max() < 1e-5, (step, np.abs(f - f_ref).max())
+
+
+@GPU
+def test_ase_calculator_refuses_what_flash_cannot_take():
+    from so3lr import FlashCalculator
+    atoms = _water((3, 3, 3))
+    atoms.pbc = False
+    atoms.calc = FlashCalculator(precision="float64")
+    with pytest.raises(ValueError, match="periodic"):
+        atoms.get_potential_energy()
+
+
+@GPU
+@pytest.mark.parametrize("pme", [None, "pme"])
+def test_eval_on_flash_matches_neighbour_lists(tmp_path, pme):
+    """so3lr eval on flash (float64): three labelled structures, the second in a larger box
+    (the engine's box moves), the third with a water fewer (a new engine). The energies are
+    So3lrCalculator's in float64 and the force metrics and forces so3lr eval's on the
+    neighbour-list model (whose energies are 3.5e-8 eV/atom off float64 here: make_so3lr
+    takes no dtype)."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from ase.io import read, write
+    from so3lr import So3lrCalculator
+    from so3lr.cli.so3lr_eval import evaluate_so3lr_on
+    from so3lr.mlff.utils.kspace_utils import DEFAULT_KSPACE_SMEARING, DEFAULT_KSPACE_SPACING
+    rng = np.random.default_rng(0)
+    water = _water((3, 3, 3))
+    frames = [water, _scaled(water, 1.01), water[3:]]
+    for a in frames:
+        a.calc = SinglePointCalculator(a, energy=float(rng.normal()), forces=rng.normal(size=(len(a), 3)))
+    write(tmp_path / "data.extxyz", frames)
+    out = {}
+    for engine in ("flash", "standard"):
+        out[engine] = evaluate_so3lr_on(
+            str(tmp_path / "data.extxyz"), targets="energy,forces", precision="float64",
+            model_path="so3lr-tauri-m-2606", kspace_electrostatics=pme, engine=engine,
+            save_to=str(tmp_path / f"{engine}.extxyz"), log_file=str(tmp_path / f"{engine}.log"))
+    assert "Engine: flash" in (tmp_path / "flash.log").read_text()
+    # the forces agree to 1e-5 eV/A (verify's bound): a force metric moves by at most the mean
+    # |difference|
+    for key in ("forces_mae", "forces_rmse"):
+        assert abs(out["flash"][key] - out["standard"][key]) <= 1e-6, (key, out["flash"][key], out["standard"][key])
+    kspace = dict(kspace_electrostatics=pme, kspace_smearing=DEFAULT_KSPACE_SMEARING,
+                  kspace_spacing=DEFAULT_KSPACE_SPACING)
+    for a, b in zip(read(tmp_path / "flash.extxyz", ":"), read(tmp_path / "standard.extxyz", ":")):
+        ref = a.copy()
+        ref.calc = So3lrCalculator(model="so3lr-tauri-m-2606", lr_cutoff=12.0, dtype=np.float64, **kspace)
+        assert abs(a.info["energy_so3lr"] - ref.get_potential_energy()) / len(a) < 1e-9
+        assert np.abs(a.arrays["forces_so3lr"] - b.arrays["forces_so3lr"]).max() < 1e-5
+        assert np.allclose(a.positions, b.positions)
+
+
+@GPU
+def test_eval_falls_back_for_other_targets(tmp_path):
+    """The default targets include dipoles and ratios, which flash does not compute: auto
+    runs the neighbour-list model and says why."""
+    from so3lr.cli.so3lr_eval import evaluate_so3lr_on
+    from ase.io import write
+    write(tmp_path / "data.extxyz", [_water((3, 3, 3))])
+    evaluate_so3lr_on(str(tmp_path / "data.extxyz"), log_file=str(tmp_path / "o.log"))
+    log = (tmp_path / "o.log").read_text()
+    assert "flash cannot: it evaluates energy and forces, not dipole_vec, hirshfeld_ratios" in log, log[-2000:]
+
+
 def _so3lr(args, cwd, env=None):
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
     from subprocess_env import so3lr_subprocess_env
@@ -445,6 +588,25 @@ def test_md_restarts_on_flash(tmp_path):
     for name in "bcd":
         log = (tmp_path / f"{name}.log").read_text()
         assert "Engine: flash" in log, log[-2000:]
+
+
+@GPU
+def test_opt_on_flash_follows_neighbour_lists(tmp_path):
+    """`so3lr opt` on flash (auto) follows the neighbour-list potential's FIRE trajectory
+    (float64, PME), and writes the same trajectory file."""
+    from ase.io import read, write
+    write(tmp_path / "w.xyz", _water((3, 3, 3)))
+    run = ["opt", "--input", "w.xyz", "--precision", "float64", "--min-cycles", "3", "--min-steps", "5",
+           "--kspace-electrostatics", "pme"]
+    _so3lr([*run, "--output", "a.xyz"], tmp_path)
+    _so3lr([*run, "--engine", "standard", "--output", "b.xyz"], tmp_path)
+    assert "Engine: flash (auto)" in (tmp_path / "a.log").read_text()
+    a, b = read(tmp_path / "a.xyz", ":"), read(tmp_path / "b.xyz", ":")
+    assert len(a) == len(b) == 4
+    for fa, fb in zip(a, b):
+        d = fa.positions - fb.positions
+        d -= np.round(d / np.diag(fa.cell[:])) * np.diag(fa.cell[:])
+        assert np.abs(d).max() < 1e-6, np.abs(d).max()
 
 
 @GPU
@@ -495,6 +657,19 @@ def test_several_gpus_give_one_gpus_forces(precision, tol):
         assert eng.K > 16
         _check("energy, rows widened on 2 GPUs", e, e_ref, 1e-12)
         _check("forces, rows widened on 2 GPUs", f, f_ref, 1e-10)
+
+
+@GPUS
+def test_ase_calculator_on_two_gpus():
+    """FlashCalculator(flash_devices=2) gives one GPU's energy and forces (float64)."""
+    from so3lr import FlashCalculator
+    out = []
+    for devices in (1, 2):
+        atoms = _water((3, 3, 3))
+        atoms.calc = FlashCalculator(precision="float64", flash_devices=devices)
+        out.append((atoms.get_potential_energy(), atoms.get_forces()))
+    _check("energy on 2 GPUs", out[1][0], out[0][0], 1e-12)
+    _check("forces on 2 GPUs", out[1][1], out[0][1], 1e-10)
 
 
 @GPUS
