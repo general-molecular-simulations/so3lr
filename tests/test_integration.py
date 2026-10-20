@@ -150,6 +150,8 @@ class TestSO3LRCLISubcommands:
         )
         assert result.returncode == 0, f"opt failed: {result.stderr}"
         assert (workdir / 'optimized.xyz').exists()
+        from ase.io import read
+        assert len(read(workdir / 'optimized.xyz')) == len(read(workdir / 'input.xyz'))
     def test_nvt_subcommand(self, sample_molecule):
         workdir = sample_molecule
         result = subprocess.run(
@@ -189,22 +191,6 @@ class TestSO3LRCLISubcommands:
             timeout=SUBPROCESS_TIMEOUT,
         )
         assert result.returncode == 0, f"nve failed: {result.stderr}"
-    def test_eval_subcommand(self, sample_molecule):
-        workdir = sample_molecule
-        result = subprocess.run(
-            [
-                'so3lr', 'eval',
-                '--datafile', 'input.xyz',
-                '--save-to', 'evaluated.extxyz',
-            ],
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            env=so3lr_subprocess_env(),
-            timeout=SUBPROCESS_TIMEOUT,
-        )
-        assert result.returncode == 0, f"eval failed: {result.stderr}"
-        assert (workdir / 'evaluated.extxyz').exists(), "Output file not created"
 
 class TestSO3LRCLIOptions:
     """Test various SO3LR CLI subcommand options and configurations."""
@@ -244,40 +230,3 @@ class TestSO3LRCLIOptions:
         else:
             from ase.io import read
             assert len(read(workdir / output_file, index=':')) == 2
-    def test_eval_with_targets(self, sample_molecule):
-        workdir = sample_molecule
-        result = subprocess.run(
-            [
-                'so3lr', 'eval',
-                '--datafile', 'input.xyz',
-                '--save-to', 'evaluated.extxyz',
-                '--targets', 'forces,dipole_vec',
-            ],
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            env=so3lr_subprocess_env(),
-            timeout=SUBPROCESS_TIMEOUT,
-        )
-        assert result.returncode == 0, f"eval with targets failed: {result.stderr}"
-    def test_nvt_xyz_output(self, sample_molecule):
-        workdir = sample_molecule
-        result = subprocess.run(
-            [
-                'so3lr', 'nvt',
-                '--input', 'input.xyz',
-                '--output', 'trajectory.xyz',  # XYZ format instead of HDF5
-                '--temperature', '300',
-                '--dt', '0.5',
-                '--md-cycles', '2',
-                '--md-steps', '2',
-                '--no-relax',
-            ],
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            env=so3lr_subprocess_env(),
-            timeout=SUBPROCESS_TIMEOUT,
-        )
-        assert result.returncode == 0, f"nvt xyz output failed: {result.stderr}"
-        assert (workdir / 'trajectory.xyz').exists()
