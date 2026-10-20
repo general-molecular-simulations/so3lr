@@ -5,17 +5,15 @@ the floor must not touch anything the model is still interpolating. It therefore
 engages only where the pair's OWN tabulated NLH repulsion already exceeds
 ``PAIR_FLOOR_ENERGY`` -- one physically meaningful knob, no per-pair tuning.
 
-Both bounds are measured, over all 73 test sets and all three v2 checkpoints
-(the evaluation behind the SO3LR-2 paper's test-set errors):
+Both bounds are measured (the measurements and their consequences are in the
+comment block next to ``PAIR_FLOOR_ENERGY`` in embed_sparse.py):
 
   ONSET  the outermost separation where the UN-floored network diverges
-         (|F| > 1e3 eV/A or NaN) on dimer scans. ``rmin`` must reach past it.
-  REAL   the closest contact per pair anywhere in the labelled data. ``rmin``
-         must stay below it, or the floor overrides trained physics. The data
-         goes much closer than intuition suggests -- the scaled-separation sets
-         label down to 0.4 A -- and where the floor engages on such contacts it
-         measurably HURTS forces, because the model is inaccurate but not
-         diverging there.
+         (|F| > 1e3 eV/A or NaN) on dimer scans of the three v2 checkpoints.
+         ``rmin`` must reach past it.
+  REAL   the closest contact per pair across all 73 labelled test sets (the
+         evaluation behind the SO3LR-2 paper's test-set errors). ``rmin`` must
+         stay below it, or the floor overrides trained physics.
 
 Only the radial basis is floored. The angular part comes from the unit vector,
 and the repulsion / electrostatics / dispersion keep the true distance, so they
@@ -52,11 +50,16 @@ MEASURED = {
     ('S', 'S'): (1.020, 1.467), ('Si', 'H'): (0.600, 0.915),
 }
 
-# Pairs whose onset rmin cannot reach -- see the comment block in embed_sparse.py.
-# The onsets were measured on BARE DIMERS, which overstate the risk. Re-measured
-# with the atoms carrying normal valence, C-H and P-P are clean and only P-S is a
-# real problem (-42 keV and 4e5 eV/A in PH3...H2S on so3lr-tauri-l).
+# Pairs whose bare-dimer onset rmin cannot reach -- see the comment block in
+# embed_sparse.py for why only P-S is a real problem. For C-H the onset and the
+# closest real contact are 0.011 A apart, so no global energy protects it
+# without flooring real C-H contacts; 5 eV takes the non-intruding side.
 UNPROTECTED = {('P', 'P'), ('P', 'S'), ('C', 'H')}
+
+# Pairs whose closest real contact lies inside the handover shoulder
+# (rmin < real < rmin + PAIR_FLOOR_WIDTH): the floor bends those contacts, by
+# under 0.005 A. That shoulder is the whole cost of the width.
+SHOULDER = {('B', 'H'), ('C', 'H'), ('F', 'H'), ('N', 'H'), ('O', 'H')}
 
 # Equilibrium bond lengths [A]. The floor must be exactly inert at and above
 # each of these.
@@ -65,9 +68,9 @@ BONDS = {('H', 'H'): 0.741, ('C', 'H'): 1.09, ('N', 'H'): 1.01, ('O', 'H'): 0.96
          ('S', 'S'): 1.89, ('C', 'S'): 1.82, ('C', 'Cl'): 1.77, ('S', 'H'): 1.34}
 
 
-def _rmin(e1, e2):
+def _rmin(e1, e2, energy=PAIR_FLOOR_ENERGY):
     """The value the descriptor distance is clamped to for this pair."""
-    t = np.asarray(nlh_reference_distance())
+    t = np.asarray(nlh_reference_distance(energy))
     z1, z2 = atomic_numbers[e1], atomic_numbers[e2]
     return float(t[min(z1, z2) - 1, max(z1, z2) - 1])
 
@@ -87,8 +90,9 @@ def test_inert_at_and_above_every_real_bond():
     """Ordinary chemistry must be bit-for-bit untouched."""
     bad = []
     for (e1, e2), bond in BONDS.items():
-        if _handover(e1, e2) >= bond:
-            bad.append(f'{e1}-{e2}: handover {_handover(e1, e2):.3f} >= bond {bond}')
+        handover = _handover(e1, e2)
+        if handover >= bond:
+            bad.append(f'{e1}-{e2}: handover {handover:.3f} >= bond {bond}')
             continue
         d = jnp.array([bond, bond + 0.2, 1.5 * bond, 4.0])
         if not np.array_equal(np.asarray(_floor(e1, e2, d)), np.asarray(d)):
@@ -116,40 +120,26 @@ def test_reaches_past_the_measured_failure_onset():
     Failures are not monotone in distance -- so3lr-tauri-l is sane for S-S at 0.2 A,
     where 18 keV of repulsion swamps everything, and catastrophic further out --
     so clamping to a distance inside the band just moves the descriptor from one
-    bad place to another.
+    bad place to another. The pairs it cannot reach must be exactly the
+    documented ones, so a constant change cannot quietly add a fourth and fixing
+    one shows up as a failure rather than going unnoticed.
     """
-    bad = [f'{e1}-{e2}: clamp {_rmin(e1, e2):.3f} <= onset {onset:.3f}'
-           for (e1, e2), (onset, _) in MEASURED.items()
-           if (e1, e2) not in UNPROTECTED and _rmin(e1, e2) <= onset]
-    assert not bad, ('floor lands inside the diverging band for:\n  '
-                     + '\n  '.join(bad))
+    unreached = {pair for pair, (onset, _) in MEASURED.items() if _rmin(*pair) <= onset}
+    assert unreached == UNPROTECTED, (
+        f'newly unprotected: {sorted(unreached - UNPROTECTED)}; '
+        f'now protected (remove from UNPROTECTED): {sorted(UNPROTECTED - unreached)}')
 
 
-@pytest.mark.parametrize('pair', sorted(UNPROTECTED))
-def test_known_unreached_pairs_are_exactly_these(pair):
-    """Pin the three documented gaps so a constant change cannot quietly add a
-    fourth, and so fixing one shows up as a failing test rather than going
-    unnoticed. P-P and P-S need a per-pair floor or stronger P repulsion; C-H
-    has no (energy, width) that is both protective and non-intruding."""
-    e1, e2 = pair
-    onset, real = MEASURED[pair]
-    assert _rmin(e1, e2) <= onset, (
-        f'{e1}-{e2} is now protected (clamp {_rmin(e1, e2):.3f} > onset {onset}) '
-        f'-- remove it from UNPROTECTED')
-    if pair != ('C', 'H'):
-        # P-P / P-S are out of reach for any usable threshold. Even at 1 eV --
-        # already five times more intrusive than the shipped setting, and enough
-        # to floor real contacts across the board -- rmin still falls short.
-        z1, z2 = atomic_numbers[e1], atomic_numbers[e2]
-        i, j = min(z1, z2) - 1, max(z1, z2) - 1
-        at_1ev = float(np.asarray(nlh_reference_distance(1.0))[i, j])
-        assert at_1ev < onset, (
-            f'{e1}-{e2}: rmin reaches {at_1ev:.3f} A already at 1 eV, clearing the '
-            f'{onset} A onset -- a global energy could protect it after all')
-        return
-    assert real - onset < 0.10, (
-        f'{e1}-{e2}: onset {onset} and real contact {real} are {real - onset:.3f} A '
-        f'apart, which is enough room to protect it -- it should not be here')
+@pytest.mark.parametrize('pair', [('P', 'P'), ('P', 'S')])
+def test_phosphorus_pairs_are_beyond_any_global_energy(pair):
+    """Even at 1 eV -- already five times more intrusive than the shipped
+    setting, and enough to floor real contacts across the board -- rmin still
+    falls short, so these need a per-pair floor or a stronger P repulsion."""
+    onset = MEASURED[pair][0]
+    at_1ev = _rmin(*pair, energy=1.0)
+    assert at_1ev < onset, (
+        f'{pair}: rmin reaches {at_1ev:.3f} A already at 1 eV, clearing the '
+        f'{onset} A onset -- a global energy could protect it after all')
 
 
 def test_the_energy_threshold_is_the_only_knob_and_it_is_thermally_unreachable():
@@ -165,19 +155,20 @@ def test_width_adds_intrusion_and_no_protection():
     """Protection is set by rmin alone; the width only widens the shoulder that
     reaches into real data. Kept at 0.05 because that is what the 73-set
     evaluation was run with, but it is pure cost -- pinned so the trade-off
-    stays visible."""
+    stays visible, and the shoulder must stay confined to the documented pairs."""
     assert PAIR_FLOOR_WIDTH == 0.05
-    for pair in (('O', 'H'), ('C', 'H'), ('N', 'H')):
-        e1, e2 = pair
+    shoulder = {pair for pair, (_, real) in MEASURED.items() if _handover(*pair) > real}
+    assert shoulder == SHOULDER
+    for pair in SHOULDER:
         real = MEASURED[pair][1]
-        # rmin clears the real contact, but rmin + width does not for these
-        # three tight H-X pairs -- that shoulder is the whole cost of the width.
-        assert _rmin(e1, e2) < real
+        assert float(_floor(*pair, real)[0]) - real < 0.005, pair
 
 
 def test_scale_is_pair_specific_and_ordered_by_size():
     """A single global floor cannot serve both: S-S needs ~3x the reach of H-H."""
     assert _rmin('H', 'H') < _rmin('O', 'H') < _rmin('C', 'C') < _rmin('S', 'S')
+    # At H-H's value S-S would be unprotected; at S-S's value H-H would be
+    # floored above its own bond length.
     assert _rmin('S', 'S') / _rmin('H', 'H') > 2.0
 
 

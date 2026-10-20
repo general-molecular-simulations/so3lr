@@ -36,9 +36,9 @@ from so3lr.mlff.sph_ops import init_sph_fn
 # scales the way the failures do -- the heavier the pair, the further out.
 PAIR_FLOOR_ENERGY = 5.0    # [eV] engage only where the pair's repulsion exceeds this
 PAIR_FLOOR_WIDTH = 0.05    # [A] handover; the floor is exactly inert above it
-# 5 eV is bounded from both sides by measurement over all 73 test sets and all
-# three v2 checkpoints. It is the value the SO3LR-2 paper's test-set errors were
-# computed with (SI, "Behaviour at close contact"):
+# 5 eV is bounded from both sides by measurement -- dimer scans of the three v2
+# checkpoints below, the 73 labelled test sets above. It is the value the SO3LR-2
+# paper's test-set errors were computed with (SI, "Behaviour at close contact"):
 #
 #   lower bound  the failure onset per pair -- the outermost separation where the
 #                UN-floored network diverges (|F| > 1e3 eV/A or NaN) on dimer
@@ -51,8 +51,8 @@ PAIR_FLOOR_WIDTH = 0.05    # [A] handover; the floor is exactly inert above it
 #                model is inaccurate but NOT diverging there -- it is
 #                interpolating, and flooring distorts what it learned.
 #
-# At 5 eV NO pair intrudes on the real-contact envelope, which is why it beats
-# the 3 eV this started at: on the affected subsets forces improve, e.g.
+# At 5 eV rmin sits below the closest real contact for EVERY pair, which is why
+# it beats the 3 eV this started at: on the affected subsets forces improve, e.g.
 # so3lr-tauri-l on geom_orca6 RMSE 4.55 -> 2.98 kcal/mol/A, and 48/63 model x
 # subset entries improve while 4 are negligibly worse. 23 of 26 pairs are also
 # protected.
@@ -66,8 +66,8 @@ PAIR_FLOOR_WIDTH = 0.05    # [A] handover; the floor is exactly inert above it
 # three is a real problem:
 #
 #   C-H  fixed. In CH4 the floor gives a clean monotone wall on all four
-#        checkpoints; the divergence survives only in the bare C-H radical dimer
-#        on so3lr-tauri-l.
+#        checkpoints (legacy so3lr and the three v2 models); the divergence
+#        survives only in the bare C-H radical dimer on so3lr-tauri-l.
 #   P-P  fixed. Clean in PH3...PH3 on all four; the bare dimer on so3lr-tauri-l
 #        keeps bounded oscillations of a few tens of eV.
 #   P-S  NOT fixed, and worse than the dimer suggested. In PH3...H2S the energy
@@ -81,8 +81,20 @@ PAIR_FLOOR_WIDTH = 0.05    # [A] handover; the floor is exactly inert above it
 #
 # WIDTH is still 0.05 because that is what the 73-set evaluation above was run
 # with. Note it buys ZERO protection -- that is set by rmin alone -- while adding
-# pure intrusion through the handover shoulder, so 0.02 is a strict improvement
-# whenever there is budget to re-run the evaluation.
+# pure intrusion through the handover shoulder -- at 0.05 it reaches the closest
+# real B-H, C-H, F-H, N-H and O-H contacts, bending them by under 0.005 A -- so
+# 0.02 is a strict improvement whenever there is budget to re-run the evaluation.
+#
+# Deliberately NOT covered: below ~1.3 A the S-S curve has a shallow spurious
+# minimum behind a ~2 eV barrier on legacy so3lr and so3lr-tauri-s. It is bounded
+# and finite, and at 1.31 A the S-S repulsion is 0.007 eV, so flooring there would
+# mean overriding the model where its own repulsion is negligible -- exactly the
+# interpolating regime this constant exists to protect. Reported, not patched.
+#
+# Scope: the floor runs in every model built on GeometryEmbedSparse -- legacy
+# so3lr (whose repulsion is ZBL, not the NLH table used here) and training and
+# fine-tuning forward passes included -- while the calibration above is for the
+# v2 checkpoints. Changing either constant changes all of them.
 
 _NLH_REFERENCE_DISTANCE = {}
 
