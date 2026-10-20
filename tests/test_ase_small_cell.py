@@ -56,36 +56,55 @@ def kspace(request):
 
 
 @pytest.fixture(scope='module')
-def exact_supercell(kspace):
+def exact_calc():
+    """Exact-backend stress calculators, one per k-space setting, shared by the module.
+
+    The exact backend rebuilds its neighbour list whenever the atom count changes,
+    so one calculator serves the unit cell, the supercell and displaced copies.
+    (A glp calculator keeps the neighbour list of the first structure it sees, so
+    those are not shared.)
+    """
+    cache = {}
+
+    def get(kspace):
+        if kspace not in cache:
+            cache[kspace] = _calc('exact', kspace, calculate_stress=True)
+        return cache[kspace]
+
+    return get
+
+
+@pytest.fixture(scope='module')
+def exact_supercell(kspace, exact_calc):
     """Exact-backend results on the valid-minimum-image supercell (shared, costly)."""
     sup = _supercell(_small_triclinic_water())
-    return sup, _efs(sup, _calc('exact', kspace, calculate_stress=True))
+    return sup, _efs(sup, exact_calc(kspace))
 
 
-def test_unit_cell_matches_supercell(kspace, exact_supercell):
+def test_unit_cell_matches_supercell(kspace, exact_supercell, exact_calc):
     unit = _small_triclinic_water()
     sup, (e_s, f_s, s_s) = exact_supercell
-    e_u, f_u, s_u = _efs(unit, _calc('exact', kspace, calculate_stress=True))
+    e_u, f_u, s_u = _efs(unit, exact_calc(kspace))
     npt.assert_allclose(e_u / len(unit), e_s / len(sup), rtol=0, atol=1e-7)
     npt.assert_allclose(f_u, f_s[:len(unit)], rtol=0, atol=1e-5)
     npt.assert_allclose(s_u, s_s, rtol=0, atol=1e-7)
 
 
-def test_exact_matches_glp_where_auto_keeps_glp(kspace):
+def test_exact_matches_glp_where_auto_keeps_glp(kspace, exact_calc):
     """On the cells 'auto' still sends to glp, both backends must agree exactly:
     orthorhombic, heights between 2 and 3 x cutoff (minimum image, no cell list)."""
     sup = _supercell(_small_triclinic_water(angles=(90.0, 90.0, 90.0)))
     assert not needs_exact(sup.get_cell(), 4.5, LR)
-    e_x, f_x, s_x = _efs(sup, _calc('exact', kspace, calculate_stress=True))
+    e_x, f_x, s_x = _efs(sup, exact_calc(kspace))
     e_g, f_g, s_g = _efs(sup, _calc('glp', kspace, calculate_stress=True))
     npt.assert_allclose(e_x, e_g, rtol=1e-10)
     npt.assert_allclose(f_x, f_g, rtol=0, atol=1e-8)
     npt.assert_allclose(s_x, s_g, rtol=0, atol=1e-9)
 
 
-def test_exact_forces_and_stress_match_finite_differences():
+def test_exact_forces_and_stress_match_finite_differences(exact_calc):
     unit = _small_triclinic_water()
-    calc = _calc('exact', True, calculate_stress=True)
+    calc = exact_calc(True)
     _, f0, s0 = _efs(unit, calc)
 
     def displaced(i, k):
@@ -107,7 +126,7 @@ def test_exact_forces_and_stress_match_finite_differences():
                         rtol=0, atol=1e-7)
 
 
-def test_exact_hessian_on_small_cell():
+def test_exact_hessian_on_small_cell(exact_calc):
     """Every calculate_fn variant runs on explicit images, the hessian included."""
     unit = _small_triclinic_water()
     n = len(unit)
@@ -117,7 +136,8 @@ def test_exact_hessian_on_small_cell():
     hess = np.asarray(atoms.calc.results['hessian']).reshape(3 * n, 3 * n)
     npt.assert_allclose(hess, hess.T, rtol=0, atol=1e-6)
 
-    f_calc = _calc('exact', True)
+    # Forces from the shared stress calculator: same model and k-space settings.
+    f_calc = exact_calc(True)
 
     def forces(h):
         a = unit.copy(); a.positions[0, 0] += h

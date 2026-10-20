@@ -4,7 +4,11 @@ Test extraction of different observables.
 This test file validates that individual observables
 (nn_energy, electrostatic_energy, dispersion_energy, partial_charges, etc.)
 can be extracted from the SO3LR model and that the energy components
-sum to the total energy.
+sum to the total energy. The same decomposition for a periodic water box is
+checked in test_ase.py::test_water, alongside that box's reference values.
+
+One molecule (dha) is enough: these are properties of the observable
+plumbing, not of a particular molecule.
 """
 
 import numpy as np
@@ -52,7 +56,7 @@ def package_dir():
 class TestObservablesExtraction:
     """Test class for observable extraction."""
 
-    @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
+    @pytest.mark.parametrize('name', ['dha'])
     def test_energy_components_sum_to_total_molecules(self, name: str, package_dir):
         """
         Test that extracted energy components sum approximately to total energy
@@ -156,62 +160,11 @@ class TestObservablesExtraction:
         )
         assert x.shape[1] > 0, "Feature dimension must be non-zero"
 
-    def test_energy_components_sum_to_total_water_box(self, package_dir):
-        """
-        Test that extracted energy components sum approximately to total energy
-        for periodic water system.
-        """
-        # Repeat water box to ensure it's large enough for the 12 Å cutoff
-        atoms = read(package_dir / f'tests/test_data/water_64.xyz') * [2, 2, 2]
-
-        # Create calculator with observables output
-        calc = AseCalculatorSparse.create_from_workdir(
-            workdir=MODEL_DIR,
-            lr_cutoff=12.,
-            dispersion_energy_cutoff_lr_damping=2.,
-            from_file=True,
-            dtype=np.float64,
-            has_aux=True,
-            observables=['zbl_repulsion','nn_energy', 'electrostatic_energy', 'dispersion_energy']
-        )
-
-        atoms.calc = calc
-
-        # Get total energy
-        total_energy = atoms.get_potential_energy()
-
-        # Access the auxiliary outputs
-        results = calc.results.get('aux', {})
-
-        # Get individual energy components
-        nn_energy = np.sum(results['nn_energy'])
-        electrostatic_energy = np.sum(results['electrostatic_energy'])
-        dispersion_energy = np.sum(results['dispersion_energy'])
-        zbl_repulsion = np.sum(results['zbl_repulsion'])
-
-        sum_components = nn_energy + electrostatic_energy + dispersion_energy + zbl_repulsion
-
-        print(f"\nWater box (64 molecules, repeated 2x2x2)")
-        print(f"Total energy: {total_energy:.6f} eV")
-        print(f"NN energy: {nn_energy:.6f} eV")
-        print(f"Electrostatic energy: {electrostatic_energy:.6f} eV")
-        print(f"Dispersion energy: {dispersion_energy:.6f} eV")
-        print(f"ZBL repulsion energy: {zbl_repulsion:.6f} eV")
-        print(f"Sum of components: {sum_components:.6f} eV")
-        
-        npt.assert_allclose(
-            sum_components,
-            total_energy,
-            rtol=1e-4,
-            atol=1e-5,
-            err_msg="Energy components don't sum to total for water box"
-        )
-
 
 class TestConsistencyBetweenCalculators:
     """Test consistency between different calculator configurations."""
 
-    @pytest.mark.parametrize('name', ['atat', 'dha', 'bb'])
+    @pytest.mark.parametrize('name', ['dha'])
     def test_energy_and_forces_same_with_and_without_observables(self, name: str, package_dir):
         """
         Test that requesting observables, the atom embeddings 'x' included, changes

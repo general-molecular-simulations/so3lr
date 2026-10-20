@@ -100,6 +100,25 @@ def pme_case(package_dir, full_test):
     return box, KSPACE_SMEARING, KSPACE_LR_CUTOFF
 
 
+@pytest.fixture(scope='module')
+def jaxmd_potential():
+    """So3lrPotential(method, lr_cutoff) for the default model, built once per module.
+
+    The ASE-agreement test (pme) and the shear test use the same potential, and
+    each So3lrPotential is a model build.
+    """
+    cache = {}
+
+    def get(kspace_method, lr_cutoff):
+        key = (kspace_method, lr_cutoff)
+        if key not in cache:
+            cache[key] = So3lrPotential(
+                dtype=DTYPE, lr_cutoff=lr_cutoff, coulomb_kspace_method=kspace_method)
+        return cache[key]
+
+    return get
+
+
 def _kgrid(cell, method, smearing):
     """(k_grid, k_smearing) from the production builder, at the converged
     spacing used throughout this file: smearing/2 for ewald, /8 for the meshes."""
@@ -299,7 +318,8 @@ class TestPMEJaxMD:
     """Test PME with JAX-MD backend."""
 
     @pytest.mark.parametrize('kspace_method', ['ewald', 'pme', 'p3m'])
-    def test_jaxmd_matches_ase_calculator(self, kspace_method, package_dir, pme_case):
+    def test_jaxmd_matches_ase_calculator(self, kspace_method, package_dir, pme_case,
+                                          jaxmd_potential):
         """The Python-API jax-md potential (So3lrPotential + to_jax_md) and the ASE
         calculator agree.
 
@@ -338,13 +358,9 @@ class TestPMEJaxMD:
         positions = jnp.array(atoms.get_positions(), dtype=DTYPE)
 
         neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
-            potential=So3lrPotential(
-                dtype=DTYPE,
-                # Same cutoff switch as the ASE cases: at the default 12 A the
-                # 192-atom box (12.4 A) would violate minimum image.
-                lr_cutoff=lr_cutoff,
-                coulomb_kspace_method=kspace_method,
-            ),
+            # Same cutoff switch as the ASE cases: at the default 12 A the
+            # 192-atom box (12.4 A) would violate minimum image.
+            potential=jaxmd_potential(kspace_method, lr_cutoff),
             displacement_or_metric=displacement,
             shift_fn=shift,
             box_size=box,
@@ -389,7 +405,8 @@ class TestPMEJaxMD:
         npt.assert_allclose(float(energy), ase_energy, rtol=0, atol=ASE_JAXMD_ENERGY_ATOL)
         npt.assert_allclose(forces, ase_forces, rtol=0, atol=ASE_JAXMD_FORCES_ATOL)
 
-    def test_jaxmd_pme_shear_derivative_matches_finite_difference(self, pme_case):
+    def test_jaxmd_pme_shear_derivative_matches_finite_difference(self, pme_case,
+                                                                 jaxmd_potential):
         """The strain perturbation used for the NPT-flex stress deforms the lattice
         the model's PME sees in the right direction.
 
@@ -413,7 +430,7 @@ class TestPMEJaxMD:
         displacement, shift = jax_md.space.periodic_general(box=box, fractional_coordinates=True)
         frac = jnp.array(atoms.get_scaled_positions(), dtype=DTYPE)
         neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
-            potential=So3lrPotential(dtype=DTYPE, lr_cutoff=lr_cutoff, coulomb_kspace_method='pme'),
+            potential=jaxmd_potential('pme', lr_cutoff),
             displacement_or_metric=displacement, shift_fn=shift, box_size=box,
             species=species, capacity_multiplier=1.5, buffer_size_multiplier_sr=1.5,
             buffer_size_multiplier_lr=1.5, minimum_cell_size_multiplier_sr=1.0,

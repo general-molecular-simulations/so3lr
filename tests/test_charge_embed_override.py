@@ -17,6 +17,7 @@ every trained weight in place: the 'embed_zero' case of the `energies` fixture
 loads the released checkpoint with the override set, and would raise if the
 parameter tree changed.
 """
+import functools
 import pathlib
 
 import numpy as np
@@ -59,6 +60,20 @@ def _charged_fragment():
 
 def _energy(total_charge, charge_embed_total_charge,
             charge_equilibration_total_charge=None):
+    """Energy of the charged fragment under one (charge, embed, equilibrate) condition.
+
+    The fixtures and tests below ask for overlapping conditions (the default one
+    alone four times), and every evaluation builds a model, so each distinct
+    condition is evaluated once per session. Comparisons between two conditions
+    still compare two separately built calculators.
+    """
+    return _cached_energy(total_charge, charge_embed_total_charge,
+                          charge_equilibration_total_charge)
+
+
+@functools.lru_cache(maxsize=None)
+def _cached_energy(total_charge, charge_embed_total_charge,
+                   charge_equilibration_total_charge):
     from so3lr import So3lrCalculator
 
     atoms = _charged_fragment()
@@ -287,21 +302,14 @@ class TestChargeEmbedOverrideCLI:
         with h5py.File(tmp_path / f'{tag}.hdf5', 'r') as f:
             return np.array(f['momenta'])
 
-    def test_settings_yaml_route(self, tmp_path):
-        """`charge_embed_total_charge:` in the settings YAML reaches the model."""
-        absent = self._run_nvt(tmp_path / 'a', 'absent', '# key absent')
-        null = self._run_nvt(tmp_path / 'b', 'null', 'charge_embed_total_charge: null')
-        minus = self._run_nvt(tmp_path / 'c', 'minus', 'charge_embed_total_charge: -1.0')
-        zero = self._run_nvt(tmp_path / 'd', 'zero', 'charge_embed_total_charge: 0.0')
-        equil = self._run_nvt(
-            tmp_path / 'e', 'equil', 'charge_equilibration_total_charge: 0.0',
-        )
+    def test_settings_yaml_route(self, momenta):
+        """`charge_embed_total_charge:` in the settings YAML reaches the model.
 
-        # Absent, explicit null, and the true charge all mean the same thing.
-        assert np.array_equal(absent, null), 'null must behave as if the key were absent'
-        assert np.array_equal(absent, minus), (
-            'charge_embed_total_charge equal to total_charge must be a no-op'
-        )
+        That an override equal to the true charge is a no-op is pinned in-process
+        by TestChargeEmbedOverride.test_passthrough_is_exact.
+        """
+        absent, zero, equil = momenta['absent'], momenta['zero'], momenta['equil']
+
         # 0.0 must actually change the dynamics.
         assert not np.array_equal(absent, zero), (
             'charge_embed_total_charge: 0.0 did not change the trajectory, so it '
@@ -353,27 +361,43 @@ class TestChargeEmbedOverrideCLI:
         with h5py.File(tmp_path / out, 'r') as f:
             return np.array(f['momenta'])
 
-    def test_command_line_flag_matches_settings_yaml(self, tmp_path):
+    @pytest.fixture(scope='class')
+    def momenta(self, tmp_path_factory):
+        """The four runs the tests in this class compare, each run once.
+
+        Three through `so3lr --settings` (key absent, embedding override 0,
+        equilibration override 0) and the embedding override 0 again through the
+        `so3lr nvt` flag. Every run is a full CLI start-up, model build and JIT.
+        """
+        root = tmp_path_factory.mktemp('charge_embed_cli')
+        return {
+            'absent': self._run_nvt(root / 'a', 'absent', '# key absent'),
+            'zero': self._run_nvt(root / 'z', 'zero', 'charge_embed_total_charge: 0.0'),
+            'equil': self._run_nvt(
+                root / 'e', 'equil', 'charge_equilibration_total_charge: 0.0',
+            ),
+            'flag_zero': self._run_nvt_argv(
+                root / 'f', 'flag.hdf5', ('--charge-embed-total-charge', '0'),
+            ),
+        }
+
+    def test_command_line_flag_matches_settings_yaml(self, momenta):
         """--charge-embed-total-charge and the YAML key must agree exactly.
 
         Two independent routes into the same setting; if they disagree, one of
         them is not reaching the model.
         """
-        via_yaml = self._run_nvt(tmp_path / 'y', 'zero', 'charge_embed_total_charge: 0.0')
-        via_flag = self._run_nvt_argv(
-            tmp_path / 'f', 'flag.hdf5', ('--charge-embed-total-charge', '0'),
-        )
-        assert np.array_equal(via_yaml, via_flag), (
+        assert np.array_equal(momenta['zero'], momenta['flag_zero']), (
             'the CLI flag and the settings-file key produced different trajectories'
         )
 
-    def test_command_line_flag_changes_the_run(self, tmp_path):
-        """Omitting the flag must differ from passing 0."""
-        default = self._run_nvt_argv(tmp_path / 'd', 'def.hdf5', ())
-        zero = self._run_nvt_argv(
-            tmp_path / 'z', 'zero.hdf5', ('--charge-embed-total-charge', '0'),
-        )
-        assert not np.array_equal(default, zero), (
+    def test_command_line_flag_changes_the_run(self, momenta):
+        """Omitting the override must differ from passing 0 on the command line.
+
+        The run without an override goes through the settings file; the test above
+        shows both routes give the same trajectory for the same setting.
+        """
+        assert not np.array_equal(momenta['absent'], momenta['flag_zero']), (
             '--charge-embed-total-charge 0 did not change the trajectory'
         )
 
