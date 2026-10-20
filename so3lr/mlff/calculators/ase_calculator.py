@@ -479,35 +479,25 @@ class AseCalculatorSparse(Calculator):
             )
 
         neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
-        if neighbors.overflow:
-            logger.info('Re-allocating neighbours. ') 
+        # The list is incomplete if glp's pair buffer overflowed, or if its cell list became
+        # over-full or too small (flagged in cell_list.reallocate). Either way rebuild it and use
+        # the rebuilt list for this call; the old code reallocated on a cell-list flag but still
+        # returned the stale list.
+        cell_list = neighbors.cell_list
+        if neighbors.overflow or (cell_list is not None and cell_list.reallocate):
+            logger.info('Re-allocating neighbours.')
             self.neighbors, self.spatial_partitioning = neighbor_list(
-                        positions=system.R,
-                        cell=cell,
-                        cutoff=self.cutoff,
-                        skin=self.skin,
-                        capacity_multiplier=self.capacity_multiplier,
-                        buffer_size_multiplier=self.buffer_size_multiplier,
-                        lr_cutoff=self.lr_cutoff,
+                positions=system.R,
+                cell=cell,
+                cutoff=self.cutoff,
+                skin=self.skin,
+                capacity_multiplier=self.capacity_multiplier,
+                buffer_size_multiplier=self.buffer_size_multiplier,
+                lr_cutoff=self.lr_cutoff,
             )
             neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
             assert not neighbors.overflow
-            self.neighbors = neighbors
-        else:
-            self.neighbors = neighbors
-        if neighbors.cell_list is not None:
-            # If cell list needs to be reallocated, then reallocate neighbors
-            if neighbors.cell_list.reallocate:
-                # self.neighbors now contains Neighbors namedtuple with idx_i_lr etc.
-                self.neighbors, self.spatial_partitioning = neighbor_list(
-                    positions=system.R,
-                    cell=cell,
-                    cutoff=self.cutoff,
-                    skin=self.skin,
-                    capacity_multiplier=self.capacity_multiplier,
-                    buffer_size_multiplier=self.buffer_size_multiplier,
-                    lr_cutoff=self.lr_cutoff
-                )
+        self.neighbors = neighbors
         return neighbors
 
     # ------------------------------------------------------------------ exact PBC
