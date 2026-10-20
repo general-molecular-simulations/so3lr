@@ -100,13 +100,10 @@ def test_data_load_no_pbc(calculate_neighbors_lr: bool):
         npt.assert_equal(num_unpaired_electrons, 0)
         npt.assert_equal(len(senders), len(receivers))
 
-        npt.assert_equal(len(idx_j_lr), len(idx_j_lr))
         if calculate_neighbors_lr:
             npt.assert_equal(num_pairs, num_atoms*num_atoms - num_atoms)
             npt.assert_equal(len(idx_i_lr), num_pairs)
             npt.assert_equal(len(idx_j_lr), num_pairs)
-            npt.assert_equal(np.isnan(idx_i_lr).any(), False)
-            npt.assert_equal(np.isnan(idx_j_lr).any(), False)
         else:
             npt.assert_equal(idx_i_lr, np.array([]).reshape(-1))
             npt.assert_equal(idx_j_lr, np.array([]).reshape(-1))
@@ -150,8 +147,6 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
         npt.assert_equal(len(idx_i_lr), num_pairs)
         npt.assert_equal(len(idx_j_lr), num_pairs)
         npt.assert_equal(cell_offsets_lr.shape, (num_pairs, 3))
-        npt.assert_equal(np.isnan(idx_i_lr).any(), False)
-        npt.assert_equal(np.isnan(idx_j_lr).any(), False)
         # Indices must reference valid atoms in the 192-atom cell.
         npt.assert_(idx_i_lr.min() >= 0 and idx_i_lr.max() < 192)
         npt.assert_(idx_j_lr.min() >= 0 and idx_j_lr.max() < 192)

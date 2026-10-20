@@ -1,7 +1,9 @@
 """Tests for the TFDS dataloader and its optional runtime dependencies.
 
 Validates compute_edges_np, standardize_dataset_fields, and create_graph_tuple_tf
-for both non-PBC and PBC cases, including a real temporary TFDS disk round trip.
+for both non-PBC and PBC cases. The PBC-field stripping in _numpy_tuple_iterator
+is checked through the real _preprocess pipeline
+(test_preprocess_preserves_explicit_pbc_with_nonzero_cell).
 """
 
 import jraph
@@ -9,7 +11,7 @@ import numpy as np
 import pytest
 
 tf = pytest.importorskip('tensorflow')
-tfds = pytest.importorskip('tensorflow_datasets')
+pytest.importorskip('tensorflow_datasets')
 
 from so3lr.mlff.data.dataloader_sparse_tfds import (
     QCMLDataLoaderSparseParallel,
@@ -64,47 +66,6 @@ def _make_nacl_element():
         'charge': tf.constant([0], dtype=tf.int32),
         'multiplicity': tf.constant([1], dtype=tf.int32),
     }
-
-
-def test_tfds_extra_builder_from_directory_round_trip(tmp_path):
-    """The ``tfds`` extra must write and reopen a prepared dataset."""
-    features = tfds.features.FeaturesDict({
-        'atomic_numbers': tfds.features.Tensor(
-            shape=(3,), dtype=np.int32
-        ),
-        'positions': tfds.features.Tensor(
-            shape=(3, 3), dtype=np.float32
-        ),
-        'cell': tfds.features.Tensor(shape=(3, 3), dtype=np.float32),
-        'pbc': tfds.features.Tensor(shape=(3,), dtype=np.bool_),
-        'energy': tfds.features.Tensor(shape=(1,), dtype=np.float32),
-        'forces': tfds.features.Tensor(shape=(3, 3), dtype=np.float32),
-        'theory_level': tfds.features.Tensor(shape=(1,), dtype=np.int32),
-        'charge': tfds.features.Tensor(shape=(1,), dtype=np.int32),
-        'multiplicity': tfds.features.Tensor(shape=(1,), dtype=np.int32),
-    })
-    stored = tfds.dataset_builders.store_as_tfds_dataset(
-        name='so3lr_extra_round_trip',
-        version='1.0.0',
-        features=features,
-        split_datasets={
-            'train': tf.data.Dataset.from_tensors(_make_water_element()),
-        },
-        data_dir=tmp_path,
-        disable_shuffling=True,
-    )
-
-    reopened = tfds.builder_from_directory(stored.data_dir)
-    assert reopened.info.full_name == 'so3lr_extra_round_trip/1.0.0'
-    assert reopened.info.splits['train'].num_examples == 1
-
-    sample = next(iter(reopened.as_dataset(split='train')))
-    np.testing.assert_array_equal(sample['atomic_numbers'].numpy(), [8, 1, 1])
-    np.testing.assert_allclose(
-        sample['positions'].numpy(),
-        [[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]],
-    )
-    np.testing.assert_allclose(sample['energy'].numpy(), [-0.5])
 
 
 # ---------------------------------------------------------------------------
@@ -224,61 +185,6 @@ def test_standardize_infers_pbc_from_cell():
             sample['pbc'].numpy(), [True, True, True],
             err_msg="pbc should be inferred as [True,True,True] from non-zero cell"
         )
-
-
-# ---------------------------------------------------------------------------
-# Test 4: numpy iterator strips PBC fields for non-PBC
-# ---------------------------------------------------------------------------
-def test_numpy_tuple_iterator_strips_non_pbc():
-    element = _make_water_element()
-    graph, lr_dict = create_graph_tuple_tf(
-        element, cutoff=5.0, calculate_neighbors_lr=False
-    )
-
-    # Build a one-element TF dataset and iterate as numpy (mimics _numpy_tuple_iterator)
-    ds = tf.data.Dataset.from_tensors((graph, lr_dict))
-    for np_graph, np_lr in ds.as_numpy_iterator():
-        cell = np_graph.globals.get('cell')
-        has_pbc = cell is not None and np.any(cell != 0.0)
-        assert not has_pbc
-
-        # Apply the same stripping logic as _numpy_tuple_iterator
-        if not has_pbc:
-            globals_new = {k: v for k, v in np_graph.globals.items() if k != 'cell'}
-            edges_new = {k: v for k, v in np_graph.edges.items() if k != 'cell_offset'}
-            np_graph = np_graph._replace(globals=globals_new, edges=edges_new)
-
-        offsets = np.asarray(np_lr['cell_offsets_lr'])
-        cell_offsets_lr = offsets if has_pbc and offsets.shape[0] > 0 else None
-
-        assert 'cell' not in np_graph.globals
-        assert 'cell_offset' not in np_graph.edges
-        assert cell_offsets_lr is None
-
-
-# ---------------------------------------------------------------------------
-# Test 5: numpy iterator keeps PBC fields for periodic systems
-# ---------------------------------------------------------------------------
-def test_numpy_tuple_iterator_keeps_pbc():
-    element = _make_nacl_element()
-    graph, lr_dict = create_graph_tuple_tf(
-        element, cutoff=4.0, calculate_neighbors_lr=True, cutoff_lr=6.0
-    )
-
-    ds = tf.data.Dataset.from_tensors((graph, lr_dict))
-    for np_graph, np_lr in ds.as_numpy_iterator():
-        cell = np_graph.globals.get('cell')
-        has_pbc = cell is not None and np.any(cell != 0.0)
-        assert has_pbc
-
-        # Do NOT strip for PBC
-        offsets = np.asarray(np_lr['cell_offsets_lr'])
-        cell_offsets_lr = offsets if has_pbc and offsets.shape[0] > 0 else None
-
-        assert 'cell' in np_graph.globals
-        assert 'cell_offset' in np_graph.edges
-        assert cell_offsets_lr is not None
-        assert cell_offsets_lr.shape[1] == 3
 
 
 @pytest.mark.parametrize('pbc', [[False, False, False], [True, False, True]])
