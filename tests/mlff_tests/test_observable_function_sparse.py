@@ -44,14 +44,28 @@ def _load(model_name):
     return make_so3krates_sparse_from_config(cfg), params
 
 
-@pytest.mark.parametrize('model_name', ['so3lr-tauri-m-2606', 'so3lr'])
-def test_every_ratio_head_is_forwarded(model_name):
+# One load per model for the whole module; no test modifies the params.
+@pytest.fixture(scope='module')
+def tauri_m():
+    return _load('so3lr-tauri-m-2606')
+
+
+@pytest.fixture(scope='module')
+def legacy_so3lr():
+    return _load('so3lr')
+
+
+_MODEL_FIXTURES = {'so3lr-tauri-m-2606': 'tauri_m', 'so3lr': 'legacy_so3lr'}
+
+
+@pytest.mark.parametrize('model_name', list(_MODEL_FIXTURES))
+def test_every_ratio_head_is_forwarded(model_name, request):
     """Whatever ratio keys the model emits must survive the wrapper.
 
     'a0_ratios' used to be dropped, which also made the _RATIO_ALIAS remap in
     make_loss_fn dead code -- it can only rename a key that actually arrives.
     """
-    net, params = _load(model_name)
+    net, params = request.getfixturevalue(_MODEL_FIXTURES[model_name])
     inputs = _water_inputs()
     emitted = {k for k in net.apply(params, inputs) if 'ratio' in k}
     forwarded = {k for k in get_energy_and_force_fn_sparse(net)(params, **inputs)
@@ -60,10 +74,10 @@ def test_every_ratio_head_is_forwarded(model_name):
     assert emitted <= forwarded, f'wrapper dropped {sorted(emitted - forwarded)}'
 
 
-def test_ratio_target_trains_on_the_current_generation():
+def test_ratio_target_trains_on_the_current_generation(tauri_m):
     """`loss_weights: {hirshfeld_ratios: ...}` on a model that emits
     'a0_ratios' must work via the alias remap; it used to raise KeyError."""
-    net, params = _load('so3lr-tauri-m-2606')
+    net, params = tauri_m
     inputs = _water_inputs()
     loss_fn = training_utils.make_loss_fn(
         get_energy_and_force_fn_sparse(net),
@@ -76,10 +90,10 @@ def test_ratio_target_trains_on_the_current_generation():
     assert jnp.isfinite(loss).all()
 
 
-def test_energy_and_force_call_runs_one_forward_pass():
+def test_energy_and_force_call_runs_one_forward_pass(tauri_m):
     """The wrapper used to call model.apply a second time just to read the
     non-energy heads, doubling the cost of every training/validation step."""
-    net, params = _load('so3lr-tauri-m-2606')
+    net, params = tauri_m
     calls = {'n': 0}
     original = type(net).apply
 

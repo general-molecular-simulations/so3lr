@@ -10,17 +10,23 @@ import pytest
 TEST_DIR = Path(__file__).parent
 
 
-@pytest.mark.parametrize("calculate_neighbors_lr", [True, False])
-def test_data_load_no_pbc(calculate_neighbors_lr: bool):
-    filename = 'test_data/data_set.xyz'
-    f = TEST_DIR / filename
+@pytest.fixture(scope='module', params=[True, False])
+def no_pbc_data(request):
+    """data_set.xyz loaded once per calculate_neighbors_lr value and shared by
+    the two tests below (batching does not modify the loaded graphs).
 
-    loader = AseDataLoaderSparse(input_file=f)
+    Returns (calculate_neighbors_lr, loader, all_data, data_stats)."""
+    loader = AseDataLoaderSparse(input_file=TEST_DIR / 'test_data/data_set.xyz')
     all_data, data_stats = loader.load(
         cutoff=4.,
-        calculate_neighbors_lr=calculate_neighbors_lr,
+        calculate_neighbors_lr=request.param,
         cutoff_lr=75.
     )
+    return request.param, loader, all_data, data_stats
+
+
+def test_data_load_no_pbc(no_pbc_data):
+    calculate_neighbors_lr, loader, all_data, data_stats = no_pbc_data
 
     npt.assert_equal(len(all_data), 100)
     npt.assert_equal(loader.cardinality(), 100)
@@ -206,26 +212,9 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
             npt.assert_equal(cell_offset.shape, (len(senders), 3))
 
 
-@pytest.mark.parametrize("calculate_neighbors_lr", [True, False])
-def test_jraph_dynamically_batch(calculate_neighbors_lr: bool):
-    """
-    Loaded data is compatible with dynamically_batch_with_lr(...).
-
-    Args:
-        calculate_neighbors_lr ():
-
-    Returns:
-
-    """
-    filename = 'test_data/data_set.xyz'
-    f = TEST_DIR / filename
-
-    loader = AseDataLoaderSparse(input_file=f)
-    all_data, data_stats = loader.load(
-        cutoff=4.,
-        calculate_neighbors_lr=calculate_neighbors_lr,
-        cutoff_lr=75.
-    )
+def test_jraph_dynamically_batch(no_pbc_data):
+    """Loaded data is compatible with dynamically_batch_with_lr(...)."""
+    calculate_neighbors_lr, _, all_data, _ = no_pbc_data
 
     num_atoms = 24
 
