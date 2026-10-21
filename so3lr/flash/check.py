@@ -35,6 +35,7 @@ EVAL_AUTO_ENGINES = 16
 
 # settings flash honours (aliases included)
 HANDLED = {
+    "fixed_atom_indices",  # held in place (nve/nvt/nvt-langevin): md.py resets them after every step
     "input_file", "output_file", "log_file", "output_format", "overwrite", "output_atom_indices",
     "output_cartesian_positions", "enforce_cartesian_coordinates", "model", "model_path", "precision",
     "matmul_precision", "lr_cutoff", "dispersion_damping", "total_charge", "num_unpaired_electrons", "spin",
@@ -63,7 +64,8 @@ IRRELEVANT = {
 UNSUPPORTED = {
     "do_enhanced_sampling": "enhanced sampling",
     "observables": "observables", "observable": "observables",
-    "atom_mask_path": "fixed atoms", "mobile_atom_indices": "fixed atoms", "fixed_atom_indices": "fixed atoms",
+    "atom_mask_path": "fixed atoms from a mask file (give fixed_atom_indices)",
+    "mobile_atom_indices": "mobile_atom_indices (give fixed_atom_indices)",
     "dispersion_tail_correction": "the dispersion tail correction",
     "kspace_npt_cycles": "re-tuning the PME mesh every so many cycles (kspace_npt_cycles)",
 }
@@ -167,6 +169,15 @@ def settings_problem(settings, task="md"):
                 return f"it has no {UNSUPPORTED[key]}"
         elif key not in HANDLED and key not in IRRELEVANT and not _off(value):
             return f"it does not know the setting {key!r}"
+    if not _off(s.get("fixed_atom_indices")):
+        # md.py puts held atoms back after every step of nve / nvt / nvt-langevin; the NPT box moves
+        # them, and flash's minimiser (so3lr opt, the relaxation before MD) does not hold them
+        if task != "md":
+            return f"it holds atoms fixed only in MD, not in {task}"
+        if ens == "npt":
+            return "it holds atoms fixed only in nve, nvt and nvt-langevin (the NPT box moves them)"
+        if s.get("relax_before_run", True) and not s.get("restart_load_path"):
+            return "it holds fixed atoms only without the relaxation before MD (relax_before_run: false)"
     if ens == "npt" and (s.get("npt_coupling") or "isotropic") != "isotropic":
         return f"its NPT is isotropic, not {s.get('npt_coupling')}"
     for key, nodes in (("kspace_electrostatics", "kspace_interp_nodes"),

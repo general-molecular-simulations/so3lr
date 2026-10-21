@@ -503,6 +503,21 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
             _surrogate, shift, md_dt, pressure=P, kT=kT, barostat_kwargs=barostat,
             thermostat_kwargs=thermostat)
 
+    held = s.get("fixed_atom_indices")
+    held = None if held is None or len(held) == 0 else jnp.asarray(np.asarray(held, dtype=np.int64))
+    if held is not None:
+        # fixed_atom_indices: back at their start positions with zero momentum after every step, so
+        # each step's forces see them in place (e.g. a solute whose mean solvation force is sampled).
+        # Langevin acts per atom, so the thermostat of the rest is unchanged; check.py declines NPT and
+        # the relaxation before MD, which would move them
+        R_held = (position if state is None else state.position)[held]
+        free_apply = apply_fn
+
+        def apply_fn(st, **kwargs):
+            st = free_apply(st, **kwargs)
+            return st.set(position=st.position.at[held].set(R_held.astype(st.position.dtype)),
+                          momentum=st.momentum.at[held].set(0.0))
+
     def cartesian(st):
         """Positions in A and the box sides of a state."""
         if npt:
@@ -541,6 +556,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         if state is None:
             state = jax.jit(lambda R, F, m, p: init_fn(key, R, kT=kT, mass=m, momenta=p, F=F))(
                 position, F0, geo["masses"], geo.get("momenta"))
+    if held is not None:
+        state = state.set(momentum=state.momentum.at[held].set(0.0))
     del position, F0, W0
 
     unit_sys = units.metal_unit_system()
