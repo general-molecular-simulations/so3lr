@@ -372,8 +372,9 @@ class TestChargeEmbedOverrideCLI:
             )
             result = CliRunner().invoke(so3lr_cli.cli, ['--settings', str(tmp_path / f'{tag}.yaml')])
             assert result.exit_code == 0, result.output
-        assert captured['null']['charge_embed_total_charge'] is None
-        assert captured['null']['charge_embed_total_charge'] == captured['absent']['charge_embed_total_charge']
+        # A missing key and None both mean "no override" downstream.
+        assert captured['null'].get('charge_embed_total_charge') is None
+        assert captured['absent'].get('charge_embed_total_charge') is None
 
     @pytest.fixture(scope='class')
     def momenta(self, tmp_path_factory):
