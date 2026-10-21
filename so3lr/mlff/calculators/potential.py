@@ -21,6 +21,14 @@ from ..config import from_config
 from orbax import checkpoint
 
 
+def cast_float_params(params, dtype):
+    """params with every floating-point array in dtype. A run computes in its own precision
+    only so: what is made of parameters alone (the charge and spin embedding's softplus(q.k),
+    the legacy so3lr's ZBL coefficients) stays in the checkpoint's float32 otherwise."""
+    return jax.tree_util.tree_map(
+        lambda v: jnp.asarray(v, dtype) if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating) else v, params)
+
+
 def load_hyperparameters(workdir: str):
     """Load hyperparameters from workdir."""
     with open(pathlib.Path(workdir) / "hyperparameters.json", "r") as fp:
@@ -233,6 +241,7 @@ class PotentialSparse:
             charge_embed_total_charge=charge_embed_total_charge,
             charge_equilibration_total_charge=charge_equilibration_total_charge
         )
+        params = cast_float_params(params, dtype)
 
         cfg = load_hyperparameters(workdir=workdir)
 

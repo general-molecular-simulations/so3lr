@@ -163,16 +163,13 @@ def test_legacy_pieces_match_so3lr():
     ref = head.apply({"params": params["observables_2"]}, dict(x=x, atomic_numbers=z, node_mask=mask))
     _check("hirshfeld ratios", blocks.legacy_hirshfeld_head(params["observables_2"], x, z),
            ref["hirshfeld_ratios"], 1e-12)
-    # ZBL, a pair per atom: the module with the checkpoint's float32 parameters (as the
-    # neighbour-list potential holds them in a float64 run) and with float64 ones
+    # ZBL, a pair per atom (float64 parameters, as the neighbour-list potential casts them)
     i, j = jnp.arange(n), jnp.asarray((np.arange(n) + rng.integers(1, n, n)) % n)
     d = jnp.asarray(rng.uniform(0.3, 1.6, n))
     cut = jnp.asarray(rng.uniform(0.1, 1.0, n))
     inputs = dict(atomic_numbers=z.astype(jnp.int32), node_mask=mask, cut=cut, idx_i=i, idx_j=j, d_ij=d)
-    zbl = params["observables_0"]["zbl_repulsion"]
-    ref, ref32 = (ZBLRepulsionSparse(prop_keys=None).apply({"params": q}, inputs)["zbl_repulsion"]
-                  for q in (zbl, jax.tree_util.tree_map(lambda v: np.asarray(v, np.float32), zbl)))
-    np.testing.assert_allclose(ref32, ref, rtol=1e-14)
+    ref = ZBLRepulsionSparse(prop_keys=None).apply({"params": params["observables_0"]["zbl_repulsion"]},
+                                                   inputs)["zbl_repulsion"]
     # as _sr_kernel takes the tables: [min(Z) - 1, max(Z) - 1]
     lo, hi = jnp.minimum(z[i], z[j]) - 1, jnp.maximum(z[i], z[j]) - 1
     y = (params["repulsion_a"][lo, hi] * jnp.exp(-params["repulsion_b"][lo, hi] * d[:, None])).sum(-1)
@@ -566,7 +563,8 @@ def test_ase_calculator_refuses_what_flash_cannot_take():
 @pytest.mark.parametrize("pme", [None, "pme"])
 def test_eval_on_flash_matches_neighbour_lists(tmp_path, pme):
     """so3lr eval on flash (float64): three labelled structures, the second in a larger box
-    (the engine's box moves), the third with a water fewer (a new engine). The energies are
+    (the engine's box moves), the third with a water fewer and a charge of +1 (a new engine;
+    the charge embedding, made of parameters alone, in float64 on both engines). The energies are
     So3lrCalculator's in float64 and the force metrics and forces so3lr eval's on the
     neighbour-list model (whose energies are 3.5e-8 eV/atom off float64 here: make_so3lr
     takes no dtype)."""
@@ -578,6 +576,7 @@ def test_eval_on_flash_matches_neighbour_lists(tmp_path, pme):
     rng = np.random.default_rng(0)
     water = _water((3, 3, 3))
     frames = [water, _scaled(water, 1.01), water[3:]]
+    frames[2].info["charge"] = 1
     for a in frames:
         a.calc = SinglePointCalculator(a, energy=float(rng.normal()), forces=rng.normal(size=(len(a), 3)))
     write(tmp_path / "data.extxyz", frames)

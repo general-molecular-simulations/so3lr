@@ -1583,24 +1583,16 @@ class ZBLRepulsionSparse(BaseSubModule):
                  inputs: Dict,
                  *args,
                  **kwargs) -> Dict[str, jnp.ndarray]:
-        # The coefficients are made of parameters alone: in the distances' precision, or a
-        # float64 run would round them to the parameters' float32 (by as much as XLA's
-        # fusion of the surrounding graph decides).
-        dtype = inputs['d_ij'].dtype
-
-        def positive(name, value):
-            return softplus(jnp.asarray(self.param(name, constant(softplus_inverse(value)), (1,)), dtype))
-
-        a1 = positive('a1', 3.20000)  # shape: (1)
-        a2 = positive('a2', 0.94230)  # shape: (1)
-        a3 = positive('a3', 0.40280)  # shape: (1)
-        a4 = positive('a4', 0.20160)  # shape: (1)
-        c1 = positive('c1', 0.18180)  # shape: (1)
-        c2 = positive('c2', 0.50990)  # shape: (1)
-        c3 = positive('c3', 0.28020)  # shape: (1)
-        c4 = positive('c4', 0.02817)  # shape: (1)
-        p = positive('p', 0.23)  # shape: (1)
-        d = positive('d', 1 / (0.8854 * self.a0))  # shape: (1)
+        a1 = softplus(self.param('a1', constant(softplus_inverse(3.20000)), (1,)))  # shape: (1)
+        a2 = softplus(self.param('a2', constant(softplus_inverse(0.94230)), (1,)))  # shape: (1)
+        a3 = softplus(self.param('a3', constant(softplus_inverse(0.40280)), (1,)))  # shape: (1)
+        a4 = softplus(self.param('a4', constant(softplus_inverse(0.20160)), (1,)))  # shape: (1)
+        c1 = softplus(self.param('c1', constant(softplus_inverse(0.18180)), (1,)))  # shape: (1)
+        c2 = softplus(self.param('c2', constant(softplus_inverse(0.50990)), (1,)))  # shape: (1)
+        c3 = softplus(self.param('c3', constant(softplus_inverse(0.28020)), (1,)))  # shape: (1)
+        c4 = softplus(self.param('c4', constant(softplus_inverse(0.02817)), (1,)))  # shape: (1)
+        p = softplus(self.param('p', constant(softplus_inverse(0.23)), (1,)))  # shape: (1)
+        d = softplus(self.param('d', constant(softplus_inverse(1 / (0.8854 * self.a0))), (1,)))  # shape: (1)
 
         c_sum = c1 + c2 + c3 + c4
         c1 = c1 / c_sum

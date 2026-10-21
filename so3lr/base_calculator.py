@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from so3lr.mlff.calculators.potential import build_long_range_kwargs, load_model_from_workdir
+from so3lr.mlff.calculators.potential import build_long_range_kwargs, cast_float_params, load_model_from_workdir
 from so3lr.model_registry import resolve_model
 
 
@@ -76,7 +76,8 @@ def make_so3lr(
         if residue_charge is not None:
             inputs['residue_charge'] = residue_charge
 
-        output = model.apply(params, inputs)
+        # in the positions' precision (the checkpoint's parameters are float32)
+        output = model.apply(cast_float_params(params, positions.dtype), inputs)
 
         # We sum over all energies
         summed_energy = jnp.sum(jnp.where(graph_mask, output['energy'], 0.))

@@ -1,13 +1,13 @@
 """Parameters and statics for the flash engine from a model in the registry (or a path)."""
 import json
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from ase.units import alpha as FINE_STRUCTURE
 
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     C6_coef, C6_coef_legacy, NLH_AA, NLH_BB, alphas, alphas_legacy)
+from so3lr.mlff.calculators.potential import cast_float_params
 from so3lr.mlff.utils.checkpoint_utils import load_params_from_workdir
 from so3lr.mlff.utils.training_utils import expand_observables_to_theory_levels
 from so3lr.model_registry import resolve_model
@@ -39,11 +39,7 @@ def load_params(model=None, *, precision="float32", lr_cutoff=12.0, dispersion_d
     legacy = m.get("legacy_so3lr_bool", False) is True
     raw = expand_observables_to_theory_levels(load_params_from_workdir(spec.dir))["params"]
     dt = jnp.float64 if precision == "float64" else jnp.float32
-
-    def cast(x):
-        a = np.asarray(x)
-        return jnp.asarray(a, dt) if np.issubdtype(a.dtype, np.floating) else jnp.asarray(a)
-    params = jax.tree_util.tree_map(cast, raw)
+    params = cast_float_params(raw, dt)
     # the repulsion's tables, over the elements of the descriptor floor's (NLH's)
     rep = zbl_tables(raw["observables_0"]["zbl_repulsion"], NLH_AA.shape[0]) if legacy else (NLH_AA, NLH_BB)
     params["repulsion_a"], params["repulsion_b"] = (jnp.asarray(t, dt) for t in rep)
