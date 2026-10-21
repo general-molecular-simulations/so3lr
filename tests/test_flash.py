@@ -345,13 +345,15 @@ def test_bad_engine_options_raise(bad):
 
 
 def test_rocm_launches(monkeypatch):
-    """On ROCm a row kernel puts several atoms in a program once one atom each would pass
-    2^32 threads; elsewhere one atom per program and the launches as tuned."""
+    """The launches measured on the MI355X on ROCm, the NVIDIA ones elsewhere."""
     from types import SimpleNamespace
 
     def rows(n, warps):
         return E.FlashSO3LR._row_grid(SimpleNamespace(nl=n, atoms_per_program=None), warps)
     monkeypatch.setattr(E, "is_rocm", lambda: True)
+    assert E._att_launch(32) == {"fwd": (16, 1), "bwd_heads": (16, 1), "bwd_degrees": (8, 1)}
+    assert E._att_launch(64) == {"fwd": (16, 2), "bwd_heads": (32, 2), "bwd_degrees": (16, 2)}
+    assert E._warps(E.NUM_WARPS) == 1
     assert rows(12_288, 1) == (12_288, 1)
     assert rows(84_283_392, 1) == (42_141_696, 2)
     assert rows(84_283_392, 2) == (28_094_464, 3)

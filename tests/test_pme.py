@@ -12,8 +12,14 @@ import numpy as np
 import numpy.testing as npt
 import pathlib
 import pytest
+import logging
+import sys
+import types
+from collections import namedtuple
 
+from ase import Atoms
 from ase.io import read
+from ase.calculators.calculator import Calculator
 
 from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 from so3lr import So3lrCalculator, So3lrPotential, to_jax_md
@@ -36,6 +42,34 @@ KE = 14.399645351950548  # Coulomb constant in eV*Angstrom
 # against a reference produced by the ASE calculator.
 ASE_JAXMD_ENERGY_ATOL = 1e-6
 ASE_JAXMD_FORCES_ATOL = 1e-4
+
+
+DummySystem = namedtuple('DummySystem', ['R', 'k_grid', 'k_smearing'])
+
+
+def make_stub_ase_calculator():
+    calc = object.__new__(AseCalculatorSparse)
+    Calculator.__init__(calc)
+    calc.calculate_fn = lambda system, neighbors: {
+        'energy': np.array(0.0),
+        'forces': np.zeros((len(system.R), 3)),
+    }
+    calc.neighbors = None
+    calc.neighbor_backend = 'glp'
+    calc.spatial_partitioning = None
+    calc.capacity_multiplier = 1.25
+    calc.buffer_size_multiplier = 1.25
+    calc.skin = 0.0
+    calc.cutoff = 5.0
+    calc.hessian_slice = False
+    calc.lr_cutoff = -1.0
+    calc.dtype = np.float64
+    calc.kspace_electrostatics = 'pme'
+    calc.kspace_smearing = 4.0
+    calc.kspace_spacing = 0.5
+    calc._kspace_reported_source = None
+    calc.supported_atomic_numbers = None
+    return calc
 
 
 def get_package_dir():
@@ -78,14 +112,11 @@ def _kgrid(cell, method, smearing):
 class TestPMEDirectComparison:
     """
     Test that electrostatic_energy_kspace and partial_charges from SO3LR
-    can be used with jax-pme to reproduce the k-space energy.
-
-    Ewald only: pme and p3m are pinned to it by
-    TestKspaceHighLevelPathEnergies.test_methods_agree_through_high_level_path,
-    which runs the same box, cutoff and smearing.
+    can be used with jax-pme solvers to reproduce the k-space energy.
     """
 
-    def test_kspace_energy_matches_direct_calculation(self, package_dir, pme_case):
+    @pytest.mark.parametrize('kspace_method', ['ewald', 'pme', 'p3m'])
+    def test_kspace_energy_matches_direct_calculation(self, kspace_method, package_dir, pme_case):
         """
         Test that electrostatic_energy_kspace from SO3LR matches direct jax-pme calculation.
 
@@ -94,7 +125,7 @@ class TestPMEDirectComparison:
         2. Uses the same partial charges with jax-pme directly
         3. Compares the k-space energies
         """
-        from jaxpme.solvers import ewald
+        from jaxpme.solvers import ewald, pme, p3m
         from jaxpme.potentials import potential as get_potential
         from jaxpme.kspace import generate_kvectors, get_reciprocal
 
@@ -105,7 +136,7 @@ class TestPMEDirectComparison:
         cell = jnp.array(atoms.get_cell().array, dtype=DTYPE)
         positions = jnp.array(atoms.get_positions(), dtype=DTYPE)
 
-        k_grid, k_smearing = _kgrid(cell, 'ewald', smearing)
+        k_grid, k_smearing = _kgrid(cell, kspace_method, smearing)
 
         # Store k-space info in atoms
         atoms.info['k_grid'] = np.array(k_grid)
@@ -120,7 +151,7 @@ class TestPMEDirectComparison:
             dtype=np.float64,
             has_aux=True,
             observables=['partial_charges', 'electrostatic_energy_kspace'],
-            coulomb_kspace_method='ewald',
+            coulomb_kspace_method=kspace_method,
         )
 
         atoms.calc = calc
@@ -138,7 +169,7 @@ class TestPMEDirectComparison:
         so3lr_kspace_energy = jnp.sum(results['electrostatic_energy_kspace'])
 
         # Neutral water: one charge per atom, summing to zero. The charges come
-        # from the model before any solver runs, so one k-space method suffices.
+        # from the model before any solver runs.
         assert partial_charges.shape[0] == len(atoms), \
             f"Expected {len(atoms)} charges, got {partial_charges.shape[0]}"
         npt.assert_allclose(
@@ -153,15 +184,21 @@ class TestPMEDirectComparison:
         reciprocal_cell = get_reciprocal(cell)
         pbc = jnp.array([True, True, True])
 
-        solver = ewald(get_potential())
-        kvectors = generate_kvectors(reciprocal_cell, k_grid.shape, dtype=DTYPE, for_ewald=True)
-        potentials = solver.kspace(k_smearing, partial_charges, kvectors, positions, volume, cell, pbc)
+        if kspace_method == 'ewald':
+            solver = ewald(get_potential())
+            kvectors = generate_kvectors(reciprocal_cell, k_grid.shape, dtype=DTYPE, for_ewald=True)
+            potentials = solver.kspace(k_smearing, partial_charges, kvectors, positions, volume, cell, pbc)
+        else:
+            solver = {'pme': pme, 'p3m': p3m}[kspace_method](get_potential(), interpolation_nodes=4)
+            kvectors = generate_kvectors(reciprocal_cell, k_grid.shape, dtype=DTYPE, for_ewald=False)
+            potentials = solver.kspace(k_smearing, partial_charges, reciprocal_cell, k_grid, kvectors,
+                                       positions, volume, cell, pbc)
 
         # Calculate energy: E = sum(q * phi) with KE factor
         # Note: jax-pme already returns phi/2 to avoid double counting, so we just do sum(q * phi)
         direct_kspace_energy = jnp.sum(partial_charges * potentials) * KE
 
-        print("\nEWALD test:")
+        print(f"\n{kspace_method.upper()} test:")
         print(f"  SO3LR k-space energy: {so3lr_kspace_energy:.6f} eV")
         print(f"  Direct k-space energy: {direct_kspace_energy:.6f} eV")
         print(f"  Difference: {so3lr_kspace_energy - direct_kspace_energy:.6e} eV")
@@ -175,8 +212,87 @@ class TestPMEDirectComparison:
             direct_kspace_energy,
             rtol=1e-4,
             atol=1e-5,
-            err_msg="K-space energies don't match for ewald"
+            err_msg=f"K-space energies don't match for {kspace_method}"
         )
+
+
+class TestASECalculatorKSpaceReporting:
+    @pytest.fixture(autouse=True)
+    def _so3lr_logs_reach_caplog(self, monkeypatch):
+        # setup_logger() (so3lr_md.py) sets propagate=False on "SO3LR" while
+        # caplog listens on the root logger: after any test in this process has
+        # run the CLI/eval path, these records would otherwise never arrive.
+        monkeypatch.setattr(logging.getLogger("SO3LR"), "propagate", True)
+
+    def test_logs_atoms_info_override_for_kspace_kwargs(self, monkeypatch, caplog):
+        calc = make_stub_ase_calculator()
+        atoms = Atoms('H2', positions=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.74)])
+        atoms.cell = np.eye(3) * 10.0
+        atoms.pbc = True
+        atoms.info['k_grid'] = np.ones((2, 2, 2))
+        atoms.info['k_smearing'] = np.array([4.0])
+
+        dummy_system = DummySystem(
+            R=np.asarray(atoms.get_positions()),
+            k_grid=atoms.info['k_grid'],
+            k_smearing=atoms.info['k_smearing'],
+        )
+        monkeypatch.setattr(
+            'so3lr.mlff.calculators.ase_calculator.atoms_to_system',
+            lambda atoms, dtype: dummy_system,
+        )
+
+        dummy_neighbors = types.SimpleNamespace(overflow=False, cell_list=None)
+        dummy_partitioning = types.SimpleNamespace(
+            update_fn=lambda positions, neighbors, new_cell=None: dummy_neighbors,
+        )
+        monkeypatch.setattr(
+            'so3lr.mlff.calculators.ase_calculator.neighbor_list',
+            lambda **kwargs: (dummy_neighbors, dummy_partitioning),
+        )
+
+        with caplog.at_level(logging.INFO, logger="SO3LR"):
+            calc.calculate(atoms)
+
+        assert 'Using k-space grid from atoms.info; it overrides ASE calculator k-space kwargs.' in caplog.text
+
+    def test_logs_generated_kspace_grid_from_kwargs(self, monkeypatch, caplog):
+        calc = make_stub_ase_calculator()
+        atoms = Atoms('H2', positions=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.74)])
+        atoms.cell = np.eye(3) * 10.0
+        atoms.pbc = True
+
+        dummy_system = DummySystem(
+            R=np.asarray(atoms.get_positions()),
+            k_grid=None,
+            k_smearing=None,
+        )
+        monkeypatch.setattr(
+            'so3lr.mlff.calculators.ase_calculator.atoms_to_system',
+            lambda atoms, dtype: dummy_system,
+        )
+
+        dummy_neighbors = types.SimpleNamespace(overflow=False, cell_list=None)
+        dummy_partitioning = types.SimpleNamespace(
+            update_fn=lambda positions, neighbors, new_cell=None: dummy_neighbors,
+        )
+        monkeypatch.setattr(
+            'so3lr.mlff.calculators.ase_calculator.neighbor_list',
+            lambda **kwargs: (dummy_neighbors, dummy_partitioning),
+        )
+
+        fake_jaxpme = types.SimpleNamespace(
+            kspace=types.SimpleNamespace(
+                get_kgrid_ewald=lambda cell, lr_wavelength: np.ones((2, 2, 2)),
+                get_kgrid_mesh=lambda cell, mesh_spacing: np.ones((2, 2, 2)),
+            )
+        )
+        monkeypatch.setitem(sys.modules, 'jaxpme', fake_jaxpme)
+
+        with caplog.at_level(logging.INFO, logger="SO3LR"):
+            calc.calculate(atoms)
+
+        assert 'Generating PME k-space grid from ASE calculator kwargs.' in caplog.text
 
 
 class TestPMEJaxMD:

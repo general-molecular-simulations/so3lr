@@ -59,7 +59,8 @@ class TestObservablesExtraction:
         for molecular systems (non-periodic), and that the per-atom observables
         from the same evaluation have their basic properties: neutral partial
         charges, non-negative Hirshfeld ratios, attractive dispersion (damped and
-        undamped) and one embedding row per atom.
+        undamped), undamped electrostatics of the damped sign, and one embedding
+        row per atom.
         """
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
@@ -72,7 +73,8 @@ class TestObservablesExtraction:
             dtype=np.float64,
             has_aux=True,
             observables=['zbl_repulsion', 'nn_energy', 'electrostatic_energy', 'dispersion_energy',
-                         'dispersion_energy_undamped', 'partial_charges', 'hirshfeld_ratios', 'x']
+                         'dispersion_energy_undamped', 'electrostatic_energy_undamped',
+                         'partial_charges', 'hirshfeld_ratios', 'x']
         )
 
         atoms.calc = calc
@@ -139,6 +141,12 @@ class TestObservablesExtraction:
             f"Dispersion energy should be negative (attractive), got {dispersion_energy}"
         assert dispersion_energy_undamped <= 0, \
             f"Undamped dispersion energy should be negative (attractive), got {dispersion_energy_undamped}"
+
+        # Damping changes the magnitude of the electrostatic energy, not its sign
+        electrostatic_energy_undamped = np.sum(results['electrostatic_energy_undamped'])
+        assert np.sign(electrostatic_energy) == np.sign(electrostatic_energy_undamped) or \
+               np.isclose(electrostatic_energy, 0, atol=1e-10), \
+            "Damped and undamped electrostatic energies should have the same sign"
 
         # Atom embeddings: one feature row per atom
         x = results['x']

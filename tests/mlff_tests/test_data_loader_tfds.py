@@ -1,7 +1,8 @@
 """Tests for the TFDS dataloader and its optional runtime dependencies.
 
 Validates compute_edges_np, standardize_dataset_fields, and create_graph_tuple_tf
-for both non-PBC and PBC cases. The PBC-field stripping in _numpy_tuple_iterator
+for both non-PBC and PBC cases, including a real temporary TFDS disk round trip
+through the locked ``tfds`` extra. The PBC-field stripping in _numpy_tuple_iterator
 is checked through the real _preprocess pipeline
 (test_preprocess_preserves_explicit_pbc_with_nonzero_cell).
 """
@@ -11,7 +12,7 @@ import numpy as np
 import pytest
 
 tf = pytest.importorskip('tensorflow')
-pytest.importorskip('tensorflow_datasets')
+tfds = pytest.importorskip('tensorflow_datasets')
 
 from so3lr.mlff.data.dataloader_sparse_tfds import (
     QCMLDataLoaderSparseParallel,
@@ -66,6 +67,47 @@ def _make_nacl_element():
         'charge': tf.constant([0], dtype=tf.int32),
         'multiplicity': tf.constant([1], dtype=tf.int32),
     }
+
+
+def test_tfds_extra_builder_from_directory_round_trip(tmp_path):
+    """The ``tfds`` extra must write and reopen a prepared dataset."""
+    features = tfds.features.FeaturesDict({
+        'atomic_numbers': tfds.features.Tensor(
+            shape=(3,), dtype=np.int32
+        ),
+        'positions': tfds.features.Tensor(
+            shape=(3, 3), dtype=np.float32
+        ),
+        'cell': tfds.features.Tensor(shape=(3, 3), dtype=np.float32),
+        'pbc': tfds.features.Tensor(shape=(3,), dtype=np.bool_),
+        'energy': tfds.features.Tensor(shape=(1,), dtype=np.float32),
+        'forces': tfds.features.Tensor(shape=(3, 3), dtype=np.float32),
+        'theory_level': tfds.features.Tensor(shape=(1,), dtype=np.int32),
+        'charge': tfds.features.Tensor(shape=(1,), dtype=np.int32),
+        'multiplicity': tfds.features.Tensor(shape=(1,), dtype=np.int32),
+    })
+    stored = tfds.dataset_builders.store_as_tfds_dataset(
+        name='so3lr_extra_round_trip',
+        version='1.0.0',
+        features=features,
+        split_datasets={
+            'train': tf.data.Dataset.from_tensors(_make_water_element()),
+        },
+        data_dir=tmp_path,
+        disable_shuffling=True,
+    )
+
+    reopened = tfds.builder_from_directory(stored.data_dir)
+    assert reopened.info.full_name == 'so3lr_extra_round_trip/1.0.0'
+    assert reopened.info.splits['train'].num_examples == 1
+
+    sample = next(iter(reopened.as_dataset(split='train')))
+    np.testing.assert_array_equal(sample['atomic_numbers'].numpy(), [8, 1, 1])
+    np.testing.assert_allclose(
+        sample['positions'].numpy(),
+        [[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]],
+    )
+    np.testing.assert_allclose(sample['energy'].numpy(), [-0.5])
 
 
 # ---------------------------------------------------------------------------
