@@ -17,8 +17,9 @@ from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_for
 TEST_DIR = Path(__file__).parent
 
 
-# Two ethanol frames fit in one batch (see _fit), so the default 50 training
-# frames make 25 optimizer steps per epoch and two epochs make 50 steps.
+# 50 training + 10 validation frames, loaded once. Two ethanol frames fit in one
+# batch (see _fit), so 50 training frames make 25 optimizer steps per epoch and
+# two epochs make 50 steps.
 NUM_FRAMES = 60
 
 

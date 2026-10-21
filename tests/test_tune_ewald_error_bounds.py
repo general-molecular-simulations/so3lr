@@ -61,13 +61,12 @@ def _random_case(charge_scale):
 @pytest.mark.parametrize("charge_scale", [1.0, 3.0])
 @pytest.mark.parametrize("spacing", [2.2, 3.0])
 def test_ewald_kspace_bound_matches_measured_force_error(charge_scale, spacing):
-    box, smearing = BOX, SMEARING
     positions, charges, reference = _random_case(charge_scale)
 
-    truncated = _reciprocal_forces(positions, charges, box, smearing, spacing)
+    truncated = _reciprocal_forces(positions, charges, BOX, SMEARING, spacing)
     measured = np.sqrt(np.mean(np.sum((truncated - reference) ** 2, axis=1)))
 
-    ratio = measured / _bound(positions, charges, box, smearing, spacing)
+    ratio = measured / _bound(positions, charges, BOX, SMEARING, spacing)
     assert 0.5 < ratio < 2.0, ratio
 
 

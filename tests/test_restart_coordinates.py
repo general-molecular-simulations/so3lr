@@ -3,11 +3,9 @@
 When a restart file is saved with one coordinate system (e.g., fractional)
 and loaded into a simulation using a different coordinate system (e.g.,
 cartesian), positions and momenta must be converted. These tests verify
-that save_state/load_state handle this correctly, and that full MD
-simulations produce correct results across coordinate system switches.
+that save_state/load_state handle this correctly; the end-to-end restarts
+across coordinate systems are in tests/test_pysages_cli.py.
 """
-
-import importlib.util
 
 import pytest
 import numpy as np
@@ -384,66 +382,3 @@ class TestRestartResetWithCoordinateConversion:
                 path, ensemble='nvt', restart_reset=True,
                 fractional_coordinates=True
             )
-
-
-# ===========================================================================
-# Integration tests: cross-coordinate restart with full MD simulations
-# ===========================================================================
-
-def _assert_last_two_match(continuous, restarted):
-    """The last 2 cycles of a 2+2 restart must match cycles 3-4 of the
-    continuous run. Logs print 3 decimals (1 for T), so the 1e-6 tolerances
-    mean the printed rows are identical."""
-    assert len(continuous) >= 4, f"Expected >= 4 data points, got {len(continuous)}"
-    assert len(restarted) >= 2, f"Expected >= 2 data points, got {len(restarted)}"
-
-    for c, r in zip(continuous[-2:], restarted[-2:]):
-        np.testing.assert_allclose(c['E'], r['E'], atol=1e-6,
-            err_msg=f"Total energy mismatch at step {c['step']}")
-        np.testing.assert_allclose(c['KE'], r['KE'], atol=1e-6,
-            err_msg=f"Kinetic energy mismatch at step {c['step']}")
-        np.testing.assert_allclose(c['PE'], r['PE'], atol=1e-6,
-            err_msg=f"Potential energy mismatch at step {c['step']}")
-        np.testing.assert_allclose(c['T'], r['T'], atol=0.1,
-            err_msg=f"Temperature mismatch at step {c['step']}")
-
-
-@pytest.mark.slow
-@pytest.mark.skipif(
-    importlib.util.find_spec("pysages") is None,
-    reason="PySAGES is an optional dependency",
-)
-class TestCrossCoordinateRestart:
-    """Integration tests: verify that restarting across coordinate systems
-    produces physically correct results. The runs come from the shared
-    session fixture ``pysages_cli_runs`` (tests/conftest.py).
-
-    Test 1 (fractional -> cartesian): run vanilla NVT (fractional coords)
-    for 2 cycles, save restart, then restart with PySAGES unbiased
-    (cartesian coords) for 2 more cycles. Compare the last 2 cycles
-    against a continuous 4-cycle PySAGES unbiased run.
-
-    Test 2 (cartesian -> fractional): run PySAGES unbiased (cartesian coords)
-    for 2 cycles, save restart, then restart as vanilla NVT (fractional
-    coords) for 2 more cycles. Compare the last 2 cycles against a
-    continuous 4-cycle vanilla NVT run.
-
-    A coordinate mismatch on restart once gave potential energies of ~45
-    million eV (fixed in c5e3740); it cannot match the continuous run.
-    """
-
-    def test_frac_to_cart_restart_matches_continuous(self, pysages_cli_runs):
-        """Last 2 cycles of frac->cart restart should match cycles 3-4 of
-        continuous PySAGES unbiased run."""
-        _assert_last_two_match(
-            pysages_cli_runs('unbiased_4'),
-            pysages_cli_runs('restart_vanilla_to_unbiased'),
-        )
-
-    def test_cart_to_frac_restart_matches_continuous(self, pysages_cli_runs):
-        """Last 2 cycles of cart->frac restart should match cycles 3-4 of
-        continuous vanilla NVT run."""
-        _assert_last_two_match(
-            pysages_cli_runs('vanilla_4'),
-            pysages_cli_runs('restart_unbiased_to_vanilla'),
-        )

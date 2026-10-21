@@ -30,33 +30,18 @@ from so3lr.cli.so3lr_md import handle_box, HAS_PYSAGES
 TEST_DATA_DIR = pathlib.Path(__file__).resolve().parent / "test_data"
 GEOMETRY_FILE = TEST_DATA_DIR / "benzoic_acid_aq_1.xyz"
 
-_PYSAGES_INPUT_UNBIASED = {
-    'method': 'unbiased',
-    'cv': [{
-        'type': 'coordinationnumber',
-        'indices': [4, 7],
-        'cn_exps': [6, 30],
-        'species': 1,
-        'grid_min': 0.0,
-        'grid_max': 1.5,
-        'grid_stride': 64,
-        'periodic': False,
-    }],
-}
-
-_PYSAGES_INPUT_ABF = {
-    'method': 'abf',
-    'cv': [{
-        'type': 'coordinationnumber',
-        'indices': [4, 7],
-        'cn_exps': [6, 30],
-        'species': 1,
-        'grid_min': 0.0,
-        'grid_max': 1.5,
-        'grid_stride': 64,
-        'periodic': False,
-    }],
-}
+_CV = [{
+    'type': 'coordinationnumber',
+    'indices': [4, 7],
+    'cn_exps': [6, 30],
+    'species': 1,
+    'grid_min': 0.0,
+    'grid_max': 1.5,
+    'grid_stride': 64,
+    'periodic': False,
+}]
+_PYSAGES_INPUT_UNBIASED = {'method': 'unbiased', 'cv': _CV}
+_PYSAGES_INPUT_ABF = {'method': 'abf', 'cv': _CV}
 
 
 def _write_yaml(path, data):
@@ -1377,87 +1362,3 @@ class TestPerformMdEnforceCartesianGating:
             f"expected_info={expect_info}, saw info={info_seen}.\n"
             f"--- output ---\n{output}"
         )
-
-
-# ===========================================================================
-# 6. Integration: run simulations and compare trajectories
-# ===========================================================================
-# The `so3lr` CLI runs are shared with tests/test_restart_coordinates.py through
-# the session fixture ``pysages_cli_runs`` in tests/conftest.py (4 cycles x 100
-# steps, no relaxation, float64). The logs print E/KE/PE/H with 3 decimals and
-# T with 1, so the 1e-6 tolerances below mean the printed rows are identical.
-
-
-def _assert_rows_match(reference, other, label):
-    for c, r in zip(reference, other):
-        np.testing.assert_allclose(c['E'], r['E'], atol=1e-6,
-            err_msg=f"{label}: total energy mismatch at step {c['step']}")
-        np.testing.assert_allclose(c['KE'], r['KE'], atol=1e-6,
-            err_msg=f"{label}: kinetic energy mismatch at step {c['step']}")
-        np.testing.assert_allclose(c['PE'], r['PE'], atol=1e-6,
-            err_msg=f"{label}: potential energy mismatch at step {c['step']}")
-        np.testing.assert_allclose(c['H'], r['H'], atol=1e-6,
-            err_msg=f"{label}: Hamiltonian mismatch at step {c['step']}")
-        np.testing.assert_allclose(c['T'], r['T'], atol=0.1,
-            err_msg=f"{label}: temperature mismatch at step {c['step']}")
-
-
-@pytest.mark.slow
-class TestTrajectoryComparison:
-    """Integration tests: run simulations and compare MD observables."""
-
-    def test_vanilla_and_unbiased_match(self, pysages_cli_runs):
-        """All MD observables should be identical between vanilla and unbiased."""
-        vanilla = pysages_cli_runs('vanilla_4')
-        unbiased = pysages_cli_runs('unbiased_4')
-
-        assert len(vanilla) > 0, "No MD data found in vanilla log"
-        assert len(unbiased) > 0, "No MD data found in unbiased log"
-        assert len(vanilla) == len(unbiased), (
-            f"Different number of MD output lines: vanilla={len(vanilla)}, unbiased={len(unbiased)}"
-        )
-        for v, u in zip(vanilla, unbiased):
-            assert v['step'] == u['step'], f"Step mismatch: {v['step']} vs {u['step']}"
-        _assert_rows_match(vanilla, unbiased, "vanilla vs unbiased")
-
-    def test_abf_diverges_from_vanilla(self, pysages_cli_runs):
-        """ABF should produce different observables than vanilla (bias is applied)."""
-        vanilla = pysages_cli_runs('vanilla_4')
-        abf = pysages_cli_runs('abf_4')
-
-        assert len(vanilla) > 0 and len(abf) > 0
-
-        # The last rows are the same step of the same-length runs, and should
-        # differ (ABF applies bias forces).
-        last_v = vanilla[-1]
-        last_a = abf[-1]
-        assert last_v['step'] == last_a['step']
-        # Check that at least one observable differs by more than numerical noise
-        diffs = [
-            abs(last_v['E'] - last_a['E']),
-            abs(last_v['KE'] - last_a['KE']),
-            abs(last_v['H'] - last_a['H']),
-            abs(last_v['T'] - last_a['T']),
-        ]
-        assert any(d > 0.01 for d in diffs), (
-            "ABF and vanilla trajectories are unexpectedly identical. "
-            "The bias force should cause observable differences."
-        )
-
-
-@pytest.mark.slow
-class TestRestart:
-    """Integration test: verify restart produces identical results to continuous run."""
-
-    def test_restart_matches_continuous(self, pysages_cli_runs):
-        """A 2+2-cycle run that restarts both the SO3LR and the PySAGES state
-        must match cycles 3-4 of the continuous 4-cycle PySAGES run."""
-        continuous = pysages_cli_runs('unbiased_4')
-        restarted = pysages_cli_runs('restart_unbiased_with_state')
-
-        assert len(continuous) >= 4, f"Expected >= 4 data points in continuous, got {len(continuous)}"
-        # Restarted run has: initial line (from restart) + 2 cycle outputs
-        assert len(restarted) >= 2, f"Expected >= 2 data points in restart, got {len(restarted)}"
-
-        # Compare the last 2 cycles: continuous[-2:] vs restarted[-2:]
-        _assert_rows_match(continuous[-2:], restarted[-2:], "restart vs continuous")

@@ -71,8 +71,8 @@ jobs:
             #
             # test_pysages_doublewell.py validates PySAGES' own jax-md backend
             # rather than the SO3LR interface, so keep it in full mode only.
-            run_short: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py -v --tb=short --full"
-            run_full: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_doublewell.py -v --tb=short --full"
+            run_short: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py -v --tb=short --full"
+            run_full: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py tests/test_pysages_doublewell.py -v --tb=short --full"
           - group: 8
             name: "md-regressions"
             sync_extra: ""

@@ -76,6 +76,21 @@ class Validator:
     def count_atoms(self, input_file: str) -> int:
         return len(read(self.workdir / input_file))
 
+    def check_box_changed(self, input_file: str, trajectory: str = 'trajectory.hdf5',
+                          tolerance: float = 1e-9) -> bool:
+        """The barostat must actually move the cell: the last saved box against the
+        input cell lengths."""
+        path = self.workdir / trajectory
+        if not path.exists():
+            return False  # check_file_exists already reported it
+        initial = read(self.workdir / input_file).cell.lengths()
+        with h5py.File(path, 'r') as f:
+            final = f['box'][-1]
+        if max(abs(a - b) for a, b in zip(final, initial)) <= tolerance:
+            self.errors.append(f"Box did not change: input {initial}, last frame {final}")
+            return False
+        return True
+
     def check_settings_in_logs(self, settings: dict) -> bool:
         """
         Check that every explicitly set value appears verbatim in stderr.log and,

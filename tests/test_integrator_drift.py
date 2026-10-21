@@ -10,8 +10,7 @@ values on water_64:
 - f64: all ensembles ~3.0e-4 → threshold 1.0e-3
 - f32: NVT/NPT iso ~3.0e-4 → threshold 1.0e-3
 - f32: NPT flex ~5-8e-3 → threshold 2.5e-2
-The assertion is made per atom, max|H - H0| / N < threshold * |H0| / N: the
-same bound, reported in meV/atom so a failure reads as a physical number.
+Failure messages also give the drift in meV/atom.
 
 The anisotropic flex mode is not tested here: the CLI and create_npt_nhc_fn
 reject it (tests/test_npt_coupling_safety.py).
@@ -21,6 +20,8 @@ the invariant is sampled every INVARIANT_EVERY steps. Sampling can only miss
 a peak between samples, so the check is never stricter than sampling every
 step was.
 """
+import functools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -47,8 +48,9 @@ INVARIANT_EVERY = 10
 DT_FS = 0.5e-3  # 0.5 fs in ps (metal units)
 
 
+@functools.lru_cache(maxsize=None)
 def _setup_system(dtype):
-    """Load water_64 system and create energy function."""
+    """Load water_64 system and create energy function (built once per dtype)."""
     mol = read(PACKAGE_DIR / 'tests' / 'test_data' / 'water_64.xyz')
     cell = jnp.array(np.diag(mol.get_cell()), dtype=dtype)
     species = jnp.array(mol.get_atomic_numbers())
@@ -98,20 +100,6 @@ def _setup_system(dtype):
     return energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr
 
 
-@pytest.fixture(scope='module')
-def water_system():
-    """Build the water_64 system (model, neighbour lists) once per dtype."""
-    cache = {}
-
-    def get(dtype):
-        key = jnp.dtype(dtype).name
-        if key not in cache:
-            cache[key] = _setup_system(dtype)
-        return cache[key]
-
-    return get
-
-
 def _measure_drift(init_fn, apply_fn, invariant_fn, init_args, init_kwargs,
                    step_kwargs, invariant_kwargs, n_steps):
     """Run simulation and return (max |H - H0|, H0)."""
@@ -132,10 +120,9 @@ def _measure_drift(init_fn, apply_fn, invariant_fn, init_args, init_kwargs,
     return H_max_dev, H0
 
 
-def _run_ensemble(ensemble, dtype, system):
-    """Run a single ensemble and return (max |H - H0|, H0, n_atoms)."""
-    energy_fn, shift, positions, cell, masses, _, nbrs, nbrs_lr = system
-    n_atoms = positions.shape[0]
+def _run_ensemble(ensemble, dtype):
+    """Run a single ensemble and return (max |H - H0|, H0)."""
+    energy_fn, shift, positions, cell, masses, _, nbrs, nbrs_lr = _setup_system(dtype)
 
     # x64 is enabled globally (see top of file), so metal_unit_system() returns
     # float64 scalars. Cast every scalar quantity to the system dtype so the
@@ -167,7 +154,7 @@ def _run_ensemble(ensemble, dtype, system):
         # not enter the dynamics. Passing it to nve() would be silently dropped
         # into **sim_kwargs, so it must go to init_fn instead.
         init_fn, apply_fn = simulate.nve(energy_fn, shift, dt=dt)
-        return (*_measure_drift(
+        return _measure_drift(
             init_fn, apply_fn,
             lambda state, **kw: energy_fn(state.position, **kw)
             + simulate.kinetic_energy(state),
@@ -180,13 +167,13 @@ def _run_ensemble(ensemble, dtype, system):
             invariant_kwargs=dict(neighbor=nbrs_idx, neighbor_lr=nbrs_lr_idx,
                                   box=cell),
             n_steps=N_STEPS,
-        ), n_atoms)
+        )
 
     elif ensemble == 'NVT':
         init_fn, apply_fn = simulate.nvt_nose_hoover(
             energy_fn, shift, dt=dt, kT=kT, tau=dt * 100,
         )
-        return (*_measure_drift(
+        return _measure_drift(
             init_fn, apply_fn,
             lambda state, **kw: simulate.nvt_nose_hoover_invariant(
                 energy_fn, state, kT=kT, **kw),
@@ -199,7 +186,7 @@ def _run_ensemble(ensemble, dtype, system):
             invariant_kwargs=dict(neighbor=nbrs_idx, neighbor_lr=nbrs_lr_idx,
                                   box=cell),
             n_steps=N_STEPS,
-        ), n_atoms)
+        )
 
     elif ensemble == 'NPT_iso':
         init_fn, apply_fn = simulate.npt_nose_hoover(
@@ -207,7 +194,7 @@ def _run_ensemble(ensemble, dtype, system):
             barostat_kwargs=barostat_kwargs,
             thermostat_kwargs=thermostat_kwargs,
         )
-        return (*_measure_drift(
+        return _measure_drift(
             init_fn, apply_fn,
             lambda state, **kw: simulate.npt_nose_hoover_invariant(
                 energy_fn, state, pressure=P, kT=kT, **kw),
@@ -219,7 +206,7 @@ def _run_ensemble(ensemble, dtype, system):
                              neighbor=nbrs_idx, neighbor_lr=nbrs_lr_idx),
             invariant_kwargs=dict(neighbor=nbrs_idx, neighbor_lr=nbrs_lr_idx),
             n_steps=N_STEPS,
-        ), n_atoms)
+        )
 
     else:
         # NPT flex variants
@@ -233,7 +220,7 @@ def _run_ensemble(ensemble, dtype, system):
             barostat_kwargs=barostat_kwargs,
             thermostat_kwargs=thermostat_kwargs,
         )
-        return (*_measure_drift(
+        return _measure_drift(
             init_fn, apply_fn,
             lambda state, **kw: simulate.npt_nose_hoover_flex_invariant(
                 energy_fn, state, pressure=P, kT=kT, **kw),
@@ -245,33 +232,31 @@ def _run_ensemble(ensemble, dtype, system):
                              neighbor=nbrs_idx, neighbor_lr=nbrs_lr_idx),
             invariant_kwargs=dict(neighbor=nbrs_idx, neighbor_lr=nbrs_lr_idx),
             n_steps=N_STEPS,
-        ), n_atoms)
+        )
 
 
 ALL_ENSEMBLES = ['NVE', 'NVT', 'NPT_iso', 'NPT_flex_iso', 'NPT_flex_semi_iso']
 
 
-def _assert_drift_below(ensemble, precision, threshold, max_dev, H0, n_atoms):
-    """max|H - H0| / N < threshold * |H0| / N: the relative threshold per atom."""
-    per_atom = max_dev / n_atoms
-    bound = threshold * abs(H0) / n_atoms
-    assert per_atom < bound, (
-        f"{ensemble} {precision}: max |H - H0| = {per_atom * 1e3:.4f} meV/atom exceeds "
-        f"{bound * 1e3:.4f} meV/atom (= {threshold:.1e} x |H0| = {abs(H0):.2f} eV over "
-        f"{n_atoms} atoms; relative drift {max_dev / abs(H0) if H0 else float('inf'):.2e})"
+def _assert_drift_below(ensemble, dtype, precision, threshold):
+    """max|H - H0| < threshold * |H0|; the failure message also gives meV/atom."""
+    max_dev, H0 = _run_ensemble(ensemble, dtype)
+    n_atoms = _setup_system(dtype)[2].shape[0]
+    assert max_dev < threshold * abs(H0), (
+        f"{ensemble} {precision}: max |H - H0| = {max_dev:.4e} eV "
+        f"({max_dev / n_atoms * 1e3:.4f} meV/atom) exceeds {threshold:.1e} x |H0| "
+        f"= {threshold * abs(H0):.4e} eV"
     )
 
 
 @pytest.mark.parametrize('ensemble', ALL_ENSEMBLES)
-def test_integrator_drift_f64(ensemble, water_system):
+def test_integrator_drift_f64(ensemble):
     """All ensembles should have a drift below 1e-3 x |H0| in f64."""
-    max_dev, H0, n_atoms = _run_ensemble(ensemble, jnp.float64, water_system(jnp.float64))
-    _assert_drift_below(ensemble, 'f64', 1.0e-3, max_dev, H0, n_atoms)
+    _assert_drift_below(ensemble, jnp.float64, 'f64', 1.0e-3)
 
 
 @pytest.mark.parametrize('ensemble', ALL_ENSEMBLES)
-def test_integrator_drift_f32(ensemble, water_system):
+def test_integrator_drift_f32(ensemble):
     """NPT flex has looser threshold in f32 due to matrix precision loss."""
-    max_dev, H0, n_atoms = _run_ensemble(ensemble, jnp.float32, water_system(jnp.float32))
     threshold = 2.5e-2 if 'flex' in ensemble else 1.0e-3
-    _assert_drift_below(ensemble, 'f32', threshold, max_dev, H0, n_atoms)
+    _assert_drift_below(ensemble, jnp.float32, 'f32', threshold)

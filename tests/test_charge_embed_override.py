@@ -58,22 +58,16 @@ def _charged_fragment():
     return atoms
 
 
-def _energy(total_charge, charge_embed_total_charge,
-            charge_equilibration_total_charge=None):
-    """Energy of the charged fragment under one (charge, embed, equilibrate) condition.
+@functools.lru_cache(maxsize=None)
+def _evaluate(total_charge, charge_embed_total_charge, charge_equilibration_total_charge):
+    """(energy, forces) of the charged fragment under one (charge, embed, equilibrate)
+    condition.
 
     The fixtures and tests below ask for overlapping conditions (the default one
     alone four times), and every evaluation builds a model, so each distinct
     condition is evaluated once per session. Comparisons between two conditions
     still compare two separately built calculators.
     """
-    return _cached_energy(total_charge, charge_embed_total_charge,
-                          charge_equilibration_total_charge)
-
-
-@functools.lru_cache(maxsize=None)
-def _cached_energy(total_charge, charge_embed_total_charge,
-                   charge_equilibration_total_charge):
     from so3lr import So3lrCalculator
 
     atoms = _charged_fragment()
@@ -86,7 +80,13 @@ def _cached_energy(total_charge, charge_embed_total_charge,
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge,
     )
-    return float(atoms.get_potential_energy())
+    return float(atoms.get_potential_energy()), atoms.get_forces()
+
+
+def _energy(total_charge, charge_embed_total_charge, charge_equilibration_total_charge=None):
+    # Fills in the default, so (Q, embed) and (Q, embed, None) share one cache entry.
+    return _evaluate(total_charge, charge_embed_total_charge,
+                     charge_equilibration_total_charge)[0]
 
 
 @pytest.fixture(scope='module')
@@ -149,18 +149,7 @@ class TestChargeEmbedOverride:
 
     def test_forces_change_too(self):
         """Forces, not just energy -- the measured effect is a force MAE change."""
-        from so3lr import So3lrCalculator
-
-        def forces(override):
-            atoms = _charged_fragment()
-            atoms.info['charge'] = -1
-            atoms.calc = So3lrCalculator(
-                model=MODEL, lr_cutoff=LR_CUTOFF,
-                charge_embed_total_charge=override,
-            )
-            return atoms.get_forces()
-
-        f_default, f_zero = forces(None), forces(0.0)
+        f_default, f_zero = _evaluate(-1, None, None)[1], _evaluate(-1, 0.0, None)[1]
         assert np.all(np.isfinite(f_default)) and np.all(np.isfinite(f_zero))
         assert not np.array_equal(f_default, f_zero), (
             "forces are identical with and without the override"
@@ -361,7 +350,9 @@ class TestChargeEmbedOverrideCLI:
         with h5py.File(tmp_path / out, 'r') as f:
             return np.array(f['momenta'])
 
-    @pytest.fixture(scope='class')
+    # Session scope, not class: the shard ordering in conftest can separate this
+    # class's tests, and a class fixture would then rerun all four CLI runs.
+    @pytest.fixture(scope='session')
     def momenta(self, tmp_path_factory):
         """The four runs the tests in this class compare, each run once.
 
