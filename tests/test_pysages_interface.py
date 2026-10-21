@@ -6,7 +6,9 @@ Tests cover:
 3. PySAGES interface functions (unit tests)
 4. update_so3lr_after_pysages k_grid passthrough
 5. Settings parsing defaults and auto-configuration
-6. Integration: trajectory comparison between vanilla and unbiased runs
+
+The end-to-end CLI runs (vanilla vs unbiased, ABF, restarts) are in
+tests/test_pysages_cli.py.
 """
 
 import pathlib

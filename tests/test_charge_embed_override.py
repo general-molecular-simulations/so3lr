@@ -295,7 +295,8 @@ class TestChargeEmbedOverrideCLI:
         """`charge_embed_total_charge:` in the settings YAML reaches the model.
 
         That an override equal to the true charge is a no-op is pinned in-process
-        by TestChargeEmbedOverride.test_passthrough_is_exact.
+        by TestChargeEmbedOverride.test_passthrough_is_exact, and that a YAML null
+        means "absent" by test_yaml_null_is_the_key_absent.
         """
         absent, zero, equil = momenta['absent'], momenta['zero'], momenta['equil']
 
@@ -350,9 +351,31 @@ class TestChargeEmbedOverrideCLI:
         with h5py.File(tmp_path / out, 'r') as f:
             return np.array(f['momenta'])
 
-    # Session scope, not class: the shard ordering in conftest can separate this
-    # class's tests, and a class fixture would then rerun all four CLI runs.
-    @pytest.fixture(scope='session')
+    def test_yaml_null_is_the_key_absent(self, tmp_path, monkeypatch):
+        """`charge_embed_total_charge: null` must reach perform_md as the key absent
+        (None), not 0.0 or the string 'None'. In-process: perform_md is stubbed, so
+        this compares the settings dicts, not trajectories."""
+        from click.testing import CliRunner
+        from so3lr.cli import so3lr_cli, so3lr_md
+
+        captured = {}
+        monkeypatch.setattr(so3lr_md, 'setup_jax_globals', lambda **kwargs: None)
+        monkeypatch.setattr(so3lr_cli, 'reserve_gpu', lambda *args, **kwargs: None)
+        (tmp_path / 'input.xyz').write_text(_CLI_INPUT_XYZ)
+        for tag, line in (('absent', '# key absent'), ('null', 'charge_embed_total_charge: null')):
+            monkeypatch.setattr(so3lr_md, 'perform_md',
+                                lambda settings, *args, tag=tag, **kwargs: captured.setdefault(tag, settings))
+            (tmp_path / f'{tag}.yaml').write_text(
+                f"input_file: {tmp_path / 'input.xyz'}\noutput_file: {tmp_path / tag}.hdf5\n"
+                f"log_file: {tmp_path / tag}.log\nmodel: {MODEL}\nlr_cutoff: {LR_CUTOFF}\n"
+                f"total_charge: -1\nensemble: nvt\nrelax_before_run: false\n{line}\n"
+            )
+            result = CliRunner().invoke(so3lr_cli.cli, ['--settings', str(tmp_path / f'{tag}.yaml')])
+            assert result.exit_code == 0, result.output
+        assert captured['null']['charge_embed_total_charge'] is None
+        assert captured['null']['charge_embed_total_charge'] == captured['absent']['charge_embed_total_charge']
+
+    @pytest.fixture(scope='class')
     def momenta(self, tmp_path_factory):
         """The four runs the tests in this class compare, each run once.
 

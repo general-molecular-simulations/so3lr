@@ -130,7 +130,8 @@ def pytest_configure(config):
 def pytest_collection_modifyitems(config, items):
     """Modify test collection:
     - Unless --full: skip @pytest.mark.slow
-    - Order known long-running tests first so xdist workers pick them up earlier
+    - Order the modules holding known long-running tests first, each module kept
+      together in file order, so module- and class-scoped fixtures are built once
     - With --shard i/n: keep only this shard's duration-balanced slice
     """
     if not config.getoption("--full"):
@@ -139,7 +140,15 @@ def pytest_collection_modifyitems(config, items):
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
 
-        items.sort(key=lambda item: _test_duration(item), reverse=True)
+        # Sorting single tests by duration would split a class or module, and pytest
+        # then tears down its class/module fixtures and builds them again.
+        def module(item):
+            return item.nodeid.split('::', 1)[0]
+        weight = {}
+        for item in items:
+            weight[module(item)] = max(weight.get(module(item), 0.0), _test_duration(item))
+        position = {id(item): i for i, item in enumerate(items)}
+        items.sort(key=lambda item: (-weight[module(item)], position[id(item)]))
 
     shard = config.getoption("--shard")
     if shard is not None:

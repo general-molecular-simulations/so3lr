@@ -28,8 +28,8 @@ def validate():
         required_strings=['completed successfully', 'Doing P3M'],
     )
 
-    # The barostat must actually move the cell. The 15-atom box sits far from
-    # 1 bar, so 4 steps move it well above the 1e-9 A floor.
+    # The barostat must actually move the cell; 4 steps away from equilibrium
+    # move it well above the 1e-9 A floor.
     v.check_box_changed(settings['input_file'])
 
     # Check all settings are reflected in logs

@@ -12,8 +12,9 @@ values on water_64:
 - f32: NPT flex ~5-8e-3 → threshold 2.5e-2
 Failure messages also give the drift in meV/atom.
 
-The anisotropic flex mode is not tested here: the CLI and create_npt_nhc_fn
-reject it (tests/test_npt_coupling_safety.py).
+The anisotropic flex mode is covered although the CLI and create_npt_nhc_fn
+reject it today (tests/test_npt_coupling_safety.py): its integrator must stay
+conservative for when it is re-enabled.
 
 The step and the invariant are jitted (nothing inside the potential is), and
 the invariant is sampled every INVARIANT_EVERY steps. Sampling can only miss
@@ -213,6 +214,7 @@ def _run_ensemble(ensemble, dtype):
         coupling_map = {
             'NPT_flex_iso': 'isotropic',
             'NPT_flex_semi_iso': 'semi-isotropic',
+            'NPT_flex_aniso': 'anisotropic',
         }
         coupling = coupling_map[ensemble]
         init_fn, apply_fn = simulate.npt_nose_hoover_flex(
@@ -235,7 +237,7 @@ def _run_ensemble(ensemble, dtype):
         )
 
 
-ALL_ENSEMBLES = ['NVE', 'NVT', 'NPT_iso', 'NPT_flex_iso', 'NPT_flex_semi_iso']
+ALL_ENSEMBLES = ['NVE', 'NVT', 'NPT_iso', 'NPT_flex_iso', 'NPT_flex_semi_iso', 'NPT_flex_aniso']
 
 
 def _assert_drift_below(ensemble, dtype, precision, threshold):

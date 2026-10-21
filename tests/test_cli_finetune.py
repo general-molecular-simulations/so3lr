@@ -107,7 +107,7 @@ def _assert_finetuning_succeeded(result, workdir, max_loss=0.1):
 # two runs cover what only `so3lr finetune` shows: `last_layer` must name its block from
 # the *pretrained* model's num_layers, not the finetune config's (#15), and
 # `forces_only` is the frozen-keys (blacklist) path, which once reported everything
-# trainable because frozen_keys were ignored. `full` still runs in
+# trainable because frozen_keys were ignored. `full` (everything trainable) runs in
 # test_cli_finetune_water_pbc (--full).
 @pytest.mark.parametrize('strategy', ['last_layer', 'forces_only'])
 def test_cli_finetune(workdir, test_config, strategy):
@@ -191,3 +191,10 @@ def test_cli_finetune_water_pbc(workdir, test_config_water):
     )
 
     _assert_finetuning_succeeded(result, workdir, max_loss=0.2)
+
+    # `full` must train everything through the CLI wiring, not only in
+    # resolve_finetuning_strategy (test_finetuning_strategies.py).
+    total, trainable = _parse_param_counts(result)
+    assert total is not None and trainable == total, (
+        f"strategy=full trained {trainable}/{total} parameters"
+    )

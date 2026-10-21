@@ -151,15 +151,22 @@ def test_vanilla_and_unbiased_match(run):
 
 @pytest.mark.slow
 def test_abf_diverges_from_vanilla(run):
-    """ABF applies bias forces, so its last row must differ from vanilla's."""
+    """ABF applies bias forces, so its log must differ from vanilla's.
+
+    test_vanilla_and_unbiased_match shows that without a bias the printed rows
+    are identical, so any difference above the print resolution (1e-3 eV, 0.1 K)
+    is the bias. Requiring a fixed size would depend on how fast this system
+    diverges in 400 steps.
+    """
     vanilla, abf = run('vanilla_4'), run('abf_4')
-    assert vanilla and abf
-    last_v, last_a = vanilla[-1], abf[-1]
-    assert last_v['step'] == last_a['step']
-    diffs = [abs(last_v[k] - last_a[k]) for k in ('E', 'KE', 'H', 'T')]
-    assert any(d > 0.01 for d in diffs), (
-        "ABF and vanilla trajectories are unexpectedly identical. "
-        "The bias force should cause observable differences."
+    assert [r['step'] for r in vanilla] == [r['step'] for r in abf]
+    differs = [
+        abs(v[k] - a[k]) > (0.05 if k == 'T' else 5e-4)  # half a printed digit
+        for v, a in zip(vanilla, abf) for k in ('E', 'KE', 'PE', 'H', 'T')
+    ]
+    assert any(differs), (
+        "ABF and vanilla logs are identical to the printed digit; the bias force "
+        "should change the trajectory."
     )
 
 

@@ -4,6 +4,7 @@ import pathlib
 from typing import Dict, List, Optional, Union
 
 import h5py
+import numpy as np
 import yaml
 from ase.io import read
 
@@ -83,10 +84,15 @@ class Validator:
         path = self.workdir / trajectory
         if not path.exists():
             return False  # check_file_exists already reported it
-        initial = read(self.workdir / input_file).cell.lengths()
         with h5py.File(path, 'r') as f:
-            final = f['box'][-1]
-        if max(abs(a - b) for a, b in zip(final, initial)) <= tolerance:
+            if 'box' not in f:
+                self.errors.append(f"No 'box' dataset in {trajectory}")
+                return False
+            final = np.asarray(f['box'][-1])
+        if final.ndim == 2:  # a full cell matrix: compare its vector lengths
+            final = np.linalg.norm(final, axis=-1)
+        initial = read(self.workdir / input_file).cell.lengths()
+        if np.max(np.abs(final - initial)) <= tolerance:
             self.errors.append(f"Box did not change: input {initial}, last frame {final}")
             return False
         return True

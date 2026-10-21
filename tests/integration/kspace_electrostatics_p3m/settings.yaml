@@ -1,15 +1,16 @@
 # K-space electrostatics (P3M) test - NPT dynamics with the P3M solver
 
-# One benzoic acid molecule (15 atoms) in a periodic 25 A box: the box only has
-# to be at least twice lr_cutoff, and the cost of this case scaled with the atom
-# count (it ran a 3072-atom water box). validate.py checks the box moved.
-input_file: benzoic_acid_aq_1.xyz  # from tests/test_data
+# 512 waters (1536 atoms) in a periodic 24.8 A box: the one integration case
+# that runs a dense periodic system through CLI MD, so neighbour pairs cross the
+# boundary and the NPT virial includes periodic images (npt_ensemble and
+# restart_checkpoint use a dilute 15-atom box). validate.py checks the box moved.
+input_file: water_1536.xyz  # from tests/test_data
 output_file: trajectory.hdf5
 log_file: so3lr.log
 
 # Model settings
 precision: float64
-lr_cutoff: 10.0  # box (25 A) must be >= 2 x lr_cutoff
+lr_cutoff: 10.0  # box (24.8 A) must be >= 2 x lr_cutoff
 dispersion_damping: 1.0
 buffer_size_multiplier_sr: 1.25
 buffer_size_multiplier_lr: 1.25
