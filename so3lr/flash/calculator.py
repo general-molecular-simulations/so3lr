@@ -1,4 +1,4 @@
-"""An ASE calculator on the flash engine: energy and forces of so3lr-tauri-s/m/l.
+"""An ASE calculator on the flash engine: energy and forces of so3lr-tauri-s/m/l and the legacy so3lr.
 
     from so3lr import FlashCalculator
     atoms.calc = FlashCalculator(model="so3lr-tauri-m", kspace_electrostatics="pme")

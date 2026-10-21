@@ -2,10 +2,11 @@
 FIRE with the flash engine.
 
 ``so3lr_md.run`` runs the flash engine whenever it computes what the settings ask for
-(``check.flash_problem`` is None: an NVIDIA GPU or an AMD MI355X, a periodic orthorhombic box, nve / nvt /
-nvt-langevin / isotropic npt, no k-space other than PME, so3lr-tauri-s, -m or -l), else the
-neighbour-list potential of ``perform_md``; ``perform_min`` (``so3lr opt``) likewise runs
-``perform_min_flash``. ``--engine flash`` or ``--engine standard`` forces one.
+(``check.flash_problem`` is None: an NVIDIA GPU or an AMD MI355X, a periodic orthorhombic
+box, nve / nvt / nvt-langevin / isotropic npt, no k-space other than PME,
+so3lr-tauri-s, -m, -l or the legacy so3lr), else the neighbour-list potential of ``perform_md``;
+``perform_min`` (``so3lr opt``) likewise runs ``perform_min_flash``. ``--engine flash`` or
+``--engine standard`` forces one.
 
 Same settings, units, log lines, trajectory and restart files as ``perform_md``; the
 forces come from ``FlashSO3LR`` instead of the neighbour-list potential. NVE and NVT
@@ -52,6 +53,7 @@ from so3lr.cli.so3lr_md import (
     validate_and_log_input,
     validate_npt_restart_coupling,
     validate_orthorhombic_restart_box,
+    warn_legacy_kspace,
     write_to_extxyz,
     write_to_hdf5,
 )
@@ -132,6 +134,8 @@ def build_engine(atoms, settings, dtype, box_margin=None):
     for what, p, mesh in (("electrostatics", pme_el, eng.mesh_el), ("dispersion", pme_disp, eng.mesh_disp)):
         if p:
             logger.info(f"Flash: PME {what}, smearing {p[0]} A, mesh {mesh}")
+    if statics["legacy"] and pme_el:
+        warn_legacy_kspace("pme")
     return eng, staged
 
 

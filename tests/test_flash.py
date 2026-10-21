@@ -142,6 +142,44 @@ def test_c6_mesh_table():
     assert np.isclose(lr6[0], 1.0 / (6.0 * (2.0 * s * s) ** 3))
 
 
+def test_legacy_pieces_match_so3lr():
+    """The legacy so3lr's own pieces against so3lr_dev's modules (float64): LayerNorm, the
+    Hirshfeld-ratio head, and the learnable ZBL repulsion from the repulsion kernel's tables."""
+    import flax.linen as nn
+    from so3lr.flash import blocks
+    from so3lr.flash.loader import load_params
+    from so3lr.mlff.nn.observable.observable_sparse import HirshfeldSparse, ZBLRepulsionSparse
+    params, statics = load_params("so3lr", precision="float64")
+    assert statics["legacy"] and not (statics["rms_norm"] or statics["qk_norm"])
+    rng = np.random.default_rng(0)
+    n = 40
+    x = jnp.asarray(rng.normal(size=(n, 128)) * 2.0 + 0.5)
+    z = jnp.asarray(rng.choice([1, 6, 7, 8, 9, 15, 16, 17], size=n))
+    mask = jnp.ones(n)
+    p = params["layers_1"]["layer_normalization_2"]
+    _check("LayerNorm", blocks.layer_norm(p, x), nn.LayerNorm().apply({"params": p}, x), 1e-12)
+    head = HirshfeldSparse(prop_keys=None, regression_dim=128, activation_fn=jax.nn.silu,
+                           output_is_zero_at_init=False, legacy=True)
+    ref = head.apply({"params": params["observables_2"]}, dict(x=x, atomic_numbers=z, node_mask=mask))
+    _check("hirshfeld ratios", blocks.legacy_hirshfeld_head(params["observables_2"], x, z),
+           ref["hirshfeld_ratios"], 1e-12)
+    # ZBL, a pair per atom: the module with the checkpoint's float32 parameters (as the
+    # neighbour-list potential holds them in a float64 run) and with float64 ones
+    i, j = jnp.arange(n), jnp.asarray((np.arange(n) + rng.integers(1, n, n)) % n)
+    d = jnp.asarray(rng.uniform(0.3, 1.6, n))
+    cut = jnp.asarray(rng.uniform(0.1, 1.0, n))
+    inputs = dict(atomic_numbers=z.astype(jnp.int32), node_mask=mask, cut=cut, idx_i=i, idx_j=j, d_ij=d)
+    zbl = params["observables_0"]["zbl_repulsion"]
+    ref, ref32 = (ZBLRepulsionSparse(prop_keys=None).apply({"params": q}, inputs)["zbl_repulsion"]
+                  for q in (zbl, jax.tree_util.tree_map(lambda v: np.asarray(v, np.float32), zbl)))
+    np.testing.assert_allclose(ref32, ref, rtol=1e-14)
+    # as _sr_kernel takes the tables: [min(Z) - 1, max(Z) - 1]
+    lo, hi = jnp.minimum(z[i], z[j]) - 1, jnp.maximum(z[i], z[j]) - 1
+    y = (params["repulsion_a"][lo, hi] * jnp.exp(-params["repulsion_b"][lo, hi] * d[:, None])).sum(-1)
+    e_pair = E._switch(d, 0.0, 1.5)[0] * cut * KE * z[i] * z[j] / d * y / 2.0
+    np.testing.assert_allclose(e_pair, ref, rtol=1e-12)
+
+
 def _water(reps):
     from ase.io import read
     return read(DATA / "water_64.xyz").repeat(reps)
@@ -171,7 +209,8 @@ SETTINGS = dict(ensemble="nvt", model_path=None, lr_cutoff=12.0)
     (dict(model_path="so3lr-tauri-s-2602"), None),
     (dict(model_path="so3lr-tauri-l-2606"), None),
     (dict(model_path="so3lr-tauri-l-2602"), None),
-    (dict(model_path="so3lr"), "legacy"),
+    (dict(model_path="so3lr"), None),
+    (dict(model_path="so3lr", kspace_electrostatics="pme", kspace_dispersion="pme"), None),
 ])
 def test_engine_choice(monkeypatch, change, reason):
     """What auto picks for a GPU, given the settings (37 A of water)."""
@@ -193,7 +232,7 @@ def test_engine_choice_small_box(monkeypatch):
     ("eval", dict(targets="forces,dipole_vec,hirshfeld_ratios"), "not dipole_vec, hirshfeld_ratios"),
     ("eval", dict(targets="energy", kspace_electrostatics="ewald"), "PME but not ewald"),
     ("opt", dict(lr_cutoff=None), "long-range cutoff"),
-    ("opt", dict(model_path="so3lr"), "legacy"),
+    ("opt", dict(model_path="so3lr"), None),
 ])
 def test_engine_choice_other_tasks(monkeypatch, task, change, reason):
     """so3lr opt, so3lr eval and the ASE calculator take what MD takes, with no ensemble;
@@ -240,18 +279,27 @@ def test_every_settings_key_classified():
     assert not known_yaml_keys() - known, sorted(known_yaml_keys() - known)
 
 
-@pytest.mark.parametrize("edit,reason", [
-    (None, None),
-    (("num_heads", 8), "degrees, heads and features"),
-    (("degrees", [1, 2, 3, 5]), "degrees, heads and features"),
-    (("activation_fn", "gelu"), "activation_fn"),
-    (("some_new_hyperparameter", True), "does not know the model hyperparameter"),
-    (("qk_norm", None), "does not set 'qk_norm'"),
+@pytest.mark.parametrize("model,edit,reason", [
+    ("so3lr-tauri-m-2606", None, None),
+    ("so3lr-tauri-m-2606", ("num_heads", 8), "degrees, heads and features"),
+    ("so3lr-tauri-m-2606", ("degrees", [1, 2, 3, 5]), "degrees, heads and features"),
+    ("so3lr-tauri-m-2606", ("activation_fn", "gelu"), "activation_fn"),
+    ("so3lr-tauri-m-2606", ("some_new_hyperparameter", True), "does not know the model hyperparameter"),
+    ("so3lr-tauri-m-2606", ("qk_norm", None), "does not set 'qk_norm'"),
+    ("so3lr-tauri-m-2606", ("legacy_so3lr_bool", False), None),
+    # declined (the first mismatch it names follows the file's key order)
+    ("so3lr-tauri-m-2606", ("legacy_so3lr_bool", True), ""),
+    ("so3lr", None, None),
+    ("so3lr", ("qk_norm", False), None),
+    ("so3lr", ("use_rms_norm", True), "use_rms_norm = False"),
+    ("so3lr", ("layer_normalization_2", False), "layer_normalization_2 = True"),
+    ("so3lr", ("use_final_bias_bool", None), "does not set 'use_final_bias_bool'"),
+    ("so3lr", ("electrostatic_energy_kspace_do_ewald_bool", False), "does not know the model hyperparameter"),
 ])
-def test_model_architecture_check(tmp_path, edit, reason):
-    """so3lr-tauri-m with one hyperparameter changed (None: removed) is declined."""
+def test_model_architecture_check(tmp_path, model, edit, reason):
+    """A model with one hyperparameter changed (None: removed) is declined."""
     from so3lr.model_registry import resolve_model
-    src = resolve_model("so3lr-tauri-m-2606").dir
+    src = resolve_model(model).dir
     for f in src.iterdir():
         if f.name != "hyperparameters.json":
             (tmp_path / f.name).symlink_to(f)
@@ -264,7 +312,7 @@ def test_model_architecture_check(tmp_path, edit, reason):
             cfg["model"][key] = value
     (tmp_path / "hyperparameters.json").write_text(json.dumps(cfg))
     problem = check.model_problem(str(tmp_path))
-    assert (problem is None) if reason is None else (reason in problem), problem
+    assert (problem is None) if reason is None else (problem is not None and reason in problem), problem
 
 
 def test_cell_grid_takes_every_box_from_the_smallest():
@@ -388,7 +436,8 @@ GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash
 
 @GPU
 @pytest.mark.parametrize("model,pme", [("so3lr-tauri-m-2606", ""), ("so3lr-tauri-m-2606", "electrostatics,dispersion"),
-                                       ("so3lr-tauri-l-2606", "electrostatics,dispersion")])
+                                       ("so3lr-tauri-l-2606", "electrostatics,dispersion"), ("so3lr", ""),
+                                       ("so3lr", "electrostatics,dispersion")])
 def test_flash_matches_neighbour_lists(tmp_path, model, pme):
     """Energy, forces and dE/d(strain) on 12,288 waters (49.6 A), float64."""
     from ase.io import write
@@ -399,7 +448,7 @@ def test_flash_matches_neighbour_lists(tmp_path, model, pme):
 
 
 @GPU
-@pytest.mark.parametrize("model", ["so3lr-tauri-m-2606", "so3lr-tauri-l-2606"])
+@pytest.mark.parametrize("model", ["so3lr-tauri-m-2606", "so3lr-tauri-l-2606", "so3lr"])
 def test_float32_follows_float64(model):
     """float32 (each model's attention launch; the backward's filter products as TF32x3 on
     tensor cores, which float64 never runs; plain float32 on ROCm) gives float64's energy and
@@ -591,13 +640,15 @@ def test_md_restarts_on_flash(tmp_path):
 
 
 @GPU
-def test_opt_on_flash_follows_neighbour_lists(tmp_path):
+@pytest.mark.parametrize("model", [None, "so3lr"])
+def test_opt_on_flash_follows_neighbour_lists(tmp_path, model):
     """`so3lr opt` on flash (auto) follows the neighbour-list potential's FIRE trajectory
-    (float64, PME), and writes the same trajectory file."""
+    (float64, PME; the default model and the legacy so3lr), and writes the same trajectory
+    file."""
     from ase.io import read, write
     write(tmp_path / "w.xyz", _water((3, 3, 3)))
     run = ["opt", "--input", "w.xyz", "--precision", "float64", "--min-cycles", "3", "--min-steps", "5",
-           "--kspace-electrostatics", "pme"]
+           "--kspace-electrostatics", "pme"] + ([] if model is None else ["--model", model])
     _so3lr([*run, "--output", "a.xyz"], tmp_path)
     _so3lr([*run, "--engine", "standard", "--output", "b.xyz"], tmp_path)
     assert "Engine: flash (auto)" in (tmp_path / "a.log").read_text()

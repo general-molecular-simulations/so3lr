@@ -512,8 +512,8 @@ def flash_options(f: Callable) -> Callable:
                           'no per-edge arrays: 2.5x faster, and tens of millions of atoms on one '
                           'GPU) whenever it computes what the other options ask for -- an NVIDIA '
                           'GPU or an AMD MI355X, a periodic orthorhombic box, real-space long range or PME, '
-                          'so3lr-tauri-s/m/l; for MD nve/nvt/nvt-langevin/isotropic npt, for eval '
-                          'the targets energy and forces -- else the neighbour-list potential; the '
+                          'so3lr-tauri-s/m/l or the legacy so3lr; for MD nve/nvt/nvt-langevin/isotropic '
+                          'npt, for eval the targets energy and forces -- else the neighbour-list potential; the '
                           'log says which and why. flash or standard forces one. [default: auto]')(f)
     f = click.option('--flash-mode', 'flash_mode', default='auto',
                      type=click.Choice(list(FLASH_MODES)),

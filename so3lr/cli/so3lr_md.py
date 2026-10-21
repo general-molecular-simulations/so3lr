@@ -982,6 +982,15 @@ def dispersion_ratios(aux):
     return aux.get('a0_ratios', aux.get('hirshfeld_ratios')), aux.get('c6_ratios')
 
 
+def warn_legacy_kspace(kspace_electrostatics):
+    """The legacy v1 model used real-space cutoff electrostatics; k-space (pme/ewald/p3m)
+    is untested for it. Warn but allow."""
+    logger.warning(
+        f"k-space electrostatics ('{kspace_electrostatics}') is untested for the legacy "
+        f"v1 SO3LR model, which was trained with real-space cutoff electrostatics. "
+        f"Results may be unreliable; consider a real-space long-range cutoff instead.")
+
+
 def _is_legacy_model(model_dir) -> bool:
     """Return True if the resolved model is the legacy v1 SO3LR (legacy_so3lr_bool)."""
     try:
@@ -1035,13 +1044,8 @@ def load_model(
     spec = resolve_model(model_path)
     model_dir, from_file = spec.dir, spec.from_file
 
-    # The legacy v1 model used real-space cutoff electrostatics; k-space
-    # (pme/ewald/p3m) is untested for it. Warn but allow.
     if kspace_electrostatics is not None and _is_legacy_model(model_dir):
-        logger.warning(
-            f"k-space electrostatics ('{kspace_electrostatics}') is untested for the legacy "
-            f"v1 SO3LR model, which was trained with real-space cutoff electrostatics. "
-            f"Results may be unreliable; consider a real-space long-range cutoff instead.")
+        warn_legacy_kspace(kspace_electrostatics)
 
     long_range_kw = dict(
         cutoff_lr=lr_cutoff,

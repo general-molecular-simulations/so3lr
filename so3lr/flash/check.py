@@ -66,8 +66,10 @@ UNSUPPORTED = {
 }
 
 # the model hyperparameters the kernels are written for (so3lr-tauri-s/m/l 2602 and 2606); the
-# sizes below may vary; any other key, or any other value, makes flash decline
+# sizes below may vary; any other key, or any other value, makes flash decline (a key a model
+# leaves out counts as the model builder's default, UNSET, or as missing)
 ARCHITECTURE = {
+    "legacy_so3lr_bool": False,
     "activation_fn": "silu", "energy_activation_fn": "silu", "cutoff_fn": "phys",
     "radial_basis_fn": "bernstein", "num_features_head": 32,
     "qk_non_linearity": "identity", "qk_norm": True, "layer_normalization_1": True,
@@ -78,6 +80,15 @@ ARCHITECTURE = {
     "energy_learn_atomic_type_shifts": True, "electrostatic_energy_kspace_do_ewald_bool": False,
     "electrostatic_energy_kspace_interp_nodes": None,
 }
+# the legacy so3lr (legacy_so3lr_bool): the same attention; LayerNorm after the attention and
+# the exchange, no q/k norm or residual scalars, a bias on the energy head (ZBL repulsion
+# and one ratio head for both dispersion ratios come with the flag)
+LEGACY_ARCHITECTURE = dict(
+    {k: v for k, v in ARCHITECTURE.items() if not k.startswith("electrostatic_energy_kspace")},
+    legacy_so3lr_bool=True, qk_norm=False, use_rms_norm=False, use_residual_scalars=False,
+    layer_normalization_2=True, use_final_bias_bool=True)
+# what so3lr's model builder takes for these when a model does not set them
+UNSET = {"legacy_so3lr_bool": False, "qk_norm": False, "use_rms_norm": False, "use_residual_scalars": False}
 # (degrees, heads, features) checked against the neighbour-list potential: one head per
 # degree entry, 32 features each (so3lr-tauri-s/m, and so3lr-tauri-l with each degree twice)
 SHAPES = {((1, 2, 3, 4), 4, 128), ((1, 1, 2, 2, 3, 3, 4, 4), 8, 256)}
@@ -187,22 +198,20 @@ def model_problem(model_path):
     spec = resolve_model(model_path)
     with open(spec.dir / "hyperparameters.json") as fp:
         model = json.load(fp)["model"]
-    if model.get("legacy_so3lr_bool", False):
-        return "it runs the v2 models (so3lr-tauri-s, -m, -l), not the legacy so3lr"
+    arch = LEGACY_ARCHITECTURE if model.get("legacy_so3lr_bool") is True else ARCHITECTURE
     shape = (tuple(model.get("degrees") or ()), model.get("num_heads"), model.get("num_features"))
     if shape not in SHAPES:
         return (f"its kernels are written for degrees, heads and features {sorted(SHAPES)} "
                 f"({spec.dir.name} has {shape})")
     for key, value in model.items():
-        if key in ("legacy_so3lr_bool", "degrees", "num_heads", "num_features"):
+        if key in ("degrees", "num_heads", "num_features"):
             continue
-        if key in ARCHITECTURE:
-            if value != ARCHITECTURE[key]:
-                return (f"its kernels are written for {key} = {ARCHITECTURE[key]!r} "
-                        f"({spec.dir.name} has {value!r})")
+        if key in arch:
+            if value != arch[key]:
+                return f"its kernels are written for {key} = {arch[key]!r} ({spec.dir.name} has {value!r})"
         elif key not in SIZES:
             return f"it does not know the model hyperparameter {key!r} ({spec.dir.name})"
-    missing = [k for k in ARCHITECTURE if k not in model]
+    missing = [k for k in arch if k not in model and (k not in UNSET or UNSET[k] != arch[k])]
     if missing:
         return f"{spec.dir.name} does not set {missing[0]!r}"
     return None
