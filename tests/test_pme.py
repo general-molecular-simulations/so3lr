@@ -241,14 +241,17 @@ class TestPMEJaxMD:
             fractional_coordinates=True,
         )
 
-        nbrs = neighbor_fn.allocate(positions / box, box=box)
-        nbrs_lr = neighbor_fn_lr.allocate(positions / box, box=box)
+        positions_frac = positions / box
+        nbrs = neighbor_fn.allocate(positions_frac, box=box)
+        nbrs_lr = neighbor_fn_lr.allocate(positions_frac, box=box)
 
-        # Differentiate in Cartesian positions, so the forces are in the units
-        # the ASE calculator reports regardless of the fractional convention.
-        def energy_of_cartesian(R):
+        # Differentiate in the fractional positions, as the integrators do:
+        # jax_md.space.transform's custom JVP passes the gradient through
+        # unscaled, so this is already the Cartesian force. Differentiating
+        # through `R / box` instead would divide it by the box length again.
+        def energy_of(R_frac):
             return energy_fn(
-                R / box,
+                R_frac,
                 nbrs.idx,
                 nbrs_lr.idx,
                 box=box,
@@ -259,7 +262,7 @@ class TestPMEJaxMD:
                 has_aux=False,
             )
 
-        energy, grad = jax.jit(jax.value_and_grad(energy_of_cartesian))(positions)
+        energy, grad = jax.jit(jax.value_and_grad(energy_of))(positions_frac)
         forces = -np.asarray(grad)
 
         print(f"\n{kspace_method.upper()} ASE vs JAX-MD:")
