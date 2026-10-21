@@ -257,6 +257,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     setup_logger(s.get("log_file"))
     validate_md_counts(s)
     atoms = read(s["input_file"]) if atoms is None else atoms
+    input_atoms = atoms     # the input structure (atoms is replaced by a copy in the run's box)
     # process_model's element check: past the trained elements the tables are gathered
     # out of bounds under jit
     check_atomic_numbers_supported(atoms.numbers, supported_atomic_numbers_for_model(s.get("model_path")))
@@ -421,7 +422,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     if pysages_set_dict is not None:
         from so3lr.cli.so3lr_pysages_interface import (
             create_pysages_interface_fns, get_pysages_method, reset_pysages_runner, run_pysages_cycle,
-            update_so3lr_after_pysages)
+            update_so3lr_after_pysages, warn_restart_method_mismatch)
         # the CVs as perform_md builds them: coordinationnumber counts the edges of a
         # short-range list like perform_md's, the others read only its starting positions
         if any(cv["type"].lower() == "coordinationnumber" for cv in pysages_set_dict["cv"]):
@@ -434,7 +435,10 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                 disable_cell_list=True).allocate(state.position, box=box)
         else:
             cv_nbrs = SimpleNamespace(reference_position=state.position)
-        method = get_pysages_method(pysages_set_dict, nbrs=cv_nbrs, species=geo["species"], box=box)
+        method = get_pysages_method(pysages_set_dict, nbrs=cv_nbrs, species=geo["species"], box=box,
+                                    input_atoms=input_atoms)
+        if pysages_result is not None:
+            warn_restart_method_mismatch(method, pysages_result.method)
 
         def step_md_fn(i, carry):
             """perform_md's step over its carry; flash keeps no neighbour lists or k-grids."""

@@ -427,8 +427,57 @@ def _water_oxygens(arguments, nbrs, species, box):
     return o_idx[d.min(axis=1) > 1.7]
 
 
-def process_cv(cv_dict, nbrs=None, species=None, box=None):
-    """Create a PySAGES collective variable from a settings dictionary."""
+def _neutral_h_counts(arguments, input_atoms, species, h_idx, owner_idx, ref_idx,
+                      ow_idx, site_idx, sigma):
+    """Neutral H counts of the chargeseparation charge sites: the CV's own Gaussian
+    sharing, rounded, in the undissociated structure ('neutral_reference' if given,
+    otherwise the input structure). Waters must hold 2 H and every count must be an
+    integer there, otherwise the structure is not a valid reference."""
+    from pysages.colvars.coordinates import charge_separation
+    path = arguments.get('neutral_reference')
+    if path is not None:
+        from ase.io import read
+        atoms, source = read(path), f"neutral_reference {path}"
+    elif input_atoms is not None:
+        atoms, source = input_atoms, "the input structure"
+    else:
+        raise ValueError("chargeseparation: charge_sites needs the input structure or "
+                         "'neutral_reference' (an undissociated structure) for the "
+                         "neutral H counts.")
+    if not np.array_equal(np.asarray(atoms.numbers), np.asarray(species)):
+        raise ValueError(f"chargeseparation: {source} does not have the atoms of the "
+                         f"simulated system.")
+    cell = np.asarray(atoms.cell[:], dtype=float)
+    L = np.diag(cell)
+    if not (np.all(atoms.pbc) and np.all(L > 0) and np.allclose(cell, np.diag(L))):
+        raise ValueError(f"chargeseparation: {source} needs an orthorhombic periodic cell.")
+    pos = np.asarray(atoms.positions, dtype=float)
+    water_sites = np.searchsorted(owner_idx, ow_idx)
+    _, n_owned = charge_separation(
+        jnp.asarray(pos[h_idx]), jnp.asarray(pos[owner_idx]), jnp.asarray(pos[ref_idx]),
+        jnp.asarray(L), water_sites, sigma, 2.0)
+    n = np.asarray(n_owned, dtype=float)[np.searchsorted(owner_idx, site_idx)]
+    n0 = np.round(n)
+    off = np.abs(n - n0) > 0.1
+    if np.any(off):
+        raise ValueError(f"chargeseparation: in {source} atoms {site_idx[off].tolist()} "
+                         f"own {n[off].round(2).tolist()} H (not an integer), so it gives "
+                         f"no neutral H counts; set 'neutral_reference' to an undissociated "
+                         f"structure.")
+    charged = np.isin(site_idx, ow_idx) & (n0 != 2)
+    if np.any(charged):
+        raise ValueError(f"chargeseparation: {source} contains a charged water (O "
+                         f"{site_idx[charged].tolist()} owns {n0[charged].tolist()} H), "
+                         f"i.e. it is not the undissociated state; set 'neutral_reference' "
+                         f"to an undissociated structure.")
+    return n0, source
+
+
+def process_cv(cv_dict, nbrs=None, species=None, box=None, input_atoms=None):
+    """Create a PySAGES collective variable from a settings dictionary.
+
+    `input_atoms` (ase.Atoms of the input structure) is used by chargeseparation with
+    charge_sites for the neutral H counts."""
     name = cv_dict['type']
     arguments = cv_dict
 
@@ -560,6 +609,41 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
             raise ValueError("chargeseparation: water oxygens must be owner sites "
                              "(check owner_species).")
         water_sites = np.searchsorted(owner_idx, ow_idx)
+        # charge_sites: whose charge enters s. 'water' (default): the water O only;
+        # 'all': also every other owner site except the reference atoms, so a proton
+        # taken from / given to a solute site (amide N-H, carbonyl O) keeps s at the
+        # distance of the charge; or a list of atoms to add to the water O. Their
+        # neutral H counts come from the input structure or 'neutral_reference'. Every
+        # atom that can carry the titratable proton (both carboxyl O, both His ring N,
+        # the guanidinium N) belongs in 'reference', else its proton counts as a charge.
+        sigma = arguments.get('sigma', 0.3)
+        charge_spec = arguments.get('charge_sites', 'water')
+        charge_sites = n_ref_sites = None
+        if not (isinstance(charge_spec, str) and charge_spec.lower() == 'water'):
+            if isinstance(charge_spec, str) and charge_spec.lower() == 'all':
+                extra = np.setdiff1d(owner_idx, np.union1d(ow_idx, ref_idx))
+            elif isinstance(charge_spec, str) and not any(c.isdigit() for c in charge_spec):
+                raise ValueError(f"chargeseparation: charge_sites must be 'water', 'all' "
+                                 f"or atom indices, got {charge_spec!r}.")
+            else:
+                extra = np.setdiff1d(np.asarray(_expand_indices(charge_spec), dtype=int), ow_idx)
+                if not np.all(np.isin(extra, owner_idx)):
+                    raise ValueError("chargeseparation: charge_sites must be owner sites "
+                                     "(heavy atoms of owner_species).")
+                if np.any(np.isin(extra, ref_idx)):
+                    raise ValueError("chargeseparation: the reference atoms cannot be "
+                                     "charge_sites.")
+            site_idx = np.union1d(ow_idx, extra)
+            n_ref_sites, source = _neutral_h_counts(
+                arguments, input_atoms, species_arr, h_idx, owner_idx, ref_idx, ow_idx,
+                site_idx, sigma)
+            charge_sites = np.searchsorted(owner_idx, site_idx)
+            other = ~np.isin(site_idx, ow_idx)
+            charge_log = (f'charge on {len(ow_idx)} water O + {int(other.sum())} other sites, '
+                          f'neutral H counts from {source}')
+            logger.info('chargeseparation: neutral H counts of the non-water charge sites '
+                        '(atom:H): ' + ' '.join(f'{i}:{int(k)}' for i, k in
+                                                zip(site_idx[other], n_ref_sites[other])))
         # 'pair_guard: true' maps configurations with an H3O+ and an OH- in the solvent
         # (water autoionisation) onto s = 0, so the bias cannot drive autoionisation
         cv = pysages.colvars.coordinates.ChargeSeparation(
@@ -567,19 +651,22 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None):
                      tuple(ref_idx.tolist())],
             box=box_arr,
             water_sites=water_sites,
-            sigma=arguments.get('sigma', 0.3),
+            sigma=sigma,
             pair_guard=bool(arguments.get('pair_guard', False)),
             n_hydronium=arguments.get('n_hydronium'),
             n_hydroxide=arguments.get('n_hydroxide'),
             guard_width=arguments.get('guard_width', 0.8),
             guard_x0=arguments.get('guard_x0', 0.5),
+            charge_sites=charge_sites,
+            n_ref_sites=n_ref_sites,
         )
         guard = (f'pair guard on (n_hydronium {cv.n_hydronium}, n_hydroxide '
                  f'{cv.n_hydroxide}, width {cv.guard_width}, x0 {cv.guard_x0})'
                  if cv.pair_guard else 'pair guard off')
         logger.info(f'chargeseparation: reference {ref_idx.tolist()}, {len(h_idx)} H, '
                     f'{len(owner_idx)} owner sites, {len(ow_idx)} water O, '
-                    f'sigma {cv.sigma} A, {guard}')
+                    f'sigma {cv.sigma} A, {guard}'
+                    + (f', {charge_log}' if charge_sites is not None else ''))
         return cv
     elif name_lower == 'ionsitedistance':
         # Distance between the site atoms ('indices') and the H3O+ (mode 'acid') or
@@ -647,9 +734,9 @@ def process_grid(cv_settings):
     )
 
 
-def get_pysages_method(settings_dict, nbrs=None, species=None, box=None):
+def get_pysages_method(settings_dict, nbrs=None, species=None, box=None, input_atoms=None):
     """Process the parsed settings and return the enhanced sampling method object."""
-    cvs = [process_cv(cv, nbrs=nbrs, species=species, box=box)
+    cvs = [process_cv(cv, nbrs=nbrs, species=species, box=box, input_atoms=input_atoms)
            for cv in settings_dict['cv']]
     grid = process_grid(settings_dict['cv'])
 
@@ -709,6 +796,89 @@ def get_pysages_method(settings_dict, nbrs=None, species=None, box=None):
             f"Unknown PySAGES method: '{settings_dict['method']}'. "
             "Supported methods: abf, spectralabf, metad, harmonic, unbiased."
         )
+
+
+# CV options compared on a PySAGES restart; other CVs: type and atom indices only (some
+# keep values derived from the starting positions, e.g. CoordinationNumber.number_nn_max)
+_RESTART_CV_OPTIONS = {
+    'ChargeSeparation': ('water_sites', 'sigma', 'n_ref_water', 'pair_guard', 'n_hydronium',
+                         'n_hydroxide', 'guard_width', 'guard_x0', 'charge_sites',
+                         'n_ref_sites'),
+}
+
+
+def _method_settings(method):
+    """The settings of a PySAGES method that come from pysages_input: plain attributes
+    and kwargs of the method, grid, restraints, and per CV its type, atom indices and
+    options (_RESTART_CV_OPTIONS). Missing attributes (older pickles) read as None."""
+    def plain(v):
+        if v is None or isinstance(v, (bool, int, float, str)):
+            return v
+        if isinstance(v, (np.ndarray, jax.Array)) or (
+                isinstance(v, (list, tuple)) and all(np.isscalar(x) for x in v)):
+            return np.asarray(v)
+        return plain   # marker: not a plain value
+
+    out = {'method': type(method).__name__}
+    for k, v in list(vars(method).items()) + list(getattr(method, 'kwargs', {}).items()):
+        if k not in ('cvs', 'cv', 'grid', 'restraints', 'kwargs') and plain(v) is not plain:
+            out[k] = plain(v)
+    grid = getattr(method, 'grid', None)
+    if grid is not None:
+        out['grid'] = (np.asarray(grid.lower), np.asarray(grid.upper),
+                       np.asarray(grid.shape), bool(grid.is_periodic))
+    r = getattr(method, 'restraints', None)
+    out['restraints'] = None if r is None else tuple(np.asarray(x) for x in r)
+    for i, cv in enumerate(method.cvs):
+        name = type(cv).__name__
+        out[f'cv[{i}]'] = name
+        out[f'cv[{i}].indices'] = np.asarray(cv.indices)
+        for k in _RESTART_CV_OPTIONS.get(name, ()):
+            out[f'cv[{i}].{k}'] = plain(getattr(cv, k, None))
+    return out
+
+
+def _same(a, b):
+    if isinstance(a, tuple) or isinstance(b, tuple):
+        return (isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b)
+                and all(_same(x, y) for x, y in zip(a, b)))
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        if a is None or b is None:
+            return False
+        a, b = np.asarray(a), np.asarray(b)
+        if a.shape != b.shape:
+            return False
+        if a.dtype.kind in 'biuf' and b.dtype.kind in 'biuf':
+            return bool(np.allclose(a, b, rtol=1e-9, atol=1e-12))
+        return bool(np.all(a == b))
+    return a == b
+
+
+def warn_restart_method_mismatch(method, restored_method):
+    """Warn about every pysages_input setting in which the method built from it differs
+    from the one in the PySAGES restart file: a restart continues with the restart
+    file's method (CVs, grid, restraints, method arguments), so such input changes have
+    no effect. Returns the differing setting names. Only a diagnostic: a comparison that
+    fails is logged and never stops the run."""
+    try:
+        new, old = _method_settings(method), _method_settings(restored_method)
+        differ = [k for k in sorted(set(new) | set(old)) if not _same(new.get(k), old.get(k))]
+    except Exception as e:      # noqa: BLE001
+        logger.warning(f'PySAGES restart: could not compare pysages_input with the restart '
+                       f'file\'s method ({type(e).__name__}: {e}).')
+        return []
+
+    def show(v):
+        if isinstance(v, np.ndarray) and v.size > 6:
+            return f'array{v.shape} [{", ".join(map(str, v.ravel()[:3]))}, ...]'
+        if isinstance(v, tuple):
+            return '(' + ', '.join(show(x) for x in v) + ')'
+        return str(v.tolist() if isinstance(v, np.ndarray) else v)
+    for k in differ:
+        logger.warning(f'PySAGES restart: {k} in pysages_input is {show(new.get(k))}, but '
+                       f'{show(old.get(k))} in the restart file. The run continues with the '
+                       f'restart file\'s value; the pysages_input value has no effect.')
+    return differ
 
 
 def save_pysages_state(pysages_result, path_to_save):

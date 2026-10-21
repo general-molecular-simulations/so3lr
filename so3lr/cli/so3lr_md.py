@@ -54,6 +54,7 @@ try:
     from .so3lr_pysages_interface import (
         create_pysages_interface_fns, update_so3lr_after_pysages,
         save_pysages_state, parse_pysages_input, get_pysages_method,
+        warn_restart_method_mismatch,
         load_pysages_state, run_pysages_cycle, reset_pysages_runner
     )
     HAS_PYSAGES = True
@@ -2745,11 +2746,13 @@ def perform_md(
             pysages_set_dict,
             nbrs=nbrs,
             species=initial_geometry_dict['species'],
-            box=box
+            box=box,
+            input_atoms=initial_geometry
         )
         if restart_pysages:
             logger.info('Restarting from previous PySAGES run.')
             pysages_result = restart_data_pysages
+            warn_restart_method_mismatch(method, pysages_result.method)
         else:
             pysages_result = None
 

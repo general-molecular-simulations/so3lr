@@ -56,7 +56,7 @@ cuda12 = [
     "jax[cuda12]<0.11; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 pysages = [
-    "pysages @ git+https://github.com/em819/PySAGES.git@9ccaa07287feee1a4c33696e676f0a994cfec1c5",
+    "pysages @ git+https://github.com/em819/PySAGES.git@c95297417953021c6a461507b36c47d4dea7660a",
 ]
 tfds = [
     "importlib-resources>=6,<8",

@@ -1071,6 +1071,239 @@ class TestProcessCV:
         with pytest.raises(ValueError, match="share 1"):
             self._chargesep(pos, species, box, pair_guard=True, guard_width=1.0)
 
+    # charge_sites: the solute's other proton-owner sites carry charge too. Neutral
+    # reference = the system with the proton back on the N (ion=False).
+
+    @staticmethod
+    def _as_atoms(pos, species, box):
+        import ase
+        return ase.Atoms(numbers=species, positions=pos, cell=np.diag(box), pbc=True)
+
+    @staticmethod
+    def _neutral(pos):
+        """The H3O+ system with its excess proton back on the N (same atom order)."""
+        pos = pos.copy()
+        pos[np.all(np.isclose(pos, [7.67, 1.54, 2.80]), axis=1)] = [2.95, 1.75, 2.0]
+        return pos
+
+    def _chargesep_sites(self, pos, species, box, ref_pos=None, **kw):
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        import types
+        ref_pos = self._neutral(pos) if ref_pos is None else ref_pos
+        return process_cv({'type': 'chargeseparation', 'reference': [0], **kw},
+                          nbrs=types.SimpleNamespace(reference_position=jnp.asarray(pos)),
+                          species=species, box=jnp.asarray(box),
+                          input_atoms=self._as_atoms(ref_pos, species, box))
+
+    @staticmethod
+    def _protonated_carbonyl(pos):
+        """The excess proton moved from the H3O+ (O at 8, 2, 2) to the carbonyl O
+        (0.6, 3.23, 2; 1.86 A from the reference N), atom order unchanged."""
+        pos = pos.copy()
+        pos[np.flatnonzero(np.all(np.isclose(pos, [7.67, 1.54, 2.80]), axis=1))[0]] = [0.6, 4.20, 2.0]
+        return pos
+
+    def test_chargeseparation_charge_sites_default_is_water_only(self):
+        pos, species, box = self._proton_transfer_system()
+        cv = self._chargesep(pos, species, box)
+        assert cv.charge_sites is None and cv.n_ref_sites is None
+        cv2 = self._chargesep(pos, species, box, charge_sites='water')
+        assert cv2.charge_sites is None
+
+    def test_chargeseparation_charge_sites_all_groups_and_neutral_counts(self):
+        """'all': waters + every other owner site except the reference; neutral H counts
+        from the input structure (C 0, carbonyl O 0, waters 2)."""
+        pos, species, box = self._proton_transfer_system()
+        cv = self._chargesep_sites(pos, species, box, charge_sites='all')
+        owners = self._atoms(cv, 1)
+        sites = owners[np.asarray(cv.charge_sites)]
+        np.testing.assert_array_equal(sites, np.setdiff1d(np.flatnonzero(species != 1), [0]))
+        n0 = dict(zip(sites.tolist(), np.asarray(cv.n_ref_sites).tolist()))
+        assert n0[3] == 0.0 and n0[4] == 0.0
+        assert all(n0[o] == 2.0 for o in owners[np.asarray(cv.water_sites)])
+        # an explicit list adds those atoms to the waters
+        cv = self._chargesep_sites(pos, species, box, charge_sites=[4])
+        np.testing.assert_array_equal(owners[np.asarray(cv.charge_sites)],
+                                      np.union1d(owners[np.asarray(cv.water_sites)], [4]))
+
+    @staticmethod
+    def _tidy(pos):
+        """The fixture's N-H at (2, 3, 2) is 1.42 A from the carbonyl O, which so owns
+        0.0035 H; moved to (2, 2, 1) every solute site holds an integer H count to 1e-5,
+        as in real structures."""
+        pos = pos.copy()
+        pos[np.all(np.isclose(pos, [2.0, 3.0, 2.0]), axis=1)] = [2.0, 2.0, 1.0]
+        return pos
+
+    def test_chargeseparation_charge_sites_same_as_water_when_solute_neutral(self):
+        """With the solute sites neutral (no ion, or the H3O+ in the solvent) 'all' gives
+        the water-only value and gradient."""
+        for ion in (False, True):
+            pos, species, box = self._proton_transfer_system(ion=ion)
+            pos = self._tidy(pos)
+            plain = self._evaluate(self._chargesep(pos, species, box), pos)
+            ref_pos = self._neutral(pos) if ion else pos
+            cv = self._chargesep_sites(pos, species, box, ref_pos=ref_pos, charge_sites='all')
+            sites = self._evaluate(cv, pos)
+            assert sites[0] == pytest.approx(plain[0], abs=1e-4)
+            np.testing.assert_allclose(sites[1], plain[1], atol=1e-3)
+
+    def test_chargeseparation_charge_sites_proton_on_solute_site(self):
+        """Excess proton on the carbonyl O instead of a water: the water-only CV reads
+        the undissociated value (s ~ 0); with charge sites s is the distance of the
+        charge (1.86 A); the gradient is finite and matches finite differences."""
+        pos0, species, box = self._proton_transfer_system(ion=True)
+        pos0 = self._tidy(pos0)
+        pos = self._protonated_carbonyl(pos0)
+        plain = self._evaluate(self._chargesep(pos, species, box), pos)[0]
+        cv = self._chargesep_sites(pos, species, box, ref_pos=self._neutral(pos0),
+                                   charge_sites='all')
+        xi, grad = self._evaluate(cv, pos)
+        assert abs(plain) < 1e-3
+        assert xi == pytest.approx(np.hypot(1.4, 1.23), abs=1e-3)
+        assert np.all(np.isfinite(grad))
+        groups = [np.asarray(cv.indices)[np.asarray(g)] for g in cv.groups]
+        f = lambda X: float(cv.function(*(jnp.asarray(X)[g] for g in groups)))
+        h, k = 1e-5, np.unravel_index(np.argmax(np.abs(grad)), grad.shape)
+        dp, dm = pos.copy(), pos.copy()
+        dp[k] += h
+        dm[k] -= h
+        assert grad[k] == pytest.approx((f(dp) - f(dm)) / (2 * h), rel=1e-4)
+
+    def test_chargeseparation_neutral_reference_file(self, tmp_path):
+        """'neutral_reference' takes the counts from that file instead of the input."""
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        import ase.io
+        import types
+        pos, species, box = self._proton_transfer_system(ion=True)
+        path = tmp_path / 'neutral.xyz'
+        ase.io.write(path, self._as_atoms(self._neutral(pos), species, box), format='extxyz')
+        cv = process_cv({'type': 'chargeseparation', 'reference': [0],
+                         'charge_sites': 'all', 'neutral_reference': str(path)},
+                        nbrs=types.SimpleNamespace(reference_position=jnp.asarray(pos)),
+                        species=species, box=jnp.asarray(box),
+                        input_atoms=self._as_atoms(pos, species, box))   # dissociated: not used
+        ref = self._chargesep_sites(pos, species, box, charge_sites='all')
+        np.testing.assert_array_equal(np.asarray(cv.n_ref_sites), np.asarray(ref.n_ref_sites))
+
+    def test_chargeseparation_charge_sites_invalid_raises(self):
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        import types
+        pos, species, box = self._proton_transfer_system(ion=True)
+        nbrs = types.SimpleNamespace(reference_position=jnp.asarray(pos))
+        args = {'type': 'chargeseparation', 'reference': [0], 'charge_sites': 'all'}
+        with pytest.raises(ValueError, match="needs the input structure"):
+            process_cv(args, nbrs=nbrs, species=species, box=jnp.asarray(box))
+        # the dissociated structure (H3O+) is no neutral reference
+        with pytest.raises(ValueError, match="charged water"):
+            process_cv(args, nbrs=nbrs, species=species, box=jnp.asarray(box),
+                       input_atoms=self._as_atoms(pos, species, box))
+        with pytest.raises(ValueError, match="does not have the atoms"):
+            process_cv(args, nbrs=nbrs, species=species, box=jnp.asarray(box),
+                       input_atoms=self._as_atoms(pos[1:], species[1:], box))
+        with pytest.raises(ValueError, match="orthorhombic periodic cell"):
+            atoms = self._as_atoms(pos, species, box)
+            atoms.pbc = False
+            process_cv(args, nbrs=nbrs, species=species, box=jnp.asarray(box), input_atoms=atoms)
+        with pytest.raises(ValueError, match="reference atoms cannot"):
+            self._chargesep_sites(pos, species, box, charge_sites=[0, 4])
+        with pytest.raises(ValueError, match="must be owner sites"):
+            self._chargesep_sites(pos, species, box, charge_sites=[1])
+        with pytest.raises(ValueError, match="'water', 'all' or atom indices"):
+            self._chargesep_sites(pos, species, box, charge_sites='solute')
+
+    def test_chargeseparation_cv_pickled_without_charge_sites(self):
+        """A CV pickled before charge_sites existed (no such attributes) evaluates as
+        the water-only CV."""
+        import pickle
+        pos, species, box = self._proton_transfer_system(ion=True)
+        cv = self._chargesep(pos, species, box)
+        ref = self._evaluate(cv, pos)
+        old = pickle.loads(pickle.dumps(cv))
+        del old.charge_sites, old.n_ref_sites
+        val = self._evaluate(old, pos)
+        assert val[0] == ref[0]
+        np.testing.assert_array_equal(val[1], ref[1])
+        new = pickle.loads(pickle.dumps(self._chargesep_sites(pos, species, box, charge_sites='all')))
+        np.testing.assert_array_equal(np.asarray(new.charge_sites), np.asarray(
+            self._chargesep_sites(pos, species, box, charge_sites='all').charge_sites))
+
+
+class TestRestartMethodMismatch:
+    """warn_restart_method_mismatch: pysages_input settings that a PySAGES restart
+    ignores because it continues with the restart file's method."""
+
+    @staticmethod
+    def _settings(**restraint_kw):
+        r = {'lower': [0.5], 'upper': [9.5], 'kl': [1.0], 'ku': [1.0], **restraint_kw}
+        return {'method': 'abf', 'method_args': {'N': 150, 'use_pinv': True},
+                'restraints': r,
+                'cv': [{'type': 'distance', 'grp1': [0], 'grp2': [1], 'grid_min': 0.0,
+                        'grid_max': 10.0, 'grid_stride': 32, 'periodic': False}]}
+
+    @staticmethod
+    def _warnings(monkeypatch):
+        """Warnings of the interface's logger (it may not propagate to caplog once an
+        MD run has set up the SO3LR logger)."""
+        from so3lr.cli import so3lr_pysages_interface as iface
+        seen = []
+        monkeypatch.setattr(iface.logger, 'warning', lambda msg, *a, **k: seen.append(msg))
+        return seen
+
+    def test_identical_settings_no_warning(self, monkeypatch):
+        from so3lr.cli.so3lr_pysages_interface import get_pysages_method, warn_restart_method_mismatch
+        import pickle
+        seen = self._warnings(monkeypatch)
+        m = get_pysages_method(self._settings())
+        restored = pickle.loads(pickle.dumps(get_pysages_method(self._settings())))
+        assert warn_restart_method_mismatch(m, restored) == []
+        assert seen == []
+
+    def test_changed_settings_warn(self, monkeypatch):
+        from so3lr.cli.so3lr_pysages_interface import get_pysages_method, warn_restart_method_mismatch
+        seen = self._warnings(monkeypatch)
+        old = get_pysages_method(self._settings())
+        new = get_pysages_method(self._settings(kl=[0.2], ku=[0.2]))
+        assert warn_restart_method_mismatch(new, old) == ['restraints']
+        assert len(seen) == 1 and 'restraints' in seen[0] and 'has no effect' in seen[0]
+        s = self._settings()
+        s['method_args']['N'] = 300
+        s['cv'][0]['grid_stride'] = 64
+        s['cv'][0]['grp2'] = [2]
+        assert warn_restart_method_mismatch(get_pysages_method(s), old) == [
+            'N', 'cv[0].indices', 'grid']
+
+    def test_comparison_failure_does_not_stop_the_run(self, monkeypatch):
+        from so3lr.cli.so3lr_pysages_interface import get_pysages_method, warn_restart_method_mismatch
+        import types
+        seen = self._warnings(monkeypatch)
+        broken = types.SimpleNamespace(cvs=None)
+        assert warn_restart_method_mismatch(get_pysages_method(self._settings()), broken) == []
+        assert len(seen) == 1 and 'could not compare' in seen[0]
+
+    def test_chargeseparation_options(self):
+        """Old pickle (no charge_sites attributes) vs the default input: no warning;
+        vs an input with charge_sites: warning."""
+        from so3lr.cli.so3lr_pysages_interface import get_pysages_method, warn_restart_method_mismatch
+        import ase
+        import types
+        pos, species, box = TestProcessCV._proton_transfer_system(ion=True)
+        atoms = ase.Atoms(numbers=species, positions=TestProcessCV._neutral(pos),
+                          cell=np.diag(box), pbc=True)
+
+        def build(**kw):
+            s = {'method': 'abf', 'method_args': {'N': 150},
+                 'cv': [{'type': 'chargeseparation', 'reference': [0], 'grid_min': -7.0,
+                         'grid_max': 7.0, 'grid_stride': 32, 'periodic': False, **kw}]}
+            return get_pysages_method(s, nbrs=types.SimpleNamespace(reference_position=jnp.asarray(pos)),
+                                      species=species, box=jnp.asarray(box), input_atoms=atoms)
+        old = build()
+        del old.cvs[0].charge_sites, old.cvs[0].n_ref_sites
+        assert warn_restart_method_mismatch(build(), old) == []
+        assert warn_restart_method_mismatch(build(charge_sites='all'), old) == [
+            'cv[0].charge_sites', 'cv[0].n_ref_sites']
+        assert warn_restart_method_mismatch(build(sigma=0.25), old) == ['cv[0].sigma']
+
 
 class TestGetPysagesMethod:
     """Tests for get_pysages_method."""

@@ -2583,8 +2583,8 @@ wheels = [
 
 [[package]]
 name = "pysages"
-version = "0.1.dev624+g9ccaa0728"
-source = { git = "https://github.com/em819/PySAGES.git?rev=9ccaa07287feee1a4c33696e676f0a994cfec1c5#9ccaa07287feee1a4c33696e676f0a994cfec1c5" }
+version = "0.1.dev625+gc95297417"
+source = { git = "https://github.com/em819/PySAGES.git?rev=c95297417953021c6a461507b36c47d4dea7660a#c95297417953021c6a461507b36c47d4dea7660a" }
 dependencies = [
     { name = "cython" },
     { name = "dill" },
@@ -3021,7 +3021,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "optax", specifier = "<0.3" },
     { name = "orbax-checkpoint", specifier = "<0.13" },
-    { name = "pysages", marker = "extra == 'pysages'", git = "https://github.com/em819/PySAGES.git?rev=9ccaa07287feee1a4c33696e676f0a994cfec1c5" },
+    { name = "pysages", marker = "extra == 'pysages'", git = "https://github.com/em819/PySAGES.git?rev=c95297417953021c6a461507b36c47d4dea7660a" },
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "tensorflow", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'tfds'", specifier = ">=2.20,<2.22" },
     { name = "tensorflow-cpu", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'tfds') or (platform_machine == 'AMD64' and sys_platform == 'win32' and extra == 'tfds')", specifier = ">=2.20,<2.22" },

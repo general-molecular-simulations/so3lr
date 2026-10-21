@@ -531,6 +531,26 @@ def test_flash_pysages_falls_back_from_a_staged_mode(tmp_path, monkeypatch):
     assert len(cv) == 10 and int(np.asarray(method_state.hist).sum()) == 10
 
 
+def test_flash_runs_chargeseparation_charge_sites_as_perform_md(tmp_path, monkeypatch):
+    """chargeseparation with charge_sites: both engines take the neutral H counts from the
+    input structure (same CVs); a PySAGES restart whose pysages_input differs from the
+    restart file's method (here charge_sites) warns in both engines."""
+    pytest.importorskip("pysages")
+    cv = {"type": "chargeseparation", "reference": [4, 7], "charge_sites": "all",
+          "grid_min": -1.0, "grid_max": 1.0, "grid_stride": 20, "periodic": False}
+    kw = dict(pysages={"method": "unbiased", "cv": [cv]})
+    ref = _pysages_run(tmp_path, "standard", "standard", monkeypatch, **kw)
+    out = _pysages_run(tmp_path, "flash", "flash", monkeypatch, **kw)
+    for d in (ref, out):
+        assert "neutral H counts from the input structure" in (d / "out.log").read_text()
+    _check("CVs", _pysages_outputs(out)[3], _pysages_outputs(ref)[3], 1e-9)
+    restart = dict(restart_load_path=str(ref / "r.npz"), restart_pysages_load_path=str(ref / "r.pkl"),
+                   pysages={"method": "unbiased", "cv": [dict(cv, charge_sites="water")]})
+    for engine in ("standard", "flash"):
+        log = (_pysages_run(tmp_path, f"restart_{engine}", engine, monkeypatch, **restart) / "out.log").read_text()
+        assert "PySAGES restart: cv[0].charge_sites in pysages_input is None" in log
+
+
 def test_flash_saves_pysages_state_without_an_md_checkpoint(tmp_path, monkeypatch):
     """restart_pysages_save_path without restart_save_path: flash saves the PySAGES state
     alone, as perform_md does."""
