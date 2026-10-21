@@ -190,11 +190,13 @@ class TestHessianNumerical:
 # Contiguous atom ranges for subsystem Hessians, as functions of the atom count.
 # Ranges that do not start at atom 0 exercise the offset in the slice update
 # (calculate_hessian in ase_calculator.py), which a shape check cannot see.
+# Atom ranges of acetone (10 atoms) whose subsystem Hessian is checked: a block
+# that does not start at atom 0 is what catches a start_index offset bug.
 SUBSETS = {
-    'first': lambda n: list(range(min(5, n))),
-    'middle': lambda n: list(range(n // 4, min(n // 4 + 5, n))),
-    'last': lambda n: list(range(n - min(5, n), n)),
-    'single': lambda n: [n // 2],
+    'first': [0, 1, 2, 3, 4],
+    'middle': [2, 3, 4, 5, 6],
+    'last': [5, 6, 7, 8, 9],
+    'single': [5],
 }
 
 
@@ -209,9 +211,7 @@ class TestSubsystemHessian:
         full Hessian, for ranges at the start, middle and end, and a single atom.
         """
         atoms = read(package_dir / f'tests/test_data/{name}.xyz')
-        n_atoms = len(atoms)
-
-        output_atom_indices = SUBSETS[subset](n_atoms)
+        output_atom_indices = SUBSETS[subset]
 
         # Get full Hessian
         calc_full = AseCalculatorSparse.create_from_workdir(
@@ -258,7 +258,7 @@ class TestSubsystemHessian:
         print(f"Subsystem Hessian shape: {sub_hessian.shape}")
         print(f"Max difference: {np.max(np.abs(sub_hessian - full_hessian_block)):.2e}")
 
-        # Shape (n_subset, 3, n_subset, 3); assert_allclose also fails on a shape mismatch.
+        # assert_allclose broadcasts compatible shapes, so check the shape explicitly.
         n_subset = len(output_atom_indices)
         assert sub_hessian.shape == (n_subset, 3, n_subset, 3), \
             f"Expected Hessian shape {(n_subset, 3, n_subset, 3)}, got {sub_hessian.shape}"

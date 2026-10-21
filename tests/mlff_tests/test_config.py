@@ -49,10 +49,8 @@ def test_default_config_yaml_has_every_required_key():
         cfg = config_dict.ConfigDict(yaml.safe_load(stream))
 
     assert {'workdir', *REQUIRED_KEYS} <= set(cfg.keys())
-    missing = {
-        section: sorted(keys - set(cfg[section].keys()))
-        for section, keys in REQUIRED_KEYS.items()
-        if keys - set(cfg[section].keys())
-    }
+    missing = {section: sorted(keys - set(cfg[section].keys()))
+               for section, keys in REQUIRED_KEYS.items()}
+    missing = {section: keys for section, keys in missing.items() if keys}
     assert not missing, f'config.yaml lacks keys the trainer reads: {missing}'
     assert len(cfg.training.loss_weights) > 0

@@ -508,32 +508,32 @@ class TestParsePysagesInput:
 # CV dispatch table: settings 'type' -> the pysages.colvars class it must build.
 # The *_pbc entries need the simulation box.
 _CV_DISPATCH_CASES = [
-    ({'type': 'distance', 'grp1': [0, 1], 'grp2': [2, 3]}, False, 'Distance'),
-    ({'type': 'angle', 'indices': [0, 1, 2]}, False, 'Angle'),
-    ({'type': 'dihedral', 'indices': [0, 1, 2, 3]}, False, 'DihedralAngle'),
-    ({'type': 'gyrrad', 'indices': [0, 1, 2]}, False, 'RadiusOfGyration'),
-    ({'type': 'asphericity', 'indices': [0, 1, 2, 3]}, False, 'Asphericity'),
-    ({'type': 'acylindricity', 'indices': [0, 1, 2, 3]}, False, 'Acylindricity'),
-    ({'type': 'shapeanisotropy', 'indices': [0, 1, 2, 3]}, False, 'ShapeAnisotropy'),
-    ({'type': 'differenceofdistances', 'indices': [0, 1, 2, 3]}, False,
-     'DifferenceOfDistances'),
-    ({'type': 'distance_pbc', 'grp1': [0, 1], 'grp2': [2, 3]}, True, 'DistancePBC'),
-    ({'type': 'differenceofdistances_pbc', 'indices': [0, 1, 2, 3]}, True,
+    ({'type': 'distance', 'grp1': [0, 1], 'grp2': [2, 3]}, 'Distance'),
+    ({'type': 'angle', 'indices': [0, 1, 2]}, 'Angle'),
+    ({'type': 'dihedral', 'indices': [0, 1, 2, 3]}, 'DihedralAngle'),
+    ({'type': 'gyrrad', 'indices': [0, 1, 2]}, 'RadiusOfGyration'),
+    ({'type': 'asphericity', 'indices': [0, 1, 2, 3]}, 'Asphericity'),
+    ({'type': 'acylindricity', 'indices': [0, 1, 2, 3]}, 'Acylindricity'),
+    ({'type': 'shapeanisotropy', 'indices': [0, 1, 2, 3]}, 'ShapeAnisotropy'),
+    ({'type': 'differenceofdistances', 'indices': [0, 1, 2, 3]}, 'DifferenceOfDistances'),
+    ({'type': 'distance_pbc', 'grp1': [0, 1], 'grp2': [2, 3]}, 'DistancePBC'),
+    ({'type': 'differenceofdistances_pbc', 'indices': [0, 1, 2, 3]},
      'DifferenceOfDistancesPBC'),
 ]
+_PBC_CV_CASES = [cv for cv, _ in _CV_DISPATCH_CASES if cv['type'].endswith('_pbc')]
 
 
 class TestProcessCV:
     """Tests for process_cv."""
 
     @pytest.mark.parametrize(
-        "cv_dict,needs_box,cls_name", _CV_DISPATCH_CASES,
+        "cv_dict,cls_name", _CV_DISPATCH_CASES,
         ids=[case[0]['type'] for case in _CV_DISPATCH_CASES],
     )
-    def test_cv_dispatch(self, cv_dict, needs_box, cls_name):
+    def test_cv_dispatch(self, cv_dict, cls_name):
         from so3lr.cli.so3lr_pysages_interface import process_cv
         import pysages.colvars
-        box = jnp.array([10.0, 10.0, 10.0]) if needs_box else None
+        box = jnp.array([10.0, 10.0, 10.0]) if cv_dict['type'].endswith('_pbc') else None
         cv = process_cv(cv_dict, box=box)
         assert isinstance(cv, getattr(pysages.colvars, cls_name))
 
@@ -542,10 +542,7 @@ class TestProcessCV:
         with pytest.raises(ValueError, match="Unknown collective variable type"):
             process_cv({'type': 'nonexistent_cv'})
 
-    @pytest.mark.parametrize("cv_dict", [
-        {'type': 'distance_pbc', 'grp1': [0, 1], 'grp2': [2, 3]},
-        {'type': 'differenceofdistances_pbc', 'indices': [0, 1, 2, 3]},
-    ], ids=['distance_pbc', 'differenceofdistances_pbc'])
+    @pytest.mark.parametrize("cv_dict", _PBC_CV_CASES, ids=[cv['type'] for cv in _PBC_CV_CASES])
     def test_pbc_cv_without_box_raises(self, cv_dict):
         """The *_pbc dispatchers raise if `box` is not given. Without this
         guard the underlying colvar would fail with an opaque error far from
@@ -890,11 +887,11 @@ class TestUpdateAfterPysages:
 
     # ---- k_grid passthrough (real, not signature-only) -------------------
 
-    @pytest.mark.parametrize("with_k_grid", [True, False], ids=['array', 'none'])
-    def test_k_grid_passed_through(self, with_k_grid):
+    @pytest.mark.parametrize("k_grid_in", [np.array([[1.0, 2.0], [3.0, 4.0]]), None],
+                             ids=['array', 'none'])
+    def test_k_grid_passed_through(self, k_grid_in):
         from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
         result, *_ = self._make_nvt_inputs()
-        k_grid_in = jnp.array([[1.0, 2.0], [3.0, 4.0]]) if with_k_grid else None
 
         _, _, _, _, k_grid_out, _ = update_so3lr_after_pysages(
             result, init_fn=None, rng_key=None,

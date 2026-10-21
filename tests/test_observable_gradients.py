@@ -30,12 +30,16 @@ MODEL_DIR = resolve_model('so3lr').dir
 # per-atom observables checked through '<name>_jac'.
 GRAD_OBSERVABLES = ['nn_energy', 'electrostatic_energy', 'dispersion_energy']
 JAC_OBSERVABLES = ['partial_charges', 'hirshfeld_ratios']
+# Observable -> the calculator key holding its derivative.
+DERIVATIVE_KEYS = {**{o: f'{o}_grad' for o in GRAD_OBSERVABLES},
+                   **{o: f'{o}_jac' for o in JAC_OBSERVABLES}}
 
 # Non-contiguous on purpose: a mask that assumed a contiguous range, or dropped
 # the index altogether, would put atom 0's derivative under atom 2.
 OUTPUT_ATOM_INDICES = [0, 2]
 
-# Finite-difference step and tolerances of the earlier per-observable tests.
+# Finite-difference step and tolerances, carried over from the per-observable
+# tests this one replaced.
 EPS = 1e-4
 RTOL = 1e-3
 ATOL = 1e-5
@@ -88,18 +92,16 @@ def test_gradients_and_jacobians_match_finite_differences(name: str, package_dir
     n_atoms = len(atoms)
     positions = atoms.get_positions().copy()
 
-    calc_derivatives = _calculator(
-        [f'{o}_grad' for o in GRAD_OBSERVABLES] + [f'{o}_jac' for o in JAC_OBSERVABLES],
-        output_atom_indices=OUTPUT_ATOM_INDICES,
-    )
+    calc_derivatives = _calculator(list(DERIVATIVE_KEYS.values()),
+                                   output_atom_indices=OUTPUT_ATOM_INDICES)
     analytical = _observables_at(atoms, calc_derivatives, positions)
 
     # Plain observables: the reference values and the finite differences.
-    calc_plain = _calculator(GRAD_OBSERVABLES + JAC_OBSERVABLES)
+    calc_plain = _calculator(list(DERIVATIVE_KEYS))
     reference = _observables_at(atoms, calc_plain, positions)
 
     numerical = {idx: {o: np.zeros((n_atoms, 3) if o in JAC_OBSERVABLES else 3)
-                       for o in GRAD_OBSERVABLES + JAC_OBSERVABLES}
+                       for o in DERIVATIVE_KEYS}
                  for idx in OUTPUT_ATOM_INDICES}
     for idx in OUTPUT_ATOM_INDICES:
         for dim in range(3):
@@ -116,8 +118,7 @@ def test_gradients_and_jacobians_match_finite_differences(name: str, package_dir
                     np.array(obs_plus[o]) - np.array(obs_minus[o])) / (2 * EPS)
     atoms.set_positions(positions)
 
-    for o in GRAD_OBSERVABLES + JAC_OBSERVABLES:
-        key = f'{o}_grad' if o in GRAD_OBSERVABLES else f'{o}_jac'
+    for o, key in DERIVATIVE_KEYS.items():
         assert key in analytical, f"{key} not found in observables"
         derivatives = analytical[key]
         # Only the requested atoms, keyed by their index.

@@ -67,12 +67,12 @@ def pme_case(package_dir, full_test):
 
 
 def _kgrid(cell, method, smearing):
-    """k-grid at the converged spacing used throughout this file."""
-    from jaxpme.kspace import get_kgrid_mesh, get_kgrid_ewald
+    """(k_grid, k_smearing) from the production builder, at the converged
+    spacing used throughout this file: smearing/2 for ewald, /8 for the meshes."""
+    from so3lr.mlff.utils.kspace_utils import setup_kspace_grid
 
-    if method == 'ewald':
-        return get_kgrid_ewald(cell, jnp.array([smearing / 2]))
-    return get_kgrid_mesh(cell, jnp.array([smearing / 8]))
+    spacing = smearing / 2 if method == 'ewald' else smearing / 8
+    return setup_kspace_grid(method, smearing, spacing, cell)
 
 
 class TestPMEDirectComparison:
@@ -105,8 +105,7 @@ class TestPMEDirectComparison:
         cell = jnp.array(atoms.get_cell().array, dtype=DTYPE)
         positions = jnp.array(atoms.get_positions(), dtype=DTYPE)
 
-        k_grid = _kgrid(cell, 'ewald', smearing)
-        k_smearing = jnp.array([smearing])
+        k_grid, k_smearing = _kgrid(cell, 'ewald', smearing)
 
         # Store k-space info in atoms
         atoms.info['k_grid'] = np.array(k_grid)
@@ -162,7 +161,7 @@ class TestPMEDirectComparison:
         # Note: jax-pme already returns phi/2 to avoid double counting, so we just do sum(q * phi)
         direct_kspace_energy = jnp.sum(partial_charges * potentials) * KE
 
-        print(f"\nEWALD test:")
+        print("\nEWALD test:")
         print(f"  SO3LR k-space energy: {so3lr_kspace_energy:.6f} eV")
         print(f"  Direct k-space energy: {direct_kspace_energy:.6f} eV")
         print(f"  Difference: {so3lr_kspace_energy - direct_kspace_energy:.6e} eV")
@@ -195,8 +194,7 @@ class TestPMEJaxMD:
         atoms, smearing, lr_cutoff = pme_case
 
         cell_ase = np.array(atoms.get_cell().array, dtype=np.float64)
-        k_grid = _kgrid(jnp.array(cell_ase), kspace_method, smearing)
-        k_smearing = jnp.array([smearing])
+        k_grid, k_smearing = _kgrid(jnp.array(cell_ase), kspace_method, smearing)
 
         # ASE calculator, grid handed over in atoms.info
         atoms_ase = atoms.copy()
@@ -283,8 +281,6 @@ class TestPMEJaxMD:
         transposed deformation once the potential hands PME the lattice as rows,
         and the off-diagonal k-space stress comes out scaled by the wrong box length.
         """
-        from jaxpme.kspace import get_kgrid_mesh
-
         atoms, smearing, lr_cutoff = pme_case
         # Stretch one axis so the box is not cubic: a cubic box hides the error.
         atoms = atoms.copy()
@@ -294,8 +290,7 @@ class TestPMEJaxMD:
         box = jnp.array(cell.T)
         species = jnp.array(atoms.get_atomic_numbers())
         masses = jnp.array(atoms.get_masses())
-        k_grid = get_kgrid_mesh(jnp.array(cell), jnp.array([smearing / 8]))
-        k_smearing = jnp.array([smearing])
+        k_grid, k_smearing = _kgrid(jnp.array(cell), 'pme', smearing)
 
         displacement, shift = jax_md.space.periodic_general(box=box, fractional_coordinates=True)
         frac = jnp.array(atoms.get_scaled_positions(), dtype=DTYPE)

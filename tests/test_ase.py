@@ -90,7 +90,7 @@ def test_so3lr_ase_calculator(name: str):
 
     # Reference predictions were generated with the legacy (v1) model, so pin to
     # it explicitly; the no-arg default is so3lr-tauri-m-2606 (see
-    # tests/test_model_registry.py::test_default_resolves_to_the_new_m_model).
+    # tests/test_model_registry.py::test_defaults).
     calc = So3lrCalculator(
         model="so3lr",
         dtype=np.float64

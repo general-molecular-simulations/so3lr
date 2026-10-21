@@ -299,18 +299,12 @@ class TestLangevinRestart:
                        fractional_coordinates=True)
 
 
-# Restart builders and the state class load_state must rebuild, per ensemble.
+# Restart state builders, per ensemble.
 _STATE_BUILDERS = {
     'nve': lambda pos, mom, force, mass, box: _make_nve_state(pos, mom, force, mass),
     'nvt': lambda pos, mom, force, mass, box: _make_nvt_state(pos, mom, force, mass),
     'npt': _make_npt_state,
     'nvt-langevin': lambda pos, mom, force, mass, box: _make_langevin_state(pos, mom, force, mass),
-}
-_STATE_CLASSES = {
-    'nve': 'NVEState',
-    'nvt': 'NVTNoseHooverState',
-    'npt': 'NPTNoseHooverState',
-    'nvt-langevin': 'NVTLangevinState',
 }
 
 
@@ -353,7 +347,7 @@ class TestCoordinateConversion:
             path, ensemble=ensemble, fractional_coordinates=load_fractional
         )
 
-        assert isinstance(loaded_state, getattr(jax_md.simulate, _STATE_CLASSES[ensemble]))
+        assert type(loaded_state) is type(state)
         np.testing.assert_allclose(loaded_state.position, expected_pos, atol=1e-10)
         np.testing.assert_allclose(loaded_state.momentum, mom, atol=1e-10)
         np.testing.assert_allclose(loaded_state.force, force, atol=1e-10)
