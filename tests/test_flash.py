@@ -224,7 +224,6 @@ SETTINGS = dict(ensemble="nvt", model_path=None, lr_cutoff=12.0)
     (dict(observables=[]), None),
     (dict(fixed_atom_indices=[0, 1]), "relax_before_run"),
     (dict(fixed_atom_indices=[0, 1], relax_before_run=False), None),
-    (dict(fixed_atom_indices=[0, 1], restart_load_path="r.npz"), None),
     (dict(ensemble="npt", fixed_atom_indices=[0, 1], relax_before_run=False), "NPT box moves them"),
     (dict(mobile_atom_indices=[0, 1]), "mobile_atom_indices"),
     (dict(kspace_npt_cycles=10), None),
@@ -245,6 +244,12 @@ def test_engine_choice(monkeypatch, change, reason):
     monkeypatch.setattr(check, "device_problem", lambda: None)
     problem = check.flash_problem(dict(SETTINGS, **change), _water((3, 3, 3)))
     assert (problem is None) if reason is None else (reason in problem), problem
+
+
+def test_fixed_atoms_after_a_restart():
+    """A restart skips the relaxation before MD, so flash then takes fixed atoms with the default relax_before_run."""
+    assert check.settings_problem(dict(SETTINGS, fixed_atom_indices=[0, 1], restart_load_path="r.npz")) is None
+    assert "relax_before_run" in check.settings_problem(dict(SETTINGS, fixed_atom_indices=[0, 1]))
 
 
 def test_engine_choice_small_box(monkeypatch):
