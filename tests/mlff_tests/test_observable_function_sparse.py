@@ -4,6 +4,7 @@ Two defects lived here: the wrapper dropped 'a0_ratios' (the key the current
 so3lr-tauri-s/m/l models emit for the ratio head), and it ran a second full
 model.apply purely to read the non-energy outputs.
 """
+import functools
 import json
 import pathlib
 import pickle
@@ -35,7 +36,9 @@ def _water_inputs(n=3):
     )
 
 
+@functools.lru_cache(maxsize=None)
 def _load(model_name):
+    # One load per model; no test modifies the params.
     d = MODELS_DIR / model_name
     cfg = config_dict.ConfigDict(json.loads((d / 'hyperparameters.json').read_text()))
     params = training_utils.expand_observables_to_theory_levels(

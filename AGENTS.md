@@ -36,9 +36,9 @@ uv run pytest tests/test_ase.py -v                  # one file
 uv run pytest tests/test_integration.py --shard 1/3 # how CI splits the slow ones
 ```
 
-By default, tests marked `@pytest.mark.slow` are skipped and the parametrised
-molecule tests (`atat`, `dha`, `bb`) run only `dha`. Full runs take tens of
-minutes; prefer targeting the file that covers your change.
+By default, tests marked `@pytest.mark.slow` are skipped; `--full` runs them
+too. Full runs take tens of minutes; prefer targeting the file that covers your
+change.
 
 | Area | Tests |
 |---|---|

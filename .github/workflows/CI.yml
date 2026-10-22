@@ -71,8 +71,8 @@ jobs:
             #
             # test_pysages_doublewell.py validates PySAGES' own jax-md backend
             # rather than the SO3LR interface, so keep it in full mode only.
-            run_short: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py -v --tb=short --full"
-            run_full: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_doublewell.py -v --tb=short --full"
+            run_short: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py -v --tb=short --full"
+            run_full: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py tests/test_pysages_doublewell.py -v --tb=short --full"
           - group: 8
             name: "md-regressions"
             sync_extra: ""
@@ -84,8 +84,8 @@ jobs:
     runs-on: ubuntu-latest
     name: "${{ matrix.name }}"
     # The full md-regressions lane launches every drift case in a fresh Python
-    # process. MeluXina timing for those cases alone is about 61 minutes, so it
-    # needs more headroom than the other full-suite shards on hosted runners.
+    # process. Jitting the drift loop cut those cases from about 61 minutes on
+    # MeluXina to a fraction of that; the headroom below predates the change.
     timeout-minutes: ${{ (github.event.inputs.test_mode == 'full' || contains(github.event.head_commit.message, '[full tests]')) && (matrix.name == 'md-regressions' && 180 || 90) || 60 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

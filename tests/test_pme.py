@@ -6,6 +6,8 @@ the SO3LR model matches direct calculations using jax-pme with the same
 partial charges.
 """
 
+import functools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -98,6 +100,13 @@ def pme_case(package_dir, full_test):
     if full_test:
         return box * [2, 2, 2], 4.0, 12.
     return box, KSPACE_SMEARING, KSPACE_LR_CUTOFF
+
+
+@functools.cache
+def _jaxmd_potential(kspace_method, lr_cutoff):
+    """So3lrPotential for the default model, built once per (method, cutoff): the
+    ASE-agreement test (pme) and the shear test use the same one."""
+    return So3lrPotential(dtype=DTYPE, lr_cutoff=lr_cutoff, coulomb_kspace_method=kspace_method)
 
 
 def _kgrid(cell, method, smearing):
@@ -338,13 +347,9 @@ class TestPMEJaxMD:
         positions = jnp.array(atoms.get_positions(), dtype=DTYPE)
 
         neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
-            potential=So3lrPotential(
-                dtype=DTYPE,
-                # Same cutoff switch as the ASE cases: at the default 12 A the
-                # 192-atom box (12.4 A) would violate minimum image.
-                lr_cutoff=lr_cutoff,
-                coulomb_kspace_method=kspace_method,
-            ),
+            # Same cutoff switch as the ASE cases: at the default 12 A the
+            # 192-atom box (12.4 A) would violate minimum image.
+            potential=_jaxmd_potential(kspace_method, lr_cutoff),
             displacement_or_metric=displacement,
             shift_fn=shift,
             box_size=box,
@@ -413,7 +418,7 @@ class TestPMEJaxMD:
         displacement, shift = jax_md.space.periodic_general(box=box, fractional_coordinates=True)
         frac = jnp.array(atoms.get_scaled_positions(), dtype=DTYPE)
         neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
-            potential=So3lrPotential(dtype=DTYPE, lr_cutoff=lr_cutoff, coulomb_kspace_method='pme'),
+            potential=_jaxmd_potential('pme', lr_cutoff),
             displacement_or_metric=displacement, shift_fn=shift, box_size=box,
             species=species, capacity_multiplier=1.5, buffer_size_multiplier_sr=1.5,
             buffer_size_multiplier_lr=1.5, minimum_cell_size_multiplier_sr=1.0,

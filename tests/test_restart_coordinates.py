@@ -3,15 +3,9 @@
 When a restart file is saved with one coordinate system (e.g., fractional)
 and loaded into a simulation using a different coordinate system (e.g.,
 cartesian), positions and momenta must be converted. These tests verify
-that save_state/load_state handle this correctly, and that full MD
-simulations produce correct results across coordinate system switches.
+that save_state/load_state handle this correctly; the end-to-end restarts
+across coordinate systems are in tests/test_pysages_cli.py.
 """
-
-import os
-import shutil
-import pathlib
-import subprocess
-import importlib.util
 
 import pytest
 import numpy as np
@@ -19,52 +13,12 @@ import jax
 import jax.numpy as jnp
 import jax_md
 
-import yaml
-
-
 from so3lr.cli.so3lr_md import (
     save_state,
     load_state,
     RestartInNewEnsembleError,
     RestartSchemaMismatchError,
 )
-
-
-TEST_DATA_DIR = pathlib.Path(__file__).resolve().parent / "test_data"
-GEOMETRY_FILE = TEST_DATA_DIR / "benzoic_acid_aq_1.xyz"
-
-# Settings shared by the cross-coordinate restart integration runs.
-# Values mirror the historical basic_test/so3lr_vanilla/md_settings.yaml.
-# input_file/output_file/log_file are filled in at fixture time.
-_BASE_MD_SETTINGS = {
-    'precision': 'float64',
-    'total_charge': 0.0,
-    'lr_cutoff': 12.0,
-    'relax_before_run': True,
-    'min_cycles': 10,
-    'min_steps': 20,
-    'min_start_dt': 0.05,
-    'min_max_dt': 0.1,
-    'min_n_min': 2,
-    'md_dt': 0.5,  # fs (the CLI/YAML convention; converted fs->ps internally)
-    'md_T': 300,
-    'md_cycles': 2,
-    'md_steps': 500,
-}
-
-_PYSAGES_INPUT_UNBIASED = {
-    'method': 'unbiased',
-    'cv': [{
-        'type': 'coordinationnumber',
-        'indices': [4, 7],
-        'cn_exps': [6, 30],
-        'species': 1,
-        'grid_min': 0.0,
-        'grid_max': 1.5,
-        'grid_stride': 64,
-        'periodic': False,
-    }],
-}
 
 
 # ===========================================================================
@@ -137,79 +91,6 @@ def _make_langevin_state(position, momentum, force, mass, rng=None):
         mass=mass,
         rng=rng,
     )
-
-
-def _run_so3lr_simulation(workdir, settings_file='md_settings.yaml'):
-    """Run an SO3LR simulation in the given directory."""
-    result = subprocess.run(
-        ['so3lr', '--settings', settings_file],
-        cwd=workdir,
-        capture_output=True,
-        text=True,
-        env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
-    )
-    assert result.returncode == 0, (
-        f"SO3LR simulation failed in {workdir} with return code {result.returncode}\n"
-        f"STDERR:\n{result.stderr}"
-    )
-    return result
-
-
-def _parse_md_observables(log_path):
-    """Parse MD observables from an out.log file.
-
-    Returns a list of dicts with keys: step, E, KE, PE, H, T
-    """
-    results = []
-    with open(log_path) as f:
-        for line in f:
-            if "INFO - " in line:
-                content = line.split("INFO - ", 1)[1]
-            else:
-                content = line
-            parts = content.strip().split('\t')
-            if len(parts) == 7:
-                try:
-                    results.append({
-                        'step': int(parts[0]),
-                        'E': float(parts[1]),
-                        'KE': float(parts[2]),
-                        'PE': float(parts[3]),
-                        'H': float(parts[4]),
-                        'T': float(parts[5]),
-                    })
-                except (ValueError, IndexError):
-                    continue
-    return results
-
-
-def _prepare_run_dir(tmp_path, name, md_overrides=None, pysages_input=None):
-    """Create a self-contained SO3LR run directory.
-
-    Copies the committed benzoic_acid_aq_1.xyz geometry, writes md_settings.yaml
-    built from _BASE_MD_SETTINGS + any md_overrides, and optionally writes
-    pysages_input.yaml. Replaces the previous _setup_simulation_dir, which
-    relied on an external basic_test/ source tree.
-    """
-    run_dir = tmp_path / name
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    shutil.copy2(GEOMETRY_FILE, run_dir / "benzoic_acid_aq_1.xyz")
-
-    settings = dict(_BASE_MD_SETTINGS)
-    settings['input_file'] = 'benzoic_acid_aq_1.xyz'
-    settings['output_file'] = 'traj.xyz'
-    settings['log_file'] = 'out.log'
-    if md_overrides:
-        settings.update(md_overrides)
-    with open(run_dir / "md_settings.yaml", 'w') as f:
-        yaml.dump(settings, f)
-
-    if pysages_input is not None:
-        with open(run_dir / "pysages_input.yaml", 'w') as f:
-            yaml.dump(pysages_input, f)
-
-    return run_dir
 
 
 # ===========================================================================
@@ -501,161 +382,3 @@ class TestRestartResetWithCoordinateConversion:
                 path, ensemble='nvt', restart_reset=True,
                 fractional_coordinates=True
             )
-
-
-# ===========================================================================
-# Integration tests: cross-coordinate restart with full MD simulations
-# ===========================================================================
-
-@pytest.mark.slow
-@pytest.mark.skipif(
-    importlib.util.find_spec("pysages") is None,
-    reason="PySAGES is an optional dependency",
-)
-class TestCrossCoordinateRestart:
-    """Integration tests: verify that restarting across coordinate systems
-    produces physically correct results.
-
-    Test 1 (fractional -> cartesian): Run vanilla NVT (fractional coords)
-    for 2 cycles, save restart, then restart with PySAGES unbiased
-    (cartesian coords) for 2 more cycles. Compare the last 2 cycles
-    against a continuous 4-cycle PySAGES unbiased run.
-
-    Test 2 (cartesian -> fractional): Run PySAGES unbiased (cartesian coords)
-    for 2 cycles, save restart, then restart as vanilla NVT (fractional
-    coords) for 2 more cycles. Compare the last 2 cycles against a
-    continuous 4-cycle vanilla NVT run.
-    """
-
-    @pytest.fixture(scope="class")
-    def frac_to_cart_results(self, tmp_path_factory):
-        """Fractional->cartesian restart: vanilla NVT then PySAGES unbiased."""
-        tmp_path = tmp_path_factory.mktemp("frac_to_cart")
-
-        # --- Continuous 4-cycle PySAGES unbiased run (reference) ---
-        continuous_dir = _prepare_run_dir(
-            tmp_path, "continuous",
-            md_overrides={
-                'md_cycles': 4,
-                'do_enhanced_sampling': True,
-                'enforce_cartesian_coordinates': True,
-            },
-            pysages_input=_PYSAGES_INPUT_UNBIASED,
-        )
-        _run_so3lr_simulation(continuous_dir)
-
-        # --- First 2 cycles: vanilla NVT (fractional coords) ---
-        first_dir = _prepare_run_dir(
-            tmp_path, "first_vanilla",
-            md_overrides={
-                'md_cycles': 2,
-                'restart_save_path': './restart.npz',
-            },
-        )
-        _run_so3lr_simulation(first_dir)
-
-        # --- Restart: PySAGES unbiased (cartesian coords) for 2 more cycles ---
-        restart_dir = _prepare_run_dir(
-            tmp_path, "restart_pysages",
-            md_overrides={
-                'md_cycles': 2,
-                'do_enhanced_sampling': True,
-                'enforce_cartesian_coordinates': True,
-                'restart_load_path': './restart.npz',
-                'restart_save_path': './restart2.npz',
-            },
-            pysages_input=_PYSAGES_INPUT_UNBIASED,
-        )
-        shutil.copy2(first_dir / "restart.npz", restart_dir)
-        _run_so3lr_simulation(restart_dir)
-
-        return {
-            'continuous_log': continuous_dir / "out.log",
-            'restart_log': restart_dir / "out.log",
-        }
-
-    @pytest.fixture(scope="class")
-    def cart_to_frac_results(self, tmp_path_factory):
-        """Cartesian->fractional restart: PySAGES unbiased then vanilla NVT."""
-        tmp_path = tmp_path_factory.mktemp("cart_to_frac")
-
-        # --- Continuous 4-cycle vanilla NVT run (reference) ---
-        continuous_dir = _prepare_run_dir(
-            tmp_path, "continuous",
-            md_overrides={'md_cycles': 4},
-        )
-        _run_so3lr_simulation(continuous_dir)
-
-        # --- First 2 cycles: PySAGES unbiased (cartesian coords) ---
-        first_dir = _prepare_run_dir(
-            tmp_path, "first_pysages",
-            md_overrides={
-                'md_cycles': 2,
-                'do_enhanced_sampling': True,
-                'enforce_cartesian_coordinates': True,
-                'restart_save_path': './restart.npz',
-            },
-            pysages_input=_PYSAGES_INPUT_UNBIASED,
-        )
-        _run_so3lr_simulation(first_dir)
-
-        # --- Restart: vanilla NVT (fractional coords) for 2 more cycles ---
-        restart_dir = _prepare_run_dir(
-            tmp_path, "restart_vanilla",
-            md_overrides={
-                'md_cycles': 2,
-                'restart_load_path': './restart.npz',
-                'restart_save_path': './restart2.npz',
-            },
-        )
-        shutil.copy2(first_dir / "restart.npz", restart_dir)
-        _run_so3lr_simulation(restart_dir)
-
-        return {
-            'continuous_log': continuous_dir / "out.log",
-            'restart_log': restart_dir / "out.log",
-        }
-
-    def test_frac_to_cart_restart_matches_continuous(self, frac_to_cart_results):
-        """Last 2 cycles of frac->cart restart should match cycles 3-4 of
-        continuous PySAGES unbiased run."""
-        continuous = _parse_md_observables(frac_to_cart_results['continuous_log'])
-        restarted = _parse_md_observables(frac_to_cart_results['restart_log'])
-
-        assert len(continuous) >= 4, f"Expected >= 4 data points, got {len(continuous)}"
-        assert len(restarted) >= 2, f"Expected >= 2 data points, got {len(restarted)}"
-
-        cont_last2 = continuous[-2:]
-        rest_last2 = restarted[-2:]
-
-        for c, r in zip(cont_last2, rest_last2):
-            np.testing.assert_allclose(c['E'], r['E'], atol=1e-6,
-                err_msg=f"Total energy mismatch at step {c['step']}")
-            np.testing.assert_allclose(c['KE'], r['KE'], atol=1e-6,
-                err_msg=f"Kinetic energy mismatch at step {c['step']}")
-            np.testing.assert_allclose(c['PE'], r['PE'], atol=1e-6,
-                err_msg=f"Potential energy mismatch at step {c['step']}")
-            np.testing.assert_allclose(c['T'], r['T'], atol=0.1,
-                err_msg=f"Temperature mismatch at step {c['step']}")
-
-    def test_cart_to_frac_restart_matches_continuous(self, cart_to_frac_results):
-        """Last 2 cycles of cart->frac restart should match cycles 3-4 of
-        continuous vanilla NVT run."""
-        continuous = _parse_md_observables(cart_to_frac_results['continuous_log'])
-        restarted = _parse_md_observables(cart_to_frac_results['restart_log'])
-
-        assert len(continuous) >= 4, f"Expected >= 4 data points, got {len(continuous)}"
-        assert len(restarted) >= 2, f"Expected >= 2 data points, got {len(restarted)}"
-
-        cont_last2 = continuous[-2:]
-        rest_last2 = restarted[-2:]
-
-        for c, r in zip(cont_last2, rest_last2):
-            np.testing.assert_allclose(c['E'], r['E'], atol=1e-6,
-                err_msg=f"Total energy mismatch at step {c['step']}")
-            np.testing.assert_allclose(c['KE'], r['KE'], atol=1e-6,
-                err_msg=f"Kinetic energy mismatch at step {c['step']}")
-            np.testing.assert_allclose(c['PE'], r['PE'], atol=1e-6,
-                err_msg=f"Potential energy mismatch at step {c['step']}")
-            np.testing.assert_allclose(c['T'], r['T'], atol=0.1,
-                err_msg=f"Temperature mismatch at step {c['step']}")

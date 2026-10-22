@@ -13,7 +13,7 @@ Without the TFDS extra, its data-loader tests are skipped. Add `--extra pysages`
 to exercise the enhanced-sampling tests as well. Focused non-TFDS test files can
 use the base locked environment.
 
-Run the full test suite (includes slow tests and all molecule parametrizations):
+Run the full test suite (includes slow tests):
 
 ```bash
 uv run --no-sync pytest tests/ --full
@@ -21,11 +21,7 @@ uv run --no-sync pytest tests/ --full
 
 ### Short vs Full
 
-By default, pytest runs a lightweight subset:
-- Tests marked `@pytest.mark.slow` are skipped
-- For parametrized molecule tests (`atat`, `dha`, `bb`), only `dha` is run
-
-With `--full`, everything runs including slow tests and all molecule parametrizations. See [`conftest.py`](conftest.py) for details.
+By default, tests marked `@pytest.mark.slow` are skipped; `--full` runs them too. See [`conftest.py`](conftest.py) for details.
 
 ### Run a specific test file or test case
 
@@ -65,4 +61,4 @@ Unit tests for the underlying MLFF framework (model fitting, loss functions, nei
 
 ### `test_data/`
 
-Reference data for tests: molecular geometries (`.xyz`) and pre-computed predictions (`.npz`) for molecules like DHA, alanine tetrapeptide (atat), buckyball-catcher (bb), and water.
+Reference data for tests: molecular geometries (`.xyz`) and pre-computed predictions (`.npz`) for molecules like DHA and water.

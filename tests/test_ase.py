@@ -35,7 +35,12 @@ def test_bounding_cell_does_not_change_free_molecule():
 
 
 def test_water():
+    """Periodic water box against saved references, and its energy decomposition.
 
+    The components are read from the same evaluation (requesting observables
+    does not change the energy, see test_observables.py), so the 1536-atom box
+    is evaluated once for both checks.
+    """
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
     target_predictions = np.load(package_dir / f'tests/test_data/water_ase.npz')
@@ -49,7 +54,9 @@ def test_water():
         lr_cutoff=12.,
         dispersion_energy_cutoff_lr_damping=2.,
         from_file=True,
-        dtype=np.float64
+        dtype=np.float64,
+        has_aux=True,
+        observables=['zbl_repulsion', 'nn_energy', 'electrostatic_energy', 'dispersion_energy']
     )
 
     atoms.calc = calc
@@ -76,6 +83,20 @@ def test_water():
 
     with npt.assert_raises(AssertionError):
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
+
+    # The energy components sum to the total for the periodic box too.
+    results = calc.results['aux']
+    sum_components = sum(
+        np.sum(results[key])
+        for key in ('nn_energy', 'electrostatic_energy', 'dispersion_energy', 'zbl_repulsion')
+    )
+    npt.assert_allclose(
+        sum_components,
+        energy,
+        rtol=1e-4,
+        atol=1e-5,
+        err_msg="Energy components don't sum to total for water box"
+    )
 
 
 @pytest.mark.parametrize('name', ['dha'])
@@ -133,13 +154,16 @@ def test_so3lr_ase_calculator(name: str):
 
 @pytest.mark.parametrize('calculate_stress', [True, False])
 def test_so3lr_ase_calculator_stress(calculate_stress: bool):
+    """Stress only when asked for. A contract test, so the 192-atom cell suffices:
+    below twice the cutoff the calculator uses explicit images, and stress values
+    are checked against finite differences in test_ase_small_cell.py."""
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
     atoms = read(
         package_dir / f'tests/test_data/water_64.xyz'
-    ) * [2, 2, 2]
+    )
 
     calc = So3lrCalculator(
         model="so3lr",

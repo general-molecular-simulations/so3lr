@@ -1,8 +1,8 @@
 """
 Pytest configuration for so3lr tests.
 
-Adds a --full option to run comprehensive versions of tests.
-By default, slow tests run a lighter version (e.g., fewer atoms).
+Adds a --full option that also runs the tests marked @pytest.mark.slow, which
+are skipped by default.
 
 Adds a --shard i/n option that splits a run into duration-balanced slices, used
 by CI to keep any single job well under the runner's practical wall-clock and
@@ -12,44 +12,40 @@ import jax
 import pytest
 
 # Measured wall-clock seconds, used to (a) order slow tests first and (b) balance
-# --shard slices. Values come from a passing ubuntu-latest CI run; they only need
-# to be roughly right, since both consumers care about relative size.
+# --shard slices. They only need to be roughly right, since both consumers care
+# about relative size.
 #
 # This table needs to be manually maintained by developers as new tests are added
 # and timings are collected. A test that is missing here is assumed to cost
 # DEFAULT_TEST_DURATION, which is deliberately non-zero so unknown tests still
 # get spread across shards instead of piling into shard 1.
 KNOWN_SLOW_TEST_DURATIONS = {
-    # tests/test_integration.py -- measured 2026-08 (previously ~5x stale)
-    # restart_checkpoint: 621 s before its input shrank from 3072 to 1536 atoms.
-    # 340 s is that 621 s scaled by the 1.81x speedup measured locally through
-    # pytest (95.8 s -> 52.9 s); refresh from a real CI run when convenient.
-    'tests/test_integration.py::test_integration_case[restart_checkpoint]': 340.0,
-    'tests/test_integration.py::test_integration_case[kspace_electrostatics_p3m]': 411.0,
-    'tests/test_integration.py::test_integration_case[npt_ensemble]': 318.0,
-    'tests/test_integration.py::test_integration_case[restart_ensemble_change]': 59.0,
-    'tests/test_integration.py::test_integration_case[observables]': 55.0,
-    'tests/test_integration.py::test_integration_case[initial_velocities]': 31.0,
-    'tests/test_integration.py::test_integration_case[nve_ensemble]': 29.0,
-    'tests/test_integration.py::test_integration_case[nvt_langevin]': 28.0,
-    'tests/test_integration.py::TestSO3LRCLIOptions::test_nvt_with_relax[trajectory.hdf5]': 49.0,
-    'tests/test_integration.py::TestSO3LRCLIOptions::test_nvt_with_relax[trajectory.xyz]': 49.0,
+    # Measured 2026-10-21 on MeluXina (pytest --durations, 8 xdist workers).
+    # tests/test_integration.py
+    'tests/test_integration.py::test_integration_case[restart_checkpoint]': 60.0,
+    'tests/test_integration.py::test_integration_case[restart_ensemble_change]': 56.0,
+    'tests/test_integration.py::test_integration_case[observables]': 41.0,
+    'tests/test_integration.py::test_integration_case[kspace_electrostatics_p3m]': 37.0,
+    'tests/test_integration.py::test_integration_case[npt_ensemble]': 35.0,
+    'tests/test_integration.py::test_integration_case[nvt_langevin]': 31.0,
+    'tests/test_integration.py::test_integration_case[initial_velocities]': 30.0,
+    'tests/test_integration.py::test_integration_case[nve_ensemble]': 28.0,
+    'tests/test_integration.py::TestSO3LRCLIOptions::test_nvt_with_relax[trajectory.hdf5]': 39.0,
+    'tests/test_integration.py::TestSO3LRCLIOptions::test_nvt_with_relax[trajectory.xyz]': 40.0,
     'tests/test_integration.py::TestSO3LRCLISubcommands::test_opt_subcommand': 30.0,
-    'tests/test_integration.py::TestSO3LRCLISubcommands::test_nvt_subcommand': 27.0,
-    'tests/test_integration.py::TestSO3LRCLISubcommands::test_nve_subcommand': 26.0,
+    'tests/test_integration.py::TestSO3LRCLISubcommands::test_nvt_subcommand': 29.0,
+    'tests/test_integration.py::TestSO3LRCLISubcommands::test_nve_subcommand': 28.0,
     # other suites
-    # CLI subprocess runs: each spawns a real `so3lr nvt`, so they dominate the
-    # charge-embed file. Measured locally 2026-08-19.
-    'tests/test_charge_embed_override.py::TestChargeEmbedOverrideCLI::test_settings_yaml_route': 20.0,
-    'tests/test_charge_embed_override.py::TestChargeEmbedOverrideCLI::test_command_line_flag_matches_settings_yaml': 10.0,
-    'tests/test_charge_embed_override.py::TestChargeEmbedOverrideCLI::test_command_line_flag_changes_the_run': 10.0,
-    'tests/mlff_tests/test_data_loader_ase.py::test_data_load_with_pbc[True]': 198.23,
-    'tests/test_cli_train.py::test_cli_train_water_pbc_with_long_range': 112.14,
-    'tests/test_cli_train.py::test_cli_train_forces_and_energy_with_lse_shifts': 91.94,
-    'tests/test_cli_finetune.py::test_cli_finetune[full]': 80.94,
-    'tests/test_cli_finetune.py::test_cli_finetune[last_layer]': 80.94,
-    'tests/test_cli_finetune.py::test_cli_finetune[final_mlp]': 80.94,
-    'tests/test_cli_finetune.py::test_cli_finetune[forces_only]': 80.94,
+    # CLI subprocess runs: the shared `so3lr nvt` runs land on whichever test
+    # asks for them first.
+    'tests/test_charge_embed_override.py::TestChargeEmbedOverrideCLI::test_settings_yaml_route': 112.0,
+    'tests/test_charge_embed_override.py::TestChargeEmbedOverrideCLI::test_command_line_flag_changes_the_run': 1.0,
+    'tests/test_charge_embed_override.py::TestChargeEmbedOverrideCLI::test_command_line_flag_matches_settings_yaml': 1.0,
+    'tests/test_cli_train.py::test_cli_train_forces_and_energy_with_lse_shifts': 79.0,
+    'tests/test_cli_train.py::test_cli_train_water_pbc_with_long_range': 60.0,
+    'tests/test_cli_finetune.py::test_cli_finetune[last_layer]': 35.0,
+    'tests/test_cli_finetune.py::test_cli_finetune[forces_only]': 31.0,
+    'tests/mlff_tests/test_data_loader_ase.py::test_data_load_with_pbc[True]': 13.0,
 }
 
 # Cost assumed for a test with no entry above.
@@ -133,27 +129,26 @@ def pytest_configure(config):
 
 def pytest_collection_modifyitems(config, items):
     """Modify test collection:
-    - Unless --full: skip @pytest.mark.slow and non-'dha' molecule params
-    - Order known long-running tests first so xdist workers pick them up earlier
+    - Unless --full: skip @pytest.mark.slow
+    - Order the modules holding known long-running tests first, each module kept
+      together in file order, so module- and class-scoped fixtures are built once
     - With --shard i/n: keep only this shard's duration-balanced slice
     """
     if not config.getoption("--full"):
         skip_slow = pytest.mark.skip(reason="Slow test (use --full to run)")
-        # Molecule names to skip in short mode (keep only 'dha')
-        skip_molecules = {"atat", "bb"}
-
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
 
-            # Skip non-default molecule parametrizations
-            if hasattr(item, "callspec") and "name" in item.callspec.params:
-                if item.callspec.params["name"] in skip_molecules:
-                    item.add_marker(pytest.mark.skip(
-                        reason=f"Molecule '{item.callspec.params['name']}' only runs with --full"
-                    ))
-
-        items.sort(key=lambda item: _test_duration(item), reverse=True)
+        # Sorting single tests by duration would split a class or module, and pytest
+        # then tears down its class/module fixtures and builds them again.
+        def module(item):
+            return item.nodeid.split('::', 1)[0]
+        weight = {}
+        for item in items:
+            weight[module(item)] = max(weight.get(module(item), 0.0), _test_duration(item))
+        position = {id(item): i for i, item in enumerate(items)}
+        items.sort(key=lambda item: (-weight[module(item)], position[id(item)]))
 
     shard = config.getoption("--shard")
     if shard is not None:
@@ -163,7 +158,10 @@ def pytest_collection_modifyitems(config, items):
         deselected = [item for item in items if id(item) not in keep]
         if deselected:
             config.hook.pytest_deselected(items=deselected)
-        items[:] = selected
+        # _shard_items packs by duration; run the shard in the order above so a
+        # module's tests stay together.
+        order = {id(item): i for i, item in enumerate(items)}
+        items[:] = sorted(selected, key=lambda item: order[id(item)])
 
 
 @pytest.fixture

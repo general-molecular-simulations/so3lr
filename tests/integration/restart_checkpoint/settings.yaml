@@ -1,22 +1,21 @@
 # Restart checkpoint test - tests saving and loading restart files
-# This is a two-phase test:
-# 1. First run saves a restart file (setup phase)
-# 2. Second run loads from the restart file (actual test)
-#
-# NOTE: This test requires running setup_restart.py first to generate the restart file
+# This is a two-phase test (the harness runs both):
+# 1. setup_settings.yaml saves a restart file (setup phase)
+# 2. this file loads from the restart file (actual test)
 
-input_file: input.xyz
+input_file: benzoic_acid_aq_1.xyz  # from tests/test_data
 output_file: trajectory.hdf5
 log_file: so3lr.log
 
 # Model settings
-# 512-molecule periodic water box (tests/test_data/water_64.xyz tiled 2x2x2).
-# This case validates restart-file round-tripping, not numerics: restart.npz
-# stores only positions/momenta/forces/masses, the box, the step counter and the
-# thermostat chain -- nothing that scales in kind with system size. The box must
-# still be periodic (box is one of the round-tripped fields) and at least twice
-# lr_cutoff for minimum image, and check_cell() rejects lr_cutoff < 10 A, which
-# together put the floor at ~20 A / ~800 atoms.
+# One benzoic acid molecule (15 atoms) in a periodic 25 A box. This case
+# validates restart-file round-tripping, not numerics: restart.npz stores only
+# positions/momenta/forces/masses, the box, the step counter and the thermostat
+# chain -- nothing that scales in kind with system size. The box must still be
+# periodic (box is one of the round-tripped fields) and at least twice lr_cutoff
+# for minimum image (check_cell() rejects lr_cutoff < 10 A). That bounds the box
+# length, not the atom count: a dilute box is enough, and the cost of this case
+# scaled with the atoms (it ran 1536 waters).
 precision: float64
 lr_cutoff: 10.0
 dispersion_damping: 2.0
