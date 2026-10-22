@@ -38,6 +38,7 @@ uv run --no-sync pytest tests/test_integration.py -v -k "nve_ensemble"
 
 | File | Description |
 |------|-------------|
+| `test_potential.py` | A float64 run computes in float64 although the checkpoint parameters are float32 |
 | `test_ase.py` | Tests ASE calculator against pre-computed reference predictions |
 | `test_jaxmd.py` | Tests JAX-MD integration with SO3LR potential |
 | `test_cli.py` | Tests CLI command structure and the settings template |
