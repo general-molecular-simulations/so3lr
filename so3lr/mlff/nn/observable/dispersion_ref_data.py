@@ -157,10 +157,9 @@ def supported_atomic_numbers_for_config(model_cfg):
 
 def supported_atomic_numbers_for_model(model=None):
     """Element coverage of a bundled model name or custom model directory."""
-    import json
+    from so3lr.model_config import load_model_config
     from so3lr.model_registry import resolve_model
-    with open(resolve_model(model).dir / "hyperparameters.json") as fp:
-        return supported_atomic_numbers_for_config(json.load(fp)["model"])
+    return supported_atomic_numbers_for_config(load_model_config(resolve_model(model).dir)["model"])
 
 
 def check_atomic_numbers_supported(atomic_numbers, supported, *, context=None):

@@ -573,9 +573,10 @@ def run_fine_tuning(
     # Read once: this object also supplies `config.model` below and is what the
     # network is built from, so a second read later would shadow it with a
     # different (but equal) ConfigDict and silently split the two.
-    hyperparams_path = start_from_workdir / 'hyperparameters.json'
-    with open(hyperparams_path, mode='r') as fp:
-        config_start_from_workdir = config_dict.ConfigDict(json.load(fp=fp))
+    # Completed from the checkpoint where an old config is silent (legacy_so3lr_bool,
+    # use_final_bias_bool); the fine-tuned model's own config then carries both.
+    from so3lr.model_config import load_model_config
+    config_start_from_workdir = config_dict.ConfigDict(load_model_config(start_from_workdir))
 
     # The net is built from `config_start_from_workdir` (see below), so forcing
     # 'sparse' on `config` alone was dead: a checkpoint saved with

@@ -1,6 +1,4 @@
 """Parameters and statics for the flash engine from a model in the registry (or a path)."""
-import json
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -9,6 +7,7 @@ from ase.units import alpha as FINE_STRUCTURE
 from so3lr.mlff.nn.observable.dispersion_ref_data import C6_coef, NLH_AA, NLH_BB, alphas
 from so3lr.mlff.utils.checkpoint_utils import load_params_from_workdir
 from so3lr.mlff.utils.training_utils import expand_observables_to_theory_levels
+from so3lr.model_config import load_model_config
 from so3lr.model_registry import resolve_model
 
 
@@ -17,8 +16,7 @@ def load_params(model=None, *, precision="float32", lr_cutoff=12.0, dispersion_d
     params.pkl (or the checkpoint) expanded to all theory levels, the energy from
     ``spec.head_index``, the NLH and free-atom dispersion tables of ``dispersion_ref_data``."""
     spec = resolve_model(model)
-    with open(spec.dir / "hyperparameters.json") as fp:
-        cfg = json.load(fp)
+    cfg = load_model_config(spec.dir)
     m = cfg["model"]
     if m.get("legacy_so3lr_bool", False):
         raise ValueError("the flash engine runs the v2 models (so3lr-tauri-s/m/l), not the legacy so3lr")

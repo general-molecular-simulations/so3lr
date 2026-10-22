@@ -985,9 +985,8 @@ def dispersion_ratios(aux):
 def _is_legacy_model(model_dir) -> bool:
     """Return True if the resolved model is the legacy v1 SO3LR (legacy_so3lr_bool)."""
     try:
-        with open(pathlib.Path(model_dir) / 'hyperparameters.json', 'r') as fp:
-            cfg = json.load(fp)
-        return bool(cfg.get('model', {}).get('legacy_so3lr_bool', False))
+        from ..model_config import load_model_config
+        return bool(load_model_config(model_dir)['model'].get('legacy_so3lr_bool', False))
     except Exception:
         return False
 

@@ -21,7 +21,6 @@ from so3lr.mlff.utils.kspace_utils import (
     setup_kspace_grid)
 from so3lr.mlff.data import AseDataLoaderSparse
 from pathlib import Path
-import json
 from collections import defaultdict
 
 from ..jraph_utils import jraph_to_ase_atoms
@@ -455,9 +454,10 @@ def evaluate_so3lr_on(
         charge_equilibration_total_charge=charge_equilibration_total_charge
     )
 
-    # Read the short-range cutoff from the resolved model's hyperparameters.
-    with open(workdir_path / "hyperparameters.json", "r") as fp:
-        cfg = json.load(fp)
+    # Read the short-range cutoff from the resolved model's hyperparameters
+    # (completed from the checkpoint where an old config is silent).
+    from ..model_config import load_model_config
+    cfg = load_model_config(workdir_path)
     cutoff = cfg['model']['cutoff']
 
     logger.info(f"Using cutoff: {cutoff} Å")

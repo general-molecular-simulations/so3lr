@@ -4,7 +4,6 @@ import jax.numpy as jnp
 import logging
 import numpy as np
 import pathlib
-import json
 
 from flax import struct
 from typing import Any, Callable, Type, Dict, Sequence, Optional
@@ -21,12 +20,11 @@ from ..config import from_config
 from orbax import checkpoint
 
 
-def load_hyperparameters(workdir: str):
-    """Load hyperparameters from workdir."""
-    with open(pathlib.Path(workdir) / "hyperparameters.json", "r") as fp:
-        cfg = json.load(fp)
-    cfg = config_dict.ConfigDict(cfg)
-    return cfg
+def load_hyperparameters(workdir: str, params=None):
+    """Load hyperparameters from workdir, with the flags an old config leaves out read from
+    the checkpoint (see ``so3lr.model_config``)."""
+    from ...model_config import load_model_config
+    return config_dict.ConfigDict(load_model_config(workdir, params=params))
 
 
 def build_long_range_kwargs(
@@ -69,7 +67,29 @@ def load_model_from_workdir(
         charge_equilibration_total_charge: Optional[float] = None
 ):
     """Load model and parameters from workdir with advanced features support."""
-    cfg = load_hyperparameters(workdir)
+    if from_file is True:
+        params = load_params_pkl(pathlib.Path(workdir) / 'params.pkl')
+    else:
+        loaded_mngr = checkpoint.CheckpointManager(
+            pathlib.Path(workdir) / "checkpoints",
+            item_names=('params',),
+            item_handlers={'params': checkpoint.StandardCheckpointHandler()},
+            options=checkpoint.CheckpointManagerOptions(step_prefix="ckpt"),
+        )
+
+        mngr_state = loaded_mngr.restore(
+            loaded_mngr.latest_step(),
+            args=checkpoint.args.Composite(
+                params=checkpoint.args.StandardRestore()
+            ),
+        )
+
+        params = mngr_state.get('params')
+        loaded_mngr.close()
+
+    # The parameters come first: a config written before legacy_so3lr_bool or
+    # use_final_bias_bool existed is completed from them.
+    cfg = load_hyperparameters(workdir, params=params)
 
     # Inference-time override for the charge fed to the charge embedding only;
     # charge equilibration keeps using the graph's true total_charge. Set
@@ -125,34 +145,6 @@ def load_model_from_workdir(
                         f"{dispersion_energy_cutoff_lr_damping=} and {cutoff_lr=}"
                     )
             cfg.model.dispersion_energy_cutoff_lr_damping = dispersion_energy_cutoff_lr_damping
-
-    if from_file is True:
-        params = load_params_pkl(pathlib.Path(workdir) / 'params.pkl')
-    else:
-        loaded_mngr = checkpoint.CheckpointManager(
-            pathlib.Path(workdir) / "checkpoints",
-            item_names=('params',),
-            item_handlers={'params': checkpoint.StandardCheckpointHandler()},
-            options=checkpoint.CheckpointManagerOptions(step_prefix="ckpt"),
-        )
-
-        mngr_state = loaded_mngr.restore(
-            loaded_mngr.latest_step(),
-            args=checkpoint.args.Composite(
-                params=checkpoint.args.StandardRestore()
-            ),
-        )
-
-        params = mngr_state.get('params')
-        loaded_mngr.close()
-
-    # Auto-detect legacy (v1) hirshfeld head: the v1 attention head stores a
-    # query embedding under 'Embed_1' in observables_2, while the v2 scalar
-    # head does not.  When not set in the config, infer from checkpoint shape.
-    if not cfg.model.get('legacy_so3lr_bool', False):
-        obs2 = params.get('params', params).get('observables_2', {})
-        if 'Embed_1' in obs2:
-            cfg.model.legacy_so3lr_bool = True
 
     if model == 'so3krates':
         net = from_config.make_so3krates_sparse_from_config(

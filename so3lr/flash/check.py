@@ -158,8 +158,8 @@ def model_problem(model_path):
     """Why flash cannot evaluate this model (None if it can)."""
     from so3lr.model_registry import resolve_model
     spec = resolve_model(model_path)
-    with open(spec.dir / "hyperparameters.json") as fp:
-        model = json.load(fp)["model"]
+    from so3lr.model_config import load_model_config
+    model = load_model_config(spec.dir)["model"]
     if model.get("legacy_so3lr_bool", False):
         return "it runs the v2 models (so3lr-tauri-s, -m, -l), not the legacy so3lr"
     shape = (tuple(model.get("degrees") or ()), model.get("num_heads"), model.get("num_features"))
