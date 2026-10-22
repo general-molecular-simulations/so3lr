@@ -982,6 +982,15 @@ def dispersion_ratios(aux):
     return aux.get('a0_ratios', aux.get('hirshfeld_ratios')), aux.get('c6_ratios')
 
 
+def warn_legacy_kspace(kspace_electrostatics):
+    """The legacy v1 model used real-space cutoff electrostatics; k-space (pme/ewald/p3m)
+    is untested for it. Warn but allow."""
+    logger.warning(
+        f"k-space electrostatics ('{kspace_electrostatics}') is untested for the legacy "
+        f"v1 SO3LR model, which was trained with real-space cutoff electrostatics. "
+        f"Results may be unreliable; consider a real-space long-range cutoff instead.")
+
+
 def _is_legacy_model(model_dir) -> bool:
     """Return True if the resolved model is the legacy v1 SO3LR (legacy_so3lr_bool)."""
     try:
@@ -1034,13 +1043,8 @@ def load_model(
     spec = resolve_model(model_path)
     model_dir, from_file = spec.dir, spec.from_file
 
-    # The legacy v1 model used real-space cutoff electrostatics; k-space
-    # (pme/ewald/p3m) is untested for it. Warn but allow.
     if kspace_electrostatics is not None and _is_legacy_model(model_dir):
-        logger.warning(
-            f"k-space electrostatics ('{kspace_electrostatics}') is untested for the legacy "
-            f"v1 SO3LR model, which was trained with real-space cutoff electrostatics. "
-            f"Results may be unreliable; consider a real-space long-range cutoff instead.")
+        warn_legacy_kspace(kspace_electrostatics)
 
     long_range_kw = dict(
         cutoff_lr=lr_cutoff,
@@ -2897,6 +2901,40 @@ def perform_md(
                 logger.warning('and/or saving the trajectory in HDF5 format (--output traj_name.hdf5)')
 
 
+def run_on_flash(settings: Dict, atoms, task: str, start: Callable):
+    """Run ``start(so3lr.flash.md)`` on SO3LR-Flash if ``engine`` (auto, flash or standard)
+    allows it and flash computes what the settings ask for of ``task`` on ``atoms`` (a
+    structure or a list of them; ``flash.check.flash_problem``). Returns (True, start's
+    result), or (False, None) after logging why the neighbour-list potential runs instead;
+    ``engine: flash`` raises instead of falling back. ``start`` raising ``FlashUnavailable``
+    (the engine failed before anything was written) falls back too."""
+    from so3lr.flash.check import flash_problem, validate_options
+    validate_options(settings)
+    engine = settings.get('engine') or 'auto'
+    if engine == 'standard':
+        logger.info("Engine: neighbour-list potential (--engine standard)")
+        return False, None
+    problem = flash_problem(settings, atoms, task=task)
+    if problem is None:
+        try:
+            from so3lr.flash import md as flash_md
+        except Exception as exc:    # e.g. a JAX build without Pallas-Triton
+            problem = f"it does not import here ({type(exc).__name__}: {exc})"
+    if problem is None:
+        logger.info(f"Engine: flash ({'--engine flash' if engine == 'flash' else 'auto'})")
+        try:
+            return True, start(flash_md)
+        except flash_md.FlashUnavailable as exc:
+            if engine == 'flash':
+                raise
+            problem = f"it failed to start: {exc}"
+        gc.collect()                # the failed engine's arrays, before the other one starts
+    if engine == 'flash':
+        raise ValueError(f"--engine flash: {problem}")
+    logger.info(f"Engine: neighbour-list potential (flash cannot: {problem})")
+    return False, None
+
+
 def create_min_fn(
     min_apply: callable,
     box=None
@@ -2953,12 +2991,16 @@ def create_fire_fn(
 def perform_min(
     all_settings: Dict,
     log_input: bool = True,
+    try_flash: bool = True,
 ) -> Union[jnp.ndarray, List[jnp.ndarray]]:
     """
     Perform energy minimization (geometry optimization) with the given settings.
 
     Args:
         all_settings (Dict): Settings for the minimization.
+        try_flash (bool): Run SO3LR-Flash (``perform_min_flash``) where it computes what
+            the settings ask for and ``engine`` is not ``standard`` (``run_on_flash``);
+            False: the neighbour-list potential.
 
     Returns:
         Union[jnp.ndarray, List[jnp.ndarray]]: Optimized structure or trajectory.
@@ -3054,6 +3096,13 @@ def perform_min(
                            total_charge=total_charge,
                            num_unpaired_electrons=num_unpaired_electrons,
                            verbose=log_input)
+    if try_flash:
+        flash_settings = dict(all_settings, output_file=output_file)
+        ran, position = run_on_flash(
+            flash_settings, initial_geometry, 'opt',
+            lambda flash_md: flash_md.perform_min_flash(flash_settings, initial_geometry))
+        if ran:
+            return position
     cell = cell_from_atoms_boundary_conditions(
         initial_geometry, lr_cutoff, kspace_electrostatics, kspace_smearing,
     )
@@ -3666,31 +3715,14 @@ def run(
     # The engine: SO3LR-Flash wherever it computes what the settings ask for, else the
     # neighbour-list potential below (--engine flash / standard forces one). Flash relaxes
     # with its own force (perform_min would build the full model).
-    from so3lr.flash.check import flash_problem, validate_options
-    validate_options(settings)
-    engine = settings.get('engine') or 'auto'
-    if engine == 'standard':
-        logger.info("Engine: neighbour-list potential (--engine standard)")
-    elif input_file_path is not None:
-        problem = flash_problem(settings, initial_geometry)
-        if problem is None:
-            try:
-                from so3lr.flash.md import FlashUnavailable, perform_md_flash
-            except Exception as exc:    # e.g. a JAX build without Pallas-Triton
-                problem = f"it does not import here ({type(exc).__name__}: {exc})"
-        if problem is None:
-            logger.info(f"Engine: flash ({'--engine flash' if engine == 'flash' else 'auto'})")
-            try:
-                perform_md_flash(settings, restart, atoms=initial_geometry)
-                return
-            except FlashUnavailable as exc:
-                if engine == 'flash':
-                    raise
-                problem = f"it failed to start: {exc}"
-            gc.collect()                # the failed engine's arrays, before the other one starts
-        if engine == 'flash':
-            raise ValueError(f"--engine flash: {problem}")
-        logger.info(f"Engine: neighbour-list potential (flash cannot: {problem})")
+    if input_file_path is None:
+        from so3lr.flash.check import validate_options
+        validate_options(settings)
+    else:
+        def md_on_flash(flash_md):
+            flash_md.perform_md_flash(settings, restart, atoms=initial_geometry)
+        if run_on_flash(settings, initial_geometry, 'md', md_on_flash)[0]:
+            return
 
     # Relax the geometry
     if relax_before_run:
@@ -3712,7 +3744,8 @@ def run(
                 output_path.with_name(f'{output_path.stem}_opt.xyz')
             )
             relaxation_settings['output_format'] = 'extxyz'
-            opt_structure = perform_min(relaxation_settings, log_input=False)
+            # the engine is chosen above: this is the neighbour-list potential's relaxation
+            opt_structure = perform_min(relaxation_settings, log_input=False, try_flash=False)
             logger.info("=" * 60)
     else:
         opt_structure = None

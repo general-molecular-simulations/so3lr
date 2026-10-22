@@ -42,7 +42,8 @@ exists), and tiled execution (the per-atom work runs over fixed-size atom tiles)
 
 Periodic orthorhombic boxes, at least 2 x the long-range cutoff across and wide enough
 for the cell grid (``check.box_problem``); models with one head per degree entry,
-degrees 1-4 (so3lr-tauri-s, -m, -l). ``so3lr.flash.md`` runs MD with it;
+degrees 1-4 (so3lr-tauri-s, -m, -l, and the legacy so3lr: LayerNorm, ZBL repulsion, its
+Hirshfeld ratios for both dispersion ratios). ``so3lr.flash.md`` runs MD with it;
 ``python -m so3lr.flash.verify`` compares it with the neighbour-list potential.
 """
 from __future__ import annotations
@@ -60,7 +61,7 @@ from jax.experimental.pallas import triton as plgpu
 import jaxpme
 
 from so3lr.flash import blocks
-from so3lr.flash.check import box_problem, cell_grid
+from so3lr.flash.check import box_problem, cell_grid, is_rocm
 from so3lr.mlff.nn.embed.embed_sparse import PAIR_FLOOR_WIDTH, nlh_reference_distance
 from so3lr.mlff.nn.observable.observable_sparse import c6_raw_potential
 from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
@@ -79,6 +80,18 @@ BL = 64              # candidates per chunk in the long-range kernel
 AXIS = "atoms"       # the device axis of the several-GPU mesh
 
 
+def _warps(n):
+    """Warps for a launch tuned with n on NVIDIA: half on ROCm (64-lane wavefronts), as measured
+    on the MI355X."""
+    return max(1, n // 2) if is_rocm() else n
+
+
+def _att_launch(width):
+    """ATT_LAUNCH for this filter width (the nearest wider tabulated), warps for this platform."""
+    launch = ATT_LAUNCH[min((w for w in ATT_LAUNCH if w >= width), default=max(ATT_LAUNCH))]
+    return {k: (be, _warps(w)) for k, (be, w) in launch.items()}
+
+
 def _cp(num_warps):
     return plgpu.CompilerParams(num_warps=num_warps, num_stages=1)
 
@@ -86,7 +99,8 @@ def _cp(num_warps):
 def _mm(a, b, x3=False):
     """A float32 dot: FMAs (the forward), or x3: on tensor cores as three TF32 products (the
     backward), whose float32 energies and forces are as close to float64."""
-    precision = lax.DotAlgorithmPreset.TF32_TF32_F32_X3 if x3 else lax.Precision.HIGHEST
+    # no TF32 on ROCm
+    precision = lax.DotAlgorithmPreset.TF32_TF32_F32_X3 if x3 and not is_rocm() else lax.Precision.HIGHEST
     return jnp.dot(a, b, precision=precision, preferred_element_type=a.dtype)
 
 
@@ -341,37 +355,51 @@ def _row(acc, h):
 # =========================================================================== #
 # neighbour table
 # =========================================================================== #
-def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, rows, nbr, count, *, NX, NY, NZ, K, BLE):
-    a = rows[0] + _i32(pl.program_id(0))
-    Lx, Ly, Lz, rc2 = boxl[0], boxl[1], boxl[2], geo[0]
-    ax, ay, az = px[a], py[a], pz[a]
-    c = cell_of[a]
-    cx = _rem(c, NX)
-    cy = _rem(_div(c, NX), NY)
-    cz = _div(c, NX * NY)
+def _each_atom(rows, N, APP, atom):
+    """atom(a) for this program's atom, or its APP atoms (guarded) where N programs would pass
+    HIP's 2^32 threads a launch."""
+    if APP == 1:
+        atom(rows[0] + _i32(pl.program_id(0)))
+        return
+    assert N > 0, "APP > 1 needs the number of rows N"
+    for i in range(APP):
+        a = rows[0] + _i32(pl.program_id(0)) * APP + i
+        pl.when(a < rows[0] + N)(partial(atom, a))
 
-    def cell(k, n):
-        dz = _div(k, 9) - 1
-        dy = _rem(_div(k, 3), 3) - 1
-        dx = _rem(k, 3) - 1
-        cc = (_rem(cz + dz + NZ, NZ) * NY + _rem(cy + dy + NY, NY)) * NX + _rem(cx + dx + NX, NX)
-        s = cell_start[cc]
-        e = cell_start[cc + 1]
 
-        def chunk(t, n):
-            ks = s + t * BLE + jnp.arange(BLE)
-            m = ks < e
-            j = plgpu.load(order.at[ks], mask=m, other=0)
-            ddx = _min_image(plgpu.load(px.at[j], mask=m, other=0.0) - ax, Lx)
-            ddy = _min_image(plgpu.load(py.at[j], mask=m, other=0.0) - ay, Ly)
-            ddz = _min_image(plgpu.load(pz.at[j], mask=m, other=0.0) - az, Lz)
-            hit = m & (ddx * ddx + ddy * ddy + ddz * ddz < rc2) & (j != a)
-            slot = n + jnp.cumsum(hit.astype(jnp.int32)) - 1
-            plgpu.store(nbr.at[a, slot], j, mask=hit & (slot < K))
-            return (n + jnp.sum(hit.astype(jnp.int32))).astype(jnp.int32)
-        return lax.fori_loop(0, _cdiv(e - s, BLE), chunk, n)
+def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, rows, nbr, count, *, NX, NY, NZ, K, BLE, N, APP):
+    def atom(a):
+        Lx, Ly, Lz, rc2 = boxl[0], boxl[1], boxl[2], geo[0]
+        ax, ay, az = px[a], py[a], pz[a]
+        c = cell_of[a]
+        cx = _rem(c, NX)
+        cy = _rem(_div(c, NX), NY)
+        cz = _div(c, NX * NY)
 
-    count[a] = lax.fori_loop(0, 27, cell, jnp.int32(0))
+        def cell(k, n):
+            dz = _div(k, 9) - 1
+            dy = _rem(_div(k, 3), 3) - 1
+            dx = _rem(k, 3) - 1
+            cc = (_rem(cz + dz + NZ, NZ) * NY + _rem(cy + dy + NY, NY)) * NX + _rem(cx + dx + NX, NX)
+            s = cell_start[cc]
+            e = cell_start[cc + 1]
+
+            def chunk(t, n):
+                ks = s + t * BLE + jnp.arange(BLE)
+                m = ks < e
+                j = plgpu.load(order.at[ks], mask=m, other=0)
+                ddx = _min_image(plgpu.load(px.at[j], mask=m, other=0.0) - ax, Lx)
+                ddy = _min_image(plgpu.load(py.at[j], mask=m, other=0.0) - ay, Ly)
+                ddz = _min_image(plgpu.load(pz.at[j], mask=m, other=0.0) - az, Lz)
+                hit = m & (ddx * ddx + ddy * ddy + ddz * ddz < rc2) & (j != a)
+                slot = n + jnp.cumsum(hit.astype(jnp.int32)) - 1
+                plgpu.store(nbr.at[a, slot], j, mask=hit & (slot < K))
+                return (n + jnp.sum(hit.astype(jnp.int32))).astype(jnp.int32)
+            return lax.fori_loop(0, _cdiv(e - s, BLE), chunk, n)
+
+        count[a] = lax.fori_loop(0, 27, cell, jnp.int32(0))
+
+    _each_atom(rows, N, APP, atom)
 
 
 # =========================================================================== #
@@ -379,69 +407,72 @@ def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, rows, nbr, co
 # =========================================================================== #
 def _att_fwd_kernel(q1, k1, v1, q2, k2, ev, px, py, pz, nbr, cnt, z, rmin,
                     t1v, t1d, t2v, t2d, wa1, ba1, wb1, bb1, wa2, ba2, wb2, bb2, mdeg, cdeg, scal,
-                    x_in, ev_in, boxl, rows, x_out, ev_out, *, G, ND, MP, ZMAX, YS, CH=0, BE=BE, H0=0, NH=4):
+                    x_in, ev_in, boxl, rows, x_out, ev_out, *, G, ND, MP, ZMAX, YS, CH=0, BE=BE, H0=0, NH=4, N,
+                    APP):
     # CH 0: both channels; 1: heads only (x_out); 2: degrees only (ev_out). The outputs
     # alias the inputs, so a channel not run leaves its output as it was.
-    a = rows[0] + _i32(pl.program_id(0))
-    n_a = jnp.minimum(cnt[a], nbr.shape[1])         # an overflowed row holds K entries
-    inv_nc, spacing, n_int, rc = scal[0], scal[1], scal[2], scal[3]
-    Lx, Ly, Lz = boxl[0], boxl[1], boxl[2]
-    ax, ay, az = px[a], py[a], pz[a]
-    dt = rc.dtype
-    mo = jnp.arange(MP)
-    md = mdeg[...]
-    valid = md >= 0
-    ev_a = plgpu.load(ev.at[a, mo], mask=valid, other=0.0)
-    za = z[a]
-    yc = _ycols(md, mo, YS)
+    def atom(a):
+        n_a = jnp.minimum(cnt[a], nbr.shape[1])         # an overflowed row holds K entries
+        inv_nc, spacing, n_int, rc = scal[0], scal[1], scal[2], scal[3]
+        Lx, Ly, Lz = boxl[0], boxl[1], boxl[2]
+        ax, ay, az = px[a], py[a], pz[a]
+        dt = rc.dtype
+        mo = jnp.arange(MP)
+        md = mdeg[...]
+        valid = md >= 0
+        ev_a = plgpu.load(ev.at[a, mo], mask=valid, other=0.0)
+        za = z[a]
+        yc = _ycols(md, mo, YS)
 
-    def chunk(c, carry):
-        acc, dev_a = carry
-        oe = c * BE + jnp.arange(BE)
-        emask = oe < n_a
-        jj = plgpu.load(nbr.at[a, oe], mask=emask, other=0)
-        ux, uy, uz, r, ce, _ = _geometry(px, py, pz, jj, emask, ax, ay, az, Lx, Ly, Lz, rc)
-        rt = _floor(r, za, jj, emask, z, rmin, ZMAX)[0]
-        nz = ce != 0.0
-        i0, u = _table_coords(rt, spacing, n_int)
-        diff = _ev_diff(ev, ev_a, jj, mo, valid, emask)
+        def chunk(c, carry):
+            acc, dev_a = carry
+            oe = c * BE + jnp.arange(BE)
+            emask = oe < n_a
+            jj = plgpu.load(nbr.at[a, oe], mask=emask, other=0)
+            ux, uy, uz, r, ce, _ = _geometry(px, py, pz, jj, emask, ax, ay, az, Lx, Ly, Lz, rc)
+            rt = _floor(r, za, jj, emask, z, rmin, ZMAX)[0]
+            nz = ce != 0.0
+            i0, u = _table_coords(rt, spacing, n_int)
+            diff = _ev_diff(ev, ev_a, jj, mo, valid, emask)
 
-        def head(j, acc):
-            h = H0 + j
-            co = h * G + jnp.arange(G)
-            cp = j * G + jnp.arange(G)
-            w = (_filter_mm(hz, wb1, h * G, G) + bb1[pl.ds(h * G, G)][None, :]
-                 + _radial(t1v, t1d, i0, u, spacing, co, emask))
-            s = jnp.sum(q1[a, pl.ds(j * G, G)].astype(dt)[None, :] * w * _rows(k1, jj, cp, emask, dt), axis=1)
-            al = jnp.where(nz, ce * s * inv_nc, 0.0)
-            return _put_row(acc, j, jnp.sum(al[:, None] * _rows(v1, jj, cp, emask, dt), axis=0))
+            def head(j, acc):
+                h = H0 + j
+                co = h * G + jnp.arange(G)
+                cp = j * G + jnp.arange(G)
+                w = (_filter_mm(hz, wb1, h * G, G) + bb1[pl.ds(h * G, G)][None, :]
+                     + _radial(t1v, t1d, i0, u, spacing, co, emask))
+                s = jnp.sum(q1[a, pl.ds(j * G, G)].astype(dt)[None, :] * w * _rows(k1, jj, cp, emask, dt), axis=1)
+                al = jnp.where(nz, ce * s * inv_nc, 0.0)
+                return _put_row(acc, j, jnp.sum(al[:, None] * _rows(v1, jj, cp, emask, dt), axis=0))
+            if CH != 2:
+                hz = jax.nn.silu(_spherical_z(diff, md, wa1, ba1, cdeg, ND))
+                acc = lax.fori_loop(0, NH, head, acc)
+            if CH == 1:
+                return acc, dev_a
+
+            def degree(j, a_m):
+                d = H0 + j
+                co = d * G + jnp.arange(G)
+                cp = j * G + jnp.arange(G)
+                w = (_filter_mm(hz, wb2, d * G, G) + bb2[pl.ds(d * G, G)][None, :]
+                     + _radial(t2v, t2d, i0, u, spacing, co, emask))
+                s = jnp.sum(q2[a, pl.ds(j * G, G)].astype(dt)[None, :] * w * _rows(k2, jj, cp, emask, dt), axis=1)
+                return a_m + jnp.where(md[None, :] == d, jnp.where(nz, ce * s * inv_nc, 0.0)[:, None], 0.0)
+            hz = jax.nn.silu(_spherical_z(diff, md, wa2, ba2, cdeg, ND))
+            a_m = lax.fori_loop(0, NH, degree, jnp.zeros((BE, MP), dt))
+            return acc, dev_a + jnp.sum(a_m * _ylm(ux, uy, uz, yc, MP), axis=0)
+
+        acc, dev_a = lax.fori_loop(0, _cdiv(n_a, BE), chunk,
+                                   (jnp.zeros((NH, G), dt), jnp.zeros((MP,), dt)))
         if CH != 2:
-            hz = jax.nn.silu(_spherical_z(diff, md, wa1, ba1, cdeg, ND))
-            acc = lax.fori_loop(0, NH, head, acc)
-        if CH == 1:
-            return acc, dev_a
+            for j in range(NH):
+                h = H0 + j
+                x_out[a, pl.ds(h * G, G)] = x_in[a, pl.ds(h * G, G)] + _row(acc, j)
+        if CH != 1:
+            plgpu.store(ev_out.at[a, mo], plgpu.load(ev_in.at[a, mo], mask=valid, other=0.0) + dev_a,
+                        mask=valid)
 
-        def degree(j, a_m):
-            d = H0 + j
-            co = d * G + jnp.arange(G)
-            cp = j * G + jnp.arange(G)
-            w = (_filter_mm(hz, wb2, d * G, G) + bb2[pl.ds(d * G, G)][None, :]
-                 + _radial(t2v, t2d, i0, u, spacing, co, emask))
-            s = jnp.sum(q2[a, pl.ds(j * G, G)].astype(dt)[None, :] * w * _rows(k2, jj, cp, emask, dt), axis=1)
-            return a_m + jnp.where(md[None, :] == d, jnp.where(nz, ce * s * inv_nc, 0.0)[:, None], 0.0)
-        hz = jax.nn.silu(_spherical_z(diff, md, wa2, ba2, cdeg, ND))
-        a_m = lax.fori_loop(0, NH, degree, jnp.zeros((BE, MP), dt))
-        return acc, dev_a + jnp.sum(a_m * _ylm(ux, uy, uz, yc, MP), axis=0)
-
-    acc, dev_a = lax.fori_loop(0, _cdiv(n_a, BE), chunk,
-                               (jnp.zeros((NH, G), dt), jnp.zeros((MP,), dt)))
-    if CH != 2:
-        for j in range(NH):
-            h = H0 + j
-            x_out[a, pl.ds(h * G, G)] = x_in[a, pl.ds(h * G, G)] + _row(acc, j)
-    if CH != 1:
-        plgpu.store(ev_out.at[a, mo], plgpu.load(ev_in.at[a, mo], mask=valid, other=0.0) + dev_a,
-                    mask=valid)
+    _each_atom(rows, N, APP, atom)
 
 
 # =========================================================================== #
@@ -630,52 +661,55 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
 
 
 # =========================================================================== #
-# short-range pairs: the NLH repulsion (per-atom energy, forces)
+# short-range pairs: the repulsion (per-atom energy, forces)
 # =========================================================================== #
-def _sr_kernel(px, py, pz, z, nbr, cnt, nlh_a, nlh_b, scal, fx_in, fy_in, fz_in, fw_in, boxl, rows,
-               energy, fx_o, fy_o, fz_o, fw_o, *, ZMAX, NK, NKP):
-    """Per-atom NLH energy (half of each pair) and its forces."""
-    a = rows[0] + _i32(pl.program_id(0))
-    n_a = jnp.minimum(cnt[a], nbr.shape[1])         # an overflowed row holds K entries
-    ke, rc = scal[0], scal[3]
-    Lx, Ly, Lz = boxl[0], boxl[1], boxl[2]
-    ax, ay, az = px[a], py[a], pz[a]
-    dt = rc.dtype
-    za = z[a]
-    kk = jnp.arange(NKP)
+def _sr_kernel(px, py, pz, z, nbr, cnt, rep_a, rep_b, scal, fx_in, fy_in, fz_in, fw_in, boxl, rows,
+               energy, fx_o, fy_o, fz_o, fw_o, *, ZMAX, NK, NKP, N, APP):
+    """Per-atom repulsion energy (half of each pair) and its forces: NLH, or the legacy
+    so3lr's ZBL, both a screening sum_k A_k exp(-B_k r) tabulated per element pair."""
+    def atom(a):
+        n_a = jnp.minimum(cnt[a], nbr.shape[1])         # an overflowed row holds K entries
+        ke, rc = scal[0], scal[3]
+        Lx, Ly, Lz = boxl[0], boxl[1], boxl[2]
+        ax, ay, az = px[a], py[a], pz[a]
+        dt = rc.dtype
+        za = z[a]
+        kk = jnp.arange(NKP)
 
-    def chunk(c, carry):
-        e_a, fx, fy, fz, fw = carry
-        oe = c * BE + jnp.arange(BE)
-        emask = oe < n_a
-        jj = plgpu.load(nbr.at[a, oe], mask=emask, other=0)
-        ux, uy, uz, r, ce, dce = _geometry(px, py, pz, jj, emask, ax, ay, az, Lx, Ly, Lz, rc)
-        zb = plgpu.load(z.at[jj], mask=emask, other=1)
-        lo = jnp.minimum(za, zb) - 1
-        hi = jnp.maximum(za, zb) - 1
-        tab = (lo * ZMAX + hi)[:, None] * NK + kk[None, :]
-        tm = emask[:, None] & (kk < NK)[None, :]
-        ca = plgpu.load(nlh_a.at[tab], mask=tm, other=0.0)
-        cb = plgpu.load(nlh_b.at[tab], mask=tm, other=0.0)
-        ex = ca * jnp.exp(-cb * r[:, None])
-        yv = jnp.sum(ex, axis=1)
-        dyv = -jnp.sum(cb * ex, axis=1)
-        w, dw = _switch(r, 0.0, 1.5)
-        x = ke * (za * zb).astype(dt) / r
-        e_pair = w * ce * x * yv
-        de = dw * ce * x * yv + w * dce * x * yv - w * ce * x / r * yv + w * ce * x * dyv
-        e_a = e_a + 0.5 * jnp.sum(jnp.where(emask, e_pair, 0.0))
-        fr = jnp.where(emask, de, 0.0)
-        return (e_a, fx + jnp.sum(fr * ux), fy + jnp.sum(fr * uy), fz + jnp.sum(fr * uz),
-                fw + jnp.sum(fr * r))
+        def chunk(c, carry):
+            e_a, fx, fy, fz, fw = carry
+            oe = c * BE + jnp.arange(BE)
+            emask = oe < n_a
+            jj = plgpu.load(nbr.at[a, oe], mask=emask, other=0)
+            ux, uy, uz, r, ce, dce = _geometry(px, py, pz, jj, emask, ax, ay, az, Lx, Ly, Lz, rc)
+            zb = plgpu.load(z.at[jj], mask=emask, other=1)
+            lo = jnp.minimum(za, zb) - 1
+            hi = jnp.maximum(za, zb) - 1
+            tab = (lo * ZMAX + hi)[:, None] * NK + kk[None, :]
+            tm = emask[:, None] & (kk < NK)[None, :]
+            ca = plgpu.load(rep_a.at[tab], mask=tm, other=0.0)
+            cb = plgpu.load(rep_b.at[tab], mask=tm, other=0.0)
+            ex = ca * jnp.exp(-cb * r[:, None])
+            yv = jnp.sum(ex, axis=1)
+            dyv = -jnp.sum(cb * ex, axis=1)
+            w, dw = _switch(r, 0.0, 1.5)
+            x = ke * (za * zb).astype(dt) / r
+            e_pair = w * ce * x * yv
+            de = dw * ce * x * yv + w * dce * x * yv - w * ce * x / r * yv + w * ce * x * dyv
+            e_a = e_a + 0.5 * jnp.sum(jnp.where(emask, e_pair, 0.0))
+            fr = jnp.where(emask, de, 0.0)
+            return (e_a, fx + jnp.sum(fr * ux), fy + jnp.sum(fr * uy), fz + jnp.sum(fr * uz),
+                    fw + jnp.sum(fr * r))
 
-    s0 = jnp.zeros((), dt)
-    e_a, fx, fy, fz, fw = lax.fori_loop(0, _cdiv(n_a, BE), chunk, (s0, s0, s0, s0, s0))
-    energy[a] = e_a
-    fx_o[a] = fx_in[a] + fx
-    fy_o[a] = fy_in[a] + fy
-    fz_o[a] = fz_in[a] + fz
-    fw_o[a] = fw_in[a] + fw
+        s0 = jnp.zeros((), dt)
+        e_a, fx, fy, fz, fw = lax.fori_loop(0, _cdiv(n_a, BE), chunk, (s0, s0, s0, s0, s0))
+        energy[a] = e_a
+        fx_o[a] = fx_in[a] + fx
+        fy_o[a] = fy_in[a] + fy
+        fz_o[a] = fz_in[a] + fz
+        fw_o[a] = fw_in[a] + fw
+
+    _each_atom(rows, N, APP, atom)
 
 
 # =========================================================================== #
@@ -1151,7 +1185,7 @@ class FlashSO3LR:
                  equilibration_charge=None, tile=1 << 17, max_neighbours=None, lr_scratch=1024,
                  keep_layer_inputs=True, keep_attention=False, split_channels=False,
                  split_blocks=False, pme_electrostatics=None, pme_dispersion=None, box_margin=0.0,
-                 devices=1):
+                 devices=1, atoms_per_program=None):
         degrees = [int(d) for d in statics["degrees"]]
         self.nh = int(statics["num_heads"])
         # one head per degree entry, each on its own block of G features (so3lr-tauri-s/m: 4 x 32,
@@ -1209,7 +1243,7 @@ class FlashSO3LR:
         # the attention kernels' launch for this width of the spherical filters' hidden
         # layer: the nearest wider one tabulated (the widest if none is)
         sh = int(params["layers_0"]["attention_block"]["spherical_filter1_layer_1"]["kernel"].shape[1])
-        self.launch = ATT_LAUNCH[min((w for w in ATT_LAUNCH if w >= sh), default=max(ATT_LAUNCH))]
+        self.launch = _att_launch(sh)
         self.par = jnp.asarray([(-1.0) ** d for d in degrees], dt)
         self.z = jnp.asarray(z)
         # x0 depends on the element only: one row per element present
@@ -1232,10 +1266,10 @@ class FlashSO3LR:
                                  TABLE_INTERVALS, self.rc], dt)
         self.sr_scal = self.scal.at[0].set(ASE_UNITS["ke"])
         self.geo = jnp.asarray([self.rc ** 2], dt)
-        self.nlh_a = jnp.asarray(params["nlh_aa"], dt).reshape(-1)
-        self.nlh_b = jnp.asarray(params["nlh_bb"], dt).reshape(-1)
-        self.zmax = int(params["nlh_aa"].shape[0])
-        self.nk = int(params["nlh_aa"].shape[-1])
+        self.rep_a = jnp.asarray(params["repulsion_a"], dt).reshape(-1)
+        self.rep_b = jnp.asarray(params["repulsion_b"], dt).reshape(-1)
+        self.zmax = int(params["repulsion_a"].shape[0])
+        self.nk = int(params["repulsion_a"].shape[-1])
         self.rmin = jnp.asarray(nlh_reference_distance(), dt).reshape(-1)     # so3lr_dev's floor
         # long range
         sig = float(statics["electrostatic_energy_scale"])
@@ -1264,6 +1298,8 @@ class FlashSO3LR:
         # the long-range kernel's resident programs: 16 per streaming multiprocessor
         self.lr_programs = 16 * (getattr(jax.devices()[0], "core_count", None) or 132)
         self.maxh = int(lr_scratch)
+        self.builds = 0
+        self.atoms_per_program = atoms_per_program
         self._build_jit()
 
     def _layout(self, L):
@@ -1281,11 +1317,14 @@ class FlashSO3LR:
         self.L, self.L_lo = L, small
         self.box = jnp.asarray(L, jnp.float64 if jax.config.jax_enable_x64 else self.dtype)
         self.nc, self.kc = cell_grid(small, self.rc, self.rc_lr)
-        self.mesh_el = pme_mesh_shape(L, self.pme_el[1]) if self.pme_el else None
-        self.mesh_disp = pme_mesh_shape(L, self.pme_disp[1]) if self.pme_disp else None
+        self.mesh_el, self.mesh_disp = self._meshes(L)
         for m in (self.mesh_el, self.mesh_disp):
             if m and math.prod(m) >= 2 ** 31:
                 raise ValueError(f"PME mesh {m} has 2^31 points or more: a larger spacing")
+
+    def _meshes(self, L):
+        """The PME meshes (electrostatics, dispersion) for a box of sides L, None where off."""
+        return tuple(pme_mesh_shape(L, p[1]) if p else None for p in (self.pme_el, self.pme_disp))
 
     # ---- the embedding, per element -----------------------------------------
     def _embed_table(self, zu, counts, total_charge, total_spin):
@@ -1339,15 +1378,18 @@ class FlashSO3LR:
                 out[i] = blocks.functional_rms_norm(out[i])
         return out
 
+    def _norm(self, p, x):
+        return blocks.functional_rms_norm(x) if self.statics["rms_norm"] else blocks.layer_norm(p, x)
+
     def _post(self, li, x1, ev1):
         p = self.params[f"layers_{li}"]
-        x = blocks.functional_rms_norm(x1) if self.statics["ln1"] else x1
+        x = self._norm(p.get("layer_normalization_1"), x1) if self.statics["ln1"] else x1
         x = x + blocks.mlp(p, ("res_mlp_1_layer_1", "res_mlp_1_layer_2"), jax.nn.silu(x))
         su, eu = blocks.scalar_equivariant_exchange(p["exchange_block"], x, ev1, degrees=self.statics["degrees"])
         x = x + su
         ev = ev1 + eu
         if self.statics["ln2"]:
-            x = blocks.functional_rms_norm(x)
+            x = self._norm(p.get("layer_normalization_2"), x)
         return x, ev
 
     def _heads(self, x, z):
@@ -1357,6 +1399,10 @@ class FlashSO3LR:
         pc = ep["electrostatic_energy"]["partial_charges"]
         raw_q = (blocks.mlp(pc, ("charge_dense_regression_vec", "charge_dense_final_vec"), x).squeeze(-1)
                  + pc["Embed_0"]["embedding"][z].squeeze(-1))
+        if self.statics["legacy"]:
+            # no C6 head: the Hirshfeld ratio h scales alpha, h^2 scales C6
+            a0 = blocks.legacy_hirshfeld_head(p["observables_2"], x, z)
+            return e_loc, raw_q, a0, a0 * a0
         a0 = blocks.ratio_head(p["observables_2"], ("hirshfeld_ratios_dense_regression",
                                                 "hirshfeld_ratios_dense_final"), x, z)
         c6 = blocks.ratio_head(p["observables_3"], ("c6_ratios_dense_regression",
@@ -1386,6 +1432,13 @@ class FlashSO3LR:
     def _row_arg(self):
         """The first row this device computes, as the kernels take it."""
         return jnp.reshape(jnp.asarray(self._r0, jnp.int32), (1,))
+
+    def _row_grid(self, warps):
+        """(programs, atoms per program) of a row kernel: one atom each, or on ROCm as many as
+        keep it under 2^32 threads (atoms_per_program: forced, for tests)."""
+        app = self.atoms_per_program or (
+            max(1, -(-self.nl // ((2 ** 32 - 1) // (warps * 64) - 1))) if is_rocm() else 1)
+        return -(-self.nl // app), app
 
     def _mine(self, a):
         """This device's rows of a (all of a on one device)."""
@@ -1496,10 +1549,11 @@ class FlashSO3LR:
                 qkv = self._projections(li, x_l, which, block=blk)
             ref = qkv[which[0]]
             be, warps = self.launch["fwd"]
+            progs, app = self._row_grid(warps)
             kern = partial(_att_fwd_kernel, G=self.G, ND=self.nh, MP=self.MP, ZMAX=self.zmax, YS=self.ys,
-                           CH=ch, BE=be, H0=h0, NH=nh)
+                           CH=ch, BE=be, H0=h0, NH=nh, N=self.nl, APP=app)
             x1, ev1 = pl.pallas_call(
-                kern, grid=(self.nl,), compiler_params=_cp(warps),
+                kern, grid=(progs,), compiler_params=_cp(warps),
                 out_shape=(jax.ShapeDtypeStruct((n, F), dt), jax.ShapeDtypeStruct((n, self.M), dt)),
                 input_output_aliases={28: 0, 29: 1},
             )(*[q if q is not None else ref for q in qkv], ev_l, px, py, pz, nbr, cnt, self.z,
@@ -1619,8 +1673,10 @@ class FlashSO3LR:
         px, py, pz = pos3
         order, cell_start, cell_of = self.build_grid(pos3)
         # rows of other devices' atoms are left unwritten (never read here)
+        progs, app = self._row_grid(1)
+        # one warp, one wavefront on ROCm (as measured)
         nbr, cnt = pl.pallas_call(
-            partial(_ell_kernel, NX=nx, NY=ny, NZ=nz, K=self.K, BLE=16), grid=(self.nl,),
+            partial(_ell_kernel, NX=nx, NY=ny, NZ=nz, K=self.K, BLE=16, N=self.nl, APP=app), grid=(progs,),
             compiler_params=_cp(1),
             out_shape=(jax.ShapeDtypeStruct((n, self.K), jnp.int32), jax.ShapeDtypeStruct((n,), jnp.int32)),
         )(px, py, pz, order, cell_start, cell_of, self.geo, self._box(px), self._row_arg())
@@ -1679,12 +1735,14 @@ class FlashSO3LR:
         zero = jnp.zeros((n,), dt)
         shp = jax.ShapeDtypeStruct
         nkp = int(2 ** math.ceil(math.log2(self.nk)))
+        warps = _warps(NUM_WARPS)
+        progs, app = self._row_grid(warps)
         e_atom, fx, fy, fz, fw = pl.pallas_call(
-            partial(_sr_kernel, ZMAX=self.zmax, NK=self.nk, NKP=nkp),
-            grid=(self.nl,), compiler_params=_cp(NUM_WARPS),
+            partial(_sr_kernel, ZMAX=self.zmax, NK=self.nk, NKP=nkp, N=self.nl, APP=app),
+            grid=(progs,), compiler_params=_cp(warps),
             out_shape=(shp((n,), dt),) * 5,
             input_output_aliases={9: 1, 10: 2, 11: 3, 12: 4},
-        )(px, py, pz, self.z, nbr, cnt, self.nlh_a, self.nlh_b, self.sr_scal, zero, zero + 0.0, zero + 0.0,
+        )(px, py, pz, self.z, nbr, cnt, self.rep_a, self.rep_b, self.sr_scal, zero, zero + 0.0, zero + 0.0,
           zero + 0.0, self._box(px), self._row_arg())
         e_loc, raw_q, a0, c6 = self._heads(self._mine(x), self._mine(self.z))
         raw_q, a0, c6 = self._gather_rows(raw_q, a0, c6)
@@ -1697,6 +1755,7 @@ class FlashSO3LR:
         order, cell_start, cell_of = grid
         px, py, pz = pos3
         shp = jax.ShapeDtypeStruct
+        # two warps, two wavefronts on ROCm (as measured)
         nprog = min(self.lr_programs, self.nl)
         scratch = jnp.zeros((nprog, self.maxh), jnp.int32)
         e_atom, gq, ga0, gc6, fx, fy, fz, fw, _, most = pl.pallas_call(
@@ -1970,6 +2029,7 @@ class FlashSO3LR:
                 self._Lt = keep
         self._jit = jax.jit(ef)
         self._stage_cache = None
+        self.builds += 1                 # programs to compile at the next call
         # programs others build on this engine's force (md's jitted step loops): they
         # hold the old tables and grid, so a rebuild drops them
         self.loops = {}
@@ -1987,13 +2047,16 @@ class FlashSO3LR:
         """(energy, forces). Rebuilds with wider tables if a row or scratch overflowed."""
         return self.energy_forces_strain(R)[:2]
 
-    def set_box(self, L):
+    def set_box(self, L, exact_mesh=False):
         """A new orthorhombic box (sides L) for the next calls, e.g. an NPT step. Within
         the margin the cell grid was laid out for, nothing compiles; outside it the
-        grid (and the PME mesh, as so3lr_dev's re-tuning would) is laid out again for L."""
+        grid (and the PME mesh, as so3lr_dev's re-tuning would) is laid out again for L.
+        exact_mesh: also lay out again where L's PME mesh differs from the current one,
+        so each box gets the mesh a single point of it builds (so3lr eval, ASE)."""
         L = [float(v) for v in np.asarray(L, np.float64).reshape(-1)[:3]]
         hi = 1.0 + self.box_margin
-        if all(lo <= v <= hi * b for v, lo, b in zip(L, self.L_lo, self.L)):
+        same_mesh = not exact_mesh or self._meshes(L) == (self.mesh_el, self.mesh_disp)
+        if same_mesh and all(lo <= v <= hi * b for v, lo, b in zip(L, self.L_lo, self.L)):
             self.box = jnp.asarray(L, jnp.float64 if jax.config.jax_enable_x64 else self.dtype)
             return
         self._layout(L)

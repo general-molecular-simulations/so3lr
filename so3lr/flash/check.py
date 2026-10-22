@@ -1,11 +1,15 @@
-"""Whether the flash engine can run a simulation: settings, model, box, device.
+"""Whether the flash engine can run a task: settings, model, box, device.
 
-Imports no kernels, so ``so3lr_md.run`` can decide cheaply and fall back without
+Imports no kernels, so ``so3lr_md.run_on_flash`` can decide cheaply and fall back without
 touching Pallas. Every check fails closed: a setting or a model hyperparameter flash
 does not know makes it decline (with the reason), rather than run something it might
 not compute.
+
+The tasks (``TASKS``): ``md`` (``so3lr nve|nvt|nvt-langevin|npt``), ``opt`` (``so3lr opt``),
+``eval`` (``so3lr eval``: energies and forces only) and ``ase`` (``calculator.FlashCalculator``).
 """
 import dataclasses
+import functools
 import json
 import math
 import os
@@ -16,7 +20,15 @@ import numpy as np
 # a compile (and is laid out again if it leaves the margin)
 NPT_BOX_MARGIN = 0.03
 ENGINES = ("auto", "flash", "standard")
+# the AMD GPUs (gfx targets) flash is tested on: the MI355X
+ROCM_TARGETS = ("gfx950",)
 FLASH_MODES = ("auto", "fast", "default", "lean", "leanest", "minimal")     # engine.MODES and auto
+TASKS = ("md", "opt", "eval", "ase")
+# what so3lr eval can take from the engine
+EVAL_TARGETS = ("energy", "forces")
+# so3lr eval builds (and compiles) an engine per set of atoms: auto takes this many at most
+# (the neighbour-list model compiles once for the whole dataset); engine flash any number
+EVAL_AUTO_ENGINES = 16
 
 # settings flash honours (aliases included)
 HANDLED = {
@@ -54,8 +66,10 @@ UNSUPPORTED = {
 }
 
 # the model hyperparameters the kernels are written for (so3lr-tauri-s/m/l 2602 and 2606); the
-# sizes below may vary; any other key, or any other value, makes flash decline
+# sizes below may vary; any other key, or any other value, makes flash decline (a key a model
+# leaves out counts as the model builder's default, UNSET, or as missing)
 ARCHITECTURE = {
+    "legacy_so3lr_bool": False,
     "activation_fn": "silu", "energy_activation_fn": "silu", "cutoff_fn": "phys",
     "radial_basis_fn": "bernstein", "num_features_head": 32,
     "qk_non_linearity": "identity", "qk_norm": True, "layer_normalization_1": True,
@@ -66,6 +80,15 @@ ARCHITECTURE = {
     "energy_learn_atomic_type_shifts": True, "electrostatic_energy_kspace_do_ewald_bool": False,
     "electrostatic_energy_kspace_interp_nodes": None,
 }
+# the legacy so3lr (legacy_so3lr_bool): the same attention; LayerNorm after the attention and
+# the exchange, no q/k norm or residual scalars, a bias on the energy head (ZBL repulsion
+# and one ratio head for both dispersion ratios come with the flag)
+LEGACY_ARCHITECTURE = dict(
+    {k: v for k, v in ARCHITECTURE.items() if not k.startswith("electrostatic_energy_kspace")},
+    legacy_so3lr_bool=True, qk_norm=False, use_rms_norm=False, use_residual_scalars=False,
+    layer_normalization_2=True, use_final_bias_bool=True)
+# what so3lr's model builder takes for these when a model does not set them
+UNSET = {"legacy_so3lr_bool": False, "qk_norm": False, "use_rms_norm": False, "use_residual_scalars": False}
 # (degrees, heads, features) checked against the neighbour-list potential: one head per
 # degree entry, 32 features each (so3lr-tauri-s/m, and so3lr-tauri-l with each degree twice)
 SHAPES = {((1, 2, 3, 4), 4, 128), ((1, 1, 2, 2, 3, 3, 4, 4), 8, 256)}
@@ -103,11 +126,11 @@ def validate_options(settings):
             raise ValueError(f"flash_devices {n}: only {len(jax.local_devices())} visible")
 
 
-def reserve_gpu(settings):
+def reserve_gpu(settings, task="md"):
     """Let XLA take 97% of the GPU (unless set) when flash may run these settings and this
     model: its largest systems need nearly all of it. Called before JAX starts, so before
     the structure is read: a run that falls back for its structure still reserves it."""
-    if ((settings.get("engine") or "auto") != "standard" and settings_problem(settings) is None
+    if ((settings.get("engine") or "auto") != "standard" and settings_problem(settings, task) is None
             and model_problem(settings.get("model_path")) is None):
         # several GPUs: room outside XLA's pool for NCCL's buffers
         n = settings.get("flash_devices")
@@ -115,12 +138,20 @@ def reserve_gpu(settings):
         os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90" if several else "0.97")
 
 
-def settings_problem(settings):
-    """Why flash cannot run these settings (None if it can)."""
+def settings_problem(settings, task="md"):
+    """Why flash cannot run these settings for task (one of TASKS; None if it can)."""
+    if task not in TASKS:
+        raise ValueError(f"task must be one of {', '.join(TASKS)} (received {task!r})")
     s = settings
     ens = s.get("ensemble")
-    if ens not in ("nve", "nvt", "nvt-langevin", "npt"):
+    if task == "md" and ens not in ("nve", "nvt", "nvt-langevin", "npt"):
         return f"it runs nve, nvt, nvt-langevin and npt, not {ens}"
+    if task == "eval":
+        other = [t for t in _targets(s.get("targets")) if t not in EVAL_TARGETS]
+        if other:
+            return f"it evaluates {' and '.join(EVAL_TARGETS)}, not {', '.join(other)}"
+    if s.get("lr_cutoff", 12.0) is None:
+        return "it needs a long-range cutoff"
     kspace = s.get("kspace_electrostatics") or s.get("kspace_dispersion")
     for key, value in s.items():
         if key in UNSUPPORTED:
@@ -146,6 +177,13 @@ def settings_problem(settings):
     return None
 
 
+def _targets(targets):
+    """so3lr eval's targets, a comma-separated string or a sequence, as a list."""
+    if isinstance(targets, str):
+        targets = targets.split(",")
+    return [t.strip() for t in targets or () if t.strip()]
+
+
 def _jax_md_keeps_dudv():
     """Flash's NPT finds each step's box and positions by running the jax-md step with
     zero force and strain derivative, which holds only if the step's first half uses
@@ -160,22 +198,20 @@ def model_problem(model_path):
     spec = resolve_model(model_path)
     from so3lr.model_config import load_model_config
     model = load_model_config(spec.dir)["model"]
-    if model.get("legacy_so3lr_bool", False):
-        return "it runs the v2 models (so3lr-tauri-s, -m, -l), not the legacy so3lr"
+    arch = LEGACY_ARCHITECTURE if model.get("legacy_so3lr_bool") is True else ARCHITECTURE
     shape = (tuple(model.get("degrees") or ()), model.get("num_heads"), model.get("num_features"))
     if shape not in SHAPES:
         return (f"its kernels are written for degrees, heads and features {sorted(SHAPES)} "
                 f"({spec.dir.name} has {shape})")
     for key, value in model.items():
-        if key in ("legacy_so3lr_bool", "degrees", "num_heads", "num_features"):
+        if key in ("degrees", "num_heads", "num_features"):
             continue
-        if key in ARCHITECTURE:
-            if value != ARCHITECTURE[key]:
-                return (f"its kernels are written for {key} = {ARCHITECTURE[key]!r} "
-                        f"({spec.dir.name} has {value!r})")
+        if key in arch:
+            if value != arch[key]:
+                return f"its kernels are written for {key} = {arch[key]!r} ({spec.dir.name} has {value!r})"
         elif key not in SIZES:
             return f"it does not know the model hyperparameter {key!r} ({spec.dir.name})"
-    missing = [k for k in ARCHITECTURE if k not in model]
+    missing = [k for k in arch if k not in model and (k not in UNSET or UNSET[k] != arch[k])]
     if missing:
         return f"{spec.dir.name} does not set {missing[0]!r}"
     return None
@@ -207,8 +243,9 @@ def box_problem(L, rc, rc_lr):
     return None
 
 
-def structure_problem(settings, atoms):
-    """Why flash cannot take this structure, or the restart's box (None if it can)."""
+def structure_problem(settings, atoms, rc):
+    """Why flash cannot take this structure, or the restart's box (None if it can); rc: the
+    model's cutoff (``model_cutoff``)."""
     if not atoms.pbc.all() or atoms.cell.rank < 3:
         return "it needs a box periodic in all three directions"
     cell = np.asarray(atoms.cell[:])
@@ -220,11 +257,19 @@ def structure_problem(settings, atoms):
             box = np.asarray(saved["box"]) if "box" in saved.files else None
         if box is not None and np.any(box):
             sides = np.diag(box) if box.ndim == 2 else np.broadcast_to(box.reshape(-1), (3,))
-    from so3lr.model_registry import resolve_model
-    with open(resolve_model(settings.get("model_path")).dir / "hyperparameters.json") as fp:
-        rc = float(json.load(fp)["model"]["cutoff"])
     shrink = 1.0 - (NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0)
     return box_problem([float(v) * shrink for v in sides], rc, float(settings.get("lr_cutoff") or 12.0))
+
+
+@functools.cache
+def is_rocm():
+    """Whether JAX runs on AMD's ROCm (HIP) here."""
+    import jax
+    try:
+        version = str(jax.devices()[0].client.platform_version).lower()
+    except Exception:
+        return False
+    return "rocm" in version or "hip" in version
 
 
 def device_problem():
@@ -235,21 +280,60 @@ def device_problem():
     except Exception as exc:                     # no backend at all
         return f"no JAX device ({exc})"
     if dev.platform != "gpu":
-        return f"its kernels run on NVIDIA GPUs, and this process has {dev.platform}"
-    try:
-        version = str(dev.client.platform_version).lower()
-    except Exception:
-        version = ""
-    if "rocm" in version or "hip" in version:
-        return "its kernels are tested on NVIDIA GPUs only, and this is ROCm"
+        return f"its kernels run on NVIDIA and AMD GPUs, and this process has {dev.platform}"
     cc = getattr(dev, "compute_capability", None)
-    if cc is not None and float(cc) < 8.0:
-        return f"its kernels are tested on compute capability 8.0 and newer (A100, H100), and this GPU is {cc}"
+    if is_rocm():
+        # as measured on the MI355X: XLA's command buffers off (HIP graph capture fails)
+        if str(cc).split(":")[0] not in ROCM_TARGETS:
+            return f"on AMD its kernels are tested on {', '.join(ROCM_TARGETS)} (MI355X), and this GPU is {cc}"
+        if "--xla_gpu_enable_command_buffer=" not in os.environ.get("XLA_FLAGS", ""):
+            return 'on AMD it needs XLA_FLAGS="--xla_gpu_enable_command_buffer=" (set before JAX starts)'
+        return None
+    try:
+        if cc is not None and float(cc) < 8.0:
+            return f"its kernels are tested on compute capability 8.0 and newer (A100, H100), and this GPU is {cc}"
+    except ValueError:
+        return f"it does not know this GPU (compute capability {cc!r})"
     return None
 
 
-def flash_problem(settings, atoms):
-    """Why the flash engine cannot run this simulation (None if it can): the settings,
-    the model and the structure first (no device needed), then the device."""
-    return (settings_problem(settings) or model_problem(settings.get("model_path"))
-            or structure_problem(settings, atoms) or device_problem())
+def model_cutoff(model_path):
+    """The model's short-range cutoff in A."""
+    from so3lr.model_registry import resolve_model
+    with open(resolve_model(model_path).dir / "hyperparameters.json") as fp:
+        return float(json.load(fp)["model"]["cutoff"])
+
+
+def frames_problem(settings, frames):
+    """Why flash cannot take one of these structures (None if it can take them all): each
+    distinct box checked once."""
+    rc, seen = model_cutoff(settings.get("model_path")), set()
+    for i, atoms in enumerate(frames):
+        key = (tuple(bool(p) for p in atoms.pbc), np.asarray(atoms.cell[:]).tobytes())
+        if key in seen:
+            continue
+        seen.add(key)
+        problem = structure_problem(settings, atoms, rc)
+        if problem:
+            return problem if len(frames) == 1 else f"structure {i}: {problem}"
+    return None
+
+
+def flash_problem(settings, atoms, task="md"):
+    """Why the flash engine cannot run task (one of TASKS) on atoms, a structure or a list of
+    them (None if it can): the settings, the model and the structures first (no device
+    needed), then the device."""
+    frames = atoms if isinstance(atoms, (list, tuple)) else [atoms]
+    return (settings_problem(settings, task) or model_problem(settings.get("model_path"))
+            or frames_problem(settings, frames) or _engines_problem(settings, frames, task) or device_problem())
+
+
+def _engines_problem(settings, frames, task):
+    """Why auto does not run so3lr eval on flash for these structures: too many engines."""
+    if task != "eval" or (settings.get("engine") or "auto") != "auto":
+        return None
+    n = len({atoms.numbers.tobytes() for atoms in frames})
+    if n > EVAL_AUTO_ENGINES:
+        return (f"the structures have {n} different sets of atoms, an engine to build and compile for "
+                f"each (auto takes up to {EVAL_AUTO_ENGINES}; --engine flash runs any number)")
+    return None

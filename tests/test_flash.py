@@ -1,12 +1,13 @@
-"""SO3LR-Flash (``so3lr/flash``): the parts that run without a GPU here, and on an NVIDIA GPU
-the engine against the neighbour-list potential.
+"""SO3LR-Flash (``so3lr/flash``): the parts that run without a GPU here, and on a GPU it runs on
+(NVIDIA, AMD Instinct) the engine against the neighbour-list potential.
 
 Without a GPU: PME's mesh part and its strain derivative against jaxpme, the real-space
 tables against so3lr_dev's pair functions, the reasons the engine choice gives (every
 settings key and model hyperparameter classified), and ``so3lr nvt`` falling back to
 the neighbour-list potential. With one:
 ``python -m so3lr.flash.verify`` on 12,288 waters (energy, forces, dE/d(strain), with and
-without PME). With two or more: the same on several GPUs as on one, and MD on two.
+without PME); ``so3lr opt``, ``so3lr eval`` and the ASE calculator against the
+neighbour-list potential. With two or more: the same on several GPUs as on one, and MD on two.
 """
 import json
 import pathlib
@@ -141,6 +142,41 @@ def test_c6_mesh_table():
     assert np.isclose(lr6[0], 1.0 / (6.0 * (2.0 * s * s) ** 3))
 
 
+def test_legacy_pieces_match_so3lr():
+    """The legacy so3lr's own pieces against so3lr_dev's modules (float64): LayerNorm, the
+    Hirshfeld-ratio head, and the learnable ZBL repulsion from the repulsion kernel's tables."""
+    import flax.linen as nn
+    from so3lr.flash import blocks
+    from so3lr.flash.loader import load_params
+    from so3lr.mlff.nn.observable.observable_sparse import HirshfeldSparse, ZBLRepulsionSparse
+    params, statics = load_params("so3lr", precision="float64")
+    assert statics["legacy"] and not (statics["rms_norm"] or statics["qk_norm"])
+    rng = np.random.default_rng(0)
+    n = 40
+    x = jnp.asarray(rng.normal(size=(n, 128)) * 2.0 + 0.5)
+    z = jnp.asarray(rng.choice([1, 6, 7, 8, 9, 15, 16, 17], size=n))
+    mask = jnp.ones(n)
+    p = params["layers_1"]["layer_normalization_2"]
+    _check("LayerNorm", blocks.layer_norm(p, x), nn.LayerNorm().apply({"params": p}, x), 1e-12)
+    head = HirshfeldSparse(prop_keys=None, regression_dim=128, activation_fn=jax.nn.silu,
+                           output_is_zero_at_init=False, legacy=True)
+    ref = head.apply({"params": params["observables_2"]}, dict(x=x, atomic_numbers=z, node_mask=mask))
+    _check("hirshfeld ratios", blocks.legacy_hirshfeld_head(params["observables_2"], x, z),
+           ref["hirshfeld_ratios"], 1e-12)
+    # ZBL, a pair per atom (float64 parameters, as the neighbour-list potential casts them)
+    i, j = jnp.arange(n), jnp.asarray((np.arange(n) + rng.integers(1, n, n)) % n)
+    d = jnp.asarray(rng.uniform(0.3, 1.6, n))
+    cut = jnp.asarray(rng.uniform(0.1, 1.0, n))
+    inputs = dict(atomic_numbers=z.astype(jnp.int32), node_mask=mask, cut=cut, idx_i=i, idx_j=j, d_ij=d)
+    ref = ZBLRepulsionSparse(prop_keys=None).apply({"params": params["observables_0"]["zbl_repulsion"]},
+                                                   inputs)["zbl_repulsion"]
+    # as _sr_kernel takes the tables: [min(Z) - 1, max(Z) - 1]
+    lo, hi = jnp.minimum(z[i], z[j]) - 1, jnp.maximum(z[i], z[j]) - 1
+    y = (params["repulsion_a"][lo, hi] * jnp.exp(-params["repulsion_b"][lo, hi] * d[:, None])).sum(-1)
+    e_pair = E._switch(d, 0.0, 1.5)[0] * cut * KE * z[i] * z[j] / d * y / 2.0
+    np.testing.assert_allclose(e_pair, ref, rtol=1e-12)
+
+
 def _water(reps):
     from ase.io import read
     return read(DATA / "water_64.xyz").repeat(reps)
@@ -170,7 +206,8 @@ SETTINGS = dict(ensemble="nvt", model_path=None, lr_cutoff=12.0)
     (dict(model_path="so3lr-tauri-s-2602"), None),
     (dict(model_path="so3lr-tauri-l-2606"), None),
     (dict(model_path="so3lr-tauri-l-2602"), None),
-    (dict(model_path="so3lr"), "legacy"),
+    (dict(model_path="so3lr"), None),
+    (dict(model_path="so3lr", kspace_electrostatics="pme", kspace_dispersion="pme"), None),
 ])
 def test_engine_choice(monkeypatch, change, reason):
     """What auto picks for a GPU, given the settings (37 A of water)."""
@@ -184,6 +221,53 @@ def test_engine_choice_small_box(monkeypatch):
     assert "narrower than twice the cutoff" in check.flash_problem(SETTINGS, _water((1, 1, 1)))
 
 
+@pytest.mark.parametrize("task,change,reason", [
+    ("opt", dict(), None),
+    ("ase", dict(kspace_electrostatics="pme", kspace_dispersion="pme"), None),
+    ("eval", dict(targets="energy,forces"), None),
+    ("eval", dict(targets=["forces"]), None),
+    ("eval", dict(targets="forces,dipole_vec,hirshfeld_ratios"), "not dipole_vec, hirshfeld_ratios"),
+    ("eval", dict(targets="energy", kspace_electrostatics="ewald"), "PME but not ewald"),
+    ("opt", dict(lr_cutoff=None), "long-range cutoff"),
+    ("opt", dict(model_path="so3lr"), None),
+])
+def test_engine_choice_other_tasks(monkeypatch, task, change, reason):
+    """so3lr opt, so3lr eval and the ASE calculator take what MD takes, with no ensemble;
+    eval only for energies and forces."""
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    problem = check.flash_problem(dict(dict(model_path=None, lr_cutoff=12.0), **change), _water((3, 3, 3)), task=task)
+    assert (problem is None) if reason is None else (reason in problem), problem
+
+
+def test_engine_choice_every_structure(monkeypatch):
+    """so3lr eval: flash takes a dataset only if it takes every structure, and names the
+    first it cannot take."""
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    settings = dict(model_path=None, lr_cutoff=12.0, targets="energy,forces")
+    water = _water((3, 3, 3))
+    gas = water.copy()
+    gas.pbc = False
+    assert check.flash_problem(settings, [water, water.copy()], task="eval") is None
+    problem = check.flash_problem(settings, [water, water, gas], task="eval")
+    assert problem.startswith("structure 2: it needs a box periodic"), problem
+
+
+def test_eval_auto_takes_a_few_engines(monkeypatch):
+    """so3lr eval builds an engine per set of atoms: auto declines more than
+    EVAL_AUTO_ENGINES of them, engine flash takes any number."""
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    water = _water((3, 3, 3))
+    frames = []
+    for k in range(check.EVAL_AUTO_ENGINES + 1):
+        a = water.copy()
+        a.numbers[3 * k + 1] = 9                # a different hydrogen each time
+        frames.append(a)
+    settings = dict(model_path=None, lr_cutoff=12.0, targets="energy,forces")
+    assert check.flash_problem(settings, frames[:-1], task="eval") is None
+    assert "different sets of atoms" in check.flash_problem(settings, frames, task="eval")
+    assert check.flash_problem(dict(settings, engine="flash"), frames, task="eval") is None
+
+
 def test_every_settings_key_classified():
     """A settings key added to the CLI must be sorted into what flash handles, ignores
     or declines; until then auto declines whenever it is set."""
@@ -192,18 +276,30 @@ def test_every_settings_key_classified():
     assert not known_yaml_keys() - known, sorted(known_yaml_keys() - known)
 
 
-@pytest.mark.parametrize("edit,reason", [
-    (None, None),
-    (("num_heads", 8), "degrees, heads and features"),
-    (("degrees", [1, 2, 3, 5]), "degrees, heads and features"),
-    (("activation_fn", "gelu"), "activation_fn"),
-    (("some_new_hyperparameter", True), "does not know the model hyperparameter"),
-    (("qk_norm", None), "does not set 'qk_norm'"),
+@pytest.mark.parametrize("model,edit,reason", [
+    ("so3lr-tauri-m-2606", None, None),
+    ("so3lr-tauri-m-2606", ("num_heads", 8), "degrees, heads and features"),
+    ("so3lr-tauri-m-2606", ("degrees", [1, 2, 3, 5]), "degrees, heads and features"),
+    ("so3lr-tauri-m-2606", ("activation_fn", "gelu"), "activation_fn"),
+    ("so3lr-tauri-m-2606", ("some_new_hyperparameter", True), "does not know the model hyperparameter"),
+    ("so3lr-tauri-m-2606", ("qk_norm", None), "does not set 'qk_norm'"),
+    ("so3lr-tauri-m-2606", ("legacy_so3lr_bool", False), None),
+    # declined (the first mismatch it names follows the file's key order)
+    ("so3lr-tauri-m-2606", ("legacy_so3lr_bool", True), ""),
+    ("so3lr", None, None),
+    ("so3lr", ("qk_norm", False), None),
+    ("so3lr", ("use_rms_norm", True), "use_rms_norm = False"),
+    ("so3lr", ("layer_normalization_2", False), "layer_normalization_2 = True"),
+    # use_final_bias_bool (like legacy_so3lr_bool) is read from the checkpoint when the
+    # config leaves it out (so3lr.model_config), so removing it changes nothing here
+    ("so3lr", ("use_final_bias_bool", None), None),
+    ("so3lr", ("layer_normalization_2", None), "does not set 'layer_normalization_2'"),
+    ("so3lr", ("electrostatic_energy_kspace_do_ewald_bool", False), "does not know the model hyperparameter"),
 ])
-def test_model_architecture_check(tmp_path, edit, reason):
-    """so3lr-tauri-m with one hyperparameter changed (None: removed) is declined."""
+def test_model_architecture_check(tmp_path, model, edit, reason):
+    """A model with one hyperparameter changed (None: removed) is declined."""
     from so3lr.model_registry import resolve_model
-    src = resolve_model("so3lr-tauri-m-2606").dir
+    src = resolve_model(model).dir
     for f in src.iterdir():
         if f.name != "hyperparameters.json":
             (tmp_path / f.name).symlink_to(f)
@@ -216,7 +312,7 @@ def test_model_architecture_check(tmp_path, edit, reason):
             cfg["model"][key] = value
     (tmp_path / "hyperparameters.json").write_text(json.dumps(cfg))
     problem = check.model_problem(str(tmp_path))
-    assert (problem is None) if reason is None else (reason in problem), problem
+    assert (problem is None) if reason is None else (problem is not None and reason in problem), problem
 
 
 def test_cell_grid_takes_every_box_from_the_smallest():
@@ -251,13 +347,50 @@ def test_bad_engine_options_raise(bad):
     check.validate_options(dict(engine="standard", flash_mode="lean", flash_devices=4096))
 
 
+def test_rocm_launches(monkeypatch):
+    """The launches measured on the MI355X on ROCm, the NVIDIA ones elsewhere."""
+    from types import SimpleNamespace
+
+    def rows(n, warps):
+        return E.FlashSO3LR._row_grid(SimpleNamespace(nl=n, atoms_per_program=None), warps)
+    monkeypatch.setattr(E, "is_rocm", lambda: True)
+    assert E._att_launch(32) == {"fwd": (16, 1), "bwd_heads": (16, 1), "bwd_degrees": (8, 1)}
+    assert E._att_launch(64) == {"fwd": (16, 2), "bwd_heads": (32, 2), "bwd_degrees": (16, 2)}
+    assert E._warps(E.NUM_WARPS) == 1
+    assert rows(12_288, 1) == (12_288, 1)
+    assert rows(84_283_392, 1) == (42_141_696, 2)
+    assert rows(84_283_392, 2) == (28_094_464, 3)
+    monkeypatch.setattr(E, "is_rocm", lambda: False)
+    assert E._att_launch(32) == E.ATT_LAUNCH[32] and E._att_launch(64) == E.ATT_LAUNCH[64]
+    assert E._warps(E.NUM_WARPS) == E.NUM_WARPS
+    assert rows(84_283_392, 1) == (84_283_392, 1)
+
+
+@pytest.mark.parametrize("rocm,cc,flags,reason", [
+    (True, "gfx950", "--xla_gpu_enable_command_buffer=", None),
+    (True, "gfx950", "", "XLA_FLAGS"),
+    (True, "gfx942", "--xla_gpu_enable_command_buffer=", "tested on gfx950"),
+    (False, "9.0", "", None),
+    (False, "7.5", "", "compute capability 8.0"),
+    (False, "gfx950", "", "does not know this GPU"),
+])
+def test_device_check(monkeypatch, rocm, cc, flags, reason):
+    """NVIDIA from compute capability 8.0; on ROCm the MI355X with XLA's command buffers off."""
+    from types import SimpleNamespace
+    monkeypatch.setattr(check, "is_rocm", lambda: rocm)
+    monkeypatch.setattr(jax, "devices", lambda *args: [SimpleNamespace(platform="gpu", compute_capability=cc)])
+    monkeypatch.setenv("XLA_FLAGS", flags)
+    problem = check.device_problem()
+    assert (problem is None) if reason is None else (reason in problem), problem
+
+
 def test_flash_modes_match_the_engine():
     assert tuple(E.MODES) == check.FLASH_MODES[1:]
 
 
-@pytest.mark.skipif(check.device_problem() is None, reason="this test is for machines without an NVIDIA GPU")
+@pytest.mark.skipif(check.device_problem() is None, reason="this test is for machines without a GPU flash runs on")
 def test_auto_falls_back_without_gpu(tmp_path):
-    """Without an NVIDIA GPU, `so3lr nvt` runs the neighbour-list potential and says why."""
+    """Without a GPU flash runs on, `so3lr nvt` runs the neighbour-list potential and says why."""
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
     from subprocess_env import so3lr_subprocess_env
     (tmp_path / "in.xyz").write_text((DATA / "acetone.xyz").read_text())
@@ -298,12 +431,13 @@ def test_flash_refuses_untrained_elements(monkeypatch):
         flash_md.perform_md_flash(SETTINGS, atoms=atoms)
 
 
-GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA GPU")
+GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA or AMD Instinct GPU")
 
 
 @GPU
 @pytest.mark.parametrize("model,pme", [("so3lr-tauri-m-2606", ""), ("so3lr-tauri-m-2606", "electrostatics,dispersion"),
-                                       ("so3lr-tauri-l-2606", "electrostatics,dispersion")])
+                                       ("so3lr-tauri-l-2606", "electrostatics,dispersion"), ("so3lr", ""),
+                                       ("so3lr", "electrostatics,dispersion")])
 def test_flash_matches_neighbour_lists(tmp_path, model, pme):
     """Energy, forces and dE/d(strain) on 12,288 waters (49.6 A), float64."""
     from ase.io import write
@@ -314,11 +448,11 @@ def test_flash_matches_neighbour_lists(tmp_path, model, pme):
 
 
 @GPU
-@pytest.mark.parametrize("model", ["so3lr-tauri-m-2606", "so3lr-tauri-l-2606"])
+@pytest.mark.parametrize("model", ["so3lr-tauri-m-2606", "so3lr-tauri-l-2606", "so3lr"])
 def test_float32_follows_float64(model):
     """float32 (each model's attention launch; the backward's filter products as TF32x3 on
-    tensor cores, which float64 never runs) gives float64's energy and forces to float32
-    accuracy."""
+    tensor cores, which float64 never runs; plain float32 on ROCm) gives float64's energy and
+    forces to float32 accuracy."""
     from so3lr.flash.loader import load_params
     atoms = _water((3, 3, 3))
     out = {}
@@ -350,6 +484,22 @@ def test_narrow_neighbour_rows_widen():
 
 
 @GPU
+@pytest.mark.parametrize("app", [2, 5])
+def test_atoms_per_program(app):
+    """Several atoms per program, as on HIP for the largest systems (5 leaves a tail), give one
+    atom per program's energy and forces (float64)."""
+    from so3lr.flash.loader import load_params
+    atoms = _water((3, 3, 3))
+    params, statics = load_params(None, precision="float64", lr_cutoff=12.0)
+    args = (params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]))
+    R = jnp.asarray(atoms.get_positions())
+    e_ref, f_ref = E.FlashSO3LR(*args).energy_forces(R)
+    e, f = E.FlashSO3LR(*args, atoms_per_program=app).energy_forces(R)
+    _check("energy", e, e_ref, 1e-13)
+    _check("forces", f, f_ref, 1e-12)
+
+
+@GPU
 def test_box_shrinks_to_the_smallest_grid():
     """NPT near the smallest box: a box that leaves the margin downwards is laid out again
     with no room left to shrink rather than refused, and gives what an engine built for it
@@ -367,6 +517,103 @@ def test_box_shrinks_to_the_smallest_grid():
     e_ref, f_ref = E.FlashSO3LR(params, statics, z, np.eye(3) * L).energy_forces(R)
     _check("energy", e, e_ref, 1e-12)
     _check("forces", f, f_ref, 1e-10)
+
+
+def _scaled(atoms, f):
+    out = atoms.copy()
+    out.set_cell(atoms.cell[:] * f, scale_atoms=True)
+    return out
+
+
+@GPU
+@pytest.mark.parametrize("pme", [None, "pme"])
+def test_ase_calculator_matches_neighbour_lists(pme):
+    """FlashCalculator gives So3lrCalculator's energy and forces (float64, 37 A of water,
+    with and without PME electrostatics), again after the cell grows (the engine's box
+    moves) and after a water is removed (a new engine)."""
+    from so3lr import FlashCalculator, So3lrCalculator
+    from so3lr.mlff.utils.kspace_utils import DEFAULT_KSPACE_SMEARING, DEFAULT_KSPACE_SPACING
+    kspace = dict(kspace_electrostatics=pme, kspace_smearing=DEFAULT_KSPACE_SMEARING,
+                  kspace_spacing=DEFAULT_KSPACE_SPACING)
+    calc = FlashCalculator(model="so3lr-tauri-m-2606", lr_cutoff=12.0, precision="float64", **kspace)
+    flash = _water((3, 3, 3))
+    flash.calc = calc
+    for step in ("first", "cell", "atoms"):
+        if step == "cell":
+            flash.set_cell(flash.cell[:] * 1.01, scale_atoms=True)
+        elif step == "atoms":
+            del flash[[0, 1, 2]]
+        other = flash.copy()
+        # a new reference each time: So3lrCalculator does not take other atoms after its first
+        other.calc = So3lrCalculator(model="so3lr-tauri-m-2606", lr_cutoff=12.0, dtype=np.float64, **kspace)
+        e_ref, f_ref = other.get_potential_energy(), other.get_forces()
+        e, f = flash.get_potential_energy(), flash.get_forces()
+        assert abs(e - e_ref) / len(flash) < 1e-9, (step, e, e_ref)
+        assert np.abs(f - f_ref).max() < 1e-5, (step, np.abs(f - f_ref).max())
+
+
+@GPU
+def test_ase_calculator_refuses_what_flash_cannot_take():
+    from so3lr import FlashCalculator
+    atoms = _water((3, 3, 3))
+    atoms.pbc = False
+    atoms.calc = FlashCalculator(precision="float64")
+    with pytest.raises(ValueError, match="periodic"):
+        atoms.get_potential_energy()
+
+
+@GPU
+@pytest.mark.parametrize("pme", [None, "pme"])
+def test_eval_on_flash_matches_neighbour_lists(tmp_path, pme):
+    """so3lr eval on flash (float64): three labelled structures, the second in a larger box
+    (the engine's box moves), the third with a water fewer and a charge of +1 (a new engine;
+    the charge embedding, made of parameters alone, in float64 on both engines). The energies are
+    So3lrCalculator's in float64 and the force metrics and forces so3lr eval's on the
+    neighbour-list model (whose energies are 3.5e-8 eV/atom off float64 here: make_so3lr
+    takes no dtype)."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from ase.io import read, write
+    from so3lr import So3lrCalculator
+    from so3lr.cli.so3lr_eval import evaluate_so3lr_on
+    from so3lr.mlff.utils.kspace_utils import DEFAULT_KSPACE_SMEARING, DEFAULT_KSPACE_SPACING
+    rng = np.random.default_rng(0)
+    water = _water((3, 3, 3))
+    frames = [water, _scaled(water, 1.01), water[3:]]
+    frames[2].info["charge"] = 1
+    for a in frames:
+        a.calc = SinglePointCalculator(a, energy=float(rng.normal()), forces=rng.normal(size=(len(a), 3)))
+    write(tmp_path / "data.extxyz", frames)
+    out = {}
+    for engine in ("flash", "standard"):
+        out[engine] = evaluate_so3lr_on(
+            str(tmp_path / "data.extxyz"), targets="energy,forces", precision="float64",
+            model_path="so3lr-tauri-m-2606", kspace_electrostatics=pme, engine=engine,
+            save_to=str(tmp_path / f"{engine}.extxyz"), log_file=str(tmp_path / f"{engine}.log"))
+    assert "Engine: flash" in (tmp_path / "flash.log").read_text()
+    # the forces agree to 1e-5 eV/A (verify's bound): a force metric moves by at most the mean
+    # |difference|
+    for key in ("forces_mae", "forces_rmse"):
+        assert abs(out["flash"][key] - out["standard"][key]) <= 1e-6, (key, out["flash"][key], out["standard"][key])
+    kspace = dict(kspace_electrostatics=pme, kspace_smearing=DEFAULT_KSPACE_SMEARING,
+                  kspace_spacing=DEFAULT_KSPACE_SPACING)
+    for a, b in zip(read(tmp_path / "flash.extxyz", ":"), read(tmp_path / "standard.extxyz", ":")):
+        ref = a.copy()
+        ref.calc = So3lrCalculator(model="so3lr-tauri-m-2606", lr_cutoff=12.0, dtype=np.float64, **kspace)
+        assert abs(a.info["energy_so3lr"] - ref.get_potential_energy()) / len(a) < 1e-9
+        assert np.abs(a.arrays["forces_so3lr"] - b.arrays["forces_so3lr"]).max() < 1e-5
+        assert np.allclose(a.positions, b.positions)
+
+
+@GPU
+def test_eval_falls_back_for_other_targets(tmp_path):
+    """The default targets include dipoles and ratios, which flash does not compute: auto
+    runs the neighbour-list model and says why."""
+    from so3lr.cli.so3lr_eval import evaluate_so3lr_on
+    from ase.io import write
+    write(tmp_path / "data.extxyz", [_water((3, 3, 3))])
+    evaluate_so3lr_on(str(tmp_path / "data.extxyz"), log_file=str(tmp_path / "o.log"))
+    log = (tmp_path / "o.log").read_text()
+    assert "flash cannot: it evaluates energy and forces, not dipole_vec, hirshfeld_ratios" in log, log[-2000:]
 
 
 def _so3lr(args, cwd, env=None):
@@ -395,6 +642,27 @@ def test_md_restarts_on_flash(tmp_path):
 
 
 @GPU
+@pytest.mark.parametrize("model", [None, "so3lr"])
+def test_opt_on_flash_follows_neighbour_lists(tmp_path, model):
+    """`so3lr opt` on flash (auto) follows the neighbour-list potential's FIRE trajectory
+    (float64, PME; the default model and the legacy so3lr), and writes the same trajectory
+    file."""
+    from ase.io import read, write
+    write(tmp_path / "w.xyz", _water((3, 3, 3)))
+    run = ["opt", "--input", "w.xyz", "--precision", "float64", "--min-cycles", "3", "--min-steps", "5",
+           "--kspace-electrostatics", "pme"] + ([] if model is None else ["--model", model])
+    _so3lr([*run, "--output", "a.xyz"], tmp_path)
+    _so3lr([*run, "--engine", "standard", "--output", "b.xyz"], tmp_path)
+    assert "Engine: flash (auto)" in (tmp_path / "a.log").read_text()
+    a, b = read(tmp_path / "a.xyz", ":"), read(tmp_path / "b.xyz", ":")
+    assert len(a) == len(b) == 4
+    for fa, fb in zip(a, b):
+        d = fa.positions - fb.positions
+        d -= np.round(d / np.diag(fa.cell[:])) * np.diag(fa.cell[:])
+        assert np.abs(d).max() < 1e-6, np.abs(d).max()
+
+
+@GPU
 def test_auto_falls_back_when_flash_fails_to_start(tmp_path, monkeypatch):
     """A flash engine that cannot be built (say, a kernel that does not compile on this
     GPU): auto runs the neighbour-list potential and says why."""
@@ -415,7 +683,7 @@ def test_auto_falls_back_when_flash_fails_to_start(tmp_path, monkeypatch):
 
 
 GPUS = pytest.mark.skipif(check.device_problem() is not None or len(jax.local_devices()) < 2,
-                          reason="several GPUs: needs two NVIDIA GPUs or more")
+                          reason="several GPUs: needs two GPUs flash runs on or more")
 
 
 @GPUS
@@ -442,6 +710,19 @@ def test_several_gpus_give_one_gpus_forces(precision, tol):
         assert eng.K > 16
         _check("energy, rows widened on 2 GPUs", e, e_ref, 1e-12)
         _check("forces, rows widened on 2 GPUs", f, f_ref, 1e-10)
+
+
+@GPUS
+def test_ase_calculator_on_two_gpus():
+    """FlashCalculator(flash_devices=2) gives one GPU's energy and forces (float64)."""
+    from so3lr import FlashCalculator
+    out = []
+    for devices in (1, 2):
+        atoms = _water((3, 3, 3))
+        atoms.calc = FlashCalculator(precision="float64", flash_devices=devices)
+        out.append((atoms.get_potential_energy(), atoms.get_forces()))
+    _check("energy on 2 GPUs", out[1][0], out[0][0], 1e-12)
+    _check("forces on 2 GPUs", out[1][1], out[0][1], 1e-10)
 
 
 @GPUS

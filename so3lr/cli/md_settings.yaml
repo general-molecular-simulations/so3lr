@@ -38,7 +38,7 @@ num_unpaired_electrons: 0                  # Spin: number of unpaired electrons 
 seed: 52                                   # Random seed for MD and thermostat initialization [Default: 52]
 precision: "float32"                       # Numerical precision: "float32" or "float64" [Default: "float32"]
 matmul_precision: "highest"                # JAX matmul precision: "default" / "high" / "highest". "highest" forces full float32 and avoids TF32 drift on GPUs. [Default: "highest"]
-engine: "auto"                             # MD engine: "auto" (flash on an NVIDIA GPU when it covers the run, else the neighbour-list engine; the log says which), "flash" or "standard" [Default: "auto"]
+engine: "auto"                             # MD engine: "auto" (flash on an NVIDIA GPU or AMD MI355X when it covers the run, else the neighbour-list engine; the log says which), "flash" or "standard" [Default: "auto"]
 flash_mode: "auto"                         # Flash memory mode, fastest first: "fast", "default", "lean", "leanest", "minimal"; "auto" picks the fastest that fits [Default: "auto"]
 flash_mixed: true                          # Flash with float32: keep positions, momenta and energy sums in float64 [Default: true]
 

@@ -1,10 +1,12 @@
-"""SO3LR-Flash in ``so3lr nve|nvt|nvt-langevin|npt``: jax-md dynamics with the flash engine.
+"""SO3LR-Flash in ``so3lr nve|nvt|nvt-langevin|npt`` and ``so3lr opt``: jax-md dynamics and
+FIRE with the flash engine.
 
 ``so3lr_md.run`` runs the flash engine whenever it computes what the settings ask for
-(``check.flash_problem`` is None: an NVIDIA GPU, a periodic orthorhombic box, nve / nvt /
-nvt-langevin / isotropic npt, no k-space other than PME, so3lr-tauri-s, -m or -l), else the
-neighbour-list potential of ``perform_md``. ``--engine flash`` or ``--engine standard``
-forces one.
+(``check.flash_problem`` is None: an NVIDIA GPU or an AMD MI355X, a periodic orthorhombic
+box, nve / nvt / nvt-langevin / isotropic npt, no k-space other than PME,
+so3lr-tauri-s, -m, -l or the legacy so3lr), else the neighbour-list potential of ``perform_md``;
+``perform_min`` (``so3lr opt``) likewise runs ``perform_min_flash``. ``--engine flash`` or
+``--engine standard`` forces one.
 
 Same settings, units, log lines, trajectory and restart files as ``perform_md``; the
 forces come from ``FlashSO3LR`` instead of the neighbour-list potential. NVE and NVT
@@ -22,6 +24,7 @@ NPT runs every step in two calls: the engine evaluates in the box the step reach
 (``set_box``), and the step takes the force and dE/d(strain) through an energy whose
 gradients they are (``_surrogate``).
 """
+import gc
 import logging
 import time
 from pathlib import Path
@@ -50,6 +53,7 @@ from so3lr.cli.so3lr_md import (
     validate_and_log_input,
     validate_npt_restart_coupling,
     validate_orthorhombic_restart_box,
+    warn_legacy_kspace,
     write_to_extxyz,
     write_to_hdf5,
 )
@@ -57,7 +61,7 @@ from so3lr.md_settings_validation import validate_md_counts
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported, supported_atomic_numbers_for_model)
 
-from .check import NPT_BOX_MARGIN, flash_problem
+from .check import NPT_BOX_MARGIN, flash_problem, model_cutoff, structure_problem
 from .engine import MODES, FlashSO3LR, mode_kib, pick_mode, pme_bytes
 from .loader import load_params
 
@@ -79,9 +83,21 @@ def _pme(settings):
     return el, disp
 
 
-def build_engine(atoms, settings, dtype):
+def dtypes(settings):
+    """(the model's dtype, the positions'): float64 positions (and MD state) around a float32
+    model unless flash_mixed is off or x64 is (float32 coordinates of a 500 A box round to
+    6e-5 A)."""
+    dtype = jnp.float64 if settings.get("precision", "float32") == "float64" else jnp.float32
+    mixed = dtype == jnp.float32 and bool(settings.get("flash_mixed", True)) and jax.config.jax_enable_x64
+    return dtype, (jnp.float64 if mixed else dtype)
+
+
+def build_engine(atoms, settings, dtype, box_margin=None):
     """FlashSO3LR for ``atoms`` with the model, charges, PME and memory mode of
-    ``settings``."""
+    ``settings``; the cell grid laid out for a box ``box_margin`` smaller (default: NPT's
+    margin in NPT, else none)."""
+    if box_margin is None:
+        box_margin = NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0
     precision = "float64" if dtype == jnp.float64 else "float32"
     params, statics = load_params(settings.get("model_path"), precision=precision,
                                   lr_cutoff=settings.get("lr_cutoff", 12.0),
@@ -98,12 +114,13 @@ def build_engine(atoms, settings, dtype):
     embed = settings.get("charge_embed_total_charge")
     equil = settings.get("charge_equilibration_total_charge")
     kw, staged, _ = MODES[mode]
-    eng = FlashSO3LR(params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]),
+    # the sides only: structure_problem takes a cell with off-diagonals up to 1e-9 as orthorhombic
+    eng = FlashSO3LR(params, statics, atoms.get_atomic_numbers(), np.diag(L),
                      total_charge=total_charge if embed is None else float(embed),
                      total_spin=float(settings.get("num_unpaired_electrons") or 0),
                      equilibration_charge=total_charge if equil is None else float(equil),
                      pme_electrostatics=pme_el, pme_dispersion=pme_disp,
-                     box_margin=NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0, devices=devices,
+                     box_margin=box_margin, devices=devices,
                      **kw)
     logger.info(f"Flash: {n} atoms, memory mode {mode} ({'staged' if staged else 'jitted'}), "
                 f"~{mode_kib(mode, statics):.1f} KiB/atom at peak")
@@ -117,6 +134,8 @@ def build_engine(atoms, settings, dtype):
     for what, p, mesh in (("electrostatics", pme_el, eng.mesh_el), ("dispersion", pme_disp, eng.mesh_disp)):
         if p:
             logger.info(f"Flash: PME {what}, smearing {p[0]} A, mesh {mesh}")
+    if statics["legacy"] and pme_el:
+        warn_legacy_kspace("pme")
     return eng, staged
 
 
@@ -183,15 +202,13 @@ def _two_call_step(apply_fn):
     return predict, finish
 
 
-def relax_flash(eng, staged, position, shift, box, settings, atoms, start):
-    """FIRE as ``perform_min`` runs it before MD (same settings, log and ``<output>_opt.xyz``
-    trajectory) from ``position``, where (energy, forces) are ``start``; returns the
-    relaxed positions."""
+def relax_flash(eng, staged, position, shift, box, settings, atoms, start, opt_file):
+    """FIRE as ``perform_min`` runs it (same settings and log, the trajectory to
+    ``opt_file`` unless None) from ``position``, where (energy, forces) are ``start``;
+    returns the relaxed positions."""
     s = settings
     overwrite = bool(s.get("overwrite", False))
-    out = Path(s["output_file"])
-    opt_file = out.with_name(f"{out.stem}_opt.xyz")
-    if _existing_regular_output_mode(opt_file) is not None and not overwrite:
+    if opt_file is not None and _existing_regular_output_mode(opt_file) is not None and not overwrite:
         raise RuntimeError(f"Output file already exists: {opt_file}. Refusing to overwrite. "
                            f"Pass --overwrite to overwrite, or choose a different --output.")
     init, apply = jax_md.minimize.fire_descent(
@@ -226,15 +243,95 @@ def relax_flash(eng, staged, position, shift, box, settings, atoms, start):
                            f"steps) without reaching force_convergence={fconv:.3f} eV/Å (last Fmax = "
                            f"{f_max:.3f} eV/Å). Increase --min-cycles or relax --force-conv if tighter "
                            f"convergence is required.")
-    write_to_extxyz(opt_file, atoms, boxes=np.asarray(box), momenta=None, positions=frames,
-                    fractional_coordinates=False, append=False, overwrite=overwrite)
-    logger.info(f"Optimization trajectory with {len(frames)} frames saved to {opt_file}")
+    if opt_file is not None:
+        write_to_extxyz(opt_file, atoms, boxes=np.asarray(box), momenta=None, positions=frames,
+                        fractional_coordinates=False, append=False, overwrite=overwrite)
+        logger.info(f"Optimization trajectory with {len(frames)} frames saved to {opt_file}")
     return state.position
 
 
 class FlashUnavailable(RuntimeError):
     """The flash engine could not be built or evaluated at the start (before anything is
     written): ``--engine auto`` runs the neighbour-list potential instead."""
+
+
+def perform_min_flash(all_settings, atoms):
+    """``perform_min`` with the flash engine: FIRE from ``atoms`` (the input structure, read
+    and logged by perform_min), the trajectory to ``output_file``; returns the relaxed
+    positions in A. Raises ``FlashUnavailable`` if the engine fails before the run starts."""
+    s = all_settings
+    check_atomic_numbers_supported(atoms.numbers, supported_atomic_numbers_for_model(s.get("model_path")))
+    problem = flash_problem(s, atoms, task="opt")
+    if problem:
+        raise ValueError(f"flash: {problem}")
+    # perform_min's cell checks
+    cell_from_atoms_boundary_conditions(atoms, s.get("lr_cutoff", 12.0), s.get("kspace_electrostatics"),
+                                        s.get("kspace_smearing"))
+    atoms = atoms.copy()
+    atoms.wrap()
+    dtype, sdt = dtypes(s)
+    position = jnp.asarray(atoms.get_positions(), sdt)
+    box = jnp.asarray(np.diag(np.asarray(atoms.cell[:])), sdt)
+    try:
+        eng, staged = build_engine(atoms, s, dtype)
+        position, box = replicated(eng, (position, box))
+        start = (eng.energy_forces_staged if staged else eng.energy_forces)(position)
+    except Exception as exc:
+        raise FlashUnavailable(f"{type(exc).__name__}: {exc}") from exc
+    logger.info(f"Flash precision: model {jnp.dtype(dtype).name}, positions {jnp.dtype(sdt).name}")
+    _, shift = jax_md.space.periodic(box)
+    # as perform_min: a trajectory only for an extxyz (or hdf5, renamed .xyz) output
+    out = s.get("output_file")
+    opt_file = Path(out) if out and s.get("output_format") in ("extxyz", "hdf5") else None
+    return relax_flash(eng, staged, position, shift, box, s, atoms, start=start, opt_file=opt_file)
+
+
+class SinglePoints:
+    """Energy and forces of one structure after another (so3lr eval, the ASE calculator). The
+    engine is built for the atoms, charge and spin of the structure and kept while they stay
+    the same; a new box is laid out again only outside the cell grid's margin or for another
+    PME mesh (so each box gets the mesh a single point of it builds). The settings, model and
+    device are checked here, a structure when its atoms or box are new. box_margin: as for
+    build_engine (the cell grid for a box that much smaller, so boxes within it compile
+    nothing; none for a box that stays the same, which keeps every cell)."""
+
+    def __init__(self, settings, task, matmul_precision="highest", box_margin=0.0):
+        problem = flash_problem(settings, [], task=task)
+        if problem:
+            raise ValueError(f"flash: {problem}")
+        self.settings, self.matmul_precision, self.box_margin = settings, matmul_precision, box_margin
+        self.dtype, self.position_dtype = dtypes(settings)
+        self.supported = supported_atomic_numbers_for_model(settings.get("model_path"))
+        self.rc = model_cutoff(settings.get("model_path"))
+        self.engine = self._ef = self._key = self._box = None
+        self._builds = 0
+
+    def __call__(self, atoms, charge=0.0, spin=0.0):
+        """(energy, forces, compiled): compiled if the call built or laid out the engine again."""
+        key = (atoms.numbers.tobytes(), float(charge), float(spin))
+        cell = np.asarray(atoms.cell[:])
+        box = (cell.tobytes(), tuple(bool(p) for p in atoms.pbc))
+        if key != self._key or box != self._box:
+            problem = structure_problem(self.settings, atoms, self.rc)
+            if problem:
+                raise ValueError(f"flash: {problem}")
+        with jax.default_matmul_precision(self.matmul_precision):
+            if key != self._key:
+                check_atomic_numbers_supported(atoms.numbers, self.supported)
+                self.engine = self._ef = self._key = None    # until the new engine exists
+                gc.collect()                 # the last engine's arrays, before the next one's
+                self.engine, staged = build_engine(
+                    atoms, dict(self.settings, total_charge=key[1], num_unpaired_electrons=key[2]), self.dtype,
+                    box_margin=self.box_margin)
+                self._ef = self.engine.energy_forces_staged if staged else self.engine.energy_forces
+                self._key, self._builds = key, 0
+            elif box != self._box:
+                self.engine.set_box(np.diag(cell), exact_mesh=True)
+            self._box = box
+            R = jnp.asarray(np.mod(atoms.positions, np.diag(cell)), self.position_dtype)
+            e, F = self._ef(replicated(self.engine, R))
+        compiled, self._builds = self.engine.builds != self._builds, self.engine.builds
+        return float(e), np.asarray(F, np.float64), compiled
 
 
 def perform_md_flash(all_settings, restart=False, atoms=None):
@@ -269,11 +366,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                                         s.get("kspace_smearing"))
     atoms.wrap()
     precision = s.get("precision", "float32")
-    dtype = jnp.float64 if precision == "float64" else jnp.float32
-    # the MD state (positions, momenta, energy sums) in float64 around a float32 model
-    # unless flash_mixed is off: float32 coordinates of a 500 A box round to 6e-5 A
-    mixed = dtype == jnp.float32 and bool(s.get("flash_mixed", True))
-    sdt = jnp.float64 if mixed else dtype
+    dtype, sdt = dtypes(s)
+    mixed = sdt != dtype
     geo = atoms_to_jnp(atoms, precision=sdt)
     position = geo["positions"]
     box = jnp.asarray(np.diag(np.asarray(atoms.cell[:])), sdt)
@@ -318,7 +412,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     ef = eng.energy_forces_staged if staged else eng.energy_forces
     _, shift = jax_md.space.periodic(box)
     if not restart and s.get("relax_before_run", True):
-        position = relax_flash(eng, staged, position, shift, box, s, atoms, start=(e0, F0))
+        out = Path(s["output_file"])
+        position = relax_flash(eng, staged, position, shift, box, s, atoms, start=(e0, F0),
+                               opt_file=out.with_name(f"{out.stem}_opt.xyz"))
         e0, F0, W0 = strain(position)
 
     md_dt_ps = s.get("md_dt")
