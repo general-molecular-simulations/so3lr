@@ -39,11 +39,13 @@ DTYPE = jnp.float64
 # Constants
 KE = 14.399645351950548  # Coulomb constant in eV*Angstrom
 
-# ASE calculator vs jax-md on the same model and k-space grid, eV and eV/A: the
-# tolerances test_jaxmd.py::test_with_solar_potential_v2 applies to jax-md
-# against a reference produced by the ASE calculator.
-ASE_JAXMD_ENERGY_ATOL = 1e-6
-ASE_JAXMD_FORCES_ATOL = 1e-4
+# The ASE calculator against a jax-md path (the Python API, or the CLI MD setup)
+# on the same model and k-space grid, in float64, eV and eV/A. Measured on
+# MeluXina: <= 9e-13 eV and <= 2.5e-13 eV/A for the 192- and 1536-atom boxes, i.e.
+# summation-order roundoff; these bounds leave ~4 orders of margin and still
+# catch any configuration difference (a float32 k-space term, another damping).
+ASE_JAXMD_ENERGY_ATOL = 1e-8
+ASE_JAXMD_FORCES_ATOL = 1e-8
 
 
 DummySystem = namedtuple('DummySystem', ['R', 'k_grid', 'k_smearing'])
@@ -109,28 +111,34 @@ def _jaxmd_potential(kspace_method, lr_cutoff):
     return So3lrPotential(dtype=DTYPE, lr_cutoff=lr_cutoff, coulomb_kspace_method=kspace_method)
 
 
-def _ase_calculator(kspace_method, lr_cutoff, smearing):
-    """So3lrCalculator for the default model with the user-level k-space settings.
+@pytest.fixture(scope='module')
+def ase_calculator():
+    """``get(kspace_method, lr_cutoff, smearing, atoms)``: a So3lrCalculator for the
+    default model with those user-level k-space settings.
 
-    Built once per (method, cutoff, smearing) and shared: TestPMEJaxMD hands it a
-    pre-built grid in atoms.info (which overrides the kwargs), TestCLIMDPotential
-    lets it build its own. Reset on every use, since ASE would otherwise return
-    the previous test's results for the same positions.
+    Shared within this module: TestPMEJaxMD hands it a pre-built grid in
+    atoms.info (which overrides the kwargs), TestCLIMDPotential lets it build its
+    own. Keyed by the structure's atom count and cell too, because a calculator
+    keeps its neighbour-list allocation; reset on every use, since ASE would
+    otherwise return the previous test's results for the same positions. Released
+    with the module.
     """
-    calc = _cached_ase_calculator(kspace_method, lr_cutoff, smearing)
-    calc.reset()
-    return calc
+    cache = {}
 
+    def get(kspace_method, lr_cutoff, smearing, atoms):
+        key = (kspace_method, lr_cutoff, smearing, len(atoms), tuple(atoms.cell.array.ravel()))
+        if key not in cache:
+            cache[key] = So3lrCalculator(
+                lr_cutoff=lr_cutoff,
+                dtype=np.float64,
+                kspace_electrostatics=kspace_method,
+                kspace_smearing=smearing,
+                kspace_spacing=_converged_spacing(kspace_method, smearing),
+            )
+        cache[key].reset()
+        return cache[key]
 
-@functools.cache
-def _cached_ase_calculator(kspace_method, lr_cutoff, smearing):
-    return So3lrCalculator(
-        lr_cutoff=lr_cutoff,
-        dtype=np.float64,
-        kspace_electrostatics=kspace_method,
-        kspace_smearing=smearing,
-        kspace_spacing=_converged_spacing(kspace_method, smearing),
-    )
+    return get
 
 
 def _converged_spacing(method, smearing):
@@ -448,7 +456,8 @@ class TestPMEJaxMD:
     """Test PME with JAX-MD backend."""
 
     @pytest.mark.parametrize('kspace_method', ['ewald', 'pme', 'p3m'])
-    def test_jaxmd_matches_ase_calculator(self, kspace_method, package_dir, pme_case):
+    def test_jaxmd_matches_ase_calculator(self, kspace_method, package_dir, pme_case,
+                                          ase_calculator):
         """The Python-API jax-md potential (So3lrPotential + to_jax_md) and the ASE
         calculator agree.
 
@@ -467,7 +476,7 @@ class TestPMEJaxMD:
         atoms_ase = atoms.copy()
         atoms_ase.info['k_grid'] = np.array(k_grid)
         atoms_ase.info['k_smearing'] = np.array(k_smearing)
-        atoms_ase.calc = _ase_calculator(kspace_method, lr_cutoff, smearing)
+        atoms_ase.calc = ase_calculator(kspace_method, lr_cutoff, smearing, atoms_ase)
         ase_energy = atoms_ase.get_potential_energy()
         ase_forces = atoms_ase.get_forces()
 
@@ -590,7 +599,8 @@ class TestCLIMDPotential:
     """
 
     @pytest.mark.parametrize('kspace_method', ['ewald', 'pme'])
-    def test_cli_md_potential_matches_ase_calculator(self, kspace_method, pme_case, monkeypatch):
+    def test_cli_md_potential_matches_ase_calculator(self, kspace_method, pme_case, monkeypatch,
+                                                     ase_calculator):
         import jaxpme.kspace
 
         atoms, smearing, lr_cutoff = pme_case
@@ -615,7 +625,7 @@ class TestCLIMDPotential:
         # it) with the dispersion damping the calculator also defaults to.
         assert settings['dispersion_damping'] == 2.0
         atoms_ase = atoms.copy()
-        atoms_ase.calc = _ase_calculator(kspace_method, lr_cutoff, smearing)
+        atoms_ase.calc = ase_calculator(kspace_method, lr_cutoff, smearing, atoms_ase)
         ase_energy = atoms_ase.get_potential_energy()
         ase_forces = atoms_ase.get_forces()
 

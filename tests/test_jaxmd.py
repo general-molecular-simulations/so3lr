@@ -11,7 +11,7 @@ from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr import jaxmd_utils
 from so3lr.model_registry import resolve_model
 
-from test_ase import V2_MODELS
+from model_references import TOLERANCES, V2_MODELS, reference_path
 
 # Original/legacy SO3LR model, resolved via the registry so the test is
 # decoupled from the on-disk layout (the model now lives under models/so3lr).
@@ -26,9 +26,7 @@ buffer_size_multiplier_lr = 1.25
 minimum_cell_size_multiplier_sr = 1.0
 
 
-def test_water():
-    jax.config.update('jax_enable_x64', True)
-
+def test_water(x64):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
     # targets
@@ -107,16 +105,14 @@ def test_water():
 
 
 @pytest.mark.parametrize('model', V2_MODELS)
-def test_with_solar_potential_v2(model: str):
+def test_with_solar_potential_v2(model: str, x64):
     """jax-md energy/forces for bundled v2 models against the saved ASE references
     (tests/test_ase.py::test_v2_ase_calculator), across the two code paths."""
     from so3lr import So3lrPotential
 
-    jax.config.update('jax_enable_x64', True)
-
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
-    target_predictions = np.load(package_dir / f'tests/test_data/dha_{model}_ase.npz')
+    target_predictions = np.load(reference_path(model))
 
     mol = read(
         package_dir / 'tests/test_data/dha.xyz'
@@ -151,17 +147,8 @@ def test_with_solar_potential_v2(model: str):
         R0, neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, box=box)
     forces = -grad
 
-    npt.assert_allclose(
-        target_predictions['energy'],
-        energy,
-        atol=1e-6
-    )
-
-    npt.assert_allclose(
-        target_predictions['forces'],
-        forces,
-        atol=1e-4
-    )
+    npt.assert_allclose(energy, target_predictions['energy'], rtol=0, atol=TOLERANCES['energy'])
+    npt.assert_allclose(forces, target_predictions['forces'], rtol=0, atol=TOLERANCES['forces'])
 
     with npt.assert_raises(AssertionError):
         npt.assert_allclose(target_predictions['energy'], np.zeros_like(energy))
@@ -171,12 +158,10 @@ def test_with_solar_potential_v2(model: str):
 
 
 @pytest.mark.parametrize('name', ['dha'])
-def test_with_solar_potential(name: str):
+def test_with_solar_potential(name: str, x64):
     """jax-md energy/forces for the legacy model in vacuum against saved references,
     through the public So3lrPotential entry point."""
     from so3lr import So3lrPotential
-
-    jax.config.update('jax_enable_x64', True)
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 

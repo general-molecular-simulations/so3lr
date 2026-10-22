@@ -3,6 +3,7 @@ import re
 import subprocess
 import sys
 import pathlib
+from unittest import mock
 
 import pytest
 from click.testing import CliRunner
@@ -100,7 +101,6 @@ def test_unknown_settings_key_warns_and_the_run_goes_on(tmp_path, monkeypatch):
     monkeypatch.setattr(so3lr_cli, 'reserve_gpu', lambda *args, **kwargs: None)
     # setup_logger would leave the SO3LR logger non-propagating for later tests.
     monkeypatch.setattr(so3lr_md, 'setup_logger', lambda *args, **kwargs: None)
-    monkeypatch.setattr(so3lr_cli.logger, 'warning', lambda msg, *args, **kwargs: warnings.append(msg))
 
     yaml_path = tmp_path / 'typo.yaml'
     yaml_path.write_text(
@@ -110,7 +110,11 @@ def test_unknown_settings_key_warns_and_the_run_goes_on(tmp_path, monkeypatch):
         "engine: standard\nrelax_before_run: false\n"
         "md_t: 350.0\n"
     )
-    result = CliRunner().invoke(cli, ['--settings', str(yaml_path)])
+    # mock.patch.object, not monkeypatch: on exit it deletes the instance attribute
+    # instead of leaving a bound method shadowing Logger.warning on the shared logger.
+    with mock.patch.object(so3lr_cli.logger, 'warning',
+                           side_effect=lambda msg, *args, **kwargs: warnings.append(msg)):
+        result = CliRunner().invoke(cli, ['--settings', str(yaml_path)])
 
     assert result.exit_code == 0, result.output
     assert captured, "perform_md was never called: the typo aborted the run"

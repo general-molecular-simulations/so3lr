@@ -6,6 +6,8 @@ from ase.io import read
 from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 from so3lr.model_registry import resolve_model
 
+from model_references import TOLERANCES, V2_MODELS, reference_path
+
 # Original/legacy SO3LR model, resolved via the registry so the test is
 # decoupled from the on-disk layout (the model now lives under models/so3lr).
 MODEL_DIR = resolve_model('so3lr').dir
@@ -231,18 +233,6 @@ def test_so3lr_s_water():
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
-# Exact releases, never floating aliases: a reference pins one checkpoint's outputs,
-# saved as tests/test_data/dha_<model>_ase.npz by tools/make_test_references.py.
-# Tolerances per model: the -2602 reference predates the tool and is held to its
-# original bounds; references the tool writes come from this code path in float64,
-# so they hold to far below any meaningful change.
-V2_MODELS = ['so3lr-tauri-s-2602', 'so3lr-tauri-m-2606']
-V2_TOLERANCES = {  # (atol, rtol) per output
-    'so3lr-tauri-s-2602': dict(energy=(2e-5, 1e-6), forces=(1e-4, 0), c6_ratios=(1e-5, 0)),
-    'so3lr-tauri-m-2606': dict(energy=(1e-7, 0), forces=(1e-6, 0), c6_ratios=(1e-8, 0)),
-}
-
-
 def test_shipped_default_has_a_reference():
     """Changing DEFAULT_MODEL must come with a saved reference for the new default."""
     from so3lr.model_registry import DEFAULT_MODEL
@@ -250,27 +240,31 @@ def test_shipped_default_has_a_reference():
 
 
 @pytest.mark.parametrize('model', V2_MODELS)
-def test_v2_ase_calculator(model: str):
-    """Regression check for bundled v2 models against saved references."""
+def test_v2_ase_calculator(model: str, x64):
+    """Regression check for bundled v2 models against saved references
+    (tests/model_references.py). Needs x64: the tight bounds hold in float64 only."""
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
-    target = np.load(package_dir / f'tests/test_data/dha_{model}_ase.npz')
-    tol = V2_TOLERANCES[model]
+    target = np.load(reference_path(model))
 
     atoms = read(package_dir / 'tests/test_data/dha.xyz')
     atoms.cell = None
     atoms.pbc = False
-    # One evaluation gives energy, forces and the c6_ratios head.
-    atoms.calc = So3lrCalculator(model=model, dtype=np.float64, has_aux=True,
-                                 observables=['c6_ratios'])
+    # Energy and forces from the plain calculator users run; c6_ratios, a head of
+    # the v2 models, from a second one that returns it as an observable.
+    atoms.calc = So3lrCalculator(model=model, dtype=np.float64)
     energy = atoms.get_potential_energy()
     forces = atoms.get_forces()
-    c6_ratios = np.asarray(atoms.calc.results['aux']['c6_ratios'])
+    atoms_obs = atoms.copy()
+    atoms_obs.calc = So3lrCalculator(model=model, dtype=np.float64, has_aux=True,
+                                     observables=['c6_ratios'])
+    atoms_obs.get_potential_energy()
+    c6_ratios = np.asarray(atoms_obs.calc.results['aux']['c6_ratios'])
 
     for key, value in (('energy', energy), ('forces', forces), ('c6_ratios', c6_ratios)):
-        atol, rtol = tol[key]
-        npt.assert_allclose(value, target[key], atol=atol, rtol=rtol, err_msg=f'{model} {key}')
+        npt.assert_allclose(value, target[key], rtol=0, atol=TOLERANCES[key],
+                            err_msg=f'{model} {key}')
     # The references are not degenerate.
     assert abs(target['energy']) > 1.0 and np.abs(target['forces']).max() > 0.1
     assert np.abs(target['c6_ratios']).max() > 0.1
