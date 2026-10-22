@@ -1,69 +1,56 @@
-from ml_collections import config_dict
-import numpy.testing as npt
-import yaml
+"""The shipped config.yaml is the template users copy for `so3lr train`.
+
+It is not merged with any defaults, so it must carry every key the training
+path reads by attribute (without a fallback). Values are deliberately not
+pinned: changing a default is not a bug, dropping a required key is.
+"""
 from importlib.resources import files
 
+import yaml
+from ml_collections import config_dict
 
-def test_default_config_yaml():
-    stream = (files('so3lr.config') / 'config.yaml').open('rb')
+# Keys read as `config.<section>.<key>` by make_so3krates_sparse_from_config,
+# make_optimizer_from_config and run_training in so3lr/mlff/config/from_config.py.
+REQUIRED_KEYS = {
+    'data': {
+        'filepath', 'energy_unit', 'length_unit', 'dipole_vec_unit', 'shift_mode',
+        'energy_shifts', 'split_seed', 'neighbors_lr_bool', 'neighbors_lr_cutoff',
+        'avg_num_neighbors',
+    },
+    'model': {
+        'num_layers', 'num_features', 'num_heads', 'num_features_head',
+        'radial_basis_fn', 'num_radial_basis_fn', 'cutoff_fn', 'cutoff', 'cutoff_lr',
+        'degrees', 'residual_mlp_1', 'residual_mlp_2', 'layer_normalization_1',
+        'layer_normalization_2', 'message_normalization', 'qk_non_linearity',
+        'activation_fn', 'layers_behave_like_identity_fn_at_init',
+        'output_is_zero_at_init', 'input_convention', 'use_charge_embed',
+        'use_spin_embed', 'energy_regression_dim', 'energy_activation_fn',
+        'energy_learn_atomic_type_scales', 'energy_learn_atomic_type_shifts',
+        'electrostatic_energy_bool', 'electrostatic_energy_scale',
+        'dispersion_energy_bool', 'dispersion_energy_cutoff_lr_damping',
+        'dispersion_energy_scale', 'zbl_repulsion_bool',
+    },
+    'optimizer': {
+        'name', 'optimizer_args', 'learning_rate', 'learning_rate_schedule',
+        'learning_rate_schedule_args', 'num_of_nans_to_ignore', 'gradient_clipping',
+        'gradient_clipping_args',
+    },
+    'training': {
+        'allow_restart', 'num_epochs', 'num_train', 'num_valid',
+        'batch_max_num_nodes', 'batch_max_num_edges', 'batch_max_num_graphs',
+        'batch_max_num_pairs', 'eval_every_num_steps', 'loss_weights',
+        'model_seed', 'training_seed', 'log_gradient_values',
+    },
+}
 
-    cfg = config_dict.ConfigDict(yaml.load(stream=stream, Loader=yaml.FullLoader))
 
-    cfg_model = cfg.model
-    cfg_optimizer = cfg.optimizer
-    cfg_training = cfg.training
-    cfg_data = cfg.data
+def test_default_config_yaml_has_every_required_key():
+    with (files('so3lr.config') / 'config.yaml').open('rb') as stream:
+        cfg = config_dict.ConfigDict(yaml.safe_load(stream))
 
-    npt.assert_equal(cfg.workdir, 'first_experiment')
-    npt.assert_equal(cfg_data.filepath, None)
-    npt.assert_equal(cfg_data.energy_unit, 'eV')
-    npt.assert_equal(cfg_data.length_unit, 'Angstrom')
-    npt.assert_equal(cfg_data.shift_mode, None)
-    npt.assert_equal(cfg_data.energy_shifts, None)
-    npt.assert_equal(cfg_data.split_seed, 42)
-
-    npt.assert_equal(cfg_model.num_layers, 2)
-    npt.assert_equal(cfg_model.num_features, 128)
-    npt.assert_equal(cfg_model.num_heads, 4)
-    npt.assert_equal(cfg_model.num_features_head, 32)
-    npt.assert_equal(cfg_model.degrees, [1, 2, 3, 4])
-    npt.assert_equal(cfg_model.cutoff, 5.0)
-    npt.assert_equal(cfg_model.cutoff_fn, 'phys')
-    npt.assert_equal(cfg_model.num_radial_basis_fn, 32)
-    npt.assert_equal(cfg_model.radial_basis_fn, 'bernstein')
-    npt.assert_equal(cfg_model.activation_fn, 'silu')
-    npt.assert_equal(cfg_model.qk_non_linearity, 'identity')
-    npt.assert_equal(cfg_model.residual_mlp_1, True)
-    npt.assert_equal(cfg_model.residual_mlp_2, False)
-    npt.assert_equal(cfg_model.layer_normalization_1, True)
-    npt.assert_equal(cfg_model.layer_normalization_2, False)
-    npt.assert_equal(cfg_model.layers_behave_like_identity_fn_at_init, True)
-    npt.assert_equal(cfg_model.output_is_zero_at_init, True)
-    npt.assert_equal(cfg_model.energy_regression_dim, 128)
-    npt.assert_equal(cfg_model.energy_activation_fn, 'silu')
-    npt.assert_equal(cfg_model.energy_learn_atomic_type_scales, True)
-    npt.assert_equal(cfg_model.energy_learn_atomic_type_shifts, True)
-    npt.assert_equal(cfg_model.input_convention, 'positions')
-
-    npt.assert_equal(cfg_optimizer.name, 'muon')
-    npt.assert_equal(cfg_optimizer.learning_rate, 1e-3)
-    npt.assert_equal(cfg_optimizer.learning_rate_schedule, 'exponential_decay')
-    npt.assert_equal(cfg_optimizer.learning_rate_schedule_args['decay_rate'], 0.75)
-    npt.assert_equal(cfg_optimizer.learning_rate_schedule_args['transition_steps'], 125_000)
-    npt.assert_equal(cfg_optimizer.num_of_nans_to_ignore, 0)
-    npt.assert_equal(cfg_optimizer.gradient_clipping, 'clip_by_global_norm')
-    npt.assert_equal(cfg_optimizer.gradient_clipping_args['max_norm'], 10)
-
-    npt.assert_equal(cfg_training.allow_restart, True)
-    npt.assert_equal(cfg_training.num_epochs, 100)
-    npt.assert_equal(cfg_training.num_train, 950)
-    npt.assert_equal(cfg_training.num_valid, 50)
-    npt.assert_equal(cfg_training.batch_max_num_nodes, None)
-    npt.assert_equal(cfg_training.batch_max_num_edges, None)
-    npt.assert_equal(cfg_training.batch_max_num_graphs, 6)
-    npt.assert_equal(cfg_training.eval_every_num_steps, 1000)
-    npt.assert_equal(cfg_training.loss_weights['energy'], 0.01)
-    npt.assert_equal(cfg_training.loss_weights['forces'], 0.99)
-    npt.assert_equal(cfg_training.model_seed, 42)
-    npt.assert_equal(cfg_training.training_seed, 42)
-    npt.assert_equal(cfg_training.log_gradient_values, False)
+    assert {'workdir', *REQUIRED_KEYS} <= set(cfg.keys())
+    missing = {section: sorted(keys - set(cfg[section].keys()))
+               for section, keys in REQUIRED_KEYS.items()}
+    missing = {section: keys for section, keys in missing.items() if keys}
+    assert not missing, f'config.yaml lacks keys the trainer reads: {missing}'
+    assert len(cfg.training.loss_weights) > 0

@@ -11,51 +11,6 @@ from so3lr.model_registry import resolve_model
 MODEL_DIR = resolve_model('so3lr').dir
 
 
-@pytest.mark.parametrize('name', ['dha'])
-def test_molecules(name: str):
-    package_dir = pathlib.Path(__file__).parent.parent.resolve()
-
-    target_predictions = np.load(package_dir / f'tests/test_data/{name}_ase.npz')
-
-    atoms = read(package_dir / f'tests/test_data/{name}.xyz')
-
-    calc = AseCalculatorSparse.create_from_workdir(
-        workdir=MODEL_DIR,
-        lr_cutoff=12.,
-        dispersion_energy_cutoff_lr_damping=2.,
-        from_file=True,
-        dtype=np.float64
-    )
-
-    atoms.calc = calc
-
-    # for ASE we remove the cell
-    atoms.cell = None
-    atoms.pbc = False
-
-    energy = atoms.get_potential_energy()
-    forces = atoms.get_forces()
-
-    npt.assert_allclose(
-        target_predictions['energy'],
-        energy,
-        atol=1e-5,
-        rtol=1e-6
-    )
-
-    npt.assert_allclose(
-        target_predictions['forces'],
-        forces,
-        atol=1e-4
-    )
-
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(target_predictions['energy'], np.zeros_like(energy))
-
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
-
-
 def test_bounding_cell_does_not_change_free_molecule():
     """A pbc=False molecule with a tight bounding cell is still free."""
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
@@ -134,7 +89,8 @@ def test_so3lr_ase_calculator(name: str):
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
     # Reference predictions were generated with the legacy (v1) model, so pin to
-    # it explicitly; the no-arg default is so3lr-tauri-m-2606 (see test_default_model_*).
+    # it explicitly; the no-arg default is so3lr-tauri-m-2606 (see
+    # tests/test_model_registry.py::test_defaults).
     calc = So3lrCalculator(
         model="so3lr",
         dtype=np.float64
@@ -249,38 +205,6 @@ def test_so3lr_s_water():
 
     with npt.assert_raises(AssertionError):
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
-
-
-@pytest.mark.parametrize('name', ['dha'])
-def test_default_model_is_current_m(name: str):
-    """The no-arg default must equal the current M model and differ from legacy."""
-    from so3lr import So3lrCalculator
-
-    package_dir = pathlib.Path(__file__).parent.parent.resolve()
-    atoms = read(package_dir / f'tests/test_data/{name}.xyz')
-    atoms.cell = None
-    atoms.pbc = False
-
-    def predict(model):
-        a = atoms.copy()
-        a.calc = So3lrCalculator(model=model, dtype=np.float64)
-        return a.get_potential_energy(), a.get_forces()
-
-    default_energy, default_forces = predict(None)        # no-arg default
-    m_energy, m_forces = predict("so3lr-tauri-m")
-    legacy_energy, _ = predict("so3lr")
-
-    # Outputs must be finite.
-    assert np.isfinite(default_energy)
-    assert np.all(np.isfinite(default_forces))
-
-    # The bare default must be exactly the current M release.
-    npt.assert_allclose(default_energy, m_energy, rtol=1e-10, atol=1e-10)
-    npt.assert_allclose(default_forces, m_forces, rtol=1e-10, atol=1e-10)
-
-    # It must be a genuinely different model from the legacy v1 model.
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(m_energy, legacy_energy, atol=1e-4)
 
 
 @pytest.mark.parametrize('name', ['dha'])

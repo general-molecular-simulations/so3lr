@@ -42,8 +42,8 @@ def test_cli_eval(eval_dir):
     result = subprocess.run(
         [
             'so3lr', 'eval',
-            # EXPECTED_RMSE was produced with the legacy (v1) model; pin to it.
-            # The no-arg default is so3lr-tauri-m-2606 (see test_cli_eval_default_model).
+            # The legacy (v1) model, whose ratio head is 'hirshfeld_ratios'; the
+            # no-arg default is so3lr-tauri-m-2606 (see test_cli_eval_default_model).
             '--model', 'so3lr',
             '--datafile', str(datafile),
             '--lr-cutoff', '100.0',
@@ -118,6 +118,40 @@ def test_cli_eval_default_model(eval_dir):
             f"{target} RMSE = {rmse} is not a finite positive float.\n"
             f"Log content:\n{log_content}"
         )
+
+
+def test_cli_eval_without_labels(eval_dir):
+    """Prediction-only eval: a structure with no labels (acetone.xyz has positions
+    only) must be predicted and saved without metrics, and the NaN labels the
+    dataloader fills in must not be written next to the predictions."""
+    import numpy as np
+
+    project_root = pathlib.Path(__file__).resolve().parent.parent
+    datafile = project_root / 'tests' / 'test_data' / 'acetone.xyz'
+    eval_xyz = eval_dir / 'acetone_eval.xyz'
+
+    result = subprocess.run(
+        ['so3lr', 'eval', '--datafile', str(datafile), '--save-to', str(eval_xyz)],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        cwd=eval_dir,
+        env=so3lr_subprocess_env(),
+    )
+    assert result.returncode == 0, (
+        f"so3lr eval failed with return code {result.returncode}\n"
+        f"stdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+
+    atoms = read(eval_xyz)
+    assert np.isfinite(atoms.info['energy_so3lr'])
+    assert atoms.arrays['forces_so3lr'].shape == (len(atoms), 3)
+    assert np.isfinite(atoms.arrays['forces_so3lr']).all()
+    # Checked in the file: ASE's reader moves an 'energy' key off atoms.info.
+    assert 'energy=nan' not in eval_xyz.read_text().lower(), (
+        "a NaN energy label was written next to the predictions"
+    )
 
 
 def test_cli_eval_so3lr_s(eval_dir):

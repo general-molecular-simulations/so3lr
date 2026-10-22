@@ -155,7 +155,9 @@ def test_npt_flex_coupling_modes(coupling):
 
 
 def test_npt_flex_energy_conservation():
-    """Test that the extended Hamiltonian is approximately conserved."""
+    """The extended Hamiltonian is conserved over a few steps: the one check of
+    npt_nose_hoover_flex_invariant (the conserved quantity the MD log reports) in
+    the short suite. The drift suite (--full) measures longer runs."""
     energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr = _setup_system()
 
     unit_system = units.metal_unit_system()
@@ -201,10 +203,10 @@ def test_npt_flex_energy_conservation():
         neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx,
     )
 
-    # Extended Hamiltonian should be approximately conserved
-    # (not exactly, due to finite dt and NHC thermostat)
+    # The drift suite holds 100 float64 steps of every flex mode under 1e-3 x |H0|
+    # (tests/test_integrator_drift.py); 5 steps must stay well inside that.
     rel_drift = abs(float(H1 - H0)) / abs(float(H0))
-    assert rel_drift < 0.05, (
+    assert np.isfinite(rel_drift) and rel_drift < 1e-3, (
         f"Extended Hamiltonian drifted by {rel_drift*100:.2f}%: "
         f"H0={float(H0):.6f}, H1={float(H1):.6f}"
     )

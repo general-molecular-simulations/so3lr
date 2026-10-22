@@ -4,7 +4,6 @@ from pathlib import Path
 import jax
 import numpy as np
 import optax
-import pytest
 from ase import units
 
 from so3lr.mlff import jraph_utils, training_utils
@@ -60,12 +59,12 @@ def _fit(ckpt_dir, model, loss_fn, data, **kwargs):
         ckpt_dir=ckpt_dir, allow_restart=False, use_wandb=False, **kwargs)
 
 
-@pytest.mark.parametrize("use_ema", [False, True])
-def test_fit(tmp_path, use_ema):
+def test_fit_with_ema(tmp_path):
+    """The plain (use_ema=False) path is what every other test here runs."""
     model = _so3krates()
     _fit(tmp_path / 'checkpoints', model, _loss(model), _ethanol(),
-         num_epochs=10, eval_every_num_steps=75, use_ema=use_ema, ema_decay=0.99)
-    # A checkpoint should have been written (with EMA weights when use_ema=True).
+         num_epochs=10, eval_every_num_steps=75, use_ema=True, ema_decay=0.99)
+    # A checkpoint of the EMA weights should have been written.
     assert any((tmp_path / 'checkpoints').iterdir())
 
 

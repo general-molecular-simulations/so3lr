@@ -13,8 +13,9 @@ equilibration on the system's true total charge.
 Note this is deliberately NOT `use_charge_embed`. That flag decides whether the
 module is built at all (`make_embedding_modules`), so flipping it changes the
 parameter tree and a released checkpoint stops loading. Overriding the input keeps
-every trained weight in place -- which `test_released_checkpoint_still_loads`
-pins directly.
+every trained weight in place: the 'embed_zero' case of the `energies` fixture
+loads the released checkpoint with the override set, and would raise if the
+parameter tree changed.
 """
 import pathlib
 
@@ -89,10 +90,6 @@ def energies():
 
 
 class TestChargeEmbedOverride:
-    def test_default_is_inert(self):
-        """Omitting the argument entirely must not perturb anything."""
-        assert _energy(-1, None) == _energy(-1, None)
-
     def test_passthrough_is_exact(self, energies):
         """override == true charge is a no-op, to the last bit.
 
@@ -127,20 +124,13 @@ class TestChargeEmbedOverride:
             f"charge equilibration, which it must never do."
         )
 
-    def test_released_checkpoint_still_loads(self):
-        """The override must not disturb the parameter tree.
+    def test_accepts_arbitrary_values(self):
+        """Not a boolean: any charge can be embedded, 0.0 is just the useful case.
 
-        This is the property that distinguishes it from `use_charge_embed`: the
-        module and all its trained weights stay in place and simply receive a
-        different input. If this ever regresses, loading raises rather than
-        returning a wrong number.
+        0.0 and -1.0 (the true charge) are already evaluated by the `energies`
+        fixture; a charge of the opposite sign covers the rest.
         """
-        assert np.isfinite(_energy(-1, 0.0))
-
-    @pytest.mark.parametrize('value', [0.0, -1.0, 2.0])
-    def test_accepts_arbitrary_values(self, value):
-        """Not a boolean: any charge can be embedded, 0.0 is just the useful case."""
-        assert np.isfinite(_energy(-1, value))
+        assert np.isfinite(_energy(-1, 2.0))
 
     def test_forces_change_too(self):
         """Forces, not just energy -- the measured effect is a force MAE change."""
@@ -163,23 +153,17 @@ class TestChargeEmbedOverride:
 
 
 class TestChargeEmbedOverrideEntryPoints:
-    """The flag has to be reachable from each documented entry point."""
+    """The flags have to be reachable from each documented entry point."""
 
-    def test_so3lr_potential(self):
-        from so3lr import So3lrPotential
+    def test_python_entry_points_accept_both_overrides(self):
+        """So3lrPotential and So3lr take both overrides (So3lrCalculator is above)."""
+        from so3lr import So3lr, So3lrPotential
 
         # Constructing is the assertion: an unsupported kwarg would land in
         # long_range_kwargs and be silently ignored, or raise.
-        assert So3lrPotential(
-            model=MODEL, lr_cutoff=LR_CUTOFF, charge_embed_total_charge=0.0
-        ) is not None
-
-    def test_make_so3lr(self):
-        from so3lr import So3lr
-
-        assert So3lr(
-            model=MODEL, lr_cutoff=LR_CUTOFF, charge_embed_total_charge=0.0
-        ) is not None
+        overrides = dict(charge_embed_total_charge=0.0, charge_equilibration_total_charge=0.0)
+        assert So3lrPotential(model=MODEL, lr_cutoff=LR_CUTOFF, **overrides) is not None
+        assert So3lr(model=MODEL, lr_cutoff=LR_CUTOFF, **overrides) is not None
 
     def test_yaml_key_is_known(self):
         """The did-you-mean validator must not flag it as a typo."""
@@ -242,16 +226,6 @@ class TestChargeEquilibrationOverride:
             f"gave {neutral!r}; the equilibration override is not equivalent to "
             f"setting the total charge."
         )
-
-    def test_reaches_every_entry_point(self):
-        from so3lr import So3lr, So3lrPotential
-
-        assert So3lrPotential(
-            model=MODEL, lr_cutoff=LR_CUTOFF, charge_equilibration_total_charge=0.0
-        ) is not None
-        assert So3lr(
-            model=MODEL, lr_cutoff=LR_CUTOFF, charge_equilibration_total_charge=0.0
-        ) is not None
 
     def test_yaml_key_is_known(self):
         from so3lr.cli.so3lr_cli import KNOWN_YAML_KEYS_EXTRA, YAML_DEFAULTS

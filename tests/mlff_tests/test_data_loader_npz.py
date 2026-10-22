@@ -43,7 +43,7 @@ def test_data_load(calculate_neighbors_lr: bool):
         senders = graph.senders
         receivers = graph.receivers
         energy = graph.globals.get('energy')
-        cell = graph.edges.get('cell')
+        cell = graph.globals.get('cell')
         cell_offset = graph.edges.get('cell_offset')
         stress = graph.globals['stress']
         total_charge = graph.globals['total_charge']
@@ -98,7 +98,6 @@ def test_data_load(calculate_neighbors_lr: bool):
         npt.assert_equal(len(senders), len(receivers))
         npt.assert_equal(len(senders), 72)
 
-        npt.assert_equal(len(idx_j_lr), len(idx_j_lr))
         if calculate_neighbors_lr:
             npt.assert_equal(num_pairs, num_atoms * num_atoms - num_atoms)
             npt.assert_equal(len(idx_i_lr), num_pairs)

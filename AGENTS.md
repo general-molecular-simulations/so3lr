@@ -32,7 +32,7 @@ a working environment before concluding that a failure is a code bug.
 ```sh
 uv run pytest tests/                                # short suite (the default)
 uv run pytest tests/ --full                         # everything, incl. slow tests
-uv run pytest tests/test_potential.py -v            # one file
+uv run pytest tests/test_ase.py -v                  # one file
 uv run pytest tests/test_integration.py --shard 1/3 # how CI splits the slow ones
 ```
 
@@ -48,7 +48,6 @@ minutes; prefer targeting the file that covers your change.
 | CLI surface | `tests/test_cli*.py` |
 | End-to-end MD | `tests/test_integration.py` |
 | Flash MD engine | `tests/test_flash.py` (GPU tests skip on CPU) |
-| Docs examples | `tests/test_readme.py` |
 
 ## Invariants worth knowing before you edit
 

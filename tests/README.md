@@ -30,7 +30,7 @@ With `--full`, everything runs including slow tests and all molecule parametriza
 ### Run a specific test file or test case
 
 ```bash
-uv run --no-sync pytest tests/test_potential.py -v
+uv run --no-sync pytest tests/test_ase.py -v
 uv run --no-sync pytest tests/test_integration.py -v -k "nve_ensemble"
 ```
 
@@ -38,11 +38,11 @@ uv run --no-sync pytest tests/test_integration.py -v -k "nve_ensemble"
 
 | File | Description |
 |------|-------------|
-| `test_potential.py` | Tests `make_potential_fn()` for creating SO3LR potential functions |
+| `test_potential.py` | A float64 run computes in float64 although the checkpoint parameters are float32 |
 | `test_ase.py` | Tests ASE calculator against pre-computed reference predictions |
 | `test_jaxmd.py` | Tests JAX-MD integration with SO3LR potential |
-| `test_cli.py` | Tests CLI command structure and help text |
-| `test_cli_eval.py` | Tests CLI `eval` command with expected RMSE values |
+| `test_cli.py` | Tests CLI command structure and the settings template |
+| `test_cli_eval.py` | Tests the CLI `eval` command and its outputs |
 | `test_cli_finetune.py` | Tests fine-tuning via the CLI |
 | `test_cli_train.py` | Tests training from scratch via the CLI |
 | `test_hessian.py` | Tests Hessian calculation and validates against numerical Hessians |
@@ -50,7 +50,6 @@ uv run --no-sync pytest tests/test_integration.py -v -k "nve_ensemble"
 | `test_observables.py` | Tests extraction of individual observables and their summation to total energy |
 | `test_observable_gradients.py` | Tests observable gradients/Jacobians with finite-difference validation |
 | `test_pme.py` | Tests PME/Ewald electrostatics against direct jax-pme calculations |
-| `test_readme.py` | Tests the basic ASE calculator and JAX-MD usage (energies and forces on gas-phase molecules) |
 
 ## Subdirectories
 
@@ -58,7 +57,7 @@ uv run --no-sync pytest tests/test_integration.py -v -k "nve_ensemble"
 
 Integration test cases for the SO3LR CLI, testing end-to-end simulation functionality. Each subdirectory contains a `settings.yaml`, input geometry, and a `validate.py` script. See [`integration/README.md`](integration/README.md) for the full structure and how to add new test cases.
 
-Test cases: `nvt_ensemble`, `npt_ensemble`, `nve_ensemble`, `opt`, `restart_checkpoint`, `restart_ensemble_change`, `initial_velocities`, `kspace_electrostatics_p3m`, `observables`.
+Test cases: `npt_ensemble`, `nve_ensemble`, `nvt_langevin`, `restart_checkpoint`, `restart_ensemble_change`, `initial_velocities`, `kspace_electrostatics_p3m`, `observables`.
 
 ### `mlff_tests/`
 

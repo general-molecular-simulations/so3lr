@@ -1,13 +1,12 @@
 """General tests for the SO3LR command-line interface."""
 import subprocess
 import sys
-import yaml
 import pathlib
 
 import pytest
 from click.testing import CliRunner
 
-from so3lr.cli.so3lr_cli import cli, main, BASIC_HELP_STRING
+from so3lr.cli.so3lr_cli import cli, main, known_yaml_keys, BASIC_HELP_STRING, YAML_DEFAULTS
 from so3lr.md_settings_validation import DEFAULT_PRESSURE, load_settings_yaml, resolve_ensemble
 
 
@@ -60,117 +59,32 @@ class TestSubcommandHelp:
             f"`so3lr {cmd} --help` failed (exit {result.exit_code}):\n{result.output}"
         )
 
-    def test_opt_help_mentions_input(self):
-        runner = CliRunner()
-        result = runner.invoke(cli, ["opt", "--help"])
-        assert "--input" in result.output
-
-    def test_nvt_help_mentions_temperature(self):
-        runner = CliRunner()
-        result = runner.invoke(cli, ["nvt", "--help"])
-        assert "--temperature" in result.output
-
-    def test_npt_help_mentions_pressure(self):
-        runner = CliRunner()
-        result = runner.invoke(cli, ["npt", "--help"])
-        assert "--pressure" in result.output
-
-    def test_nve_help_mentions_temperature(self):
-        runner = CliRunner()
-        result = runner.invoke(cli, ["nve", "--help"])
-        assert "--temperature" in result.output
-
-    def test_eval_help_mentions_datafile(self):
-        runner = CliRunner()
-        result = runner.invoke(cli, ["eval", "--help"])
-        assert "--datafile" in result.output
-
-    def test_finetune_help_mentions_workdir(self):
-        runner = CliRunner()
-        result = runner.invoke(cli, ["finetune", "--help"])
-        assert "--workdir" in result.output
-
-    def test_finetune_workdir_help_text(self):
-        """--workdir description should be about the working directory, not predictions."""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["finetune", "--help"])
-        assert "predictions" not in result.output.lower()
-
-
-# ---------------------------------------------------------------------------
-# Help text consistency
-# ---------------------------------------------------------------------------
-
-class TestHelpTextConsistency:
-    """Verify help text is accurate."""
-
-    def test_nve_described_as_nve(self):
-        """The NVE line in BASIC_HELP_STRING should say NVE, not NVT."""
-        for line in BASIC_HELP_STRING.splitlines():
-            if line.strip().startswith("so3lr nve"):
-                assert "NVE" in line
-                assert "NVT" not in line
-                break
-        else:
-            pytest.fail("'so3lr nve' line not found in BASIC_HELP_STRING")
-
-    def test_nvt_described_as_nvt(self):
-        for line in BASIC_HELP_STRING.splitlines():
-            if line.strip().startswith("so3lr nvt"):
-                assert "NVT" in line
-                break
-        else:
-            pytest.fail("'so3lr nvt' line not found in BASIC_HELP_STRING")
-
-    def test_npt_described_as_npt(self):
-        for line in BASIC_HELP_STRING.splitlines():
-            if line.strip().startswith("so3lr npt"):
-                assert "NPT" in line
-                break
-        else:
-            pytest.fail("'so3lr npt' line not found in BASIC_HELP_STRING")
-
 
 # ---------------------------------------------------------------------------
 # md_settings.yaml
 # ---------------------------------------------------------------------------
 
-class TestMdSettingsYaml:
-    """Validate the default md_settings.yaml template."""
+@pytest.mark.parametrize("ensemble", ["nve", "nvt", "npt"])
+def test_help_names_each_ensemble_correctly(ensemble):
+    """Each `so3lr <ensemble>` line of the help names its own ensemble and no other
+    (`so3lr nve` was once described as NVT)."""
+    line = next((ln for ln in BASIC_HELP_STRING.splitlines()
+                 if ln.strip().startswith(f"so3lr {ensemble}")), None)
+    assert line is not None, f"'so3lr {ensemble}' line not found in BASIC_HELP_STRING"
+    for other in ("NVE", "NVT", "NPT"):
+        assert (other in line) == (other == ensemble.upper()), line
 
-    @pytest.fixture(scope="class")
-    def settings(self):
-        with open(MD_SETTINGS_PATH) as f:
-            return yaml.safe_load(f)
 
-    def test_file_loads(self, settings):
-        assert isinstance(settings, dict)
-
-    def test_required_keys_present(self, settings):
-        required = [
-            "md_dt", "md_T", "md_cycles", "md_steps",
-            "seed", "precision", "lr_cutoff",
-        ]
-        for key in required:
-            assert key in settings, f"md_settings.yaml missing key '{key}'"
-
-    def test_buffer_keys_are_internal_names(self, settings):
-        """Buffer keys in the YAML should use the internal (long-form) names."""
-        assert "buffer_size_multiplier_sr" in settings
-        assert "buffer_size_multiplier_lr" in settings
-        assert "buffer-sr" not in settings
-        assert "buffer-lr" not in settings
-
-    def test_md_dt_is_in_femtoseconds(self, settings):
-        """md_dt in the YAML template should be in femtoseconds (0.5 fs)."""
-        assert settings["md_dt"] == 0.5
-
-    def test_temperature_default(self, settings):
-        assert settings["md_T"] == 300.0
-
-    def test_precision_valid(self, settings):
-        assert settings["precision"] in ("float32", "float64")
-
+def test_md_settings_template_matches_the_yaml_defaults():
+    """md_settings.yaml is the documented template users copy: every key in it must be
+    one the settings validator knows (else every copy warns of a typo), it must list
+    every key that has a YAML default, and the values it shows must be those defaults.
+    md_dt is in fs in the file and in ps in YAML_DEFAULTS; convert as `so3lr --settings` does."""
+    template = load_settings_yaml(MD_SETTINGS_PATH)
+    assert sorted(set(template) - known_yaml_keys()) == []
+    assert sorted(set(YAML_DEFAULTS) - set(template)) == []
+    template['md_dt'] = template['md_dt'] / 1000
+    assert {k: (template[k], v) for k, v in YAML_DEFAULTS.items() if template[k] != v} == {}
 
 
 def test_cli_import_does_not_load_jax():

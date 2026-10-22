@@ -4,9 +4,9 @@ These cover error contracts that the rest of the suite leaves unverified
 (every other CLI test only checks ``exit_code == 0``). The first group fails
 at Click parse/validation time, so it is sub-second and never builds a model.
 
-The eval overwrite-refusal path is marked ``@pytest.mark.slow`` because the
-``eval`` body calls ``setup_logger`` and ``get_hardware_info`` (both import the
-heavy stack) before reaching its refusal check, so it is not sub-second.
+The eval overwrite refusal comes after ``get_hardware_info`` (a JAX device query)
+but before any model is loaded; the conftest has imported JAX already, so it
+stays cheap and runs by default.
 """
 from pathlib import Path
 
@@ -40,16 +40,10 @@ def test_yaml_missing_input_file_raises(runner, tmp_path):
     assert "input_file" in str(result.exception)
 
 
-def test_opt_rejects_hdf5_output(runner, tmp_xyz):
-    """`so3lr opt` must reject an .hdf5 output extension."""
-    result = runner.invoke(cli, ["opt", "--input", tmp_xyz, "--output", "out.hdf5"])
-    assert result.exit_code != 0
-    assert "HDF5 output is not supported" in result.output
-
-
-def test_opt_rejects_h5_output(runner, tmp_xyz):
-    """`so3lr opt` must reject an .h5 output extension too."""
-    result = runner.invoke(cli, ["opt", "--input", tmp_xyz, "--output", "out.h5"])
+@pytest.mark.parametrize("output", ["out.hdf5", "out.h5"])
+def test_opt_rejects_hdf5_output(runner, tmp_xyz, output):
+    """`so3lr opt` must reject an HDF5 output extension (.hdf5 or .h5)."""
+    result = runner.invoke(cli, ["opt", "--input", tmp_xyz, "--output", output])
     assert result.exit_code != 0
     assert "HDF5 output is not supported" in result.output
 
@@ -97,10 +91,6 @@ def test_md_yaml_rejects_zero_count_settings(runner, tmp_xyz, tmp_path, key):
     assert key in str(result.exception)
 
 
-# NOTE: eval reaches setup_logger() and get_hardware_info() before the
-# overwrite guard, both of which import jax/flax, so this path is not
-# sub-second and is intentionally marked slow (deselected by default).
-@pytest.mark.slow
 def test_eval_refuses_overwrite(runner, tmp_xyz, tmp_path):
     """`eval --save-to <existing>` without --overwrite must refuse and exit."""
     save_to = tmp_path / "preds.extxyz"

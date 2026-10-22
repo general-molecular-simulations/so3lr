@@ -181,62 +181,25 @@ energy_and_force_fn = get_energy_and_force_fn_sparse(stacknet_sparse)
 params = stacknet_sparse.init(jax.random.PRNGKey(0), graph_to_input(graph3, lr3))
 
 
-def test_init():
-    out = energy_and_force_fn(params, **graph_to_input(graph3, lr3))
-
-    npt.assert_equal(out.get('energy').shape, (1,))
-    npt.assert_equal(out.get('forces').shape, (4, 3))
-
-
-def test_translation_symmetry():
-    inputs = graph_to_input(graph3, lr3)
-
-    inputs_translated = inputs.copy()
-    inputs_translated['positions'] = inputs_translated['positions'] + jnp.array([2.5, 1.0, -0.7])[None]
-
-    npt.assert_allclose(
-        inputs_translated.get('positions') - inputs.get('positions'),
-        jnp.array(
-            [
-                [2.5, 1.0, -0.7],
-                [2.5, 1.0, -0.7],
-                [2.5, 1.0, -0.7],
-                [2.5, 1.0, -0.7]
-            ]
-        )
-    )
-
-    out = energy_and_force_fn(params, **inputs)
-    out_translated = energy_and_force_fn(params, **inputs_translated)
-
-    npt.assert_equal(out.get('energy').shape, (1,))
-    npt.assert_equal(out_translated.get('energy').shape, (1,))
-    npt.assert_allclose(out_translated.get('energy'), out.get('energy'), atol=1e-5)
-    npt.assert_allclose(out_translated.get('forces'), out.get('forces'), atol=1e-5)
-
-
-def test_rotation_symmetry():
+def test_rotation_and_translation_symmetry():
+    """Energy is invariant and forces rotate with the molecule under a rigid
+    rotation followed by a translation."""
     inputs = graph_to_input(graph3, lr3)
 
     rot = Rotation.from_euler('xyz', [87, 14, 156], degrees=True).as_matrix()
-    inputs_rotated = inputs.copy()
-    inputs_rotated['positions'] = inputs_rotated['positions'] @ rot
-
-    npt.assert_allclose(
-        inputs_rotated.get('positions') @ rot.T,
-        inputs.get('positions'),
-        atol=1e-5
-    )
+    inputs_moved = inputs.copy()
+    inputs_moved['positions'] = inputs['positions'] @ rot + jnp.array([2.5, 1.0, -0.7])[None]
 
     out = energy_and_force_fn(params, **inputs)
-    out_rotated = energy_and_force_fn(params, **inputs_rotated)
+    out_moved = energy_and_force_fn(params, **inputs_moved)
 
     npt.assert_equal(out.get('energy').shape, (1,))
-    npt.assert_equal(out_rotated.get('energy').shape, (1,))
-    npt.assert_allclose(out_rotated.get('energy'), out.get('energy'), atol=1e-5)
-    npt.assert_allclose(out_rotated.get('forces'), out.get('forces')@rot, atol=1e-5)
+    npt.assert_equal(out.get('forces').shape, (4, 3))
+    npt.assert_allclose(out_moved.get('energy'), out.get('energy'), atol=1e-5)
+    npt.assert_allclose(out_moved.get('forces'), out.get('forces') @ rot, atol=1e-5)
+    # The rotation must actually move the forces, or the check above is vacuous.
     with npt.assert_raises(AssertionError):
-        npt.assert_allclose(out_rotated.get('forces'), out.get('forces'), atol=1e-5)
+        npt.assert_allclose(out_moved.get('forces'), out.get('forces'), atol=1e-5)
 
 
 @pytest.mark.parametrize("max_num_graphs", [2, 3, 4])
