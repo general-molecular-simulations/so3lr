@@ -29,11 +29,10 @@ def neighbor_list_featurizer(
     ``neighbor_list_featurizer_custom``).
 
     Args:
-        precision: dtype for the auxiliary arrays (``total_charge``,
-            ``num_unpaired_electrons``, ``theory_mask``). When ``None`` these
-            follow the positions array ``R.dtype`` (the historical behaviour of
-            the public helper); pass an explicit dtype (e.g. ``jnp.float64``) to
-            force it (the CLI MD behaviour).
+        precision: the model's dtype. Displacements are formed in the dtype of
+            ``R`` and the graph's floating arrays are cast to ``precision`` after,
+            so a float64 MD state around a float32 model keeps float64 edges up to
+            the model. ``None`` follows ``R.dtype`` (the public helper).
     """
     def featurize(R, neighbor, neighbor_lr, **kwargs):
         idx_i = neighbor[0]  # shape: P
@@ -116,9 +115,15 @@ def neighbor_list_featurizer(
             theory_mask=theory_mask
         )
 
+        if precision is not None:
+            graph = jax.tree_util.tree_map(lambda x: _cast(x, precision), graph)
         return graph
 
     return featurize
+
+
+def _cast(x, dtype):
+    return x.astype(dtype) if jnp.issubdtype(jnp.asarray(x).dtype, jnp.floating) else x
 
 
 def to_jax_md(
@@ -136,7 +141,7 @@ def to_jax_md(
         fractional_coordinates: bool = True,
         total_charge: float = 0.0,  # net charge of the system (e)
         num_unpaired_electrons: float = 0.0,  # spin: number of unpaired electrons
-        precision=None,  # dtype for auxiliary arrays; None -> follow positions dtype
+        precision=None,  # the model's dtype; None -> follow positions dtype
         **neighbor_kwargs
 ):
     """Build the (short-range, long-range) neighbor functions and a jax-md
@@ -209,9 +214,8 @@ def to_jax_md(
             **energy_fn_kwargs
     ):
         graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
-        if has_aux:
-            return potential(graph, has_aux=True)
-        else:
-            return potential(graph).sum()
+        # back in the positions' dtype before the sum (a float64 MD state sums in float64)
+        out = jax.tree_util.tree_map(lambda x: _cast(x, R.dtype), potential(graph, has_aux=has_aux))
+        return out if has_aux else out.sum()
 
     return neighbor_fn, neighbor_fn_lr, energy_fn

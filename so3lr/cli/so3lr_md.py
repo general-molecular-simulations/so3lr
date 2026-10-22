@@ -64,7 +64,7 @@ import h5py
 from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
-from ..md_settings_validation import resolve_ensemble, validate_md_counts
+from ..md_settings_validation import canonical_precision, resolve_ensemble, state_precision, validate_md_counts
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -1856,7 +1856,7 @@ def perform_md(
 
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = all_settings.get('precision')
+    precision = canonical_precision(all_settings.get('precision'))
     lr_cutoff = all_settings.get('lr_cutoff')
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
@@ -2069,9 +2069,9 @@ def perform_md(
     else:
         shift_displacement = 'free'
 
-    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
-
-    dtype = jnp.float64 if precision == 'float64' else jnp.float32
+    # the MD state's dtype; the model runs in `precision`
+    dtype = jnp.float64 if state_precision(precision, all_settings) == 'float64' else jnp.float32
+    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
 
@@ -2114,17 +2114,18 @@ def perform_md(
                     f"continues the dynamics it was saved with."
                 ) from e
             logger.warning(e)
-            position = e.loaded_state['position']
-            initial_geometry_dict['masses'] = e.loaded_state['mass']
-            initial_geometry_dict['momenta'] = e.loaded_state['momentum']
+            position = jnp.asarray(e.loaded_state['position'], dtype)
+            initial_geometry_dict['masses'] = jnp.asarray(e.loaded_state['mass'], dtype)
+            initial_geometry_dict['momenta'] = jnp.asarray(e.loaded_state['momentum'], dtype)
             box = e.loaded_state['box']
             if np.all(box == 0) or box is None:
-                box = jnp.array([0.0], dtype=jnp.float64 if precision == 'float64' else jnp.float32)
+                box = jnp.array([0.0], dtype=dtype)
             else:
                 # Resetting an integrator may discard thermostat/barostat
                 # history, but it must never smuggle a sheared legacy cell past
                 # the same orthorhombic restriction applied to input files.
                 validate_orthorhombic_restart_box(box)
+                box = jnp.asarray(box, dtype)
             saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
             if saved_fractional and not fractional_coordinates:
                 logger.info('Converting restart positions from fractional to cartesian coordinates.')
@@ -2514,9 +2515,9 @@ def perform_md(
         else:
             num_atoms = len(output_atom_indices)
 
-        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(dtype))
+        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(precision))
         if not np.any(trajectory_box):
-            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(dtype))
+            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(precision))
         elif trajectory_box.ndim == 1 and trajectory_box.shape == (3,):
             _cell_a0 = np.diag(trajectory_box)
         else:
@@ -2551,7 +2552,7 @@ def perform_md(
             cell_a0=_cell_a0,
             input_file=input_file,
             model_path=model_path,
-            dtype=np.dtype(dtype),
+            dtype=np.dtype(precision),  # trajectories in the model's precision
             fractional_coordinates=(
                 fractional_coordinates and not output_cartesian_positions
             ),
@@ -2755,10 +2756,10 @@ def perform_md(
             out_pos = output_position_array(
                 state.position, box, fractional_coordinates, output_cartesian_positions
             )
-            positions.append(np.array(out_pos))
-            momenta.append(np.array(state.momentum))
+            positions.append(np.asarray(out_pos, precision))
+            momenta.append(np.asarray(state.momentum, precision))
             if box is not None:
-                boxes.append(np.array(lattice_rows(box)))
+                boxes.append(np.asarray(lattice_rows(box), precision))
 
             # Calculate observables
             if len(observables)>0:
@@ -3038,7 +3039,7 @@ def perform_min(
 
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = all_settings.get('precision')
+    precision = canonical_precision(all_settings.get('precision'))
     lr_cutoff = all_settings.get('lr_cutoff')
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
@@ -3120,9 +3121,9 @@ def perform_min(
     else:
         shift_displacement = 'free'
 
-    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
-
-    dtype = jnp.float64 if precision == 'float64' else jnp.float32
+    # the MD state's dtype; the model runs in `precision`
+    dtype = jnp.float64 if state_precision(precision, all_settings) == 'float64' else jnp.float32
+    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
 
@@ -3682,6 +3683,7 @@ def run(
     """
 
     settings = resolve_ensemble(settings)  # before the optional relaxation
+    settings['precision'] = canonical_precision(settings.get('precision'))
     relax_before_run = settings.get('relax_before_run', True)
     validate_md_counts(settings)
 

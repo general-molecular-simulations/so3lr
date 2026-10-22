@@ -57,7 +57,7 @@ from so3lr.cli.so3lr_md import (
     write_to_extxyz,
     write_to_hdf5,
 )
-from so3lr.md_settings_validation import validate_md_counts
+from so3lr.md_settings_validation import state_precision, validate_md_counts
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported, supported_atomic_numbers_for_model)
 
@@ -87,9 +87,11 @@ def dtypes(settings):
     """(the model's dtype, the positions'): float64 positions (and MD state) around a float32
     model unless flash_mixed is off or x64 is (float32 coordinates of a 500 A box round to
     6e-5 A)."""
-    dtype = jnp.float64 if settings.get("precision", "float32") == "float64" else jnp.float32
-    mixed = dtype == jnp.float32 and bool(settings.get("flash_mixed", True)) and jax.config.jax_enable_x64
-    return dtype, (jnp.float64 if mixed else dtype)
+    precision = settings.get("precision", "float32")
+    dtype = jnp.float64 if precision == "float64" else jnp.float32
+    if not jax.config.jax_enable_x64:
+        return dtype, dtype
+    return dtype, (jnp.float64 if state_precision(precision, settings) == "float64" else dtype)
 
 
 def build_engine(atoms, settings, dtype, box_margin=None):

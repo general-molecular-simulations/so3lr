@@ -1,5 +1,5 @@
 """Import-light settings helpers shared by the CLI and ``so3lr_md``: loading a
-settings YAML, resolving the ensemble, checking the MD counts."""
+settings YAML, resolving the ensemble and the MD state's precision, checking the MD counts."""
 
 import difflib
 import logging
@@ -9,6 +9,7 @@ from numbers import Integral
 import yaml
 
 ENSEMBLES = ('nve', 'nvt', 'nvt-langevin', 'npt')
+PRECISIONS = ('float32', 'float64')
 DEFAULT_PRESSURE = 1.0  # bar
 
 
@@ -22,6 +23,26 @@ def canonical_ensemble(name) -> str:
             f"Unknown ensemble {name!r}; expected one of {', '.join(ENSEMBLES)}"
             + (f" (did you mean {hint[0]!r}?)" if hint else "") + ".")
     return canonical
+
+
+def canonical_precision(precision) -> str:
+    """The model's precision (float32 if unset); anything but PRECISIONS raises."""
+    p = 'float32' if precision is None else str(precision).strip().lower()
+    if p not in PRECISIONS:
+        raise ValueError(f"precision must be float32 or float64 (received {precision!r})")
+    return p
+
+
+def state_precision(precision, settings) -> str:
+    """The MD state's precision (positions, momenta, box, energy sums) on both engines, around a
+    model in ``precision``: ``md_precision`` (float64 if unset; float32 coordinates of a 500 A
+    box round to 6e-5 A), or the older ``flash_mixed`` (false: float32). A float64 model always
+    has a float64 state."""
+    if precision == 'float64':
+        return 'float64'
+    if settings.get('md_precision') is not None:
+        return canonical_precision(settings['md_precision'])
+    return 'float64' if bool(settings.get('flash_mixed', True)) else 'float32'
 
 
 def resolve_ensemble(settings: dict) -> dict:
