@@ -86,3 +86,20 @@ def test_an_explicit_value_is_kept(legacy_dir, tmp_path):
     """Only an absent flag is read from the checkpoint; an explicit one stands."""
     explicit = _copy_with_model_keys(legacy_dir, tmp_path / 'model', set_={'legacy_so3lr_bool': False})
     assert load_model_config(explicit)['model']['legacy_so3lr_bool'] is False
+
+
+def test_flash_takes_a_v1_directory_without_flags_as_the_legacy_model(legacy_without_flags):
+    """Flash runs the legacy model since #88; its check and loader read the config through the
+    resolver, so a pre-flag v1 directory is accepted and loads exactly like the bundled one
+    (without the resolver it is checked against the v2 architecture and declined). CPU only:
+    neither the check nor the loader touches the kernels."""
+    import jax
+    from so3lr.flash import check, loader
+
+    assert check.model_problem(str(legacy_without_flags)) is None
+    params, statics = loader.load_params(str(legacy_without_flags))
+    ref_params, ref_statics = loader.load_params('so3lr')
+    for got, ref in ((params, ref_params), (statics, ref_statics)):
+        assert jax.tree_util.tree_structure(got) == jax.tree_util.tree_structure(ref)
+        for a, b in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(ref)):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
