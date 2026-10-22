@@ -1,4 +1,5 @@
 """General tests for the SO3LR command-line interface."""
+import logging
 import subprocess
 import sys
 import pathlib
@@ -85,6 +86,48 @@ def test_md_settings_template_matches_the_yaml_defaults():
     assert sorted(set(YAML_DEFAULTS) - set(template)) == []
     template['md_dt'] = template['md_dt'] / 1000
     assert {k: (template[k], v) for k, v in YAML_DEFAULTS.items() if template[k] != v} == {}
+
+
+def test_unknown_settings_key_warns_and_the_run_goes_on(tmp_path, monkeypatch, caplog):
+    """A misspelt settings key (md_t for md_T) is a warning naming the likely key,
+    not an error: one typo must not abort a queued multi-hour job (AGENTS.md).
+    In-process with perform_md stubbed, so no model is built."""
+    from so3lr.cli import so3lr_cli, so3lr_md
+
+    captured = {}
+    monkeypatch.setattr(so3lr_md, 'setup_jax_globals', lambda **kwargs: None)
+    monkeypatch.setattr(so3lr_md, 'perform_md', lambda settings, *args, **kwargs: captured.update(settings))
+    monkeypatch.setattr(so3lr_cli, 'reserve_gpu', lambda *args, **kwargs: None)
+    # validate_yaml_keys logs on "SO3LR" before the CLI calls setup_logger. Once any
+    # earlier test has run setup_logger, that logger no longer propagates to the root
+    # logger caplog listens on; stubbing it here keeps this run from doing the same
+    # to the tests after it.
+    monkeypatch.setattr(logging.getLogger('SO3LR'), 'propagate', True)
+    monkeypatch.setattr(so3lr_md, 'setup_logger', lambda *args, **kwargs: None)
+
+    yaml_path = tmp_path / 'typo.yaml'
+    yaml_path.write_text(
+        f"input_file: {PROJECT_ROOT / 'tests' / 'test_data' / 'acetone.xyz'}\n"
+        f"output_file: {tmp_path / 'out.hdf5'}\n"
+        # standard engine: no flash or device checks before perform_md
+        "engine: standard\nrelax_before_run: false\n"
+        "md_t: 350.0\n"
+    )
+    with caplog.at_level(logging.WARNING, logger='SO3LR'):
+        result = CliRunner().invoke(cli, ['--settings', str(yaml_path)])
+
+    assert result.exit_code == 0, result.output
+    assert captured, "perform_md was never called: the typo aborted the run"
+
+    unknown = [r for r in caplog.records if r.getMessage().startswith('Unknown setting')]
+    assert [r.levelno for r in unknown] == [logging.WARNING], [r.getMessage() for r in unknown]
+    message = unknown[0].getMessage()
+    assert "'md_t'" in message, message
+    assert 'Did you mean:' in message, message
+    suggestions = [name.strip(' ?') for name in message.split('Did you mean:')[1].split(',')]
+    assert 'md_T' in suggestions, message
+    # ignored, not applied: md_T keeps its default
+    assert captured['md_T'] == YAML_DEFAULTS['md_T']
 
 
 def test_cli_import_does_not_load_jax():

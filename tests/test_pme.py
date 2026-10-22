@@ -109,13 +109,129 @@ def _jaxmd_potential(kspace_method, lr_cutoff):
     return So3lrPotential(dtype=DTYPE, lr_cutoff=lr_cutoff, coulomb_kspace_method=kspace_method)
 
 
+def _converged_spacing(method, smearing):
+    """The converged spacing used throughout this file: smearing/2 for ewald
+    (a real-space wavelength), /8 for the meshes."""
+    return smearing / 2 if method == 'ewald' else smearing / 8
+
+
 def _kgrid(cell, method, smearing):
-    """(k_grid, k_smearing) from the production builder, at the converged
-    spacing used throughout this file: smearing/2 for ewald, /8 for the meshes."""
+    """(k_grid, k_smearing) from the production builder, at the converged spacing."""
     from so3lr.mlff.utils.kspace_utils import setup_kspace_grid
 
-    spacing = smearing / 2 if method == 'ewald' else smearing / 8
-    return setup_kspace_grid(method, smearing, spacing, cell)
+    return setup_kspace_grid(method, smearing, _converged_spacing(method, smearing), cell)
+
+
+def _cli_md_settings(kspace_method, smearing, lr_cutoff):
+    """The settings dict `so3lr --settings` hands perform_md for a float64 k-space
+    run: YAML_DEFAULTS plus the keys a user would set."""
+    from so3lr.cli.so3lr_cli import YAML_DEFAULTS
+
+    settings = dict(YAML_DEFAULTS)
+    settings.update(
+        precision='float64',
+        lr_cutoff=lr_cutoff,
+        kspace_electrostatics=kspace_method,
+        kspace_smearing=smearing,
+        kspace_spacing=_converged_spacing(kspace_method, smearing),
+    )
+    return settings
+
+
+def _cli_md_energy_and_forces(atoms, settings):
+    """(energy, Cartesian forces, k_grid) from the potential `so3lr nvt/npt/nve`
+    integrates.
+
+    Repeats perform_md's own setup calls, in its order and with its .get defaults,
+    as so3lr/flash/verify.py does for its neighbour-list reference: cell, wrap,
+    fractional box, load_model, process_model, then the k-grids from the jax-md
+    box. Running perform_md itself would integrate and write a trajectory, so a
+    change to those calls there must be repeated here. Left out are
+    setup_jax_globals (process-wide: this module enables x64 and conftest sets the
+    matmul precision) and everything after the neighbour lists.
+    """
+    from so3lr import kspace_defaults as KS
+    from so3lr.cli import so3lr_md
+    from so3lr.jaxmd_utils import nbrs_cutoff
+    from so3lr.model_registry import DEFAULT_MODEL
+
+    s = settings
+    precision = s.get('precision')
+    dtype = jnp.float64 if precision == 'float64' else jnp.float32
+    lr_cutoff = s.get('lr_cutoff')
+    kspace_electrostatics = s.get('kspace_electrostatics', None)
+    kspace_smearing = s.get('kspace_smearing', KS.DEFAULT_KSPACE_SMEARING)
+    kspace_spacing = s.get('kspace_spacing', KS.DEFAULT_KSPACE_SPACING)
+    kspace_dispersion = s.get('kspace_dispersion', None)
+    observables = s.get('observables', [])
+
+    atoms = atoms.copy()
+    cell = so3lr_md.cell_from_atoms_boundary_conditions(
+        atoms, lr_cutoff, kspace_electrostatics, kspace_smearing)
+    atoms.wrap()
+    geometry = so3lr_md.atoms_to_jnp(atoms, precision=precision)
+    # 'periodic' is what perform_md picks for a cell when PySAGES is off.
+    position, box, displacement, _, fractional_coordinates = so3lr_md.handle_box(
+        'periodic', geometry['positions'], cell, precision=dtype)
+
+    model_path = s.get('model_path')
+    potential = so3lr_md.load_model(
+        model_path if model_path is not None else DEFAULT_MODEL,
+        precision=dtype,
+        lr_cutoff=lr_cutoff,
+        dispersion_damping=s.get('dispersion_damping'),
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_interp_nodes=s.get('kspace_interp_nodes', KS.DEFAULT_KSPACE_INTERP_NODES),
+        kspace_dispersion=kspace_dispersion,
+        kspace_dispersion_interp_nodes=s.get(
+            'kspace_dispersion_interp_nodes', KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES),
+        charge_embed_total_charge=s.get('charge_embed_total_charge', None),
+        charge_equilibration_total_charge=s.get('charge_equilibration_total_charge', None),
+        **so3lr_md.intermediate_quantity_kwargs(observables),
+    )
+    neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = so3lr_md.process_model(
+        potential=potential,
+        species=geometry['species'],
+        displacement=displacement,
+        box=box,
+        total_charge=s.get('total_charge'),
+        num_unpaired_electrons=s.get('num_unpaired_electrons', 0),
+        precision=precision,  # the string, as perform_md passes it
+        fractional_coordinates=fractional_coordinates,
+        buffer_size_multiplier_lr=s.get('buffer_size_multiplier_lr'),
+        buffer_size_multiplier_sr=s.get('buffer_size_multiplier_sr'),
+        minimum_cell_size_multiplier=s.get('minimum_cell_size_multiplier', 1.0),
+        has_aux=len(observables) > 0,
+    )
+    so3lr_md.check_box_for_neighbour_lists(box, nbrs_cutoff(potential), 'MD box')
+
+    k_grid, k_smearing = so3lr_md.setup_kspace_grid(
+        kspace_electrostatics=kspace_electrostatics,
+        kspace_spacing=kspace_spacing,
+        kspace_smearing=kspace_smearing,
+        box=box,
+    )
+    k_grid_disp, k_smearing_disp = so3lr_md.setup_kspace_grid(
+        kspace_electrostatics=kspace_dispersion,
+        kspace_spacing=s.get('kspace_dispersion_spacing', KS.DEFAULT_KSPACE_DISPERSION_SPACING),
+        kspace_smearing=s.get('kspace_dispersion_smearing', KS.DEFAULT_KSPACE_DISPERSION_SMEARING),
+        box=box,
+    )
+    energy_or_obs_fn = functools.partial(
+        energy_or_obs_fn, k_smearing=k_smearing, k_smearing_disp=k_smearing_disp)
+    energy_fn = functools.partial(energy_or_obs_fn, has_aux=False)
+
+    nbrs = neighbor_fn.allocate(position, box=box)
+    nbrs_lr = neighbor_fn_lr.allocate(position, box=box)
+
+    # The integrators take the force as -grad in these fractional positions
+    # (jax_md.quantity.force). jax_md.space.transform's custom JVP passes the
+    # gradient through unscaled, so it is already the Cartesian force; chaining
+    # through R / box would divide it by the box length again.
+    energy, grad = jax.jit(jax.value_and_grad(energy_fn))(
+        position, neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, box=box,
+        k_grid=k_grid, k_grid_disp=k_grid_disp)
+    return float(energy), -np.asarray(grad), k_grid
 
 
 class TestPMEDirectComparison:
@@ -315,8 +431,8 @@ class TestPMEJaxMD:
         Same default model, k-space method and grid through both entry points:
         energy and Cartesian forces must match, though each builds its own
         neighbour lists and long-range inputs. The CLI MD path builds its
-        long-range settings separately again (so3lr_md.load_model) and is not
-        compared here.
+        long-range settings separately again (so3lr_md.load_model);
+        TestCLIMDPotential compares that one.
         """
         atoms, smearing, lr_cutoff = pme_case
 
@@ -438,6 +554,70 @@ class TestPMEJaxMD:
         h = 1e-5
         numeric = (energy((jnp.eye(3) + h * e01) @ box) - energy((jnp.eye(3) - h * e01) @ box)) / (2 * h)
         npt.assert_allclose(float(analytic), float(numeric), rtol=1e-4, atol=1e-6)
+
+
+class TestCLIMDPotential:
+    """The potential the CLI MD path integrates agrees with So3lrCalculator.
+
+    so3lr/cli builds its own long_range_kwargs and the ASE calculator another, and
+    the two have drifted before (AGENTS.md; PR #22: kspace_electrostatics chose the
+    k-space grid but not the solver, on the ASE side only). TestPMEJaxMD covers the
+    Python-API jax-md path and hands both sides one pre-built grid. Here each side
+    gets only the user-level settings (method, smearing, spacing, cutoffs) and
+    builds its own long-range kwargs, solver and k-grid from them: the CLI side
+    through so3lr_md.load_model as perform_md does, the ASE side through the
+    calculator's kspace_electrostatics/kspace_smearing/kspace_spacing kwargs.
+    """
+
+    @pytest.mark.parametrize('kspace_method', ['ewald', 'pme'])
+    def test_cli_md_potential_matches_ase_calculator(self, kspace_method, pme_case, monkeypatch):
+        import jaxpme.kspace
+
+        atoms, smearing, lr_cutoff = pme_case
+        settings = _cli_md_settings(kspace_method, smearing, lr_cutoff)
+
+        cli_energy, cli_forces, cli_k_grid = _cli_md_energy_and_forces(atoms, settings)
+        assert cli_k_grid is not None, "the CLI path built no k-grid"
+        cli_shape = tuple(cli_k_grid.shape)
+
+        # Record the grids the ASE calculator builds in calculate() from its kwargs.
+        # Installed only now, so the CLI side's grid is not among them.
+        ase_shapes = []
+
+        def recording(build):
+            def wrapped(*args, **kwargs):
+                grid = build(*args, **kwargs)
+                ase_shapes.append(tuple(grid.shape))
+                return grid
+            return wrapped
+
+        for name in ('get_kgrid_ewald', 'get_kgrid_mesh'):
+            monkeypatch.setattr(jaxpme.kspace, name, recording(getattr(jaxpme.kspace, name)))
+
+        # Both sides run the default model; the CLI resolves an unset model_path to it.
+        atoms_ase = atoms.copy()
+        atoms_ase.calc = So3lrCalculator(
+            lr_cutoff=settings['lr_cutoff'],
+            dispersion_energy_cutoff_lr_damping=settings['dispersion_damping'],
+            dtype=np.float64,
+            kspace_electrostatics=settings['kspace_electrostatics'],
+            kspace_smearing=settings['kspace_smearing'],
+            kspace_spacing=settings['kspace_spacing'],
+        )
+        ase_energy = atoms_ase.get_potential_energy()
+        ase_forces = atoms_ase.get_forces()
+
+        grids = f"k-grids: CLI {cli_shape}, ASE {ase_shapes}"
+        print(f"\n{kspace_method.upper()} CLI MD potential vs ASE calculator:")
+        print(f"  ASE energy: {ase_energy:.6f} eV, CLI energy: {cli_energy:.6f} eV")
+        print(f"  Max force difference: {np.max(np.abs(cli_forces - ase_forces)):.2e} eV/A")
+        print(f"  {grids}")
+
+        npt.assert_allclose(cli_energy, ase_energy, rtol=0, atol=ASE_JAXMD_ENERGY_ATOL, err_msg=grids)
+        npt.assert_allclose(cli_forces, ase_forces, rtol=0, atol=ASE_JAXMD_FORCES_ATOL, err_msg=grids)
+        assert ase_shapes and set(ase_shapes) == {cli_shape}, (
+            f"{grids}: from the same kspace_electrostatics/smearing/spacing the two "
+            f"paths built different k-grids")
 
 
 class TestKspaceMethodPropagation:
