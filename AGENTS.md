@@ -44,6 +44,7 @@ change.
 |---|---|
 | Model name resolution | `tests/test_model_registry.py` |
 | ASE calculator, observables | `tests/test_ase.py`, `tests/test_observables.py` |
+| Symmetry, permutation, batching (shipped model) | `tests/test_model_invariance.py` |
 | k-space electrostatics | `tests/test_pme.py` |
 | CLI surface | `tests/test_cli*.py` |
 | End-to-end MD | `tests/test_integration.py` |

@@ -44,6 +44,7 @@ uv run --no-sync pytest tests/test_integration.py -v -k "nve_ensemble"
 | `test_hessian.py` | Tests Hessian calculation and validates against numerical Hessians |
 | `test_integration.py` | End-to-end simulation tests using actual CLI commands |
 | `test_observables.py` | Tests extraction of individual observables and their summation to total energy |
+| `test_model_invariance.py` | On the shipped so3lr-tauri-s: rotation/translation and permutation invariance of a charged molecule, and per-graph independence of a padded batch (charged + neutral) through the `so3lr eval` batching |
 | `test_observable_gradients.py` | Tests observable gradients/Jacobians with finite-difference validation |
 | `test_pme.py` | Tests PME/Ewald electrostatics against direct jax-pme calculations |
 
