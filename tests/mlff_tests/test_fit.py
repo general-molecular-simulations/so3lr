@@ -113,7 +113,7 @@ def test_fit_early_stopping(tmp_path, caplog, ethanol_frames):
     with caplog.at_level(logging.INFO, logger="SO3LR"):
         _fit(tmp_path / 'checkpoints', model, _loss(model), _ethanol(ethanol_frames),
              early_stopping_patience=2, early_stopping_min_delta=1e9)
-    stops = [r.getMessage() for r in caplog.records if 'Early stopping' in r.getMessage()]
+    stops = [r.getMessage() for r in caplog.records if 'Early stopping at step' in r.getMessage()]
     # Exactly once: a loop that logged the stop but kept training would log it again.
     assert len(stops) == 1 and 'Early stopping at step 30' in stops[0], stops
 
