@@ -690,7 +690,6 @@ class PartialChargesSparse(BaseSubModule):
             total_charge = jnp.full_like(total_charge, self.total_charge_override)
 
         num_graphs = len(graph_mask)
-        num_nodes = len(node_mask)
 
         # Element-dependent bias
         q_ = nn.Embed(num_embeddings=100, features=1)(atomic_numbers).squeeze(axis=-1)  # shape: (num_nodes)
@@ -721,15 +720,16 @@ class PartialChargesSparse(BaseSubModule):
         # If residue_charge/segments is provided, use it for charge conservation per residue/monomer
         residue_charge = inputs.get('residue_charge')
         if residue_charge is not None:
-            # Residue-based charge conservation
-            residue_charge = jnp.asarray(residue_charge, dtype=jnp.float32)
-            residue_segments = jnp.pad(
-                jnp.asarray(inputs['residue_segments'], dtype=jnp.int32).at[-1].set(2),
-                (0, num_nodes - len(inputs['residue_segments'])),
-                constant_values=2
-            )
-            batch_segments, total_charge, num_graphs = residue_segments, residue_charge, residue_charge.shape[0]
-        
+            # Residue-based charge conservation (residue ids are per structure). Padding nodes,
+            # found by node_mask rather than position, go to an extra unconstrained segment.
+            if num_graphs > 2:
+                raise ValueError('residue_charge/residue_segments support one structure per batch.')
+            total_charge = jnp.append(jnp.asarray(residue_charge, x_q.dtype).reshape(-1), 0.)
+            num_graphs = total_charge.shape[0]
+            residue_segments = jnp.asarray(inputs['residue_segments'], jnp.int32).reshape(-1)
+            residue_segments = jnp.pad(residue_segments, (0, len(node_mask) - len(residue_segments)))
+            batch_segments = jnp.where(node_mask, residue_segments, num_graphs - 1)
+
         # Unified charge conservation calculation
         predicted_charge = segment_sum(x_q, segment_ids=batch_segments, num_segments=num_graphs) # (num_graphs)
         atom_counts = jnp.bincount(batch_segments, length=num_graphs).astype(x_q.dtype)
