@@ -187,11 +187,9 @@ class TestHessianNumerical:
         )
 
 
-# Contiguous atom ranges for subsystem Hessians, as functions of the atom count.
+# Contiguous atom ranges of acetone (10 atoms) whose subsystem Hessian is checked.
 # Ranges that do not start at atom 0 exercise the offset in the slice update
 # (calculate_hessian in ase_calculator.py), which a shape check cannot see.
-# Atom ranges of acetone (10 atoms) whose subsystem Hessian is checked: a block
-# that does not start at atom 0 is what catches a start_index offset bug.
 SUBSETS = {
     'first': [0, 1, 2, 3, 4],
     'middle': [2, 3, 4, 5, 6],

@@ -1,6 +1,7 @@
 import pytest
 
 import jax.numpy as jnp
+import numpy as np
 import numpy.testing as npt
 
 import jraph
@@ -84,10 +85,19 @@ lr3 = {
 }
 
 
+def _assert_masks_match_segments(batch_info):
+    """Padding comes last: the real nodes are those of the non-padded graphs."""
+    n_real = int(batch_info['num_of_non_padded_graphs'])
+    segments = np.asarray(batch_info['batch_segments'])
+    npt.assert_array_equal(np.asarray(batch_info['node_mask']), segments < n_real)
+    graph_mask = np.asarray(batch_info['graph_mask'])
+    npt.assert_array_equal(graph_mask, np.arange(len(graph_mask)) < n_real)
+
+
 @pytest.mark.parametrize("max_num_graphs", [2, 3, 4])
 def test_batch_info_fn(max_num_graphs):
-    # node_mask and graph_mask are jraph's own padding masks passed through
-    # unchanged, so only the segments and the real-graph count are checked.
+    # The masks are checked against the expected segments, not against jraph's
+    # own mask functions (which batch_info_fn returns verbatim).
     max_num_nodes = 11
     max_num_edges = 15
     batched_graphs = dynamically_batch_with_lr(
@@ -106,6 +116,7 @@ def test_batch_info_fn(max_num_graphs):
             jnp.array([0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
         )
         npt.assert_equal(batch_info.get('num_of_non_padded_graphs').item(), 1)
+        _assert_masks_match_segments(batch_info)
 
         g, lr = next(batched_graphs)
         batch_info = jraph_utils.batch_info_fn(g)
@@ -114,6 +125,7 @@ def test_batch_info_fn(max_num_graphs):
             jnp.array([0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1])
         )
         npt.assert_equal(batch_info.get('num_of_non_padded_graphs').item(), 1)
+        _assert_masks_match_segments(batch_info)
 
         g, lr = next(batched_graphs)
         batch_info = jraph_utils.batch_info_fn(g)
@@ -122,6 +134,7 @@ def test_batch_info_fn(max_num_graphs):
             jnp.array([0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1])
         )
         npt.assert_equal(batch_info.get('num_of_non_padded_graphs').item(), 1)
+        _assert_masks_match_segments(batch_info)
 
         with npt.assert_raises(StopIteration):
             next(batched_graphs)
@@ -134,6 +147,7 @@ def test_batch_info_fn(max_num_graphs):
             jnp.array([0, 0, 0, 1, 1, 2, 2, 2, 2, 2, 2])
         )
         npt.assert_equal(batch_info.get('num_of_non_padded_graphs').item(), 2)
+        _assert_masks_match_segments(batch_info)
 
         g, lr = next(batched_graphs)
         batch_info = jraph_utils.batch_info_fn(g)
@@ -142,6 +156,7 @@ def test_batch_info_fn(max_num_graphs):
             jnp.array([0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1])
         )
         npt.assert_equal(batch_info.get('num_of_non_padded_graphs').item(), 1)
+        _assert_masks_match_segments(batch_info)
 
         with npt.assert_raises(StopIteration):
             next(batched_graphs)
@@ -154,6 +169,7 @@ def test_batch_info_fn(max_num_graphs):
             jnp.array([0, 0, 0, 1, 1, 2, 2, 2, 2, 3, 3])
         )
         npt.assert_equal(batch_info.get('num_of_non_padded_graphs').item(), 3)
+        _assert_masks_match_segments(batch_info)
 
         with npt.assert_raises(StopIteration):
             next(batched_graphs)

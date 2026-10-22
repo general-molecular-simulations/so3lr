@@ -300,12 +300,14 @@ class TestPMEJaxMD:
 
     @pytest.mark.parametrize('kspace_method', ['ewald', 'pme', 'p3m'])
     def test_jaxmd_matches_ase_calculator(self, kspace_method, package_dir, pme_case):
-        """The jax-md potential (the MD path) and the ASE calculator agree.
+        """The Python-API jax-md potential (So3lrPotential + to_jax_md) and the ASE
+        calculator agree.
 
         Same default model, k-space method and grid through both entry points:
-        energy and Cartesian forces must match. They build their neighbour lists
-        and their long-range inputs separately, which is where the CLI and ASE
-        paths have drifted before.
+        energy and Cartesian forces must match, though each builds its own
+        neighbour lists and long-range inputs. The CLI MD path builds its
+        long-range settings separately again (so3lr_md.load_model) and is not
+        compared here.
         """
         atoms, smearing, lr_cutoff = pme_case
 

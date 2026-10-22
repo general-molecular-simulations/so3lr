@@ -154,6 +154,64 @@ def test_npt_flex_coupling_modes(coupling):
         assert not np.allclose(diag[0], diag[2], atol=1e-10)
 
 
+def test_npt_flex_energy_conservation():
+    """The extended Hamiltonian is conserved over a few steps: the one check of
+    npt_nose_hoover_flex_invariant (the conserved quantity the MD log reports) in
+    the short suite. The drift suite (--full) measures longer runs."""
+    energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr = _setup_system()
+
+    unit_system = units.metal_unit_system()
+    dt = 0.5e-3 * unit_system['time']
+    kT = 300.0 * unit_system['temperature']
+    P = 1.0 * unit_system['pressure']
+
+    init_fn, apply_fn = simulate.npt_nose_hoover_flex(
+        energy_fn,
+        shift,
+        dt=dt,
+        pressure=P,
+        kT=kT,
+        coupling='anisotropic',
+        barostat_kwargs={'tau': dt * 1000},
+        thermostat_kwargs={'tau': dt * 100},
+    )
+
+    key = jax.random.PRNGKey(123)
+    state = init_fn(
+        key, positions, box=cell, mass=masses,
+        neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, kT=kT,
+    )
+
+    # Compute initial invariant
+    H0 = simulate.npt_nose_hoover_flex_invariant(
+        energy_fn, state, pressure=P, kT=kT,
+        neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx,
+    )
+
+    # Run 5 steps
+    for _ in range(5):
+        state = apply_fn(
+            state,
+            neighbor=nbrs.idx,
+            neighbor_lr=nbrs_lr.idx,
+            kT=kT,
+            pressure=P,
+        )
+
+    H1 = simulate.npt_nose_hoover_flex_invariant(
+        energy_fn, state, pressure=P, kT=kT,
+        neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx,
+    )
+
+    # The drift suite holds 100 float64 steps of every flex mode under 1e-3 x |H0|
+    # (tests/test_integrator_drift.py); 5 steps must stay well inside that.
+    rel_drift = abs(float(H1 - H0)) / abs(float(H0))
+    assert np.isfinite(rel_drift) and rel_drift < 1e-3, (
+        f"Extended Hamiltonian drifted by {rel_drift*100:.2f}%: "
+        f"H0={float(H0):.6f}, H1={float(H1):.6f}"
+    )
+
+
 def test_fixed_atoms_on_the_flex_state():
     """Semi-isotropic NPT with fixed atoms: the flex state stores velocity, and
     apply_atom_constraints_to_state used to set a 'momentum' field it does not have."""

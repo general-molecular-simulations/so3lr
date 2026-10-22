@@ -12,7 +12,8 @@ from so3lr.mlff.nn.observable import EnergySparse
 import pytest
 
 # Symmetry and batching of this toy network (energy and forces) are covered by
-# test_observable_fn.py, which builds the same StackNetSparse.
+# test_observable_fn.py, which builds the same StackNetSparse architecture (at 32
+# features instead of 64).
 
 
 def graph_to_input(graph: jraph.GraphsTuple):

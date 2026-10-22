@@ -64,6 +64,17 @@ class TestSubcommandHelp:
 # md_settings.yaml
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("ensemble", ["nve", "nvt", "npt"])
+def test_help_names_each_ensemble_correctly(ensemble):
+    """Each `so3lr <ensemble>` line of the help names its own ensemble and no other
+    (`so3lr nve` was once described as NVT)."""
+    line = next((ln for ln in BASIC_HELP_STRING.splitlines()
+                 if ln.strip().startswith(f"so3lr {ensemble}")), None)
+    assert line is not None, f"'so3lr {ensemble}' line not found in BASIC_HELP_STRING"
+    for other in ("NVE", "NVT", "NPT"):
+        assert (other in line) == (other == ensemble.upper()), line
+
+
 def test_md_settings_template_matches_the_yaml_defaults():
     """md_settings.yaml is the documented template users copy: every key in it must be
     one the settings validator knows (else every copy warns of a typo), it must list
