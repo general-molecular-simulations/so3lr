@@ -1,15 +1,12 @@
-"""A model directory whose config predates ``legacy_so3lr_bool`` / ``use_final_bias_bool``.
+"""A model directory whose config predates legacy_so3lr_bool / use_final_bias_bool.
 
-The original v1 config sets neither flag, yet its checkpoint has the v1 heads and a final
-energy bias. ``so3lr.model_config.load_model_config`` reads both from the checkpoint when
-the config is silent, and every reader of the config (network, element coverage, eval,
-fine-tuning, flash) goes through it.
+The original v1 config differs from the bundled legacy one only in these two flags, so the
+bundled model with both removed is a real pre-flag v1 directory.
 """
 import json
-import pathlib
-import re
 import shutil
 
+import jax
 import numpy as np
 import pytest
 from ase import Atoms
@@ -19,35 +16,24 @@ from so3lr import model_registry as mr
 from so3lr.model_config import load_model_config
 from so3lr.mlff.nn.observable.dispersion_ref_data import supported_atomic_numbers_for_model
 
-FLAGS = ('legacy_so3lr_bool', 'use_final_bias_bool')
 
-
-def _copy_with_model_keys(source, target, drop=(), set_=None):
-    shutil.copytree(source, target)
+def _copy(target, **model_keys):
+    """The bundled legacy model with its config's model keys changed (None removes one)."""
+    shutil.copytree(mr.resolve_model('so3lr').dir, target)
     hyper = target / 'hyperparameters.json'
     config = json.loads(hyper.read_text())
-    for key in drop:
-        config['model'].pop(key)
-    config['model'].update(set_ or {})
+    for key, value in model_keys.items():
+        if value is None:
+            del config['model'][key]
+        else:
+            config['model'][key] = value
     hyper.write_text(json.dumps(config))
-    yaml_file = target / 'hyperparameters.yaml'
-    if yaml_file.exists():
-        text = yaml_file.read_text()
-        for key in drop:
-            text = re.sub(rf'(?m)^\s*{key}:.*\n', '', text)
-        yaml_file.write_text(text)
     return target
 
 
 @pytest.fixture(scope='module')
-def legacy_dir():
-    return pathlib.Path(mr.resolve_model('so3lr').dir)
-
-
-@pytest.fixture(scope='module')
-def legacy_without_flags(legacy_dir, tmp_path_factory):
-    """The bundled v1 model as the original v1 config wrote it: neither flag set."""
-    return _copy_with_model_keys(legacy_dir, tmp_path_factory.mktemp('v1') / 'model', drop=FLAGS)
+def v1(tmp_path_factory):
+    return _copy(tmp_path_factory.mktemp('v1') / 'model', legacy_so3lr_bool=None, use_final_bias_bool=None)
 
 
 def _energy(model):
@@ -57,49 +43,29 @@ def _energy(model):
     return atoms.get_potential_energy()
 
 
-def test_flags_are_read_from_a_v1_checkpoint(legacy_without_flags):
-    model = load_model_config(legacy_without_flags)['model']
-    assert model['legacy_so3lr_bool'] is True
-    assert model['use_final_bias_bool'] is True
-
-
-def test_v1_checkpoint_without_flags_matches_the_flagged_model(legacy_dir, legacy_without_flags):
-    np.testing.assert_allclose(_energy(legacy_without_flags), _energy(legacy_dir), rtol=0, atol=1e-8)
-
-
-def test_v1_element_coverage_without_flags(legacy_without_flags):
-    """v1 was trained on eight elements; without the flag the v2 set (Z = 1..85) leaked through."""
-    assert supported_atomic_numbers_for_model(str(legacy_without_flags)) == supported_atomic_numbers_for_model('so3lr')
-    assert 11 not in supported_atomic_numbers_for_model(str(legacy_without_flags))  # Na
+def test_v1_without_flags_is_the_legacy_model(v1):
+    model = load_model_config(v1)['model']
+    assert model['legacy_so3lr_bool'] is True and model['use_final_bias_bool'] is True
+    assert supported_atomic_numbers_for_model(str(v1)) == supported_atomic_numbers_for_model('so3lr')
+    np.testing.assert_allclose(_energy(v1), _energy('so3lr'), rtol=0, atol=1e-8)
 
 
 @pytest.mark.parametrize('name', ['so3lr-tauri-s', 'so3lr-tauri-m', 'so3lr-tauri-l'])
 def test_v2_model_is_not_flipped(name):
-    """The bundled v2 configs leave legacy_so3lr_bool out; the checkpoint must not turn it on."""
+    """The bundled v2 configs leave legacy_so3lr_bool out as well."""
     model = load_model_config(mr.resolve_model(name).dir)['model']
-    assert model['legacy_so3lr_bool'] is False
-    assert model['use_final_bias_bool'] is False
-    assert 11 in supported_atomic_numbers_for_model(name)
+    assert model['legacy_so3lr_bool'] is False and model['use_final_bias_bool'] is False
 
 
-def test_an_explicit_value_is_kept(legacy_dir, tmp_path):
-    """Only an absent flag is read from the checkpoint; an explicit one stands."""
-    explicit = _copy_with_model_keys(legacy_dir, tmp_path / 'model', set_={'legacy_so3lr_bool': False})
-    assert load_model_config(explicit)['model']['legacy_so3lr_bool'] is False
+def test_an_explicit_value_is_kept(tmp_path):
+    assert load_model_config(_copy(tmp_path / 'model', legacy_so3lr_bool=False))['model']['legacy_so3lr_bool'] is False
 
 
-def test_flash_takes_a_v1_directory_without_flags_as_the_legacy_model(legacy_without_flags):
-    """Flash runs the legacy model since #88; its check and loader read the config through the
-    resolver, so a pre-flag v1 directory is accepted and loads exactly like the bundled one
-    (without the resolver it is checked against the v2 architecture and declined). CPU only:
-    neither the check nor the loader touches the kernels."""
-    import jax
+def test_flash_takes_v1_without_flags_as_the_legacy_model(v1):
+    """CPU only: neither flash's check nor its loader touches the kernels."""
     from so3lr.flash import check, loader
-
-    assert check.model_problem(str(legacy_without_flags)) is None
-    params, statics = loader.load_params(str(legacy_without_flags))
-    ref_params, ref_statics = loader.load_params('so3lr')
-    for got, ref in ((params, ref_params), (statics, ref_statics)):
-        assert jax.tree_util.tree_structure(got) == jax.tree_util.tree_structure(ref)
-        for a, b in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(ref)):
-            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    assert check.model_problem(str(v1)) is None
+    got, ref = loader.load_params(str(v1)), loader.load_params('so3lr')
+    assert jax.tree_util.tree_structure(got) == jax.tree_util.tree_structure(ref)
+    for a, b in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(ref)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))

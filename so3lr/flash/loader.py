@@ -1,5 +1,4 @@
 """Parameters and statics for the flash engine from a model in the registry (or a path)."""
-import jax
 import jax.numpy as jnp
 import numpy as np
 from ase.units import alpha as FINE_STRUCTURE

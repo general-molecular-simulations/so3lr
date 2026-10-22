@@ -28,11 +28,10 @@ def cast_float_params(params, dtype):
         lambda v: jnp.asarray(v, dtype) if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating) else v, params)
 
 
-def load_hyperparameters(workdir: str, params=None):
-    """Load hyperparameters from workdir, with the flags an old config leaves out read from
-    the checkpoint (see ``so3lr.model_config``)."""
+def load_hyperparameters(workdir: str):
+    """Load hyperparameters from workdir (see ``so3lr.model_config``)."""
     from ...model_config import load_model_config
-    return config_dict.ConfigDict(load_model_config(workdir, params=params))
+    return config_dict.ConfigDict(load_model_config(workdir))
 
 
 def build_long_range_kwargs(
@@ -75,29 +74,7 @@ def load_model_from_workdir(
         charge_equilibration_total_charge: Optional[float] = None
 ):
     """Load model and parameters from workdir with advanced features support."""
-    if from_file is True:
-        params = load_params_pkl(pathlib.Path(workdir) / 'params.pkl')
-    else:
-        loaded_mngr = checkpoint.CheckpointManager(
-            pathlib.Path(workdir) / "checkpoints",
-            item_names=('params',),
-            item_handlers={'params': checkpoint.StandardCheckpointHandler()},
-            options=checkpoint.CheckpointManagerOptions(step_prefix="ckpt"),
-        )
-
-        mngr_state = loaded_mngr.restore(
-            loaded_mngr.latest_step(),
-            args=checkpoint.args.Composite(
-                params=checkpoint.args.StandardRestore()
-            ),
-        )
-
-        params = mngr_state.get('params')
-        loaded_mngr.close()
-
-    # The parameters come first: a config written before legacy_so3lr_bool or
-    # use_final_bias_bool existed is completed from them.
-    cfg = load_hyperparameters(workdir, params=params)
+    cfg = load_hyperparameters(workdir)
 
     # Inference-time override for the charge fed to the charge embedding only;
     # charge equilibration keeps using the graph's true total_charge. Set
@@ -153,6 +130,26 @@ def load_model_from_workdir(
                         f"{dispersion_energy_cutoff_lr_damping=} and {cutoff_lr=}"
                     )
             cfg.model.dispersion_energy_cutoff_lr_damping = dispersion_energy_cutoff_lr_damping
+
+    if from_file is True:
+        params = load_params_pkl(pathlib.Path(workdir) / 'params.pkl')
+    else:
+        loaded_mngr = checkpoint.CheckpointManager(
+            pathlib.Path(workdir) / "checkpoints",
+            item_names=('params',),
+            item_handlers={'params': checkpoint.StandardCheckpointHandler()},
+            options=checkpoint.CheckpointManagerOptions(step_prefix="ckpt"),
+        )
+
+        mngr_state = loaded_mngr.restore(
+            loaded_mngr.latest_step(),
+            args=checkpoint.args.Composite(
+                params=checkpoint.args.StandardRestore()
+            ),
+        )
+
+        params = mngr_state.get('params')
+        loaded_mngr.close()
 
     if model == 'so3krates':
         net = from_config.make_so3krates_sparse_from_config(

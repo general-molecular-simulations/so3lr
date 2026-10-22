@@ -500,8 +500,7 @@ def evaluate_so3lr_on(
         charge_equilibration_total_charge=charge_equilibration_total_charge
     )
 
-    # Read the short-range cutoff from the resolved model's hyperparameters
-    # (completed from the checkpoint where an old config is silent).
+    # Read the short-range cutoff from the resolved model's hyperparameters.
     from ..model_config import load_model_config
     cfg = load_model_config(workdir_path)
     cutoff = cfg['model']['cutoff']
