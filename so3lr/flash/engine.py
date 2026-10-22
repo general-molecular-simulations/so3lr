@@ -42,7 +42,8 @@ exists), and tiled execution (the per-atom work runs over fixed-size atom tiles)
 
 Periodic orthorhombic boxes, at least 2 x the long-range cutoff across and wide enough
 for the cell grid (``check.box_problem``); models with one head per degree entry,
-degrees 1-4 (so3lr-tauri-s, -m, -l). ``so3lr.flash.md`` runs MD with it;
+degrees 1-4 (so3lr-tauri-s, -m, -l, and the legacy so3lr: LayerNorm, ZBL repulsion, its
+Hirshfeld ratios for both dispersion ratios). ``so3lr.flash.md`` runs MD with it;
 ``python -m so3lr.flash.verify`` compares it with the neighbour-list potential.
 """
 from __future__ import annotations
@@ -660,11 +661,12 @@ def _att_bwd_degrees_kernel(q2, k2, ev, px, py, pz, nbr, cnt, z, rmin, tv, td, w
 
 
 # =========================================================================== #
-# short-range pairs: the NLH repulsion (per-atom energy, forces)
+# short-range pairs: the repulsion (per-atom energy, forces)
 # =========================================================================== #
-def _sr_kernel(px, py, pz, z, nbr, cnt, nlh_a, nlh_b, scal, fx_in, fy_in, fz_in, fw_in, boxl, rows,
+def _sr_kernel(px, py, pz, z, nbr, cnt, rep_a, rep_b, scal, fx_in, fy_in, fz_in, fw_in, boxl, rows,
                energy, fx_o, fy_o, fz_o, fw_o, *, ZMAX, NK, NKP, N, APP):
-    """Per-atom NLH energy (half of each pair) and its forces."""
+    """Per-atom repulsion energy (half of each pair) and its forces: NLH, or the legacy
+    so3lr's ZBL, both a screening sum_k A_k exp(-B_k r) tabulated per element pair."""
     def atom(a):
         n_a = jnp.minimum(cnt[a], nbr.shape[1])         # an overflowed row holds K entries
         ke, rc = scal[0], scal[3]
@@ -685,8 +687,8 @@ def _sr_kernel(px, py, pz, z, nbr, cnt, nlh_a, nlh_b, scal, fx_in, fy_in, fz_in,
             hi = jnp.maximum(za, zb) - 1
             tab = (lo * ZMAX + hi)[:, None] * NK + kk[None, :]
             tm = emask[:, None] & (kk < NK)[None, :]
-            ca = plgpu.load(nlh_a.at[tab], mask=tm, other=0.0)
-            cb = plgpu.load(nlh_b.at[tab], mask=tm, other=0.0)
+            ca = plgpu.load(rep_a.at[tab], mask=tm, other=0.0)
+            cb = plgpu.load(rep_b.at[tab], mask=tm, other=0.0)
             ex = ca * jnp.exp(-cb * r[:, None])
             yv = jnp.sum(ex, axis=1)
             dyv = -jnp.sum(cb * ex, axis=1)
@@ -1264,10 +1266,10 @@ class FlashSO3LR:
                                  TABLE_INTERVALS, self.rc], dt)
         self.sr_scal = self.scal.at[0].set(ASE_UNITS["ke"])
         self.geo = jnp.asarray([self.rc ** 2], dt)
-        self.nlh_a = jnp.asarray(params["nlh_aa"], dt).reshape(-1)
-        self.nlh_b = jnp.asarray(params["nlh_bb"], dt).reshape(-1)
-        self.zmax = int(params["nlh_aa"].shape[0])
-        self.nk = int(params["nlh_aa"].shape[-1])
+        self.rep_a = jnp.asarray(params["repulsion_a"], dt).reshape(-1)
+        self.rep_b = jnp.asarray(params["repulsion_b"], dt).reshape(-1)
+        self.zmax = int(params["repulsion_a"].shape[0])
+        self.nk = int(params["repulsion_a"].shape[-1])
         self.rmin = jnp.asarray(nlh_reference_distance(), dt).reshape(-1)     # so3lr_dev's floor
         # long range
         sig = float(statics["electrostatic_energy_scale"])
@@ -1376,15 +1378,18 @@ class FlashSO3LR:
                 out[i] = blocks.functional_rms_norm(out[i])
         return out
 
+    def _norm(self, p, x):
+        return blocks.functional_rms_norm(x) if self.statics["rms_norm"] else blocks.layer_norm(p, x)
+
     def _post(self, li, x1, ev1):
         p = self.params[f"layers_{li}"]
-        x = blocks.functional_rms_norm(x1) if self.statics["ln1"] else x1
+        x = self._norm(p.get("layer_normalization_1"), x1) if self.statics["ln1"] else x1
         x = x + blocks.mlp(p, ("res_mlp_1_layer_1", "res_mlp_1_layer_2"), jax.nn.silu(x))
         su, eu = blocks.scalar_equivariant_exchange(p["exchange_block"], x, ev1, degrees=self.statics["degrees"])
         x = x + su
         ev = ev1 + eu
         if self.statics["ln2"]:
-            x = blocks.functional_rms_norm(x)
+            x = self._norm(p.get("layer_normalization_2"), x)
         return x, ev
 
     def _heads(self, x, z):
@@ -1394,6 +1399,10 @@ class FlashSO3LR:
         pc = ep["electrostatic_energy"]["partial_charges"]
         raw_q = (blocks.mlp(pc, ("charge_dense_regression_vec", "charge_dense_final_vec"), x).squeeze(-1)
                  + pc["Embed_0"]["embedding"][z].squeeze(-1))
+        if self.statics["legacy"]:
+            # no C6 head: the Hirshfeld ratio h scales alpha, h^2 scales C6
+            a0 = blocks.legacy_hirshfeld_head(p["observables_2"], x, z)
+            return e_loc, raw_q, a0, a0 * a0
         a0 = blocks.ratio_head(p["observables_2"], ("hirshfeld_ratios_dense_regression",
                                                 "hirshfeld_ratios_dense_final"), x, z)
         c6 = blocks.ratio_head(p["observables_3"], ("c6_ratios_dense_regression",
@@ -1733,7 +1742,7 @@ class FlashSO3LR:
             grid=(progs,), compiler_params=_cp(warps),
             out_shape=(shp((n,), dt),) * 5,
             input_output_aliases={9: 1, 10: 2, 11: 3, 12: 4},
-        )(px, py, pz, self.z, nbr, cnt, self.nlh_a, self.nlh_b, self.sr_scal, zero, zero + 0.0, zero + 0.0,
+        )(px, py, pz, self.z, nbr, cnt, self.rep_a, self.rep_b, self.sr_scal, zero, zero + 0.0, zero + 0.0,
           zero + 0.0, self._box(px), self._row_arg())
         e_loc, raw_q, a0, c6 = self._heads(self._mine(x), self._mine(self.z))
         raw_q, a0, c6 = self._gather_rows(raw_q, a0, c6)
