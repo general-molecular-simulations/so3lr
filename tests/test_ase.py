@@ -231,19 +231,27 @@ def test_so3lr_s_water():
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
-@pytest.mark.parametrize('name', ['dha'])
-def test_so3lr_s_ase_calculator(name: str):
-    """Regression check for bundled so3lr-tauri-s-2602 against saved references."""
+# Exact releases, never floating aliases: a reference pins one checkpoint's outputs.
+# so3lr-tauri-m-2606 is the shipped default (regenerate with tools/make_test_references.py).
+V2_REFERENCES = [
+    ('so3lr-tauri-s-2602', 'dha_so3lr_s_ase.npz'),
+    ('so3lr-tauri-m-2606', 'dha_so3lr-tauri-m-2606_ase.npz'),
+]
+
+
+@pytest.mark.parametrize('model,reference', V2_REFERENCES, ids=[m for m, _ in V2_REFERENCES])
+def test_v2_ase_calculator(model: str, reference: str):
+    """Regression check for bundled v2 models against saved references."""
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
-    target_predictions = np.load(package_dir / f'tests/test_data/{name}_so3lr_s_ase.npz')
+    target_predictions = np.load(package_dir / f'tests/test_data/{reference}')
 
-    atoms = read(package_dir / f'tests/test_data/{name}.xyz')
+    atoms = read(package_dir / 'tests/test_data/dha.xyz')
 
     calc = So3lrCalculator(
-        model="so3lr-tauri-s-2602",
+        model=model,
         dtype=np.float64
     )
 
@@ -272,7 +280,7 @@ def test_so3lr_s_ase_calculator(name: str):
     # c6_ratios is a dedicated head of the new models; check it against the
     # saved reference via the aux observable output.
     calc_obs = So3lrCalculator(
-        model="so3lr-tauri-s-2602",
+        model=model,
         dtype=np.float64,
         has_aux=True,
         observables=['c6_ratios']

@@ -40,7 +40,7 @@ DTYPE = jnp.float64
 KE = 14.399645351950548  # Coulomb constant in eV*Angstrom
 
 # ASE calculator vs jax-md on the same model and k-space grid, eV and eV/A: the
-# tolerances test_jaxmd.py::test_with_solar_potential_so3lr_s applies to jax-md
+# tolerances test_jaxmd.py::test_with_solar_potential_v2 applies to jax-md
 # against a reference produced by the ASE calculator.
 ASE_JAXMD_ENERGY_ATOL = 1e-6
 ASE_JAXMD_FORCES_ATOL = 1e-4

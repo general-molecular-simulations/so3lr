@@ -104,19 +104,26 @@ def test_water():
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
-@pytest.mark.parametrize('name', ['dha'])
-def test_with_solar_potential_so3lr_s(name: str):
-    """jax-md energy/forces for bundled so3lr-tauri-s-2602 against saved references."""
+# The same saved ASE references as tests/test_ase.py::test_v2_ase_calculator.
+V2_REFERENCES = [
+    ('so3lr-tauri-s-2602', 'dha_so3lr_s_ase.npz'),
+    ('so3lr-tauri-m-2606', 'dha_so3lr-tauri-m-2606_ase.npz'),
+]
+
+
+@pytest.mark.parametrize('model,reference', V2_REFERENCES, ids=[m for m, _ in V2_REFERENCES])
+def test_with_solar_potential_v2(model: str, reference: str):
+    """jax-md energy/forces for bundled v2 models against the saved ASE references."""
     from so3lr import So3lrPotential
 
     jax.config.update('jax_enable_x64', True)
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
-    target_predictions = np.load(package_dir / f'tests/test_data/{name}_so3lr_s_ase.npz')
+    target_predictions = np.load(package_dir / f'tests/test_data/{reference}')
 
     mol = read(
-        package_dir / f'tests/test_data/{name}.xyz'
+        package_dir / 'tests/test_data/dha.xyz'
     )
 
     species = jnp.array(mol.get_atomic_numbers())
@@ -127,7 +134,7 @@ def test_with_solar_potential_so3lr_s(name: str):
 
     neighbor_fn, neighbor_fn_lr, energy_fn = jaxmd_utils.to_jax_md(
         potential=So3lrPotential(
-            model="so3lr-tauri-s-2602",
+            model=model,
             dtype=np.float64
         ),
         displacement_or_metric=displacement,
