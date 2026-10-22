@@ -245,13 +245,20 @@ def _assert_drift_below(ensemble, dtype, precision, threshold):
     )
 
 
-@pytest.mark.parametrize('ensemble', ALL_ENSEMBLES)
+# Every case runs with --full (tools/run_integrator_drift_tests.sh, one process
+# each). The short suite runs only float32 NVE: the CLI default precision, the
+# plain integrator, about half a minute.
+SLOW = pytest.mark.slow
+
+
+@pytest.mark.parametrize('ensemble', [pytest.param(e, marks=SLOW) for e in ALL_ENSEMBLES])
 def test_integrator_drift_f64(ensemble):
     """All ensembles should have a drift below 1e-3 x |H0| in f64."""
     _assert_drift_below(ensemble, jnp.float64, 'f64', 1.0e-3)
 
 
-@pytest.mark.parametrize('ensemble', ALL_ENSEMBLES)
+@pytest.mark.parametrize('ensemble', [e if e == 'NVE' else pytest.param(e, marks=SLOW)
+                                      for e in ALL_ENSEMBLES])
 def test_integrator_drift_f32(ensemble):
     """NPT flex has looser threshold in f32 due to matrix precision loss."""
     threshold = 2.5e-2 if 'flex' in ensemble else 1.0e-3

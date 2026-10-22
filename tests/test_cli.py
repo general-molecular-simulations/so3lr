@@ -1,7 +1,9 @@
 """General tests for the SO3LR command-line interface."""
+import re
 import subprocess
 import sys
 import pathlib
+from unittest import mock
 
 import pytest
 from click.testing import CliRunner
@@ -85,6 +87,42 @@ def test_md_settings_template_matches_the_yaml_defaults():
     assert sorted(set(YAML_DEFAULTS) - set(template)) == []
     template['md_dt'] = template['md_dt'] / 1000
     assert {k: (template[k], v) for k, v in YAML_DEFAULTS.items() if template[k] != v} == {}
+
+
+def test_unknown_settings_key_warns_and_the_run_goes_on(tmp_path, monkeypatch):
+    """A misspelt settings key (md_t for md_T) is a warning naming the likely key,
+    not an error: one typo must not abort a queued multi-hour job (AGENTS.md).
+    In-process with perform_md stubbed, so no model is built."""
+    from so3lr.cli import so3lr_cli, so3lr_md
+
+    captured, warnings = {}, []
+    monkeypatch.setattr(so3lr_md, 'setup_jax_globals', lambda **kwargs: None)
+    monkeypatch.setattr(so3lr_md, 'perform_md', lambda settings, *args, **kwargs: captured.update(settings))
+    monkeypatch.setattr(so3lr_cli, 'reserve_gpu', lambda *args, **kwargs: None)
+    # setup_logger would leave the SO3LR logger non-propagating for later tests.
+    monkeypatch.setattr(so3lr_md, 'setup_logger', lambda *args, **kwargs: None)
+
+    yaml_path = tmp_path / 'typo.yaml'
+    yaml_path.write_text(
+        f"input_file: {PROJECT_ROOT / 'tests' / 'test_data' / 'acetone.xyz'}\n"
+        f"output_file: {tmp_path / 'out.hdf5'}\n"
+        # standard engine: no flash or device checks before perform_md
+        "engine: standard\nrelax_before_run: false\n"
+        "md_t: 350.0\n"
+    )
+    # mock.patch.object, not monkeypatch: on exit it deletes the instance attribute
+    # instead of leaving a bound method shadowing Logger.warning on the shared logger.
+    with mock.patch.object(so3lr_cli.logger, 'warning',
+                           side_effect=lambda msg, *args, **kwargs: warnings.append(msg)):
+        result = CliRunner().invoke(cli, ['--settings', str(yaml_path)])
+
+    assert result.exit_code == 0, result.output
+    assert captured, "perform_md was never called: the typo aborted the run"
+    unknown = [w for w in warnings if w.startswith('Unknown setting')]
+    assert len(unknown) == 1, warnings
+    assert re.search(r"'md_t'.*Did you mean: .*\bmd_T\b", unknown[0]), unknown[0]
+    # ignored, not applied: md_T keeps its default
+    assert captured['md_T'] == YAML_DEFAULTS['md_T']
 
 
 def test_cli_import_does_not_load_jax():
