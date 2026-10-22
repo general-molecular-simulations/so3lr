@@ -231,88 +231,49 @@ def test_so3lr_s_water():
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
-# Exact releases, never floating aliases: a reference pins one checkpoint's outputs.
-# so3lr-tauri-m-2606 is the shipped default (regenerate with tools/make_test_references.py).
-V2_REFERENCES = [
-    ('so3lr-tauri-s-2602', 'dha_so3lr_s_ase.npz'),
-    ('so3lr-tauri-m-2606', 'dha_so3lr-tauri-m-2606_ase.npz'),
-]
+# Exact releases, never floating aliases: a reference pins one checkpoint's outputs,
+# saved as tests/test_data/dha_<model>_ase.npz by tools/make_test_references.py.
+# Tolerances per model: the -2602 reference predates the tool and is held to its
+# original bounds; references the tool writes come from this code path in float64,
+# so they hold to far below any meaningful change.
+V2_MODELS = ['so3lr-tauri-s-2602', 'so3lr-tauri-m-2606']
+V2_TOLERANCES = {  # (atol, rtol) per output
+    'so3lr-tauri-s-2602': dict(energy=(2e-5, 1e-6), forces=(1e-4, 0), c6_ratios=(1e-5, 0)),
+    'so3lr-tauri-m-2606': dict(energy=(1e-7, 0), forces=(1e-6, 0), c6_ratios=(1e-8, 0)),
+}
 
 
-@pytest.mark.parametrize('model,reference', V2_REFERENCES, ids=[m for m, _ in V2_REFERENCES])
-def test_v2_ase_calculator(model: str, reference: str):
+def test_shipped_default_has_a_reference():
+    """Changing DEFAULT_MODEL must come with a saved reference for the new default."""
+    from so3lr.model_registry import DEFAULT_MODEL
+    assert DEFAULT_MODEL in V2_MODELS
+
+
+@pytest.mark.parametrize('model', V2_MODELS)
+def test_v2_ase_calculator(model: str):
     """Regression check for bundled v2 models against saved references."""
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
-
-    target_predictions = np.load(package_dir / f'tests/test_data/{reference}')
+    target = np.load(package_dir / f'tests/test_data/dha_{model}_ase.npz')
+    tol = V2_TOLERANCES[model]
 
     atoms = read(package_dir / 'tests/test_data/dha.xyz')
-
-    calc = So3lrCalculator(
-        model=model,
-        dtype=np.float64
-    )
-
-    atoms.calc = calc
-
-    # for ASE we remove the cell
     atoms.cell = None
     atoms.pbc = False
-
+    # One evaluation gives energy, forces and the c6_ratios head.
+    atoms.calc = So3lrCalculator(model=model, dtype=np.float64, has_aux=True,
+                                 observables=['c6_ratios'])
     energy = atoms.get_potential_energy()
     forces = atoms.get_forces()
+    c6_ratios = np.asarray(atoms.calc.results['aux']['c6_ratios'])
 
-    npt.assert_allclose(
-        target_predictions['energy'],
-        energy,
-        atol=2e-5,
-        rtol=1e-6
-    )
-
-    npt.assert_allclose(
-        target_predictions['forces'],
-        forces,
-        atol=1e-4
-    )
-
-    # c6_ratios is a dedicated head of the new models; check it against the
-    # saved reference via the aux observable output.
-    calc_obs = So3lrCalculator(
-        model=model,
-        dtype=np.float64,
-        has_aux=True,
-        observables=['c6_ratios']
-    )
-    atoms_obs = atoms.copy()
-    atoms_obs.calc = calc_obs
-    _ = atoms_obs.get_potential_energy()
-    c6_ratios = np.asarray(calc_obs.results['aux']['c6_ratios'])
-
-    npt.assert_allclose(
-        target_predictions['c6_ratios'],
-        c6_ratios,
-        atol=1e-5
-    )
-
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(
-            target_predictions['c6_ratios'],
-            np.zeros_like(c6_ratios)
-        )
-
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(
-            target_predictions['energy'],
-            np.zeros_like(energy)
-        )
-
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(
-            target_predictions['forces'],
-            np.zeros_like(forces)
-        )
+    for key, value in (('energy', energy), ('forces', forces), ('c6_ratios', c6_ratios)):
+        atol, rtol = tol[key]
+        npt.assert_allclose(value, target[key], atol=atol, rtol=rtol, err_msg=f'{model} {key}')
+    # The references are not degenerate.
+    assert abs(target['energy']) > 1.0 and np.abs(target['forces']).max() > 0.1
+    assert np.abs(target['c6_ratios']).max() > 0.1
 
 
 def test_calculate_hessian_is_forwarded_by_make_ase_calculator():

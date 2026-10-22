@@ -109,6 +109,30 @@ def _jaxmd_potential(kspace_method, lr_cutoff):
     return So3lrPotential(dtype=DTYPE, lr_cutoff=lr_cutoff, coulomb_kspace_method=kspace_method)
 
 
+def _ase_calculator(kspace_method, lr_cutoff, smearing):
+    """So3lrCalculator for the default model with the user-level k-space settings.
+
+    Built once per (method, cutoff, smearing) and shared: TestPMEJaxMD hands it a
+    pre-built grid in atoms.info (which overrides the kwargs), TestCLIMDPotential
+    lets it build its own. Reset on every use, since ASE would otherwise return
+    the previous test's results for the same positions.
+    """
+    calc = _cached_ase_calculator(kspace_method, lr_cutoff, smearing)
+    calc.reset()
+    return calc
+
+
+@functools.cache
+def _cached_ase_calculator(kspace_method, lr_cutoff, smearing):
+    return So3lrCalculator(
+        lr_cutoff=lr_cutoff,
+        dtype=np.float64,
+        kspace_electrostatics=kspace_method,
+        kspace_smearing=smearing,
+        kspace_spacing=_converged_spacing(kspace_method, smearing),
+    )
+
+
 def _converged_spacing(method, smearing):
     """The converged spacing used throughout this file: smearing/2 for ewald
     (a real-space wavelength), /8 for the meshes."""
@@ -139,7 +163,7 @@ def _cli_md_settings(kspace_method, smearing, lr_cutoff):
 
 
 def _cli_md_energy_and_forces(atoms, settings):
-    """(energy, Cartesian forces, k_grid) from the potential `so3lr nvt/npt/nve`
+    """(energy, Cartesian forces) from the potential `so3lr nvt/npt/nve`
     integrates.
 
     Repeats perform_md's own setup calls, in its order and with its .get defaults,
@@ -231,7 +255,7 @@ def _cli_md_energy_and_forces(atoms, settings):
     energy, grad = jax.jit(jax.value_and_grad(energy_fn))(
         position, neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, box=box,
         k_grid=k_grid, k_grid_disp=k_grid_disp)
-    return float(energy), -np.asarray(grad), k_grid
+    return float(energy), -np.asarray(grad)
 
 
 class TestPMEDirectComparison:
@@ -443,11 +467,7 @@ class TestPMEJaxMD:
         atoms_ase = atoms.copy()
         atoms_ase.info['k_grid'] = np.array(k_grid)
         atoms_ase.info['k_smearing'] = np.array(k_smearing)
-        atoms_ase.calc = So3lrCalculator(
-            lr_cutoff=lr_cutoff,
-            dtype=np.float64,
-            coulomb_kspace_method=kspace_method,
-        )
+        atoms_ase.calc = _ase_calculator(kspace_method, lr_cutoff, smearing)
         ase_energy = atoms_ase.get_potential_energy()
         ase_forces = atoms_ase.get_forces()
 
@@ -576,38 +596,30 @@ class TestCLIMDPotential:
         atoms, smearing, lr_cutoff = pme_case
         settings = _cli_md_settings(kspace_method, smearing, lr_cutoff)
 
-        cli_energy, cli_forces, cli_k_grid = _cli_md_energy_and_forces(atoms, settings)
-        assert cli_k_grid is not None, "the CLI path built no k-grid"
-        cli_shape = tuple(cli_k_grid.shape)
+        # Record every grid the method's builder makes: first the CLI side's, then
+        # the ASE calculator's (built in calculate(), not stored anywhere). Two
+        # converged but different grids could agree to the energy tolerance.
+        shapes = []
+        name = 'get_kgrid_ewald' if kspace_method == 'ewald' else 'get_kgrid_mesh'
+        build = getattr(jaxpme.kspace, name)
 
-        # Record the grids the ASE calculator builds in calculate() from its kwargs.
-        # Installed only now, so the CLI side's grid is not among them.
-        ase_shapes = []
+        def spy(*args, **kwargs):
+            grid = build(*args, **kwargs)
+            shapes.append(tuple(grid.shape))
+            return grid
+        monkeypatch.setattr(jaxpme.kspace, name, spy)
 
-        def recording(build):
-            def wrapped(*args, **kwargs):
-                grid = build(*args, **kwargs)
-                ase_shapes.append(tuple(grid.shape))
-                return grid
-            return wrapped
+        cli_energy, cli_forces = _cli_md_energy_and_forces(atoms, settings)
 
-        for name in ('get_kgrid_ewald', 'get_kgrid_mesh'):
-            monkeypatch.setattr(jaxpme.kspace, name, recording(getattr(jaxpme.kspace, name)))
-
-        # Both sides run the default model; the CLI resolves an unset model_path to it.
+        # Both sides run the default model (the CLI resolves an unset model_path to
+        # it) with the dispersion damping the calculator also defaults to.
+        assert settings['dispersion_damping'] == 2.0
         atoms_ase = atoms.copy()
-        atoms_ase.calc = So3lrCalculator(
-            lr_cutoff=settings['lr_cutoff'],
-            dispersion_energy_cutoff_lr_damping=settings['dispersion_damping'],
-            dtype=np.float64,
-            kspace_electrostatics=settings['kspace_electrostatics'],
-            kspace_smearing=settings['kspace_smearing'],
-            kspace_spacing=settings['kspace_spacing'],
-        )
+        atoms_ase.calc = _ase_calculator(kspace_method, lr_cutoff, smearing)
         ase_energy = atoms_ase.get_potential_energy()
         ase_forces = atoms_ase.get_forces()
 
-        grids = f"k-grids: CLI {cli_shape}, ASE {ase_shapes}"
+        grids = f"k-grids (CLI, ASE): {shapes}"
         print(f"\n{kspace_method.upper()} CLI MD potential vs ASE calculator:")
         print(f"  ASE energy: {ase_energy:.6f} eV, CLI energy: {cli_energy:.6f} eV")
         print(f"  Max force difference: {np.max(np.abs(cli_forces - ase_forces)):.2e} eV/A")
@@ -615,9 +627,9 @@ class TestCLIMDPotential:
 
         npt.assert_allclose(cli_energy, ase_energy, rtol=0, atol=ASE_JAXMD_ENERGY_ATOL, err_msg=grids)
         npt.assert_allclose(cli_forces, ase_forces, rtol=0, atol=ASE_JAXMD_FORCES_ATOL, err_msg=grids)
-        assert ase_shapes and set(ase_shapes) == {cli_shape}, (
+        assert len(shapes) == 2 and shapes[0] == shapes[1], (
             f"{grids}: from the same kspace_electrostatics/smearing/spacing the two "
-            f"paths built different k-grids")
+            f"paths did not build one grid each, of one shape")
 
 
 class TestKspaceMethodPropagation:
@@ -706,11 +718,8 @@ KSPACE_SMEARING = 2.0
 
 # Converged spacing per method: a real-space wavelength for ewald, a mesh
 # spacing for the two mesh methods, following the convention used above.
-KSPACE_SPACING = {
-    'ewald': KSPACE_SMEARING / 2,
-    'pme': KSPACE_SMEARING / 8,
-    'p3m': KSPACE_SMEARING / 8,
-}
+KSPACE_SPACING = {method: _converged_spacing(method, KSPACE_SMEARING)
+                  for method in ('ewald', 'pme', 'p3m')}
 
 # Each energy costs a calculator build plus a JIT trace, and the two tests below
 # ask for overlapping ones. Compute each (path, method) pair at most once.

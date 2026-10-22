@@ -11,6 +11,8 @@ from so3lr.mlff.calculators.potential import PotentialSparse
 from so3lr import jaxmd_utils
 from so3lr.model_registry import resolve_model
 
+from test_ase import V2_MODELS
+
 # Original/legacy SO3LR model, resolved via the registry so the test is
 # decoupled from the on-disk layout (the model now lives under models/so3lr).
 MODEL_DIR = resolve_model('so3lr').dir
@@ -104,23 +106,17 @@ def test_water():
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
-# The same saved ASE references as tests/test_ase.py::test_v2_ase_calculator.
-V2_REFERENCES = [
-    ('so3lr-tauri-s-2602', 'dha_so3lr_s_ase.npz'),
-    ('so3lr-tauri-m-2606', 'dha_so3lr-tauri-m-2606_ase.npz'),
-]
-
-
-@pytest.mark.parametrize('model,reference', V2_REFERENCES, ids=[m for m, _ in V2_REFERENCES])
-def test_with_solar_potential_v2(model: str, reference: str):
-    """jax-md energy/forces for bundled v2 models against the saved ASE references."""
+@pytest.mark.parametrize('model', V2_MODELS)
+def test_with_solar_potential_v2(model: str):
+    """jax-md energy/forces for bundled v2 models against the saved ASE references
+    (tests/test_ase.py::test_v2_ase_calculator), across the two code paths."""
     from so3lr import So3lrPotential
 
     jax.config.update('jax_enable_x64', True)
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
-    target_predictions = np.load(package_dir / f'tests/test_data/{reference}')
+    target_predictions = np.load(package_dir / f'tests/test_data/dha_{model}_ase.npz')
 
     mol = read(
         package_dir / 'tests/test_data/dha.xyz'
@@ -147,14 +143,13 @@ def test_with_solar_potential_v2(model: str, reference: str):
         disable_cell_list=True
     )
 
-    energy_fn = jax.jit(energy_fn)
-    force_fn = jax.jit(quantity.force(energy_fn))
-
     nbrs = neighbor_fn.allocate(R0, box=box)
     nbrs_lr = neighbor_fn_lr.allocate(R0, box=box)
 
-    energy = energy_fn(R0, neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, box=box)
-    forces = force_fn(R0, neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, box=box)
+    # One compile for both: free space, so the gradient is already Cartesian.
+    energy, grad = jax.jit(jax.value_and_grad(energy_fn))(
+        R0, neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx, box=box)
+    forces = -grad
 
     npt.assert_allclose(
         target_predictions['energy'],
