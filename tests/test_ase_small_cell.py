@@ -61,8 +61,9 @@ def kspace(request):
 def _exact_calc(kspace):
     """Exact-backend stress calculator for one k-space setting, shared by the module.
 
-    The exact backend rebuilds its neighbour list whenever the atom count changes,
-    so one calculator serves the unit cell, the supercell and displaced copies.
+    The exact backend rebuilds its neighbour list on every call (only its padded
+    capacity carries over), so one calculator serves the unit cell, the
+    supercell and displaced copies.
     (A glp calculator keeps the neighbour list of the first structure it sees, so
     those are not shared.)
     """

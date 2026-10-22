@@ -7,10 +7,10 @@ module fixture below; each one happens at most once, on first use, and a
 restart run first launches the run whose files it loads.
 
 Every run: one benzoic acid molecule in a periodic 25 A box, float64, 100 steps
-per cycle and no relaxation (a restart skips relaxation anyway, so the
-continuous runs it is compared with must not relax either). The logs print
-E/KE/PE/H with 3 decimals and T with 1, so the 1e-6 tolerances below mean the
-printed rows are identical.
+per cycle and no relaxation (for speed; a restart skips relaxation, so only the
+first half of a restart would relax). The logs print E/KE/PE/H with 3 decimals
+and T with 1, so the 1e-6 tolerances on log rows mean the printed rows are
+identical; restarts are also compared on the final full-precision frame.
 """
 import pathlib
 import shutil
@@ -19,6 +19,7 @@ import subprocess
 import numpy as np
 import pytest
 import yaml
+from ase.io import read
 
 pytest.importorskip("pysages", reason="PySAGES is an optional dependency")
 
@@ -95,10 +96,13 @@ def _parse_md_rows(log_path):
 
 @pytest.fixture(scope='module')
 def run(tmp_path_factory):
-    """``run(name)`` -> the MD log rows of that `so3lr` run, launched once."""
-    run_dirs = {}
+    """``run(name)`` -> the MD log rows of that `so3lr` run, launched once
+    (``run.dirs[name]`` is its directory). A failed run is not relaunched."""
+    run_dirs, failures = {}, {}
 
     def get(name):
+        if name in failures:
+            pytest.fail(failures[name])
         if name in run_dirs:
             return _parse_md_rows(run_dirs[name] / 'out.log')
         overrides, method, restart_from = RUNS[name]
@@ -119,13 +123,14 @@ def run(tmp_path_factory):
             ['so3lr', '--settings', 'md_settings.yaml'], cwd=run_dir, capture_output=True,
             text=True, env=so3lr_subprocess_env(), timeout=SUBPROCESS_TIMEOUT,
         )
-        assert result.returncode == 0, (
-            f"SO3LR run '{name}' failed in {run_dir} with return code "
-            f"{result.returncode}\nSTDERR:\n{result.stderr}"
-        )
+        if result.returncode != 0:
+            failures[name] = (f"SO3LR run '{name}' failed in {run_dir} with return code "
+                              f"{result.returncode}\nSTDERR:\n{result.stderr}")
+            pytest.fail(failures[name])
         run_dirs[name] = run_dir
         return _parse_md_rows(run_dir / 'out.log')
 
+    get.dirs = run_dirs
     return get
 
 
@@ -189,3 +194,16 @@ def test_restart_matches_continuous(run, continuous, restarted, keys):
     assert len(continuous_rows) >= 4, f"Expected >= 4 rows in {continuous}, got {len(continuous_rows)}"
     assert len(restarted_rows) >= 2, f"Expected >= 2 rows in {restarted}, got {len(restarted_rows)}"
     _assert_rows_match(continuous_rows[-2:], restarted_rows[-2:], f"{restarted} vs {continuous}", keys)
+
+    # The log rows only resolve 1e-3 eV; the last trajectory frame (step 400 of
+    # both runs) holds the full-precision state, so a small restart error in
+    # positions or momenta cannot hide below the print resolution.
+    final = {n: read(run.dirs[n] / 'traj.xyz', index=-1) for n in (continuous, restarted)}
+    a, b = final[continuous], final[restarted]
+    box = np.diag(a.cell.array)
+    displacement = b.positions - a.positions
+    displacement -= box * np.round(displacement / box)  # the same atom across a wrap
+    np.testing.assert_allclose(displacement, 0.0, atol=1e-6,
+                               err_msg=f"{restarted}: final positions differ from {continuous}")
+    np.testing.assert_allclose(b.get_momenta(), a.get_momenta(), atol=1e-6,
+                               err_msg=f"{restarted}: final momenta differ from {continuous}")

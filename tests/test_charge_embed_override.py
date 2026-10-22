@@ -276,7 +276,7 @@ class TestChargeEmbedOverrideCLI:
         result = subprocess.run(
             ['so3lr', '--settings', f'{tag}.yaml', *extra_argv],
             cwd=tmp_path, capture_output=True, text=True,
-            env=so3lr_subprocess_env(),
+            env=so3lr_subprocess_env(), timeout=600,
         )
         assert result.returncode == 0, (
             f"so3lr --settings {tag}.yaml failed ({result.returncode})\n"
@@ -342,7 +342,7 @@ class TestChargeEmbedOverrideCLI:
                 '--save-buffer', '1', *extra_argv,
             ],
             cwd=tmp_path, capture_output=True, text=True,
-            env=so3lr_subprocess_env(),
+            env=so3lr_subprocess_env(), timeout=600,
         )
         assert result.returncode == 0, (
             f"so3lr nvt failed ({result.returncode})\n"

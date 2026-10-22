@@ -30,9 +30,9 @@ def validate():
         required_strings=['NPT', 'completed successfully'],
     )
 
-    # The barostat must actually move the cell. The 15-atom box sits far from
-    # 1 bar, so 4 steps move it well above the 1e-9 A floor.
-    v.check_box_changed(settings['input_file'])
+    # The barostat must actually move the cell between the two saved frames
+    # (2 steps apart, away from equilibrium: well above the 1e-9 A floor).
+    v.check_box_changed()
 
     # Check all settings are reflected in logs
     v.check_settings_in_logs(settings)

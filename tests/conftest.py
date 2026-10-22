@@ -1,8 +1,8 @@
 """
 Pytest configuration for so3lr tests.
 
-Adds a --full option to run comprehensive versions of tests.
-By default, slow tests run a lighter version (e.g., fewer atoms).
+Adds a --full option that also runs the tests marked @pytest.mark.slow, which
+are skipped by default.
 
 Adds a --shard i/n option that splits a run into duration-balanced slices, used
 by CI to keep any single job well under the runner's practical wall-clock and
@@ -158,7 +158,10 @@ def pytest_collection_modifyitems(config, items):
         deselected = [item for item in items if id(item) not in keep]
         if deselected:
             config.hook.pytest_deselected(items=deselected)
-        items[:] = selected
+        # _shard_items packs by duration; run the shard in the order above so a
+        # module's tests stay together.
+        order = {id(item): i for i, item in enumerate(items)}
+        items[:] = sorted(selected, key=lambda item: order[id(item)])
 
 
 @pytest.fixture

@@ -176,11 +176,11 @@ def test_npt_flex_coupling_modes(coupling, water_system):
         assert not np.allclose(diag[0], diag[2], atol=1e-10)
 
 
-def test_npt_flex_energy_conservation():
+def test_npt_flex_energy_conservation(water_system):
     """The extended Hamiltonian is conserved over a few steps: the one check of
     npt_nose_hoover_flex_invariant (the conserved quantity the MD log reports) in
     the short suite. The drift suite (--full) measures longer runs."""
-    energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr = _setup_system()
+    energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr = water_system
 
     unit_system = units.metal_unit_system()
     dt = 0.5e-3 * unit_system['time']

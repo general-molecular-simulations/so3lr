@@ -1,8 +1,7 @@
 """Test integrator drift across ensembles (NVE, NVT, NPT iso, NPT flex).
 
 Asserts that the drift of each integrator's conserved quantity stays below
-thresholds established from measurement runs (scripts/measure_drift.py). The
-NPT flex thresholds verify the integrator bug fix (fractional coordinate
+thresholds established from measurement runs. The NPT flex thresholds verify the integrator bug fix (fractional coordinate
 conversion) holds.
 
 Thresholds are relative to |H0| and have ~3x safety margin over measured
@@ -16,10 +15,8 @@ The anisotropic flex mode is covered although the CLI and create_npt_nhc_fn
 reject it today (tests/test_npt_coupling_safety.py): its integrator must stay
 conservative for when it is re-enabled.
 
-The step and the invariant are jitted (nothing inside the potential is), and
-the invariant is sampled every INVARIANT_EVERY steps. Sampling can only miss
-a peak between samples, so the check is never stricter than sampling every
-step was.
+The step and the invariant are jitted (nothing inside the potential is); the
+invariant is evaluated after every step, as when the thresholds were set.
 """
 import functools
 
@@ -45,7 +42,6 @@ _SPEC = resolve_model('so3lr-tauri-m')
 MODEL_DIR, MODEL_FROM_FILE = _SPEC.dir, _SPEC.from_file
 
 N_STEPS = 100
-INVARIANT_EVERY = 10
 DT_FS = 0.5e-3  # 0.5 fs in ps (metal units)
 
 
@@ -112,11 +108,9 @@ def _measure_drift(init_fn, apply_fn, invariant_fn, init_args, init_kwargs,
     H0 = float(invariant(state, **invariant_kwargs))
     H_max_dev = 0.0
 
-    for i in range(1, n_steps + 1):
+    for _ in range(n_steps):
         state = step(state, **step_kwargs)
-        if i % INVARIANT_EVERY == 0 or i == n_steps:
-            H_i = float(invariant(state, **invariant_kwargs))
-            H_max_dev = max(H_max_dev, abs(H_i - H0))
+        H_max_dev = max(H_max_dev, abs(float(invariant(state, **invariant_kwargs)) - H0))
 
     return H_max_dev, H0
 
