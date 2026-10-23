@@ -21,7 +21,8 @@ exists), and tiled execution (the per-atom work runs over fixed-size atom tiles)
   per atom, so the kernels need no read-modify-write of their own rows.
 * The electrostatic pair function depends only on r and Pallas-Triton has no erf, so
   it is a cubic Hermite table of r (16384 intervals, exact values and derivatives at
-  the nodes; |error| < 1e-12 of the function).
+  the nodes; |error| < 1e-12 of the function), out to 8 sigma, where erf(r/sigma) is 1
+  in float64; past that (a long-range cutoff such as 1000 A) it is computed in closed form.
 * The tile loops are ``lax.fori_loop`` over fixed-size tiles; the last tile is shifted
   back to end at N and only its new atoms are written.
 * Memory modes (``MODES``) trade speed for memory: what is kept between the forward and
@@ -41,10 +42,12 @@ exists), and tiled execution (the per-atom work runs over fixed-size atom tiles)
   every atom on the PME mesh; the forces are the same as on one.
 
 Periodic orthorhombic boxes, at least 2 x the long-range cutoff across and wide enough
-for the cell grid (``check.box_problem``); models with one head per degree entry,
-degrees 1-4 (so3lr-tauri-s, -m, -l, and the legacy so3lr: LayerNorm, ZBL repulsion, its
-Hirshfeld ratios for both dispersion ratios). ``so3lr.flash.md`` runs MD with it;
-``python -m so3lr.flash.verify`` compares it with the neighbour-list potential.
+for the cell grid (``check.box_problem``), or free space (``box=None``: the gas phase, run
+in a periodic box with room for the atoms and the cutoffs, ``check.vacuum_box``); models
+with one head per degree entry, degrees 1-4 (so3lr-tauri-s, -m, -l, and the legacy so3lr:
+LayerNorm, ZBL repulsion, its Hirshfeld ratios for both dispersion ratios).
+``so3lr.flash.md`` runs MD with it; ``python -m so3lr.flash.verify`` compares it with the
+neighbour-list potential.
 """
 from __future__ import annotations
 
@@ -61,7 +64,7 @@ from jax.experimental.pallas import triton as plgpu
 import jaxpme
 
 from so3lr.flash import blocks
-from so3lr.flash.check import box_problem, cell_grid, is_rocm
+from so3lr.flash.check import box_problem, cell_grid, is_rocm, vacuum_box, vacuum_fits, vacuum_size
 from so3lr.mlff.nn.embed.embed_sparse import PAIR_FLOOR_WIDTH, nlh_reference_distance
 from so3lr.mlff.nn.observable.observable_sparse import c6_raw_potential
 from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
@@ -167,6 +170,14 @@ def _switch(x, on, off):
     ok = den > 0.0
     ds = jnp.where(ok, den, 1.0)
     return jnp.where(ok, sa / ds, 0.0), jnp.where(ok, (da * sb - sa * db) / (ds * ds), 0.0)
+
+
+def _far_field(r, rc, switch=True):
+    """_phi_table's phi past 8 sigma, where V = erf(r/sigma)/r is 1/r: 1/r - 1/rc +
+    (1 - f) (r - rc) / rc^2, and phi'; switch False where f = 1 (r below 0.45 rc)."""
+    inv, fc = 1.0 / r, -1.0 / (rc * rc)
+    f, df = _switch(r, 0.45 * rc, rc) if switch else (1.0, 0.0)
+    return inv - 1.0 / rc - (1.0 - f) * fc * (r - rc), -inv * inv - (1.0 - f) * fc + df * fc * (r - rc)
 
 
 def _geometry(px, py, pz, jj, emask, ax, ay, az, Lx, Ly, Lz, rc):
@@ -718,17 +729,20 @@ def _sr_kernel(px, py, pz, z, nbr, cnt, rep_a, rep_b, scal, fx_in, fy_in, fz_in,
 def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cell_of,
                phi_v, phi_d, lrs, e_in, fx_in, fy_in, fz_in, fw_in, scratch_in, boxl, c6lr_v, c6lr_d, rows,
                energy, gq, ga0, gc6, fx_o, fy_o, fz_o, fw_o, scratch, most,
-               *, N, NX, NY, NZ, KC, MAXH, ELEC, DISP, DPME):
+               *, N, NX, NY, NZ, KC, MAXH, ELEC, DISP, DPME, FAR, EL_SWITCH, DISP_SWITCH):
     pid = _i32(pl.program_id(0))
     nprog = _i32(pl.num_programs(0))
     # [rc, phi spacing, phi intervals, ke, damping start, gamma_scale, fs^(-4/21), hartree,
-    #  bohr]; the box comes in boxl
+    #  bohr, reach (partners are within it), the tables' end]; the box comes in boxl. FAR:
+    # phi past the tables' end in closed form; EL_SWITCH, DISP_SWITCH: a partner may be
+    # where the electrostatic or dispersion switching function is below 1
     rc, phs, phn, ke = lrs[0], lrs[1], lrs[2], lrs[3]
     dstart, gsc, fs = lrs[4], lrs[5], lrs[6]
     Lx, Ly, Lz = boxl[0], boxl[1], boxl[2]
     hartree, bohr = lrs[7], lrs[8]
+    reach2 = lrs[9] * lrs[9]
+    rtab = lrs[10]
     dt = rc.dtype
-    rc2 = rc * rc
     sxd, syd, szd = Lx / NX, Ly / NY, Lz / NZ                   # positions' dtype
     sx, sy, sz = sxd.astype(dt), syd.astype(dt), szd.astype(dt)
     b0, b1, b2, b3 = (jnp.asarray(v, dt) for v in (-0.00433008, 0.24428889, 0.04125273, -0.00078893))
@@ -755,10 +769,10 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
             gy_ = jnp.where(dyc > 0, dyc.astype(dt) * sy - oy,
                             jnp.where(dyc < 0, oy + (-dyc - 1).astype(dt) * sy, 0.0))
             g2 = gy_ * gy_ + gz_ * gz_
-            xr = jnp.sqrt(jnp.maximum(rc2 - g2, 0.0))
+            xr = jnp.sqrt(jnp.maximum(reach2 - g2, 0.0))
             lo = jnp.maximum(cx + jnp.floor((ox - xr) / sx).astype(jnp.int32), cx - KC)
             hi = jnp.minimum(cx + jnp.floor((ox + xr) / sx).astype(jnp.int32), cx + KC)
-            hi = jnp.where(g2 < rc2, hi, lo - 1)
+            hi = jnp.where(g2 < reach2, hi, lo - 1)
             zc = _rem(cz + dzc + NZ, NZ)
             yc = _rem(cy + dyc + NY, NY)
             row = (zc * NY + yc) * NX
@@ -783,7 +797,7 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
                     dy = _min_image(plgpu.load(py.at[j], mask=m, other=0.0) - ay, Ly).astype(dt)
                     dz = _min_image(plgpu.load(pz.at[j], mask=m, other=0.0) - az, Lz).astype(dt)
                     r2 = dx * dx + dy * dy + dz * dz
-                    hit = m & (r2 < rc2) & (j != a) & (r2 > 0.0)
+                    hit = m & (r2 < reach2) & (j != a) & (r2 > 0.0)
                     slot = nh + jnp.cumsum(hit.astype(jnp.int32)) - 1
                     plgpu.store(scratch.at[pid, slot], j, mask=hit & (slot < MAXH))
                     return (nh + jnp.sum(hit.astype(jnp.int32))).astype(jnp.int32)
@@ -809,9 +823,9 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
             dx = _min_image(plgpu.load(px.at[j], mask=hit, other=0.0) - ax, Lx).astype(dt)
             dy = _min_image(plgpu.load(py.at[j], mask=hit, other=0.0) - ay, Ly).astype(dt)
             dz = _min_image(plgpu.load(pz.at[j], mask=hit, other=0.0) - az, Lz).astype(dt)
-            r = jnp.sqrt(jnp.where(hit, dx * dx + dy * dy + dz * dz, rc2 * 0.25))
+            r = jnp.sqrt(jnp.where(hit, dx * dx + dy * dy + dz * dz, reach2 * 0.25))
             de = jnp.zeros_like(r)
-            ti, tu = _table_coords(r, phs, phn, column=False)
+            ti, tu = _table_coords(jnp.minimum(r, rtab) if FAR else r, phs, phn, column=False)
 
             def hermite(tv, td):
                 """A cubic Hermite table of r (values, d/dr) at r, and its d/dr."""
@@ -828,6 +842,10 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
             if ELEC:
                 qb = plgpu.load(q.at[j], mask=hit, other=0.0)
                 phi, dphi = hermite(phi_v, phi_d)
+                if FAR:
+                    far_phi, far_dphi = _far_field(r, rc, EL_SWITCH)
+                    phi = jnp.where(r > rtab, far_phi, phi)
+                    dphi = jnp.where(r > rtab, far_dphi, dphi)
                 kq = ke * qb
                 e_a = e_a + 0.5 * jnp.sum(jnp.where(hit, kq * qa * phi, 0.0))
                 gq_a = gq_a + jnp.sum(jnp.where(hit, kq * phi, 0.0))
@@ -868,7 +886,7 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
                 dv_gam = 5.0 * c6p * ig * ig * i8 + 2.0 * 245.0 / 8.0 * c6p * ig * ig * ig * i10
                 dv_p = (6.0 * p2 * p2 * p * c6p * i6 * i6 + 8.0 * p6 * p * c8 * i8 * i8
                         + 10.0 * p6 * p2 * p * c10 * i10 * i10)
-                w, dw = _switch(r, dstart, rc)
+                w, dw = _switch(r, dstart, rc) if DISP_SWITCH else (1.0, 0.0)
                 hw = hartree * w
                 g6 = hw * dv_c6 * dc6_dc6
                 if DPME:
@@ -941,13 +959,13 @@ def _radial_table(p, names, n_rbf, grid):
     return act @ w2 + c2, ((dbasis @ w1) * dact) @ w2
 
 
-def _phi_table(rc, sigma, n, smearing=None):
+def _phi_table(rc, sigma, n, smearing=None, end=None):
     """The electrostatic pair function phi(r) = V(r) - V(rc) - (1 - f) V'(rc) (r - rc),
-    V = erf(r/sigma)/r, f = switching_fn(r, 0.45 rc, rc), and phi', on [0, rc]. With PME
-    (Ewald ``smearing``) V = erf(r/sigma)/r - erf(r/(sqrt(2) smearing))/r, the mesh's
-    part taken out (so3lr_dev's coulomb_erf_shifted_force_smooth_pme)."""
+    V = erf(r/sigma)/r, f = switching_fn(r, 0.45 rc, rc), and phi', on [0, end] (default
+    rc). With PME (Ewald ``smearing``) V = erf(r/sigma)/r - erf(r/(sqrt(2) smearing))/r, the
+    mesh's part taken out (so3lr_dev's coulomb_erf_shifted_force_smooth_pme)."""
     from scipy.special import erf
-    r = np.linspace(0.0, rc, n + 1)
+    r = np.linspace(0.0, rc if end is None else end, n + 1)
     rs = np.where(r > 0, r, 1.0)
     widths = [(sigma, 1.0)] + ([] if smearing is None else [(math.sqrt(2.0) * smearing, -1.0)])
 
@@ -973,7 +991,7 @@ def _phi_table(rc, sigma, n, smearing=None):
     vc, dvc = float(V(np.array([rc]))[0]), float(dV(np.array([rc]))[0])
     phi = V(rs) * (r > 0) + (r == 0) * V(np.array([0.0]))[0] - vc - (1.0 - f) * dvc * (r - rc)
     dphi = dV(r) - (1.0 - f) * dvc + df * dvc * (r - rc)
-    return phi, dphi, rc / n
+    return phi, dphi, r[-1] / n
 
 
 def _c6_lr_table(rc, smearing_bohr, n, bohr):
@@ -1134,6 +1152,8 @@ ASE_UNITS = dict(ke=14.399645351950548, hartree=27.211386024367243, bohr=0.52917
 TABLE_INTERVALS = 4096       # radial filter tables on [0, 1.05 cutoff]
 PAIR_INTERVALS = 16384       # long-range pair tables on [0, lr cutoff]
 PME_CHUNK = 1 << 20          # atoms spread or gathered at a time in the PME mesh
+MAX_REBUILDS = 6             # rebuilds after overflows in a row, at most, before giving up
+MAX_CELLS = 1 << 28          # cells of the grid, at most (cell_start: 1 GiB)
 
 
 # memory modes, fastest first: (engine options, staged, peak KiB per atom of so3lr-tauri-m on an
@@ -1168,6 +1188,16 @@ def pick_mode(n, free_bytes, statics):
     return name
 
 
+def lr_programs():
+    """The long-range kernel's resident programs: 16 per streaming multiprocessor."""
+    return 16 * (getattr(jax.devices()[0], "core_count", None) or 132)
+
+
+def lr_scratch_bytes(n, partners):
+    """The long-range kernel's scratch: a row of partners per program."""
+    return min(lr_programs(), n) * partners * 4
+
+
 def pme_bytes(L, pme, itemsize):
     """Memory the mesh part of PME holds at its peak, for (smearing, spacing) pairs pme:
     the charges, their transform, the filtered transform, the potential and the FFT's
@@ -1178,14 +1208,15 @@ def pme_bytes(L, pme, itemsize):
 
 class FlashSO3LR:
     """Energy and forces of SO3LR (params, statics from ``loader.load_params``) for atoms
-    ``z`` in an orthorhombic periodic ``box``, with so3lr_dev's descriptor floor at
+    ``z`` in an orthorhombic periodic ``box``, or in free space (box None, laid out for
+    atoms of ``size``, ``check.vacuum_size``), with so3lr_dev's descriptor floor at
     contacts. The memory options are those of ``MODES``."""
 
     def __init__(self, params, statics, z, box, *, total_charge=0.0, total_spin=0.0,
                  equilibration_charge=None, tile=1 << 17, max_neighbours=None, lr_scratch=1024,
                  keep_layer_inputs=True, keep_attention=False, split_channels=False,
                  split_blocks=False, pme_electrostatics=None, pme_dispersion=None, box_margin=0.0,
-                 devices=1, atoms_per_program=None):
+                 devices=1, atoms_per_program=None, size=None):
         degrees = [int(d) for d in statics["degrees"]]
         self.nh = int(statics["num_heads"])
         # one head per degree entry, each on its own block of G features (so3lr-tauri-s/m: 4 x 32,
@@ -1197,11 +1228,20 @@ class FlashSO3LR:
         self.dtype = statics.get("dtype", jnp.float32)
         z = np.asarray(z).astype(np.int32)
         self.n = n = int(z.shape[0])
-        box = np.asarray(box, np.float64).reshape(3, 3)
-        if np.abs(box - np.diag(np.diag(box))).max() > 0:
-            raise ValueError("needs an orthorhombic box")
+        # free space: a periodic box with room for the atoms and the cutoffs, laid out again
+        # if they outgrow it (_fit)
+        self.vacuum = box is None
+        if self.vacuum and size is None:
+            raise ValueError("free space (box None) needs the atoms' size")
+        if not self.vacuum:
+            box = np.asarray(box, np.float64).reshape(3, 3)
+            if np.abs(box - np.diag(np.diag(box))).max() > 0:
+                raise ValueError("needs an orthorhombic box")
         self.rc = float(statics["cutoff"])
         self.rc_lr = float(statics["long_range_cutoff"])
+        # the long range's partners are within the reach: the cutoff, or in free space less
+        # where no two atoms are farther apart (_fit)
+        self.reach = self.rc_lr
         # the box: a traced argument of every jitted program (so an NPT step compiles
         # nothing); box_margin: the fraction by which it may shrink or grow before the
         # cell grid is laid out again (set_box)
@@ -1279,9 +1319,13 @@ class FlashSO3LR:
         # lose what the mesh adds back (_pme_terms)
         self.pme_el = tuple(float(v) for v in pme_electrostatics) if pme_electrostatics and self.elec else None
         self.pme_disp = tuple(float(v) for v in pme_dispersion) if pme_dispersion and self.disp else None
-        self._layout([float(v) for v in np.diag(box)])
+        if self.vacuum and (self.pme_el or self.pme_disp):
+            raise ValueError("PME needs a box")
+        # the pair tables' end: 8 sigma, past which phi is in closed form (_far_field); with
+        # PME the cutoff (the dispersion mesh's table shares the grid)
+        self.r_tab = self.rc_lr if self.pme_el or self.pme_disp or not self.elec else min(self.rc_lr, 8.0 * sig)
         phi, dphi, phs = _phi_table(self.rc_lr, sig if self.elec else 1.0, PAIR_INTERVALS,
-                                    smearing=self.pme_el[0] if self.pme_el else None)
+                                    smearing=self.pme_el[0] if self.pme_el else None, end=self.r_tab)
         self.phi_v, self.phi_d = jnp.asarray(phi, dt), jnp.asarray(dphi, dt)
         if self.pme_disp:
             lr6, dlr6 = _c6_lr_table(self.rc_lr, self.pme_disp[0] / ASE_UNITS["bohr"], PAIR_INTERVALS,
@@ -1292,31 +1336,38 @@ class FlashSO3LR:
         self.lrs = jnp.asarray([self.rc_lr, phs, PAIR_INTERVALS, ASE_UNITS["ke"],
                                 self.rc_lr - statics["dispersion_energy_cutoff_lr_damping"],
                                 statics["dispersion_energy_scale"], float(statics["fine_structure"]) ** (-4.0 / 21.0),
-                                ASE_UNITS["hartree"], ASE_UNITS["bohr"]], dt)
+                                ASE_UNITS["hartree"], ASE_UNITS["bohr"], self.reach, self.r_tab], dt)
         self.alphas = jnp.asarray(statics["dispersion_alphas"], dt)
         self.c6tab = jnp.asarray(statics["dispersion_c6"], dt)
-        # the long-range kernel's resident programs: 16 per streaming multiprocessor
-        self.lr_programs = 16 * (getattr(jax.devices()[0], "core_count", None) or 132)
-        self.maxh = int(lr_scratch)
+        self.lr_programs = lr_programs()
+        self.maxh = min(int(lr_scratch), n)        # no atom has more partners than n - 1
         self.builds = 0
         self.atoms_per_program = atoms_per_program
+        if self.vacuum:
+            self._fit(size)
+        else:
+            self._layout([float(v) for v in np.diag(box)])
         self._build_jit()
 
     def _layout(self, L):
         """What depends on the box beyond its value: the cell grid's cells per side and
-        long-range reach, laid out for the box shrunk by box_margin (so it holds for
-        any box within the margin), and the PME meshes (fixed between layouts, as
+        long-range reach in cells, laid out for the box shrunk by box_margin (so it holds
+        for any box within the margin), and the PME meshes (fixed between layouts, as
         so3lr_dev keeps its k-grid)."""
         L = [float(v) for v in L]
         small = [v * (1.0 - self.box_margin) for v in L]
-        if box_problem(small, self.rc, self.rc_lr):
+        if box_problem(small, self.rc, self.reach):
             small = L                     # near the smallest box: no room to shrink in this layout
-        problem = box_problem(small, self.rc, self.rc_lr)
+        problem = box_problem(small, self.rc, self.reach)
         if problem:
             raise ValueError(problem)
         self.L, self.L_lo = L, small
         self.box = jnp.asarray(L, jnp.float64 if jax.config.jax_enable_x64 else self.dtype)
-        self.nc, self.kc = cell_grid(small, self.rc, self.rc_lr)
+        self.nc, self.kc = cell_grid(small, self.rc, self.reach)
+        if math.prod(self.nc) >= MAX_CELLS:
+            raise ValueError(f"cell grid {self.nc} has 2^28 cells or more: a {L[0]:.0f} A box is too large"
+                             + (" (an atom far from the rest? free space takes a box around all of them)"
+                                if self.vacuum else ""))
         self.mesh_el, self.mesh_disp = self._meshes(L)
         for m in (self.mesh_el, self.mesh_disp):
             if m and math.prod(m) >= 2 ** 31:
@@ -1325,6 +1376,38 @@ class FlashSO3LR:
     def _meshes(self, L):
         """The PME meshes (electrostatics, dispersion) for a box of sides L, None where off."""
         return tuple(pme_mesh_shape(L, p[1]) if p else None for p in (self.pme_el, self.pme_disp))
+
+    def _fit(self, size):
+        """Free space: the box and the long range's reach for atoms of size (vacuum_box),
+        and scratch for every atom as a partner where the reach takes every pair."""
+        L, self.reach = vacuum_box(float(size), self.rc, self.rc_lr)
+        self.lrs = self.lrs.at[9].set(self.reach)
+        self._layout([L] * 3)
+        if self.reach > size:
+            self.maxh = self.n
+
+    def _outgrown(self, R):
+        """Free space: whether atoms at R have outgrown the box and reach laid out for them
+        (check.vacuum_fits); never in a periodic box."""
+        if not self.vacuum:
+            return jnp.zeros((), bool)
+        R = R.astype(jnp.promote_types(R.dtype, self.dtype))
+        return ~vacuum_fits(vacuum_size(R, jnp), min(self.L), self.rc, self.rc_lr, self.reach)
+
+    def _recover(self, R, over):
+        """After a call at positions R with overflow code over (1: a table, 2: the atoms
+        outgrew free space's box, 3: both): wider tables and/or the box laid out again for
+        R, and True; False if nothing overflowed, or R is not finite (the caller gets the
+        non-finite result)."""
+        if not over or not bool(jnp.isfinite(jnp.asarray(R)).all()):
+            return False
+        if over & 2:
+            self._fit(vacuum_size(np.asarray(R, np.float64)))
+        if over & 1:
+            self.widen()
+        else:
+            self._build_jit()
+        return True
 
     # ---- the embedding, per element -----------------------------------------
     def _embed_table(self, zu, counts, total_charge, total_spin):
@@ -1760,7 +1843,9 @@ class FlashSO3LR:
         scratch = jnp.zeros((nprog, self.maxh), jnp.int32)
         e_atom, gq, ga0, gc6, fx, fy, fz, fw, _, most = pl.pallas_call(
             partial(_lr_kernel, N=self.nl, NX=self.nc[0], NY=self.nc[1], NZ=self.nc[2], KC=self.kc,
-                    MAXH=self.maxh, ELEC=self.elec, DISP=self.disp, DPME=self.pme_disp is not None),
+                    MAXH=self.maxh, ELEC=self.elec, DISP=self.disp, DPME=self.pme_disp is not None,
+                    FAR=self.r_tab < self.reach, EL_SWITCH=self.reach > 0.45 * self.rc_lr,
+                    DISP_SWITCH=self.reach > self.rc_lr - self.statics["dispersion_energy_cutoff_lr_damping"]),
             grid=(nprog,), compiler_params=_cp(2),
             out_shape=(shp((n,), dt),) * 8 + (shp((nprog, self.maxh), jnp.int32), shp((nprog,), jnp.int32)),
             input_output_aliases={15: 0, 16: 4, 17: 5, 18: 6, 19: 7, 20: 8},
@@ -1896,8 +1981,10 @@ class FlashSO3LR:
                 (x_l, ev_l), kept = run_layers(li, None, pos3_l), None
             g_x, g_ev, f3 = self._layer_backward(li, x_l, ev_l, tuple(kept or ()), g_x, g_ev, f3,
                                                  pos3, nbr, cnt)
-        overflow = (jnp.max(self._mine(cnt)) > self.K) | (most > self.maxh)
-        overflow = self._sum(overflow.astype(jnp.int32)) > 0
+        # the overflow code (_recover): 1 a table, 2 the atoms outgrew free space's box
+        tables = (jnp.max(self._mine(cnt)) > self.K) | (most > self.maxh)
+        overflow = ((self._sum(tables.astype(jnp.int32)) > 0).astype(jnp.int32)
+                    + 2 * (self._sum(self._outgrown(R).astype(jnp.int32)) > 0).astype(jnp.int32))
         f3 = self._gather(*f3)
         return energy, jnp.stack(f3[:3], -1), overflow, self._strain(f3[3], R)
 
@@ -2006,18 +2093,20 @@ class FlashSO3LR:
         """energy_forces_staged and dE/d(strain) (box and positions scaled together)."""
         R = jnp.asarray(R)
         R = R if R.dtype == jnp.float64 else R.astype(self.dtype)
-        while True:
+        for _ in range(MAX_REBUILDS + 1):
+            if bool(self._outgrown(R)) and self._recover(R, 2):     # before the work, which needs the box
+                continue
             st = self._forward_staged(R)
             cnt = st["nb"][4]
             energy, f3, most = self._backward_staged(R, st)
-            if int(jnp.max(cnt)) <= self.K and int(most) <= self.maxh:
+            if not self._recover(R, int(int(jnp.max(cnt)) > self.K or int(most) > self.maxh)):
                 return energy, jnp.stack(f3[:3], -1), self._strain(f3[3], R)
-            self.widen()
+        raise RuntimeError(f"Flash: overflowed again after {MAX_REBUILDS} rebuilds")
 
     def widen(self):
         """Wider neighbour rows and long-range scratch after an overflow; recompiles."""
         self.K = int(math.ceil(self.K * 1.25 / 16) * 16)
-        self.maxh = int(self.maxh * 1.5)
+        self.maxh = min(int(self.maxh * 1.5), self.n)
         self._build_jit()
 
     def _build_jit(self):
@@ -2036,12 +2125,13 @@ class FlashSO3LR:
 
     def energy_forces_strain(self, R):
         """(energy, forces, dE/d(strain)) in the current box (set_box). Rebuilds with
-        wider tables if a row or scratch overflowed."""
-        while True:
+        wider tables if a row or scratch overflowed, in free space laid out again if the
+        atoms outgrew it."""
+        for _ in range(MAX_REBUILDS + 1):
             e, f, over, w = self._jit(R, self.box)
-            if not bool(over):
+            if not self._recover(R, int(over)):
                 return e, f, w
-            self.widen()
+        raise RuntimeError(f"Flash: overflowed again after {MAX_REBUILDS} rebuilds")
 
     def energy_forces(self, R):
         """(energy, forces). Rebuilds with wider tables if a row or scratch overflowed."""
