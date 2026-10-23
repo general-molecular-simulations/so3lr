@@ -3,12 +3,14 @@
 
 Without a GPU: PME's mesh part and its strain derivative against jaxpme, the real-space
 tables against so3lr_dev's pair functions, the reasons the engine choice gives (every
-settings key and model hyperparameter classified), and ``so3lr nvt`` logging the engine
-it picked and, falling back to the neighbour-list potential, why. With one:
-``python -m so3lr.flash.verify`` on 12,288 waters (energy, forces, dE/d(strain), with and
-without PME); ``so3lr opt``, ``so3lr eval`` and the ASE calculator against the
-neighbour-list potential. With two or more: the same on several GPUs as on one, and MD on two.
+settings key and model hyperparameter classified), the box free space runs in, and
+``so3lr nvt`` logging the engine it picked and, falling back to the neighbour-list
+potential, why. With one: ``python -m so3lr.flash.verify`` on 12,288 waters (energy,
+forces, dE/d(strain), with and without PME); ``so3lr opt``, ``so3lr eval``, MD and the ASE
+calculator against the neighbour-list potential, periodic and with no box (12 and 1000 A
+cutoffs). With two or more: the same on several GPUs as on one, and MD on two.
 """
+import itertools
 import json
 import pathlib
 import subprocess
@@ -125,6 +127,31 @@ def test_electrostatic_table(smearing):
         ref = O.coulomb_erf_shifted_force_smooth_pme(one, jnp.asarray(r), i0, i1, smearing=smearing, **kw)
     _check("phi", np.interp(r, grid, phi), ref, 1e-6)
     _check("dphi", dphi[2:-2], np.gradient(phi, grid)[2:-2], 1e-5)
+
+
+def test_electrostatic_far_field():
+    """A 1000 A cutoff (the gas phase's): the table out to 8 sigma, and past it the closed
+    form the long-range kernel takes (_far_field), give so3lr_dev's pair function and its
+    derivative, and meet at the table's end; below 0.45 rc the closed form without its
+    switching function is the same."""
+    from so3lr.mlff.nn.observable import observable_sparse as O
+    rc, sigma = 1000.0, 4.0
+    end = 8.0 * sigma
+    phi, dphi, h = E._phi_table(rc, sigma, 16384, end=end)
+    assert h == end / 16384
+    r = np.linspace(end, rc - 1e-6, 4001)
+    far, dfar = (np.asarray(v) for v in E._far_field(jnp.asarray(r), rc))
+    below = r < 0.45 * rc
+    for a, b in zip(E._far_field(jnp.asarray(r[below]), rc, switch=False), (far[below], dfar[below])):
+        _check("unswitched", a, b, 1e-15)
+    kw = dict(ke=1.0, sigma=sigma, cutoff=rc, cuton=0.45 * rc, neighborlist_format="ordered_sparse")
+
+    def ref(x):
+        i0, i1 = jnp.zeros(x.shape, int), jnp.ones(x.shape, int)
+        return O.coulomb_erf_shifted_force_smooth(jnp.ones(2), x, i0, i1, **kw)
+    _check("phi", far, ref(jnp.asarray(r)), 1e-12)
+    _check("dphi", dfar, jax.vmap(jax.grad(lambda x: ref(x[None])[0]))(jnp.asarray(r)), 1e-10)
+    assert abs(far[0] - phi[-1]) < 1e-15 and abs(dfar[0] - dphi[-1]) < 1e-15
 
 
 def test_c6_mesh_table():
@@ -245,10 +272,10 @@ def test_engine_choice_every_structure(monkeypatch):
     monkeypatch.setattr(check, "device_problem", lambda: None)
     settings = dict(model_path=None, lr_cutoff=12.0, targets="energy,forces")
     water = _water((3, 3, 3))
-    gas = water.copy()
-    gas.pbc = False
+    slab = water.copy()
+    slab.pbc = [True, True, False]
     assert check.flash_problem(settings, [water, water.copy()], task="eval") is None
-    problem = check.flash_problem(settings, [water, water, gas], task="eval")
+    problem = check.flash_problem(settings, [water, water, slab], task="eval")
     assert problem.startswith("structure 2: it needs a box periodic"), problem
 
 
@@ -333,6 +360,80 @@ def test_restart_box_is_checked(tmp_path, monkeypatch):
     assert check.flash_problem(dict(SETTINGS, restart_load_path=str(tmp_path / "same.npz")), atoms) is None
 
 
+def _acetone():
+    from ase.io import read
+    return read(DATA / "acetone.xyz")
+
+
+@pytest.mark.parametrize("task,change,reason", [
+    ("md", dict(), None),
+    ("md", dict(lr_cutoff=1000.0), None),
+    ("md", dict(ensemble="nvt-langevin"), None),
+    ("md", dict(ensemble="nve"), None),
+    ("md", dict(ensemble="npt"), "NPT needs a box"),
+    ("md", dict(kspace_electrostatics="pme"), "k-space (kspace_electrostatics) needs a box"),
+    ("md", dict(kspace_dispersion="pme"), "k-space (kspace_dispersion) needs a box"),
+    ("opt", dict(lr_cutoff=1000.0), None),
+    ("eval", dict(targets="energy,forces", lr_cutoff=1000.0), None),
+    ("ase", dict(model_path="so3lr"), None),
+])
+def test_engine_choice_in_free_space(monkeypatch, task, change, reason):
+    """A structure with no box (acetone) runs on flash at any long-range cutoff, but not in
+    NPT or with k-space."""
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    settings = {"model_path": None, "lr_cutoff": 12.0, **({"ensemble": "nvt"} if task == "md" else {}), **change}
+    problem = check.flash_problem(settings, _acetone(), task=task)
+    assert (problem is None) if reason is None else (reason in problem), problem
+
+
+def test_free_space_structures(tmp_path, monkeypatch):
+    """No box as perform_md takes it: not periodic, or periodic with no cell; a slab (some
+    directions periodic) is neither; a restart with a box cannot continue in free space."""
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    atoms = _acetone()
+    assert check.in_vacuum(atoms)
+    atoms.pbc = True
+    assert check.in_vacuum(atoms) and check.flash_problem(SETTINGS, atoms) is None
+    atoms.pbc = [True, True, False]
+    assert not check.in_vacuum(atoms)
+    assert "periodic in all three directions, or no box" in check.flash_problem(SETTINGS, atoms)
+    np.savez(tmp_path / "box.npz", box=np.array([30.0, 30.0, 30.0]))
+    np.savez(tmp_path / "none.npz", box=np.array([0.0]))
+    problem = check.flash_problem(dict(SETTINGS, restart_load_path=str(tmp_path / "box.npz")), _acetone())
+    assert "the restart has a box" in problem, problem
+    assert check.flash_problem(dict(SETTINGS, restart_load_path=str(tmp_path / "none.npz")), _acetone()) is None
+
+
+@pytest.mark.parametrize("rc_lr", [3.0, 12.0, 100.0, 1000.0])
+def test_free_space_box_has_no_images_within_reach(rc_lr):
+    """The box free space runs in (vacuum_box), for atoms as laid out and grown into all of
+    its room: every pair within the cutoff is within the long range's reach (never past the
+    cutoff, also one below the model's) and is its own minimum image, and no periodic image
+    of an atom is within either cutoff of another; vacuum_fits says when the atoms grew past
+    that."""
+    rng = np.random.default_rng(0)
+    rc = 4.5
+    for n, spread in ((30, 2.0), (300, 8.0)):
+        R = rng.normal(size=(n, 3)) * spread
+        size = check.vacuum_size(R)
+        L, reach = check.vacuum_box(size, rc, rc_lr)
+        assert check.box_problem([L] * 3, rc, reach) is None
+        assert reach <= rc_lr
+        c = R.mean(0)
+        room = min(L - max(rc, reach), reach if reach < rc_lr else np.inf)      # the size vacuum_fits takes
+        for grown in (R, c + (R - c) * 0.999 * room / size):
+            assert check.vacuum_fits(check.vacuum_size(grown), L, rc, rc_lr, reach)
+            d = grown[None] - grown[:, None]
+            r = np.linalg.norm(d, axis=-1)
+            assert (r[(r > 0) & (r < rc_lr)] < reach).all()
+            near = r < reach
+            assert np.allclose(np.asarray(E._min_image(d, L))[near], d[near])
+            for k in itertools.product((-1, 0, 1), repeat=3):
+                if any(k):
+                    assert np.linalg.norm(d + L * np.asarray(k), axis=-1).min() >= max(rc, reach), k
+        assert not check.vacuum_fits(check.vacuum_size(c + (R - c) * L / size), L, rc, rc_lr, reach)
+
+
 @pytest.mark.parametrize("bad", [dict(engine="Flash"), dict(engine="neighbour-list"), dict(flash_mode="Fast"),
                                  dict(flash_mixed="false"), dict(flash_devices=0), dict(flash_devices="2"),
                                  dict(flash_devices=2, flash_mode="lean"), dict(flash_devices=4096)])
@@ -387,7 +488,8 @@ def test_flash_modes_match_the_engine():
 
 @pytest.mark.parametrize("engine,line", [
     ("standard", "Engine: neighbour-list potential (--engine standard)"),
-    # acetone has no box, so auto runs the neighbour-list potential on any machine
+    # 64 waters' 12.4 A box is narrower than twice the cutoff, so auto runs the
+    # neighbour-list potential on any machine
     ("auto", "Engine: neighbour-list potential (flash cannot:"),
 ])
 def test_md_logs_its_engine(tmp_path, monkeypatch, engine, line):
@@ -401,7 +503,7 @@ def test_md_logs_its_engine(tmp_path, monkeypatch, engine, line):
     # subprocess the session starts after this test
     monkeypatch.setattr(so3lr_cli, "reserve_gpu", lambda *args, **kwargs: None)
     log = tmp_path / "out.log"
-    result = CliRunner().invoke(so3lr_cli.cli, ["nvt", "--input", str(DATA / "acetone.xyz"), "--no-relax",
+    result = CliRunner().invoke(so3lr_cli.cli, ["nvt", "--input", str(DATA / "water_64.xyz"), "--no-relax",
                                                 "--output", str(tmp_path / "out.hdf5"), "--log-file", str(log),
                                                 "--engine", engine])
     assert result.exit_code == 0, result.output
@@ -545,7 +647,7 @@ def test_ase_calculator_matches_neighbour_lists(pme):
 def test_ase_calculator_refuses_what_flash_cannot_take():
     from so3lr import FlashCalculator
     atoms = _water((3, 3, 3))
-    atoms.pbc = False
+    atoms.pbc = [True, True, False]
     atoms.calc = FlashCalculator(precision="float64")
     with pytest.raises(ValueError, match="periodic"):
         atoms.get_potential_energy()
@@ -669,6 +771,242 @@ def test_auto_falls_back_when_flash_fails_to_start(tmp_path, monkeypatch):
              md_cycles=1, md_steps=2, save_buffer=1))
     log = (tmp_path / "o.log").read_text()
     assert "flash cannot: it failed to start: RuntimeError: no kernels here" in log, log[-2000:]
+
+
+def _cluster():
+    """1536 waters with no box (43 A across)."""
+    from ase.io import read
+    atoms = read(DATA / "water_1536.xyz")
+    atoms.pbc = False
+    atoms.cell = np.zeros((3, 3))
+    return atoms
+
+
+def _moved(atoms, dx=60.0):
+    """atoms with the first three (a water) moved dx A out: past the room their box has."""
+    out = atoms.copy()
+    p = out.get_positions()
+    p[:3, 0] += dx
+    out.set_positions(p)
+    return out
+
+
+@GPU
+@pytest.mark.parametrize("model,lr_cutoff,charge", [
+    ("so3lr-tauri-m-2606", 12.0, 0), ("so3lr-tauri-m-2606", 1000.0, 0), ("so3lr-tauri-m-2606", 1000.0, -1),
+    ("so3lr", 1000.0, 0)])
+def test_free_space_matches_neighbour_lists(model, lr_cutoff, charge):
+    """FlashCalculator gives So3lrCalculator's energy and forces (float64) for 1536 waters
+    with no box, at the 12 A cutoff and at 1000 A (every pair; the electrostatics past the
+    table in closed form), neutral and as OH- (a hydrogen fewer), the default model and the
+    legacy so3lr; and again after a water moves 60 A out (the engine's box laid out again)."""
+    from so3lr import FlashCalculator, So3lrCalculator
+    atoms = _cluster()
+    if charge:
+        del atoms[-1]
+        atoms.info["charge"] = charge
+    calc = FlashCalculator(model=model, lr_cutoff=lr_cutoff, precision="float64")
+    for step in ("first", "moved"):
+        flash = atoms if step == "first" else _moved(atoms)
+        flash.calc = calc
+        e, f = flash.get_potential_energy(), flash.get_forces()
+        other = flash.copy()
+        other.calc = So3lrCalculator(model=model, lr_cutoff=lr_cutoff, dtype=np.float64)
+        e_ref, f_ref = other.get_potential_energy(), other.get_forces()
+        assert abs(e - e_ref) / len(flash) < 1e-9, (step, e, e_ref)
+        assert np.abs(f - f_ref).max() < 1e-5, (step, np.abs(f - f_ref).max())
+    assert calc.points.engine.L[0] > 100.0          # laid out again for the moved water
+
+
+@GPU
+@pytest.mark.parametrize("lr_cutoff", [12.0, 1000.0])
+def test_free_space_lays_out_again(lr_cutoff):
+    """An engine laid out for the cluster, given it with a water moved out past its room,
+    lays out its box again and gives what an engine laid out for that gives, jitted and
+    staged (float64)."""
+    from so3lr.flash.loader import load_params
+    params, statics = load_params(None, precision="float64", lr_cutoff=lr_cutoff)
+    atoms = _cluster()
+    z, R0, R1 = atoms.get_atomic_numbers(), atoms.get_positions(), _moved(atoms).get_positions()
+    e_ref, f_ref = E.FlashSO3LR(params, statics, z, None, size=check.vacuum_size(R1)).energy_forces(jnp.asarray(R1))
+    for staged in (False, True):
+        eng = E.FlashSO3LR(params, statics, z, None, size=check.vacuum_size(R0))
+        L0 = eng.L[0]
+        e, f = (eng.energy_forces_staged if staged else eng.energy_forces)(jnp.asarray(R1))
+        assert eng.L[0] > L0
+        _check("energy", e, e_ref, 1e-12)
+        _check("forces", f, f_ref, 1e-10)
+
+
+def _peptide():
+    from ase.io import read
+    atoms = read(DATA / "ac.xyz")
+    atoms.calc = None
+    return atoms
+
+
+def _verlet(atoms, calc, steps, dt_fs):
+    """Positions of `steps` velocity-Verlet steps (dt_fs) from atoms' positions and momenta,
+    on calc's forces: the reference NVE trajectory."""
+    from ase import units
+    b = atoms.copy()
+    b.calc = calc
+    m = b.get_masses()[:, None]
+    R, P, F = b.get_positions(), atoms.get_momenta(), b.get_forces()
+    h = dt_fs * units.fs
+    out = []
+    for _ in range(steps):
+        P = P + 0.5 * h * F
+        R = R + h * P / m
+        b.set_positions(R)
+        F = b.get_forces()
+        P = P + 0.5 * h * F
+        out.append(R)
+    return np.asarray(out)
+
+
+def _nve_no_box(tmp_path, atoms, cycles, steps, lr_cutoff, *args):
+    """`so3lr nve` with no box (float64, 0.5 fs steps) from atoms' positions and momenta (whose
+    centre-of-mass momentum perform_md takes out, so it should be zero), on flash (auto):
+    (its log, its trajectory's positions, velocity Verlet on So3lrCalculator's forces at the
+    same steps). Its trajectory has no box: [0]."""
+    import h5py
+    from ase.io import write
+    from so3lr import So3lrCalculator
+    write(tmp_path / "p.xyz", atoms)
+    _so3lr(["nve", "--input", "p.xyz", "--no-relax", "--md-cycles", str(cycles), "--md-steps", str(steps),
+            "--dt", "0.5", "--precision", "float64", "--lr-cutoff", str(lr_cutoff), "--output", "a.hdf5", *args],
+           tmp_path)
+    log = (tmp_path / "a.log").read_text()
+    assert "Engine: flash (auto)" in log and "no box: computed in a" in log, log[-2000:]
+    ref = _verlet(atoms, So3lrCalculator(lr_cutoff=float(lr_cutoff), dtype=np.float64), cycles * steps, 0.5)
+    with h5py.File(tmp_path / "a.hdf5") as a:
+        assert a["box"].shape[1:] == (1,) and not np.any(a["box"][:])
+        return log, a["positions"][:], ref[steps - 1::steps]
+
+
+@GPU
+@pytest.mark.parametrize("lr_cutoff", [12.0, 1000.0])
+def test_md_in_free_space_is_velocity_verlet(tmp_path, lr_cutoff):
+    """`so3lr nve` with no box on flash (a 42-atom peptide at 300 K, 12 and 1000 A cutoffs)
+    is velocity Verlet on So3lrCalculator's forces, step by step, and its restart has
+    Cartesian positions and no box. (perform_md's own trajectory parts from it by ~1e-6 A in
+    10 steps.)"""
+    from ase import units
+    atoms = _peptide()
+    m = atoms.get_masses()
+    p = np.random.default_rng(3).normal(size=(len(atoms), 3)) * np.sqrt(300.0 * units.kB * m)[:, None]
+    atoms.set_momenta(p - p.mean(0))
+    _, x, ref = _nve_no_box(tmp_path, atoms, 10, 1, lr_cutoff, "--restart-save", "a.npz")
+    assert np.abs(x - ref).max() < 1e-7, np.abs(x - ref).max(axis=(1, 2))
+    with np.load(tmp_path / "a.npz") as a:
+        assert not np.any(a["box"]) and not bool(a["fractional_coordinates"])
+        assert np.abs(a["position"] - ref[-1]).max() < 1e-7
+
+
+@GPU
+def test_md_in_free_space_lays_out_again(tmp_path):
+    """NVE with no box and a hydrogen leaving at 0.6 A/fs: a step inside the jitted loop
+    outgrows the engine's box, the cycle is repeated a step at a time in a box laid out
+    again, and the trajectory is velocity Verlet on So3lrCalculator's forces."""
+    from ase import units
+    atoms = _peptide()
+    out = atoms.positions[0] - atoms.positions.mean(0)
+    p = np.zeros((len(atoms), 3))
+    p[0] = atoms.get_masses()[0] * 0.6 / units.fs * out / np.linalg.norm(out)
+    atoms.set_momenta(p - p.mean(0))
+    log, x, ref = _nve_no_box(tmp_path, atoms, 3, 20, 12.0)
+    assert "cycle repeated" in log, log[-2000:]
+    assert np.linalg.norm(x[-1, 0] - x[-1, 1:].mean(0)) > 12.0
+    assert np.abs(x - ref).max() < 1e-6, np.abs(x - ref).max(axis=(1, 2))
+
+
+@GPU
+@pytest.mark.parametrize("integrator", ["nve", "fire"])
+def test_md_loop_widens_its_tables(integrator):
+    """A jitted loop of MD (NVE) or FIRE steps whose neighbour rows overflow runs again a
+    step at a time on wider ones, and the jitted loop made after that takes the wider rows
+    (jax-md jits its steps, FIRE's through its NVE step: the integrator is made again):
+    both give the loop on wide rows (float64, periodic water)."""
+    import jax_md
+    from so3lr.flash import md as flash_md
+    from so3lr.flash.loader import load_params
+    atoms = _water((3, 3, 3))
+    params, statics = load_params(None, precision="float64", lr_cutoff=12.0)
+    args = (params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]))
+    R, mass = jnp.asarray(atoms.get_positions()), jnp.asarray(atoms.get_masses())
+    _, shift = jax_md.space.periodic(jnp.asarray(np.diag(atoms.cell[:])))
+    F0 = E.FlashSO3LR(*args).energy_forces(R)[1]
+    out = []
+    for kw in (dict(), dict(max_neighbours=16)):
+        eng = E.FlashSO3LR(*args, **kw)
+
+        def make(eng=eng):
+            if integrator == "nve":
+                return jax_md.simulate.nve(flash_md._force_fn(eng), shift, 1e-2)
+            return jax_md.minimize.fire_descent(flash_md._force_fn(eng), shift, dt_start=0.05, dt_max=0.1)
+        init, step = make()
+        predict, finish = flash_md._two_call_step(step)
+        state = (init(jax.random.PRNGKey(0), R, kT=0.025, mass=mass, F=F0) if integrator == "nve"
+                 else init(R, F=F0))
+        state = flash_md._run_jitted(eng, make, state, 5, predict, finish)
+        out.append(flash_md._run_jitted(eng, make, state, 5, predict, finish))
+        assert flash_md._finite(eng.loops[make, 5](state))        # the jitted loop, on the rows it has now
+    assert eng.K > 16
+    _check("positions", out[1].position, out[0].position, 1e-12)
+    _check("forces", out[1].force, out[0].force, 1e-10)
+
+
+@GPU
+def test_opt_in_free_space_follows_neighbour_lists(tmp_path):
+    """`so3lr opt` with no box on flash (auto, 1000 A cutoff) follows the neighbour-list
+    potential's FIRE trajectory (float64)."""
+    from ase.io import read, write
+    write(tmp_path / "p.xyz", _peptide())
+    run = ["opt", "--input", "p.xyz", "--precision", "float64", "--min-cycles", "3", "--min-steps", "5",
+           "--lr-cutoff", "1000"]
+    _so3lr([*run, "--output", "a.xyz"], tmp_path)
+    _so3lr([*run, "--engine", "standard", "--output", "b.xyz"], tmp_path)
+    assert "Engine: flash (auto)" in (tmp_path / "a.log").read_text()
+    a, b = read(tmp_path / "a.xyz", ":"), read(tmp_path / "b.xyz", ":")
+    assert len(a) == len(b) == 4
+    for fa, fb in zip(a, b):
+        assert not fa.pbc.any() and not fb.pbc.any()
+        assert np.abs(fa.positions - fb.positions).max() < 1e-6, np.abs(fa.positions - fb.positions).max()
+
+
+@GPU
+def test_eval_in_free_space_matches_neighbour_lists(tmp_path):
+    """so3lr eval on flash with no box (float64, 1000 A): the peptide, a rattled copy (the
+    same engine) and a cation (+1, a doublet: an engine of its own) give so3lr eval's force
+    metrics and forces on the neighbour-list model, and So3lrCalculator's energies (as in
+    test_eval_on_flash_matches_neighbour_lists)."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from ase.io import read, write
+    from so3lr import So3lrCalculator
+    from so3lr.cli.so3lr_eval import evaluate_so3lr_on
+    rng = np.random.default_rng(0)
+    frames = [_peptide(), _peptide(), _peptide()]
+    frames[1].rattle(0.05, seed=1)
+    frames[2].info.update(charge=1, multiplicity=2)
+    for a in frames:
+        a.calc = SinglePointCalculator(a, energy=float(rng.normal()), forces=rng.normal(size=(len(a), 3)))
+    write(tmp_path / "data.extxyz", frames)
+    out = {}
+    for engine in ("flash", "standard"):
+        out[engine] = evaluate_so3lr_on(
+            str(tmp_path / "data.extxyz"), targets="energy,forces", precision="float64", lr_cutoff=1000.0,
+            model_path="so3lr-tauri-m-2606", engine=engine, save_to=str(tmp_path / f"{engine}.extxyz"),
+            log_file=str(tmp_path / f"{engine}.log"))
+    assert "Engine: flash" in (tmp_path / "flash.log").read_text()
+    for key in ("forces_mae", "forces_rmse"):
+        assert abs(out["flash"][key] - out["standard"][key]) <= 1e-6, (key, out["flash"][key], out["standard"][key])
+    for frame, a, b in zip(frames, read(tmp_path / "flash.extxyz", ":"), read(tmp_path / "standard.extxyz", ":")):
+        ref = a.copy()
+        ref.info = dict(frame.info)                  # the doublet's multiplicity too
+        ref.calc = So3lrCalculator(model="so3lr-tauri-m-2606", lr_cutoff=1000.0, dtype=np.float64)
+        assert abs(a.info["energy_so3lr"] - ref.get_potential_energy()) / len(a) < 1e-9
+        assert np.abs(a.arrays["forces_so3lr"] - b.arrays["forces_so3lr"]).max() < 1e-5
 
 
 GPUS = pytest.mark.skipif(check.device_problem() is not None or len(jax.local_devices()) < 2,

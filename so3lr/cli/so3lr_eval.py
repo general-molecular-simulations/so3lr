@@ -333,7 +333,8 @@ def evaluate_so3lr_on(
         Matches the --overwrite policy used by perform_md / perform_min.
     engine : str
         'auto': SO3LR-Flash where it computes what is asked (every structure periodic
-        and orthorhombic, the targets energy and/or forces; see so3lr.flash.evaluate),
+        and orthorhombic or without a box, the targets energy and/or forces, up to
+        so3lr.flash.check.EVAL_AUTO_ENGINES sets of atoms; see so3lr.flash.evaluate),
         else the neighbour-list model; 'flash' or 'standard' forces one. flash_mode,
         flash_mixed and flash_devices as for MD.
 
@@ -463,12 +464,19 @@ def evaluate_so3lr_on(
     flash_settings['targets'] = target_list
     frames = []
     if (engine or 'auto') != 'standard' and flash_problem(flash_settings, [], task='eval') is None:
-        # the first structure, then the rest only if flash takes it (most datasets it declines
-        # are gas phase: the loader below reads them)
-        from ase.io import read
+        # the first structure, then the rest only if flash takes it, and with auto only up
+        # to one set of atoms more than it takes (most gas-phase datasets have many: the
+        # loader below reads them)
+        from ase.io import iread, read
+        from ..flash.check import EVAL_AUTO_ENGINES
         frames = [read(str(datafile), index=0)]
         if flash_problem(flash_settings, frames, task='eval') is None:
-            frames = read(str(datafile), index=':')
+            frames, kinds = [], set()
+            for atoms in iread(str(datafile), index=':'):
+                frames.append(atoms)
+                kinds.add(atoms.numbers.tobytes())
+                if (engine or 'auto') == 'auto' and len(kinds) > EVAL_AUTO_ENGINES:
+                    break
 
     def eval_on_flash(flash_md):
         from ..flash.evaluate import evaluate_flash

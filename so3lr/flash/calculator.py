@@ -4,12 +4,12 @@
     atoms.calc = FlashCalculator(model="so3lr-tauri-m", kspace_electrostatics="pme")
     atoms.get_potential_energy(), atoms.get_forces()
 
-For periodic orthorhombic cells at least twice the long-range cutoff across, on an NVIDIA
-GPU (``check.flash_problem`` with task "ase"); anything else raises, naming the reason
-(``so3lr.So3lrCalculator``, the neighbour-list model, takes any structure). The engine is
-built at the first call and kept while the atoms, charge and spin stay the same
-(``md.SinglePoints``): a new cell is laid out again (and compiles), and other atoms build a
-new engine (and compile). The
+For periodic orthorhombic cells at least twice the long-range cutoff across, or no cell
+(``pbc=False``: free space, any long-range cutoff), on an NVIDIA GPU (``check.flash_problem``
+with task "ase"); anything else raises, naming the reason (``so3lr.So3lrCalculator``, the
+neighbour-list model, takes any structure). The engine is built at the first call and
+kept while the atoms, charge and spin stay the same (``md.SinglePoints``): a new cell is
+laid out again (and compiles), and other atoms build a new engine (and compile). The
 charge and spin come from ``atoms.info`` as for ``So3lrCalculator`` (``charge``, default
 0; ``multiplicity`` - 1, default 0). No stress: the engine's strain derivative is
 isotropic only.
