@@ -103,3 +103,14 @@ def test_unsupported_interpolation_orders_are_refused_up_front(method, nodes, mo
                     input_file="missing.xyz")
     with pytest.raises(ValueError, match="interpolation nodes"):
         tune_ewald.tune(settings)
+
+
+@pytest.mark.parametrize("model,scales", [("so3lr-tauri-s-2606", (4.0, 1.0)), ("so3lr-tauri-m-2606", (4.0, 1.0)),
+                                          ("so3lr-tauri-l-2606", (4.0, 1.0)), ("so3lr", (4.0, 1.2)),
+                                          (None, (4.0, 1.0))])
+def test_error_estimates_take_the_models_scales(model, scales):
+    """The error estimates evaluate the model's own pair functions, so they take its
+    electrostatic and dispersion scales (the Tauri models' dispersion scale is 1.0, the
+    legacy so3lr's 1.2; None is the default model)."""
+    from so3lr.cli.tune_ewald import model_energy_scales
+    assert model_energy_scales(model) == scales
