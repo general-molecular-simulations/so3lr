@@ -527,7 +527,7 @@ GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash
 
 @GPU
 @pytest.mark.parametrize("model,pme", [("so3lr-tauri-m-2606", ""), ("so3lr-tauri-m-2606", "electrostatics,dispersion"),
-                                       ("so3lr-tauri-l-2606", "electrostatics,dispersion"), ("so3lr", ""),
+                                       ("so3lr-tauri-s-2606", "electrostatics,dispersion"), ("so3lr", ""),
                                        ("so3lr", "electrostatics,dispersion")])
 def test_flash_matches_neighbour_lists(tmp_path, model, pme):
     """Energy, forces and dE/d(strain) on 12,288 waters (49.6 A), float64."""
