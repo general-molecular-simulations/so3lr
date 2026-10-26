@@ -419,27 +419,30 @@ class TestChargeEmbedOverrideCLI:
 
 # --- Per-residue charge conservation (residue_charge / residue_segments) ---------
 
-def _residue_charges(segments, targets, n_real, n_pad=0, n_graphs=1):
-    """PartialChargesSparse charges for random features with per-residue targets."""
+def _residue_charges(segments, targets, n_real, n_pad=0, num_graphs=None):
+    """PartialChargesSparse charges for random features with per-residue targets.
+    num_graphs is the graph_mask length: one structure, plus a padding graph if n_pad > 0."""
     import jax
     import jax.numpy as jnp
     from so3lr.mlff.nn.observable.observable_sparse import PartialChargesSparse
     rng = np.random.default_rng(0)
-    n, n_g = n_real + n_pad, n_graphs + (n_pad > 0)
+    n = n_real + n_pad
+    if num_graphs is None:
+        num_graphs = 2 if n_pad else 1
     inp = dict(x=jnp.asarray(rng.normal(size=(n, 8))),
                atomic_numbers=jnp.asarray(rng.choice([1, 6, 8], size=n)),
                batch_segments=jnp.zeros(n, jnp.int32), node_mask=jnp.arange(n) < n_real,
-               graph_mask=jnp.arange(n_g) < n_graphs, total_charge=jnp.zeros(n_g),
+               graph_mask=jnp.arange(num_graphs) == 0, total_charge=jnp.zeros(num_graphs),
                residue_segments=jnp.asarray(segments), residue_charge=jnp.asarray(targets))
     mod = PartialChargesSparse(prop_keys={}, output_is_zero_at_init=False)
     return np.asarray(mod.apply(mod.init(jax.random.PRNGKey(0), inp), inp)['partial_charges'])
 
 
 @pytest.mark.parametrize('segments, targets, n_real, n_pad', [
-    ([0, 0, 0, 1, 1, 1, 1], [1., -1.], 7, 0),         # unpadded (make_so3lr, PotentialSparse)
-    ([0, 0, 0, 1, 1, 1, 1, 0], [1., -1.], 7, 1),      # jraph-padded (dimer eval)
-    ([0, 0, 1, 1, 1], [0., 1.], 5, 3),                # ids for real atoms only, padded graph
-    ([0, 0, 2, 2, 2, 1, 1], [1., -1., 1.], 7, 0),      # three residues
+    pytest.param([0, 0, 0, 1, 1, 1, 1], [1., -1.], 7, 0, id='unpadded'),
+    pytest.param([0, 0, 0, 1, 1, 1, 1, 0], [1., -1.], 7, 1, id='jraph-padded'),
+    pytest.param([0, 0, 1, 1, 1], [0., 1.], 5, 3, id='ids-for-real-atoms-only'),
+    pytest.param([0, 0, 2, 2, 2, 1, 1], [1., -1., 1.], 7, 0, id='three-residues'),
 ])
 def test_residue_charges_are_conserved_per_residue(segments, targets, n_real, n_pad):
     q = _residue_charges(segments, targets, n_real, n_pad)[:n_real]
@@ -451,7 +454,7 @@ def test_residue_charges_are_conserved_per_residue(segments, targets, n_real, n_
 def test_residue_charges_reject_batches():
     """Residue ids are per structure; several structures per batch cannot be split."""
     with pytest.raises(ValueError, match='one structure'):
-        _residue_charges([0, 0, 1, 1, 0, 0, 1, 1, 0], [1., -1., 1., -1.], 8, n_pad=1, n_graphs=2)
+        _residue_charges([0, 1], [0., 0.], 2, num_graphs=3)
 
 
 if __name__ == '__main__':

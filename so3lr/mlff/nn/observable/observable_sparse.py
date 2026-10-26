@@ -720,15 +720,17 @@ class PartialChargesSparse(BaseSubModule):
         # If residue_charge/segments is provided, use it for charge conservation per residue/monomer
         residue_charge = inputs.get('residue_charge')
         if residue_charge is not None:
-            # Residue-based charge conservation (residue ids are per structure). Padding nodes,
-            # found by node_mask rather than position, go to an extra unconstrained segment.
+            # Residue ids are per structure, so allow one structure (plus jraph's padding graph).
+            # Padding nodes (node_mask False) go to an extra, unconstrained last segment.
             if num_graphs > 2:
-                raise ValueError('residue_charge/residue_segments support one structure per batch.')
-            total_charge = jnp.append(jnp.asarray(residue_charge, x_q.dtype).reshape(-1), 0.)
-            num_graphs = total_charge.shape[0]
+                raise ValueError('residue_charge/residue_segments support one structure per batch '
+                                 '(use batch size 1).')
+            residue_charge = jnp.asarray(residue_charge, x_q.dtype).reshape(-1)
+            pad_segment = residue_charge.shape[0]
+            total_charge, num_graphs = jnp.append(residue_charge, 0.), pad_segment + 1
             residue_segments = jnp.asarray(inputs['residue_segments'], jnp.int32).reshape(-1)
             residue_segments = jnp.pad(residue_segments, (0, len(node_mask) - len(residue_segments)))
-            batch_segments = jnp.where(node_mask, residue_segments, num_graphs - 1)
+            batch_segments = jnp.where(node_mask, residue_segments, pad_segment)
 
         # Unified charge conservation calculation
         predicted_charge = segment_sum(x_q, segment_ids=batch_segments, num_segments=num_graphs) # (num_graphs)
