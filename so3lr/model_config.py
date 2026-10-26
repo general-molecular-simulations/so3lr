@@ -10,6 +10,7 @@ import functools
 import json
 import logging
 import pathlib
+import pickle
 
 logger = logging.getLogger("SO3LR")
 
@@ -25,8 +26,12 @@ def _load(workdir):
     model = cfg['model']
     if 'legacy_so3lr_bool' in model and 'use_final_bias_bool' in model:
         return cfg
-    from so3lr.mlff.utils.checkpoint_utils import load_params_from_workdir
-    params = load_params_from_workdir(workdir)
+    if (workdir / 'params.pkl').exists():  # numpy arrays: no JAX or orbax import needed
+        with open(workdir / 'params.pkl', 'rb') as fp:
+            params = pickle.load(fp)
+    else:
+        from so3lr.mlff.utils.checkpoint_utils import load_params_from_workdir
+        params = load_params_from_workdir(workdir)
     params = params.get('params', params)
     inferred = {
         # the v1 Hirshfeld head stores a query embedding ('Embed_1'); the v2 scalar head has none

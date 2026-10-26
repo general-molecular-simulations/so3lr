@@ -10,7 +10,6 @@ The tasks (``TASKS``): ``md`` (``so3lr nve|nvt|nvt-langevin|npt``), ``opt`` (``s
 """
 import dataclasses
 import functools
-import json
 import math
 import os
 
@@ -299,9 +298,9 @@ def device_problem():
 
 def model_cutoff(model_path):
     """The model's short-range cutoff in A."""
+    from so3lr.model_config import load_model_config
     from so3lr.model_registry import resolve_model
-    with open(resolve_model(model_path).dir / "hyperparameters.json") as fp:
-        return float(json.load(fp)["model"]["cutoff"])
+    return float(load_model_config(resolve_model(model_path).dir)["model"]["cutoff"])
 
 
 def frames_problem(settings, frames):

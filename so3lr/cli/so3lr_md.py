@@ -15,7 +15,6 @@ import gc
 import os
 import sys
 import time
-import json
 import logging
 import pathlib
 import stat
@@ -76,10 +75,9 @@ def _model_num_features(model_path) -> Optional[int]:
     model itself is loaded.
     """
     try:
+        from ..model_config import load_model_config
         from ..model_registry import resolve_model
-        workdir = resolve_model(model_path).dir
-        with open(pathlib.Path(workdir) / 'hyperparameters.json') as fp:
-            return int(json.load(fp)['model']['num_features'])
+        return int(load_model_config(resolve_model(model_path).dir)['model']['num_features'])
     except Exception as e:  # pragma: no cover - informational fallback
         logger.warning(f"Could not determine the model's feature width: {e}")
         return None
