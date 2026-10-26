@@ -466,39 +466,26 @@ class AseCalculatorSparse(Calculator):
 
 
     def _glp_neighbors(self, system, cell):
-        """glp's minimum-image neighbour list, (re)allocated on overflow."""
-        if self.spatial_partitioning is None:
-            self.neighbors, self.spatial_partitioning = neighbor_list(
-                positions=system.R,
-                cell=cell,
-                cutoff=self.cutoff,
-                skin=self.skin,
-                capacity_multiplier=self.capacity_multiplier,
-                buffer_size_multiplier=self.buffer_size_multiplier,
-                lr_cutoff=self.lr_cutoff,
-            )
-
-        neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
-        # The list is incomplete if glp's pair buffer overflowed, or if its cell list became
-        # over-full or too small (flagged in cell_list.reallocate). Either way rebuild it and use
-        # the rebuilt list for this call; the old code reallocated on a cell-list flag but still
-        # returned the stale list.
-        cell_list = neighbors.cell_list
-        if neighbors.overflow or (cell_list is not None and cell_list.reallocate):
-            logger.info('Re-allocating neighbours.')
-            self.neighbors, self.spatial_partitioning = neighbor_list(
-                positions=system.R,
-                cell=cell,
-                cutoff=self.cutoff,
-                skin=self.skin,
-                capacity_multiplier=self.capacity_multiplier,
-                buffer_size_multiplier=self.buffer_size_multiplier,
-                lr_cutoff=self.lr_cutoff,
-            )
+        """glp's minimum-image neighbour list, (re)allocated when it is incomplete."""
+        if self.spatial_partitioning is not None:
             neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
-            assert not neighbors.overflow
-        self.neighbors = neighbors
-        return neighbors
+            # Incomplete if the pair buffer overflowed or the cell list is over-full or too small.
+            # glp folds the cell-list flag into overflow on update but not on allocation.
+            cell_list = neighbors.cell_list
+            if not (neighbors.overflow or (cell_list is not None and cell_list.reallocate)):
+                self.neighbors = neighbors
+                return neighbors
+            logger.info('Re-allocating neighbours.')
+        self.neighbors, self.spatial_partitioning = neighbor_list(
+            positions=system.R,
+            cell=cell,
+            cutoff=self.cutoff,
+            skin=self.skin,
+            capacity_multiplier=self.capacity_multiplier,
+            buffer_size_multiplier=self.buffer_size_multiplier,
+            lr_cutoff=self.lr_cutoff,
+        )
+        return self.neighbors
 
     # ------------------------------------------------------------------ exact PBC
     def _long_range_cutoff(self):
