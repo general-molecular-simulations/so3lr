@@ -47,6 +47,7 @@ from so3lr.cli.so3lr_md import (
     handle_units,
     init_hdf5_store,
     load_state,
+    run_dtypes,
     save_restart_checkpoints,
     setup_jax_globals,
     setup_logger,
@@ -57,7 +58,7 @@ from so3lr.cli.so3lr_md import (
     write_to_extxyz,
     write_to_hdf5,
 )
-from so3lr.md_settings_validation import state_precision, validate_md_counts
+from so3lr.md_settings_validation import validate_md_counts
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported, supported_atomic_numbers_for_model)
 
@@ -84,14 +85,9 @@ def _pme(settings):
 
 
 def dtypes(settings):
-    """(the model's dtype, the positions'): float64 positions (and MD state) around a float32
-    model unless flash_mixed is off or x64 is (float32 coordinates of a 500 A box round to
-    6e-5 A)."""
-    precision = settings.get("precision", "float32")
-    dtype = jnp.float64 if precision == "float64" else jnp.float32
-    if not jax.config.jax_enable_x64:
-        return dtype, dtype
-    return dtype, (jnp.float64 if state_precision(precision, settings) == "float64" else dtype)
+    """(the model's dtype, the MD state's): ``so3lr_md.run_dtypes``, shared with the
+    neighbour-list engine."""
+    return run_dtypes(settings)
 
 
 def build_engine(atoms, settings, dtype, box_margin=None):

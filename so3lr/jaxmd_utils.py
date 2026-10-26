@@ -34,6 +34,8 @@ def neighbor_list_featurizer(
             so a float64 MD state around a float32 model keeps float64 edges up to
             the model. ``None`` follows ``R.dtype`` (the public helper).
     """
+    from so3lr.mlff.calculators.potential import cast_float_params
+
     def featurize(R, neighbor, neighbor_lr, **kwargs):
         idx_i = neighbor[0]  # shape: P
         idx_j = neighbor[1]  # shape: P
@@ -44,8 +46,6 @@ def neighbor_list_featurizer(
         Rb = R[idx_j]
         Ra_lr = R[idx_i_lr]
         Rb_lr = R[idx_j_lr]
-
-        aux_dtype = precision if precision is not None else R.dtype
 
         positions = None
         k_smearing = None
@@ -93,7 +93,7 @@ def neighbor_list_featurizer(
         dR = d(Ra, Rb)
         dR_lr = d(Ra_lr, Rb_lr)
 
-        theory_mask = (jnp.eye(16, dtype=precision) if precision is not None else jnp.eye(16))[5].reshape(1, -1)
+        theory_mask = jnp.eye(16, dtype=R.dtype)[5].reshape(1, -1)
 
         graph = Graph(
             positions=positions,
@@ -102,8 +102,8 @@ def neighbor_list_featurizer(
             centers=idx_i,
             others=idx_j,
             mask=None,
-            total_charge=jnp.asarray([total_charge], dtype=aux_dtype),
-            num_unpaired_electrons=jnp.asarray([num_unpaired_electrons], dtype=aux_dtype),
+            total_charge=jnp.asarray([total_charge], dtype=R.dtype),
+            num_unpaired_electrons=jnp.asarray([num_unpaired_electrons], dtype=R.dtype),
             edges_lr=dR_lr,
             idx_i_lr=idx_i_lr,
             idx_j_lr=idx_j_lr,
@@ -115,15 +115,9 @@ def neighbor_list_featurizer(
             theory_mask=theory_mask
         )
 
-        if precision is not None:
-            graph = jax.tree_util.tree_map(lambda x: _cast(x, precision), graph)
-        return graph
+        return graph if precision is None else cast_float_params(graph, precision)
 
     return featurize
-
-
-def _cast(x, dtype):
-    return x.astype(dtype) if jnp.issubdtype(jnp.asarray(x).dtype, jnp.floating) else x
 
 
 def to_jax_md(
@@ -205,6 +199,8 @@ def to_jax_md(
         num_unpaired_electrons=num_unpaired_electrons,
     )
 
+    from so3lr.mlff.calculators.potential import cast_float_params
+
     # create an energy_fn that is compatible with jax_md
     def energy_fn(
             R,
@@ -215,7 +211,7 @@ def to_jax_md(
     ):
         graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
         # back in the positions' dtype before the sum (a float64 MD state sums in float64)
-        out = jax.tree_util.tree_map(lambda x: _cast(x, R.dtype), potential(graph, has_aux=has_aux))
+        out = cast_float_params(potential(graph, has_aux=has_aux), R.dtype)
         return out if has_aux else out.sum()
 
     return neighbor_fn, neighbor_fn_lr, energy_fn

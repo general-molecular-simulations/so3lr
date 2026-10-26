@@ -324,6 +324,16 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
 _JAX_GLOBALS_CONFIGURED: Dict[str, Any] = {}
 
 
+def run_dtypes(settings):
+    """(the model's dtype, the MD state's) for a run's settings, on both engines (see
+    md_settings_validation.state_precision); without x64 both are float32."""
+    precision = canonical_precision(settings.get('precision'))
+    model = jnp.float64 if precision == 'float64' else jnp.float32
+    if not jax.config.jax_enable_x64:
+        return model, model
+    return model, (jnp.float64 if state_precision(precision, settings) == 'float64' else jnp.float32)
+
+
 def setup_jax_globals(precision: str = 'float32', matmul_precision: str = 'highest') -> None:
     """Configure JAX process-globals that every SO3LR entry point depends on.
 
@@ -1826,6 +1836,7 @@ def perform_md(
                                     already available. Defaults to None.
     """
     all_settings = resolve_ensemble(all_settings)  # also for direct Python callers
+    all_settings['precision'] = canonical_precision(all_settings.get('precision'))
     # Direct Python callers do not necessarily enter through run(). Configure
     # precision before constructing any arrays, as perform_min already does.
     setup_jax_globals(
@@ -1856,7 +1867,7 @@ def perform_md(
 
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = canonical_precision(all_settings.get('precision'))
+    precision = all_settings.get('precision')
     lr_cutoff = all_settings.get('lr_cutoff')
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
@@ -2070,7 +2081,7 @@ def perform_md(
         shift_displacement = 'free'
 
     # the MD state's dtype; the model runs in `precision`
-    dtype = jnp.float64 if state_precision(precision, all_settings) == 'float64' else jnp.float32
+    dtype = run_dtypes(all_settings)[1]
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
@@ -2114,9 +2125,9 @@ def perform_md(
                     f"continues the dynamics it was saved with."
                 ) from e
             logger.warning(e)
-            position = jnp.asarray(e.loaded_state['position'], dtype)
-            initial_geometry_dict['masses'] = jnp.asarray(e.loaded_state['mass'], dtype)
-            initial_geometry_dict['momenta'] = jnp.asarray(e.loaded_state['momentum'], dtype)
+            position = e.loaded_state['position']
+            initial_geometry_dict['masses'] = e.loaded_state['mass']
+            initial_geometry_dict['momenta'] = e.loaded_state['momentum']
             box = e.loaded_state['box']
             if np.all(box == 0) or box is None:
                 box = jnp.array([0.0], dtype=dtype)
@@ -2125,7 +2136,6 @@ def perform_md(
                 # history, but it must never smuggle a sheared legacy cell past
                 # the same orthorhombic restriction applied to input files.
                 validate_orthorhombic_restart_box(box)
-                box = jnp.asarray(box, dtype)
             saved_fractional = bool(e.loaded_state.get('fractional_coordinates', True))
             if saved_fractional and not fractional_coordinates:
                 logger.info('Converting restart positions from fractional to cartesian coordinates.')
@@ -3007,6 +3017,7 @@ def perform_min(
     Returns:
         Union[jnp.ndarray, List[jnp.ndarray]]: Optimized structure or trajectory.
     """
+    all_settings = dict(all_settings, precision=canonical_precision(all_settings.get('precision')))
     # Configure JAX process-globals (x64, matmul precision). Idempotent if
     # already called by run(); needed here for `so3lr opt`, which previously
     # silently ignored --precision float64 because it never went through run().
@@ -3039,7 +3050,7 @@ def perform_min(
 
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = canonical_precision(all_settings.get('precision'))
+    precision = all_settings.get('precision')
     lr_cutoff = all_settings.get('lr_cutoff')
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
@@ -3122,7 +3133,7 @@ def perform_min(
         shift_displacement = 'free'
 
     # the MD state's dtype; the model runs in `precision`
-    dtype = jnp.float64 if state_precision(precision, all_settings) == 'float64' else jnp.float32
+    dtype = run_dtypes(all_settings)[1]
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
@@ -3417,6 +3428,9 @@ def load_state(
     # save_state(); object arrays are neither needed nor accepted. Disabling
     # pickle prevents an untrusted archive from executing Python during load.
     loaded_state = np.load(path_to_load, allow_pickle=False)
+    # floating arrays in the run's state dtype, also for a restart into another ensemble
+    loaded_state = {k: (loaded_state[k].astype(precision) if np.issubdtype(loaded_state[k].dtype, np.floating)
+                        else loaded_state[k]) for k in loaded_state.files}
 
     # Helper: enumerate which fields in the .npz are about to be dropped if
     # we cannot/won't reconstruct the integrator state (ensemble mismatch or
