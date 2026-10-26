@@ -1,21 +1,23 @@
 """The ASE calculator must not compute on an incomplete glp neighbour list.
 
-In large periodic boxes the default (glp) backend uses a cell list whose per-cell capacity is
-fixed at allocation. If atoms later crowd into one cell beyond that capacity (relaxations, MD near
-ions), glp must flag it and the calculator must reallocate; otherwise pairs are silently dropped
-and forces/charges are wrong. Compares the default backend, allocated on the original box, with
-the exact backend after squeezing waters together.
+The default (glp) backend uses a cell list whose per-cell capacity is fixed at allocation. If atoms
+later crowd into one cell beyond that capacity (relaxations, MD near ions), glp must flag it and the
+calculator must reallocate; otherwise pairs are silently dropped. No model is needed: the
+calculator's glp neighbour list is compared with ASE's after squeezing waters together.
 """
 from pathlib import Path
 
+import jax.numpy as jnp
 import numpy as np
-import pytest
+from ase.calculators.calculator import Calculator
 from ase.io import read
+from ase.neighborlist import neighbor_list as ase_neighbor_list
+from glp import atoms_to_system
 
-from so3lr import So3lrCalculator
+from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 
 WATER = Path(__file__).parent / 'test_data' / 'water_64.xyz'
-KW = dict(model='so3lr-tauri-s-2606', lr_cutoff=6.0, dtype=np.float64, has_aux=True, observables=['partial_charges'])
+CUTOFF, LR_CUTOFF = 2.5, 3.0     # short cutoffs give a 4x4x4 cell list on the 12.4 A box
 
 
 def squeeze(atoms, n_waters):
@@ -28,23 +30,40 @@ def squeeze(atoms, n_waters):
     return b
 
 
-@pytest.mark.slow
-def test_overfilled_cell_matches_exact_backend(x64):
-    box = read(WATER).repeat((2, 2, 2))          # 512 waters: the glp cell list is used
+def glp_calculator():
+    """Just the state _glp_neighbors needs. The pair buffer gets ample headroom so that only the
+    cell list can overflow (pair-buffer overflow was already handled before the fix)."""
+    calc = object.__new__(AseCalculatorSparse)
+    Calculator.__init__(calc)
+    calc.neighbors = calc.spatial_partitioning = None
+    calc.cutoff, calc.lr_cutoff, calc.skin = CUTOFF, LR_CUTOFF, 0.0
+    calc.capacity_multiplier, calc.buffer_size_multiplier = 3.0, 1.25
+    return calc
+
+
+def glp_pairs(calc, atoms):
+    """Short- and long-range (i, j) pairs of the calculator's glp list, padding removed."""
+    nb = calc._glp_neighbors(atoms_to_system(atoms), jnp.asarray(np.array(atoms.get_cell())).T)
+    n = len(atoms)
+
+    def pairs(i, j):
+        return {p for p in zip(np.asarray(i).tolist(), np.asarray(j).tolist()) if p[0] != n}
+    return pairs(nb.centers, nb.others), pairs(nb.idx_i_lr, nb.idx_j_lr)
+
+
+def exact_pairs(atoms, cutoff):
+    return set(zip(*ase_neighbor_list('ij', atoms, cutoff)))
+
+
+def test_overfilled_cell_is_reallocated():
+    box = read(WATER)
     box.wrap()
-    box.info['charge'] = 0
-    calc = So3lrCalculator(**KW)                 # default backend, allocated on the original box
-    box.calc = calc
-    box.get_potential_energy()
+    calc = glp_calculator()
+    glp_pairs(calc, box)                           # allocated on the original box
+    allocated = calc.spatial_partitioning
 
-    b = squeeze(box, 25)                         # one cell now exceeds its allocated capacity
-    b.calc = calc
-    f_glp = b.get_forces()
-    q_glp = calc.results['aux']['partial_charges'].ravel()
-
-    b.calc = So3lrCalculator(**KW, neighbor_backend='exact')
-    f_exact = b.get_forces()
-    q_exact = b.calc.results['aux']['partial_charges'].ravel()
-
-    np.testing.assert_allclose(q_glp, q_exact, atol=1e-8)
-    np.testing.assert_allclose(f_glp, f_exact, atol=1e-6)
+    squeezed = squeeze(box, 8)                     # one cell now exceeds its allocated capacity
+    sr, lr = glp_pairs(calc, squeezed)
+    assert calc.spatial_partitioning is not allocated, 'the over-full cell list was not reallocated'
+    assert sr == exact_pairs(squeezed, CUTOFF)
+    assert lr == exact_pairs(squeezed, LR_CUTOFF)

@@ -485,6 +485,7 @@ class AseCalculatorSparse(Calculator):
             buffer_size_multiplier=self.buffer_size_multiplier,
             lr_cutoff=self.lr_cutoff,
         )
+        assert not self.neighbors.overflow
         return self.neighbors
 
     # ------------------------------------------------------------------ exact PBC
