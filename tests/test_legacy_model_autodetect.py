@@ -69,3 +69,43 @@ def test_flash_takes_v1_without_flags_as_the_legacy_model(v1):
     assert jax.tree_util.tree_structure(got) == jax.tree_util.tree_structure(ref)
     for a, b in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(ref)):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_bundled_models_resolve_without_reading_the_checkpoint(monkeypatch):
+    from so3lr import model_config
+    monkeypatch.setattr(model_config, '_parameter_key_paths', lambda workdir: pytest.fail('read the checkpoint'))
+    model_config._load.cache_clear()
+    for name in mr.available_models():
+        load_model_config(mr.resolve_model(name).dir)
+
+
+def test_a_config_rewritten_in_place_is_read_again(tmp_path):
+    model = _copy(tmp_path / 'model', cutoff=4.0)
+    assert load_model_config(model)['model']['cutoff'] == 4.0
+    _copy(tmp_path / 'tmp', cutoff=5.0)
+    (tmp_path / 'tmp' / 'hyperparameters.json').replace(model / 'hyperparameters.json')
+    assert load_model_config(model)['model']['cutoff'] == 5.0
+
+
+def test_orbax_checkpoint_flags_without_starting_jax(v1, tmp_path):
+    """A training workdir (checkpoints/ only): the flags come from orbax's JSON tree metadata,
+    and no JAX backend starts (flash's reserve_gpu resolves the config before JAX)."""
+    import pickle
+    import subprocess
+    import sys
+    import orbax.checkpoint as ocp
+    from so3lr.mlff.utils.checkpoint_utils import make_checkpoint_manager
+    workdir = tmp_path / 'trained'
+    workdir.mkdir()
+    shutil.copy(v1 / 'hyperparameters.json', workdir)
+    with open(v1 / 'params.pkl', 'rb') as fp:
+        params = pickle.load(fp)
+    manager = make_checkpoint_manager(ckpt_dir=workdir / 'checkpoints')
+    manager.save(0, args=ocp.args.Composite(params=ocp.args.StandardSave(params)))
+    manager.wait_until_finished()
+    manager.close()
+    code = ('import sys; from so3lr.model_config import load_model_config; '
+            f'm = load_model_config({str(workdir)!r})["model"]; '
+            'print(m["legacy_so3lr_bool"], m["use_final_bias_bool"], "jax" in sys.modules)')
+    out = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, check=True).stdout.split()
+    assert out == ['True', 'True', 'False']
