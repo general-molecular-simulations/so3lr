@@ -3428,8 +3428,9 @@ def load_state(
     # save_state(); object arrays are neither needed nor accepted. Disabling
     # pickle prevents an untrusted archive from executing Python during load.
     loaded_state = np.load(path_to_load, allow_pickle=False)
-    # floating arrays in the run's state dtype, also for a restart into another ensemble
-    loaded_state = {k: (loaded_state[k].astype(precision) if np.issubdtype(loaded_state[k].dtype, np.floating)
+    # floating arrays as jax arrays in the run's state dtype, also for a restart into another
+    # ensemble (numpy positions would raise on the neighbour lists' padding index)
+    loaded_state = {k: (jnp.asarray(loaded_state[k], precision) if np.issubdtype(loaded_state[k].dtype, np.floating)
                         else loaded_state[k]) for k in loaded_state.files}
 
     # Helper: enumerate which fields in the .npz are about to be dropped if

@@ -96,3 +96,18 @@ def test_neighbour_list_engine_state_trajectory_and_restart_dtypes(tmp_path):
            '--restart-load', str(tmp_path / 'b.npz'), '--restart-save', str(tmp_path / 'c.npz'))
     c = np.load(tmp_path / 'c.npz')
     assert c['position'].dtype == np.float64 and c['momentum'].dtype == np.float64
+
+
+def test_restart_into_another_ensemble_gives_jax_arrays_in_the_state_dtype(tmp_path, x64):
+    """load_state casts before it raises, so the caller gets device arrays in the run's dtype
+    (numpy positions raise on the neighbour lists' padding index)."""
+    from so3lr.cli.so3lr_md import RestartInNewEnsembleError, load_state
+    path = tmp_path / 'nvt.npz'
+    f32 = np.float32
+    np.savez(path, position=np.zeros((2, 3), f32), momentum=np.zeros((2, 3), f32), mass=np.ones(2, f32),
+             box=np.zeros(1, f32), ensemble='nvt', step=0)
+    with pytest.raises(RestartInNewEnsembleError) as err:
+        load_state(path_to_load=str(path), ensemble='nve', precision=jnp.float64)
+    for key in ('position', 'momentum', 'mass', 'box'):
+        value = err.value.loaded_state[key]
+        assert isinstance(value, jax.Array) and value.dtype == jnp.float64, key
