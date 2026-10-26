@@ -211,7 +211,7 @@ def to_jax_md(
     ):
         graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
         # back in the positions' dtype before the sum (a float64 MD state sums in float64)
-        out = cast_float_params(potential(graph, has_aux=has_aux), R.dtype)
+        out = cast_float_params(potential(graph, has_aux=True) if has_aux else potential(graph), R.dtype)
         return out if has_aux else out.sum()
 
     return neighbor_fn, neighbor_fn_lr, energy_fn

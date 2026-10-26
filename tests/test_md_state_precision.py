@@ -35,6 +35,9 @@ def test_precision_helpers():
     assert state_precision('float32', {'flash_mixed': False}) == 'float32'  # the older form
     assert state_precision('float32', {'md_precision': 'float64', 'flash_mixed': False}) == 'float64'
     assert state_precision('float64', {'md_precision': 'float32'}) == 'float64'
+    assert state_precision('float32', {'flash_mixed': None}) == 'float64'  # unset, not off
+    with pytest.raises(ValueError):
+        state_precision('float64', {'md_precision': 'flaot32'})
 
 
 def test_featurizer_forms_displacements_before_the_cast(x64):

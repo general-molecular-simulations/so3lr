@@ -38,11 +38,14 @@ def state_precision(precision, settings) -> str:
     model in ``precision``: ``md_precision`` (float64 if unset; float32 coordinates of a 500 A
     box round to 6e-5 A), or the older ``flash_mixed`` (false: float32). A float64 model always
     has a float64 state."""
+    md_precision = settings.get('md_precision')
+    if md_precision is not None:
+        md_precision = canonical_precision(md_precision)  # validated also for a float64 model
     if precision == 'float64':
         return 'float64'
-    if settings.get('md_precision') is not None:
-        return canonical_precision(settings['md_precision'])
-    return 'float64' if bool(settings.get('flash_mixed', True)) else 'float32'
+    if md_precision is not None:
+        return md_precision
+    return 'float32' if settings.get('flash_mixed') is False else 'float64'
 
 
 def resolve_ensemble(settings: dict) -> dict:

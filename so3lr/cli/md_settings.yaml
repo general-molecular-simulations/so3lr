@@ -40,7 +40,7 @@ precision: "float32"                       # Numerical precision: "float32" or "
 matmul_precision: "highest"                # JAX matmul precision: "default" / "high" / "highest". "highest" forces full float32 and avoids TF32 drift on GPUs. [Default: "highest"]
 engine: "auto"                             # MD engine: "auto" (flash on an NVIDIA GPU or AMD MI355X when it covers the run, else the neighbour-list engine; the log says which), "flash" or "standard" [Default: "auto"]
 flash_mode: "auto"                         # Flash memory mode, fastest first: "fast", "default", "lean", "leanest", "minimal"; "auto" picks the fastest that fits [Default: "auto"]
-md_precision: "float64"                    # MD state (positions, momenta, box, energy sums) around a float32 model, on both engines: "float64" or "float32". A float64 model always has a float64 state. [Default: "float64"]
+md_precision: null                         # MD state (positions, momenta, box, energy sums) around a float32 model, on both engines: "float64" or "float32"; null takes flash_mixed (float64 unless false). A float64 model always has a float64 state. [Default: null]
 flash_mixed: true                          # Older form of md_precision (true: float64, false: float32); md_precision takes precedence [Default: true]
 
 ## Input/Output Settings
