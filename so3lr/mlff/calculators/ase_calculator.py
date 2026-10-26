@@ -469,10 +469,8 @@ class AseCalculatorSparse(Calculator):
         """glp's minimum-image neighbour list, (re)allocated when it is incomplete."""
         if self.spatial_partitioning is not None:
             neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
-            # Incomplete if the pair buffer overflowed or the cell list is over-full or too small.
-            # glp folds the cell-list flag into overflow on update but not on allocation.
-            cell_list = neighbors.cell_list
-            if not (neighbors.overflow or (cell_list is not None and cell_list.reallocate)):
+            # On update glp folds an over-full or too-small cell list into overflow.
+            if not neighbors.overflow:
                 self.neighbors = neighbors
                 return neighbors
             logger.info('Re-allocating neighbours.')
@@ -485,7 +483,12 @@ class AseCalculatorSparse(Calculator):
             buffer_size_multiplier=self.buffer_size_multiplier,
             lr_cutoff=self.lr_cutoff,
         )
-        assert not self.neighbors.overflow
+        # On allocation it does not, so check the cell list here as well.
+        cell_list = self.neighbors.cell_list
+        if self.neighbors.overflow or (cell_list is not None and cell_list.reallocate):
+            raise RuntimeError(
+                'glp could not allocate a complete neighbour list (cell too small for the cutoffs, or a '
+                "cell over-full at allocation). Use neighbor_backend='exact'.")
         return self.neighbors
 
     # ------------------------------------------------------------------ exact PBC

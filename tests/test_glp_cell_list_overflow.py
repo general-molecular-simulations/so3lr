@@ -41,9 +41,13 @@ def glp_calculator():
     return calc
 
 
+def cell_of(atoms):
+    return jnp.asarray(np.array(atoms.get_cell())).T   # glp takes lattice vectors as columns
+
+
 def glp_pairs(calc, atoms):
     """Short- and long-range (i, j) pairs of the calculator's glp list, padding removed."""
-    nb = calc._glp_neighbors(atoms_to_system(atoms), jnp.asarray(np.array(atoms.get_cell())).T)
+    nb = calc._glp_neighbors(atoms_to_system(atoms), cell_of(atoms))
     n = len(atoms)
 
     def pairs(i, j):
@@ -63,6 +67,9 @@ def test_overfilled_cell_is_reallocated():
     allocated = calc.spatial_partitioning
 
     squeezed = squeeze(box, 8)                     # one cell now exceeds its allocated capacity
+    update = calc.spatial_partitioning.update_fn(atoms_to_system(squeezed).R, calc.neighbors,
+                                                 new_cell=cell_of(squeezed))
+    assert update.cell_list.reallocate, 'glp did not flag the over-full cell list'
     sr, lr = glp_pairs(calc, squeezed)
     assert calc.spatial_partitioning is not allocated, 'the over-full cell list was not reallocated'
     assert sr == exact_pairs(squeezed, CUTOFF)
