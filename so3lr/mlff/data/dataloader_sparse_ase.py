@@ -304,9 +304,9 @@ def ASE_to_jraph(
                 residue_segments[idx_b] = 1
                 residue_charge = np.array([[int(charge_a), int(charge_b)]])
             else:
-                # The dimer itself (prepare_dimer_xyz writes both into one file): one residue that
-                # takes the total charge, so both kinds batch together with the same fields.
-                residue_charge = np.zeros((1, 2), dtype=int)
+                # The dimer itself (prepare_dimer_xyz writes both into one file): one residue with
+                # the total charge, so both kinds batch together with the same fields.
+                residue_charge = np.array([[int(total_charge[0]), 0]])
 
     if mol.get_pbc().any():
         i, j, S = neighbor_list('ijS', mol, cutoff, self_interaction=self_interaction)

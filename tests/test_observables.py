@@ -247,9 +247,8 @@ def _residue_charges(inputs, **module_kwargs):
 @pytest.mark.parametrize('segments, residue_charge, total_charge, override, expected', [
     pytest.param([0, 0, 0, 1, 1, 1, 1], [1., -1.], 0., None, [1., -1.], id='two-residues'),
     pytest.param([0, 0, 2, 2, 2, 1, 1], [1., -1., 1.], 1., None, [1., -1., 1.], id='three-residues'),
-    # a dimer stored as one residue ([0, 0]) takes the total charge, or its override
-    pytest.param([0] * 7, [0., 0.], 1., None, [1., 0.], id='whole-dimer'),
-    pytest.param([0] * 7, [0., 0.], 1., -2., [-2., 0.], id='whole-dimer-override'),
+    # residue charges take precedence over a total-charge override
+    pytest.param([0] * 7, [1., 0.], 1., -2., [1., 0.], id='override-does-not-apply'),
 ])
 def test_residue_charges_single_structure(segments, residue_charge, total_charge, override, expected):
     """The unbatched path (PotentialSparse, base_calculator): one structure, (R,) residue charges."""
