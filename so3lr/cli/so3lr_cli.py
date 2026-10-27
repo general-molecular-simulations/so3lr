@@ -523,7 +523,8 @@ def flash_options(f: Callable) -> Callable:
     f = click.option('--flash-mixed/--no-flash-mixed', 'flash_mixed', default=True,
                      help='With --precision float32: keep the positions (and the MD state: '
                           'momenta, energy sums) in float64 and form displacements in float64. '
-                          '[default: on]')(f)
+                          'For MD and opt, the older form of --md-precision (on: float64, off: '
+                          'float32), which takes precedence. [default: on]')(f)
     f = click.option('--flash-devices', 'flash_devices', default=1, type=click.IntRange(min=1),
                      help='SO3LR-Flash on this many GPUs of the node: each computes an equal share '
                           'of the atoms, for systems that fit on one GPU but should run faster. '
@@ -552,6 +553,14 @@ def kspace_options(f: Callable) -> Callable:
                      type=click.IntRange(min=1),
                      help='Frequency (in MD cycles) to re-tune k-space grid in NPT. [default: None]')(f)
     return f
+
+
+def md_precision_option(f: Callable) -> Callable:
+    """The MD state's precision, on both engines (--precision is the model's)."""
+    return click.option('--md-precision', 'md_precision', default=None, type=click.Choice(['float32', 'float64']),
+                        help='Precision of the MD state (positions, momenta, box, energy sums) around a '
+                             'float32 model: displacements are formed in it before the model. '
+                             'A float64 model always has a float64 state. [default: float64]')(f)
 
 
 def kspace_dispersion_options(f: Callable) -> Callable:
@@ -652,7 +661,7 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     # Minimization (overrides cycles/steps if set)
     'force_convergence',
     # flash engine
-    'engine', 'flash_mode', 'flash_mixed', 'flash_devices',
+    'engine', 'flash_mode', 'flash_mixed', 'flash_devices', 'md_precision',
     # Eval keys (allowed in the same YAML even though `so3lr eval` does not use
     # --settings yet, since users often share a single YAML across runs)
     'datafile', 'save_to', 'targets', 'batch_size', 'jit_compile',
@@ -1019,6 +1028,7 @@ def run_md_simulation(
     flash_mode: str = 'auto',
     flash_mixed: bool = True,
     flash_devices: int = 1,
+    md_precision: Optional[str] = None,
 ) -> None:
     """Shared runner for NVT, NVT-Langevin, NPT, and NVE MD simulations."""
     if not input_file or help:
@@ -1078,6 +1088,7 @@ def run_md_simulation(
         'flash_mode': flash_mode,
         'flash_mixed': flash_mixed,
         'flash_devices': flash_devices,
+        'md_precision': md_precision,
     }
 
     # Only insert kspace_npt_cycles when the user explicitly passed
@@ -1143,6 +1154,7 @@ def run_md_simulation(
 @click.option('--force-conv', default=None, type=float,
               help='Force convergence criterion in eV/Å, overrides --min-cycles and --min-steps. [default: None]')
 @flash_options
+@md_precision_option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def fire_optimization(
     input_file: Optional[str],
@@ -1175,6 +1187,7 @@ def fire_optimization(
     flash_mode: str = 'auto',
     flash_mixed: bool = True,
     flash_devices: int = 1,
+    md_precision: Optional[str] = None,
 ) -> None:
     """
     Run geometry optimization using the FIRE algorithm.
@@ -1278,6 +1291,7 @@ def fire_optimization(
         'flash_mode': flash_mode,
         'flash_mixed': flash_mixed,
         'flash_devices': flash_devices,
+        'md_precision': md_precision,
     }
     reserve_gpu(settings, task='opt')   # before JAX starts
     get_hardware_info()
@@ -1304,6 +1318,7 @@ def fire_optimization(
 @common_md_options
 @thermostat_options
 @flash_options
+@md_precision_option
 def nvt_md(**kwargs) -> None:
     """
     Run NVT (constant volume and temperature) MD simulation using the Nose-Hoover chain thermostat.
@@ -1322,6 +1337,7 @@ def nvt_md(**kwargs) -> None:
 @common_md_options
 @langevin_options
 @flash_options
+@md_precision_option
 def nvt_langevin_md(**kwargs) -> None:
     """
     Run NVT (constant volume and temperature) MD simulation using the Langevin thermostat.
@@ -1343,6 +1359,7 @@ def nvt_langevin_md(**kwargs) -> None:
 @thermostat_options
 @barostat_options
 @flash_options
+@md_precision_option
 def npt_md(**kwargs) -> None:
     """
     Run NPT (constant pressure and temperature) MD simulation using the Nose-Hoover chain thermostat and barostat.
@@ -1362,6 +1379,7 @@ def npt_md(**kwargs) -> None:
 @kspace_options
 @common_md_options
 @flash_options
+@md_precision_option
 def nve_md(**kwargs) -> None:
     """
     Run NVE (constant volume and energy) MD simulation with no thermostat.

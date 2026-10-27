@@ -64,7 +64,7 @@ import h5py
 from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
-from ..md_settings_validation import resolve_ensemble, validate_md_counts
+from ..md_settings_validation import canonical_precision, resolve_ensemble, state_precision, validate_md_counts
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -322,6 +322,16 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
 # twice and so we can tell if a caller's --precision/--matmul-precision is
 # being silently ignored because something configured JAX before us.
 _JAX_GLOBALS_CONFIGURED: Dict[str, Any] = {}
+
+
+def run_dtypes(settings):
+    """(the model's dtype, the MD state's) for a run's settings, on both engines (see
+    md_settings_validation.state_precision); without x64 both are float32."""
+    precision = canonical_precision(settings.get('precision'))
+    model = jnp.float64 if precision == 'float64' else jnp.float32
+    if not jax.config.jax_enable_x64:
+        return model, model
+    return model, (jnp.float64 if state_precision(precision, settings) == 'float64' else jnp.float32)
 
 
 def setup_jax_globals(precision: str = 'float32', matmul_precision: str = 'highest') -> None:
@@ -1826,6 +1836,7 @@ def perform_md(
                                     already available. Defaults to None.
     """
     all_settings = resolve_ensemble(all_settings)  # also for direct Python callers
+    all_settings['precision'] = canonical_precision(all_settings.get('precision'))
     # Direct Python callers do not necessarily enter through run(). Configure
     # precision before constructing any arrays, as perform_min already does.
     setup_jax_globals(
@@ -2069,9 +2080,9 @@ def perform_md(
     else:
         shift_displacement = 'free'
 
-    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
-
-    dtype = jnp.float64 if precision == 'float64' else jnp.float32
+    # the MD state's dtype; the model runs in `precision`
+    dtype = run_dtypes(all_settings)[1]
+    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
 
@@ -2119,7 +2130,7 @@ def perform_md(
             initial_geometry_dict['momenta'] = e.loaded_state['momentum']
             box = e.loaded_state['box']
             if np.all(box == 0) or box is None:
-                box = jnp.array([0.0], dtype=jnp.float64 if precision == 'float64' else jnp.float32)
+                box = jnp.array([0.0], dtype=dtype)
             else:
                 # Resetting an integrator may discard thermostat/barostat
                 # history, but it must never smuggle a sheared legacy cell past
@@ -2514,9 +2525,9 @@ def perform_md(
         else:
             num_atoms = len(output_atom_indices)
 
-        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(dtype))
+        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(precision))
         if not np.any(trajectory_box):
-            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(dtype))
+            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(precision))
         elif trajectory_box.ndim == 1 and trajectory_box.shape == (3,):
             _cell_a0 = np.diag(trajectory_box)
         else:
@@ -2551,7 +2562,7 @@ def perform_md(
             cell_a0=_cell_a0,
             input_file=input_file,
             model_path=model_path,
-            dtype=np.dtype(dtype),
+            dtype=np.dtype(precision),  # trajectories in the model's precision
             fractional_coordinates=(
                 fractional_coordinates and not output_cartesian_positions
             ),
@@ -2755,10 +2766,10 @@ def perform_md(
             out_pos = output_position_array(
                 state.position, box, fractional_coordinates, output_cartesian_positions
             )
-            positions.append(np.array(out_pos))
-            momenta.append(np.array(state.momentum))
+            positions.append(np.asarray(out_pos, precision))
+            momenta.append(np.asarray(state.momentum, precision))
             if box is not None:
-                boxes.append(np.array(lattice_rows(box)))
+                boxes.append(np.asarray(lattice_rows(box), precision))
 
             # Calculate observables
             if len(observables)>0:
@@ -3006,6 +3017,7 @@ def perform_min(
     Returns:
         Union[jnp.ndarray, List[jnp.ndarray]]: Optimized structure or trajectory.
     """
+    all_settings = dict(all_settings, precision=canonical_precision(all_settings.get('precision')))
     # Configure JAX process-globals (x64, matmul precision). Idempotent if
     # already called by run(); needed here for `so3lr opt`, which previously
     # silently ignored --precision float64 because it never went through run().
@@ -3120,9 +3132,9 @@ def perform_min(
     else:
         shift_displacement = 'free'
 
-    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
-
-    dtype = jnp.float64 if precision == 'float64' else jnp.float32
+    # the MD state's dtype; the model runs in `precision`
+    dtype = run_dtypes(all_settings)[1]
+    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
 
@@ -3416,6 +3428,10 @@ def load_state(
     # save_state(); object arrays are neither needed nor accepted. Disabling
     # pickle prevents an untrusted archive from executing Python during load.
     loaded_state = np.load(path_to_load, allow_pickle=False)
+    # floating arrays as jax arrays in the run's state dtype, also for a restart into another
+    # ensemble (numpy positions would raise on the neighbour lists' padding index)
+    loaded_state = {k: (jnp.asarray(loaded_state[k], precision) if np.issubdtype(loaded_state[k].dtype, np.floating)
+                        else loaded_state[k]) for k in loaded_state.files}
 
     # Helper: enumerate which fields in the .npz are about to be dropped if
     # we cannot/won't reconstruct the integrator state (ensemble mismatch or
@@ -3682,6 +3698,7 @@ def run(
     """
 
     settings = resolve_ensemble(settings)  # before the optional relaxation
+    settings['precision'] = canonical_precision(settings.get('precision'))
     relax_before_run = settings.get('relax_before_run', True)
     validate_md_counts(settings)
 

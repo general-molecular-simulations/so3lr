@@ -48,6 +48,7 @@ from so3lr.cli.so3lr_md import (
     handle_units,
     init_hdf5_store,
     load_state,
+    run_dtypes,
     save_restart_checkpoints,
     setup_jax_globals,
     setup_logger,
@@ -85,12 +86,9 @@ def _pme(settings):
 
 
 def dtypes(settings):
-    """(the model's dtype, the positions'): float64 positions (and MD state) around a float32
-    model unless flash_mixed is off or x64 is (float32 coordinates of a 500 A box round to
-    6e-5 A)."""
-    dtype = jnp.float64 if settings.get("precision", "float32") == "float64" else jnp.float32
-    mixed = dtype == jnp.float32 and bool(settings.get("flash_mixed", True)) and jax.config.jax_enable_x64
-    return dtype, (jnp.float64 if mixed else dtype)
+    """(the model's dtype, the MD state's): ``so3lr_md.run_dtypes``, shared with the
+    neighbour-list engine."""
+    return run_dtypes(settings)
 
 
 def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
