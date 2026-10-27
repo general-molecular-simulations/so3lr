@@ -170,11 +170,11 @@ def test_anchor_targets_vanish_at_the_teacher_and_grow_away_from_it():
     batch.update({training_utils.ANCHOR_PREFIX + k: v for k, v in teacher.items()})
     _, metrics = loss_fn(params, batch)
     for k in keys:
-        assert float(metrics[f'anchor_{k}_mse']) == pytest.approx(0.0, abs=1e-12)
+        assert np.asarray(metrics[f'anchor_{k}_mse']).item() == pytest.approx(0.0, abs=1e-12)
 
     batch['anchor_partial_charges'] = teacher['partial_charges'] + jnp.array([0.1, -0.05, -0.05])
     _, metrics = loss_fn(params, batch)
-    assert float(metrics['anchor_partial_charges_mse']) > 1e-3
+    assert np.asarray(metrics['anchor_partial_charges_mse']).item() > 1e-3
 
 
 def test_hirshfeld_spelling_anchors_the_a0_head():
