@@ -90,11 +90,16 @@ FINETUNING_STRATEGIES: Dict[str, Callable[[int], Tuple[Optional[List[str]], Opti
     'll_obs_023': lambda n: (
         [_last_layer(n), 'observables_0', 'observables_2', 'observables_3'], None
     ),
-    # Forces-only fine-tuning: train the short-range representation + energy
-    # head, but FREEZE the long-range heads so the (unlabelled) electrostatics
-    # and dispersion keep their physically-meaningful pretrained predictions.
+    # Freeze the long-range head weights, train everything else. NOTE: the heads
+    # read the shared backbone features, which keep training, so the predicted
+    # charges and a0/C6 ratios still drift. To keep them fixed use 'readout_only',
+    # or anchor them (training.long_range_anchor_weights).
     'freeze_long_range': lambda n: (None, list(_LONG_RANGE_KEYS)),
     'forces_only': lambda n: (None, list(_LONG_RANGE_KEYS)),
+    # Freeze the backbone and the long-range heads; train the energy readout and
+    # the residual readout (model.energy_residual_mlp_widths in the finetune
+    # config). Charges and a0/C6 ratios stay exactly the pretrained ones.
+    'readout_only': lambda n: (list(_FINAL_MLP_KEYS) + ['observables_0/energy_residual*'], None),
 }
 
 FINETUNING_STRATEGY_NAMES: Tuple[str, ...] = tuple(FINETUNING_STRATEGIES)

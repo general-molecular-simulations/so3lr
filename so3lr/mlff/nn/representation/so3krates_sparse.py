@@ -54,6 +54,8 @@ def init_so3krates_sparse(
         use_spin_embed: bool = False,
         energy_regression_dim: int = 128,
         energy_final_mlp_widths: Optional[Sequence[int]] = None,
+        energy_residual_mlp_widths: Optional[Sequence[int]] = None,
+        energy_residual_inputs: str = 'last',
         energy_activation_fn: str = 'identity',
         energy_learn_atomic_type_scales: bool = False,
         energy_learn_atomic_type_shifts: bool = False,
@@ -198,6 +200,8 @@ def init_so3krates_sparse(
         output_is_zero_at_init=output_is_zero_at_init,
         regression_dim=energy_regression_dim,
         final_mlp_widths=energy_final_mlp_widths,
+        residual_mlp_widths=energy_residual_mlp_widths,
+        residual_inputs=energy_residual_inputs,
         activation_fn=getattr(
             nn.activation, energy_activation_fn
         ) if energy_activation_fn != 'identity' else lambda u: u,

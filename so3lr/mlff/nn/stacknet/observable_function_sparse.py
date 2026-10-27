@@ -61,10 +61,36 @@ def get_energy_and_force_fn_sparse(model):
         # Per-atom ratio heads: 'a0_ratios' (so3lr-tauri-s/m/l) or 'hirshfeld_ratios'
         # (legacy so3lr) for the same quantity, and 'c6_ratios'. Forward whichever
         # the model has; make_loss_fn's _RATIO_ALIAS maps between the two names.
-        for ratio_key in ('a0_ratios', 'hirshfeld_ratios', 'c6_ratios'):
-            if ratio_key in model_output:
-                result[ratio_key] = safe_scale(model_output[ratio_key], node_mask)
+        # Per-atom partial charges are an intermediate quantity: the model only emits
+        # them when built with output_intermediate_quantities=['partial_charges'].
+        for node_key in ('a0_ratios', 'hirshfeld_ratios', 'c6_ratios', 'partial_charges'):
+            if node_key in model_output:
+                result[node_key] = safe_scale(model_output[node_key], node_mask)
 
         return result
 
     return energy_and_force_and_dipole_and_hirsh_fn
+
+
+def get_long_range_anchor_fn_sparse(model, keys):
+    """Forward-only long-range quantities of `model` as a function of (params, **inputs).
+
+    Used as the frozen teacher when anchoring the long-range heads during
+    fine-tuning: partial charges and the a0/C6 ratio heads need no positional
+    derivative, so this skips the force pass that get_energy_and_force_fn_sparse
+    does. `model` must emit 'partial_charges' (output_intermediate_quantities) if
+    it is among `keys`.
+    """
+    def anchor_fn(params, positions, atomic_numbers, idx_i, idx_j, **kwargs):
+        inputs = _model_inputs(positions, atomic_numbers, idx_i, idx_j, **kwargs)
+        model_output = model.apply(params, inputs)
+        result = {}
+        for key in keys:
+            if key not in model_output:
+                continue
+            value = model_output[key]
+            mask = inputs['graph_mask'][:, None] if key == 'dipole_vec' else inputs['node_mask']
+            result[key] = safe_scale(value, mask)
+        return result
+
+    return anchor_fn

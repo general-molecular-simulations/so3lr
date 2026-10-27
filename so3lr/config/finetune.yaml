@@ -1,4 +1,11 @@
 workdir: null  # Working directory, i.e., for saving the checkpoints and log. During finetuning, this is set via the CLI command so keep as null.
+# The checkpoint defines the model; a finetune config can only ADD a residual energy
+# readout: a per-atom MLP added to the pretrained one, zero at the start. Use it with
+# --strategy readout_only to train a bigger readout on a frozen backbone, which keeps the
+# charges and a0/C6 ratios exactly the pretrained ones.
+# model:
+#   energy_residual_mlp_widths: [256, 256]
+#   energy_residual_inputs: all_layers  # or 'last': only the final-layer features
 neighborlist_format_lr: sparse
 data:
   filepath: null  # Path to the data file. During finetuning, this is set via the CLI command so keep as null.
@@ -51,6 +58,16 @@ training:
     # dipole_vec: 0.01 
     # hirshfeld_ratios: 0.01
     # c6_ratios: 0.01
+    # partial_charges: 0.01  # Per-atom charges, read from a 'partial_charges' array column.
+  # With energies and forces only, the data cannot tell short-range from long-range
+  # energy, and full fine-tuning uses the charge / a0 / C6 heads as extra fitting knobs.
+  # Anchor them to the pretrained model's own predictions on every batch (a frozen copy
+  # of the starting weights is the teacher; costs one extra forward pass per batch):
+  # long_range_anchor_weights:
+  #   partial_charges: 1.0
+  #   a0_ratios: 1.0  # 'hirshfeld_ratios' for the legacy so3lr model
+  #   c6_ratios: 1.0  # not predicted by the legacy so3lr model
+  #   dipole_vec: 0.1
   use_robust_loss: false  # Use robust loss function. See https://arxiv.org/abs/1701.03077.
   robust_loss_alpha: 1.00 # Alpha parameter for the robust loss function.
   model_seed: 42  # Seed used for the initialization of the model parameters.
