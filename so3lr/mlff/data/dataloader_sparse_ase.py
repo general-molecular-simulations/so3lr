@@ -292,21 +292,26 @@ def ASE_to_jraph(
     residue_segments = None
     # Read dimer-specific properties for dimer calculations
     structure_type = mol.info.get('structure_type', None)
-    if structure_type == 'dimer_translated':
-        charge_a = mol.info.get('charge_a', None)
-        charge_b = mol.info.get('charge_b', None)
-        selection_a = mol.info.get('selection_a', None)
-        selection_b = mol.info.get('selection_b', None)
-    
-	    # Only create residue info if all dimer properties are present
-        if all(x is not None for x in [charge_a, charge_b, selection_a, selection_b]):
-            # Parse monomer sizes
-            n_monomer_a = parse_selection_range(selection_a)
-            n_monomer_b = parse_selection_range(selection_b)
-            # Validate that selections cover all atoms
-            if n_monomer_a > 0 and n_monomer_b > 0 and (n_monomer_a + n_monomer_b) == num_atoms:
-                residue_charge = np.array([int(charge_a), int(charge_b)])
-                residue_segments = np.concatenate([np.repeat(0, n_monomer_a), np.repeat(1, n_monomer_b)])
+    charge_a = mol.info.get('charge_a', None)
+    charge_b = mol.info.get('charge_b', None)
+    selection_a = mol.info.get('selection_a', None)
+    selection_b = mol.info.get('selection_b', None)
+    # Only create residue info if all dimer properties are present
+    if all(x is not None for x in [charge_a, charge_b, selection_a, selection_b]):
+        # Parse monomer sizes
+        n_monomer_a = parse_selection_range(selection_a)
+        n_monomer_b = parse_selection_range(selection_b)
+        # Validate that selections cover all atoms
+        if n_monomer_a > 0 and n_monomer_b > 0 and (n_monomer_a + n_monomer_b) == num_atoms:
+            if structure_type == 'dimer_translated':
+                # Separated monomers: each keeps its own charge.
+                residue_charge = np.array([[int(charge_a), int(charge_b)]])
+                residue_segments = np.repeat(np.array([0, 1], np.int32), [n_monomer_a, n_monomer_b])
+            else:
+                # The dimer itself (prepare_dimer_xyz writes both into one file): one residue with
+                # the total charge, so both kinds batch together with the same fields.
+                residue_charge = np.array([[int(total_charge[0]), 0]])
+                residue_segments = np.zeros(num_atoms, np.int32)
 
     if mol.get_pbc().any():
         i, j, S = neighbor_list('ijS', mol, cutoff, self_interaction=self_interaction)
@@ -375,7 +380,7 @@ def ASE_to_jraph(
         global_context["cell"] = np.array(cell).reshape(1, 3, 3)
 
     if residue_charge is not None:
-        global_context["residue_charge"] = residue_charge.reshape(1, -1)   # one row per graph
+        global_context["residue_charge"] = residue_charge
 
     # Edges follow a similar convention where e.g. for positions and forces one has (num_nodes, 3) and for scalars
     # like hirshfeld volumes (num_nodes, ).
@@ -387,7 +392,7 @@ def ASE_to_jraph(
             "c6_ratios": c6_ratios.reshape(num_atoms)
             }
     if residue_segments is not None:
-        node_features["residue_segments"] = residue_segments.astype(np.int32)   # per-structure ids
+        node_features["residue_segments"] = residue_segments
 
     graph = jraph.GraphsTuple(
         nodes=node_features,

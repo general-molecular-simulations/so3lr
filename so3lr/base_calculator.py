@@ -61,20 +61,10 @@ def make_so3lr(
             other_inputs['batch_segments'] = batch_segments
             other_inputs['graph_mask'] = graph_mask
 
-        # Handle residue information for dimer calculations
-        residue_segments = other_inputs.get('residue_segments', None)
-        residue_charge = other_inputs.get('residue_charge', None)
-        
         inputs = dict(
             positions=positions,
             **other_inputs
         )
-
-        # Add residue information if provided
-        if residue_segments is not None:
-            inputs['residue_segments'] = residue_segments
-        if residue_charge is not None:
-            inputs['residue_charge'] = residue_charge
 
         # in the positions' precision (the checkpoint's parameters are float32)
         output = model.apply(cast_float_params(params, positions.dtype), inputs)
