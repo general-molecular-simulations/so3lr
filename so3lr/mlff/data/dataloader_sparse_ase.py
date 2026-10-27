@@ -375,10 +375,7 @@ def ASE_to_jraph(
         global_context["cell"] = np.array(cell).reshape(1, 3, 3)
 
     if residue_charge is not None:
-        global_context.update({
-            "residue_charge": residue_charge,
-            "residue_segments": residue_segments,
-        })
+        global_context["residue_charge"] = residue_charge.reshape(1, -1)   # one row per graph
 
     # Edges follow a similar convention where e.g. for positions and forces one has (num_nodes, 3) and for scalars
     # like hirshfeld volumes (num_nodes, ).
@@ -389,6 +386,8 @@ def ASE_to_jraph(
             "hirshfeld_ratios": hirshfeld_ratios.reshape(num_atoms),
             "c6_ratios": c6_ratios.reshape(num_atoms)
             }
+    if residue_segments is not None:
+        node_features["residue_segments"] = residue_segments.astype(np.int32)   # per-structure ids
 
     graph = jraph.GraphsTuple(
         nodes=node_features,

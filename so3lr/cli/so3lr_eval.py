@@ -110,13 +110,6 @@ def process_predictions(
     if 'c6_ratios' in output_prediction:
         main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
 
-    # Remove non-standard global fields that don't have one row per graph
-    # (residue_charge has shape (2,) per graph, residue_segments has shape
-    # (num_atoms,) per graph), which causes jraph.unbatch_np to fail when
-    # splitting globals evenly by the number of graphs.
-    for field in ('residue_charge', 'residue_segments'):
-        main_graph.globals.pop(field, None)
-
     # Add any observable quantities that are present in the predictions.
     # 'x' (atom embeddings) is excluded here — it's saved separately to an NPZ file.
     for obs_key in OBSERVABLES:

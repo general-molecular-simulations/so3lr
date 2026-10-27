@@ -669,8 +669,10 @@ class PartialChargesSparse(BaseSubModule):
                 node_mask (Array): Node mask, shape: (num_nodes)
                 graph_mask (Array): Graph mask, shape: (num_graphs)
                 total_charge (Array): Target total charge per structure, shape: (num_graphs)
-                residue_charge (Array, optional): Target charge per residue for dimer calculations.
-                residue_segments (Array, optional): Residue assignment per atom.
+                residue_charge (Array, optional): Target charge per residue for dimer calculations,
+                    shape: (num_graphs, num_residues), or (num_residues) for a single structure.
+                residue_segments (Array, optional): 0-based residue id of each atom within its
+                    structure (< num_residues), shape: (num_nodes).
 
         Returns:
             Dict: ``{'partial_charges': Array}`` with charge-conserving partial charges,
@@ -720,17 +722,12 @@ class PartialChargesSparse(BaseSubModule):
         # If residue_charge/segments is provided, use it for charge conservation per residue/monomer
         residue_charge = inputs.get('residue_charge')
         if residue_charge is not None:
-            # Residue ids are per structure, so allow one structure (plus jraph's padding graph).
-            # Padding nodes (node_mask False) go to an extra, unconstrained last segment.
-            if num_graphs > 2:
-                raise ValueError('residue_charge/residue_segments support one structure per batch '
-                                 '(use batch size 1).')
-            residue_charge = jnp.asarray(residue_charge, x_q.dtype).reshape(-1)
-            pad_segment = residue_charge.shape[0]
-            total_charge, num_graphs = jnp.append(residue_charge, 0.), pad_segment + 1
-            residue_segments = jnp.asarray(inputs['residue_segments'], jnp.int32).reshape(-1)
-            residue_segments = jnp.pad(residue_segments, (0, len(node_mask) - len(residue_segments)))
-            batch_segments = jnp.where(node_mask, residue_segments, pad_segment)
+            # Residue ids are per structure; structure g owns segments g*R ... g*R + R-1. Padding
+            # graphs carry zero targets, so their (zero) padding-node charges stay zero.
+            residue_charge = jnp.asarray(residue_charge, x_q.dtype).reshape(num_graphs, -1)
+            num_residues = residue_charge.shape[1]
+            batch_segments = batch_segments * num_residues + jnp.asarray(inputs['residue_segments'], jnp.int32)
+            total_charge, num_graphs = residue_charge.reshape(-1), num_graphs * num_residues
 
         # Unified charge conservation calculation
         predicted_charge = segment_sum(x_q, segment_ids=batch_segments, num_segments=num_graphs) # (num_graphs)

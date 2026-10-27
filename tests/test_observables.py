@@ -227,5 +227,64 @@ class TestConsistencyBetweenCalculators:
         )
 
 
+# --- Per-residue charge conservation (residue_charge / residue_segments) ---------
+
+def _residue_charges(inputs):
+    """PartialChargesSparse charges for random features; inputs as the model receives them."""
+    import jax
+    from so3lr.mlff.nn.observable.observable_sparse import PartialChargesSparse
+    n = len(inputs['atomic_numbers'])
+    inp = dict(inputs, x=np.random.default_rng(0).normal(size=(n, 8)))
+    mod = PartialChargesSparse(prop_keys={}, output_is_zero_at_init=False)
+    return np.asarray(mod.apply(mod.init(jax.random.PRNGKey(0), inp), inp)['partial_charges'])
+
+
+@pytest.mark.parametrize('segments, targets', [
+    pytest.param([0, 0, 0, 1, 1, 1, 1], [1., -1.], id='two-residues'),
+    pytest.param([0, 0, 2, 2, 2, 1, 1], [1., -1., 1.], id='three-residues'),
+])
+def test_residue_charges_single_structure(segments, targets):
+    """The unbatched path (PotentialSparse, base_calculator): one structure, (R,) targets."""
+    n = len(segments)
+    q = _residue_charges(dict(
+        atomic_numbers=np.random.default_rng(1).choice([1, 6, 8], size=n),
+        batch_segments=np.zeros(n, np.int32), node_mask=np.ones(n, bool),
+        graph_mask=np.array([True]), total_charge=np.zeros(1),
+        residue_segments=np.array(segments), residue_charge=np.array(targets)))
+    npt.assert_allclose(np.bincount(segments, weights=q), targets, atol=1e-5)
+
+
+def test_residue_charges_batched_through_the_loader():
+    """Dimers of different sizes and charges through ASE_to_jraph, jraph batching with padding
+    graphs and graph_to_batch_fn: every residue of every structure keeps its own charge, and the
+    batch still unbatches (as so3lr eval does)."""
+    import jraph
+    from ase.build import molecule
+    from so3lr.mlff.data.dataloader_sparse_ase import ASE_to_jraph
+    from so3lr.mlff.utils.jraph_utils import dynamically_batch_with_lr, graph_to_batch_fn
+
+    def dimer(a, b, qa, qb):
+        d, n_a = molecule(a) + molecule(b), len(molecule(a))
+        d.positions[n_a:] += [4.0, 0.0, 0.0]
+        d.info.update(structure_type='dimer_translated', charge=qa + qb, charge_a=qa, charge_b=qb,
+                      selection_a=f'1-{n_a}', selection_b=f'{n_a + 1}-{len(d)}')
+        return d, n_a
+
+    dimers = [dimer('H2O', 'NH3', 0, 1), dimer('CH4', 'H2O', -1, 0), dimer('NH3', 'CH4', 1, -1)]
+    items = [ASE_to_jraph(d, cutoff=5.0, calculate_neighbors_lr=False) for d, _ in dimers]
+    graph, lr = next(dynamically_batch_with_lr(iter(items), n_node=40, n_edge=400, n_graph=5, n_pairs=0))
+    batch = graph_to_batch_fn(graph, lr)
+    q = _residue_charges({k: batch[k] for k in (
+        'atomic_numbers', 'batch_segments', 'node_mask', 'graph_mask', 'total_charge',
+        'residue_charge', 'residue_segments')})
+
+    start = 0
+    for d, n_a in dimers:
+        npt.assert_allclose([q[start:start + n_a].sum(), q[start + n_a:start + len(d)].sum()],
+                            [d.info['charge_a'], d.info['charge_b']], atol=1e-5)
+        start += len(d)
+    assert len(jraph.unbatch_np(graph)) == 5      # 3 dimers + 2 padding graphs
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
