@@ -22,7 +22,6 @@ from so3lr.mlff.utils.kspace_utils import (
     setup_kspace_grid)
 from so3lr.mlff.data import AseDataLoaderSparse
 from pathlib import Path
-import json
 from collections import defaultdict
 
 from ..jraph_utils import jraph_to_ase_atoms
@@ -510,8 +509,8 @@ def evaluate_so3lr_on(
     )
 
     # Read the short-range cutoff from the resolved model's hyperparameters.
-    with open(workdir_path / "hyperparameters.json", "r") as fp:
-        cfg = json.load(fp)
+    from ..model_config import load_model_config
+    cfg = load_model_config(workdir_path)
     cutoff = cfg['model']['cutoff']
 
     logger.info(f"Using cutoff: {cutoff} Å")

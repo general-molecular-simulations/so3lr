@@ -1,6 +1,4 @@
 """Parameters and statics for the flash engine from a model in the registry (or a path)."""
-import json
-
 import jax.numpy as jnp
 import numpy as np
 from ase.units import alpha as FINE_STRUCTURE
@@ -10,6 +8,7 @@ from so3lr.mlff.nn.observable.dispersion_ref_data import (
 from so3lr.mlff.calculators.potential import cast_float_params
 from so3lr.mlff.utils.checkpoint_utils import load_params_from_workdir
 from so3lr.mlff.utils.training_utils import expand_observables_to_theory_levels
+from so3lr.model_config import load_model_config
 from so3lr.model_registry import resolve_model
 
 
@@ -33,8 +32,7 @@ def load_params(model=None, *, precision="float32", lr_cutoff=12.0, dispersion_d
     form) and the free-atom dispersion tables of ``dispersion_ref_data`` (the legacy
     so3lr's own for it)."""
     spec = resolve_model(model)
-    with open(spec.dir / "hyperparameters.json") as fp:
-        cfg = json.load(fp)
+    cfg = load_model_config(spec.dir)
     m = cfg["model"]
     legacy = m.get("legacy_so3lr_bool", False) is True
     raw = expand_observables_to_theory_levels(load_params_from_workdir(spec.dir))["params"]

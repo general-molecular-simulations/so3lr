@@ -317,7 +317,10 @@ def test_every_settings_key_classified():
     ("so3lr", ("qk_norm", False), None),
     ("so3lr", ("use_rms_norm", True), "use_rms_norm = False"),
     ("so3lr", ("layer_normalization_2", False), "layer_normalization_2 = True"),
-    ("so3lr", ("use_final_bias_bool", None), "does not set 'use_final_bias_bool'"),
+    # use_final_bias_bool (like legacy_so3lr_bool) is read from the checkpoint when the
+    # config leaves it out (so3lr.model_config), so removing it changes nothing here
+    ("so3lr", ("use_final_bias_bool", None), None),
+    ("so3lr", ("layer_normalization_2", None), "does not set 'layer_normalization_2'"),
     ("so3lr", ("electrostatic_energy_kspace_do_ewald_bool", False), "does not know the model hyperparameter"),
 ])
 def test_model_architecture_check(tmp_path, model, edit, reason):

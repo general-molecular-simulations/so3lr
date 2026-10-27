@@ -4,7 +4,6 @@ import jax.numpy as jnp
 import logging
 import numpy as np
 import pathlib
-import json
 
 from flax import struct
 from typing import Any, Callable, Type, Dict, Sequence, Optional
@@ -30,11 +29,9 @@ def cast_float_params(params, dtype):
 
 
 def load_hyperparameters(workdir: str):
-    """Load hyperparameters from workdir."""
-    with open(pathlib.Path(workdir) / "hyperparameters.json", "r") as fp:
-        cfg = json.load(fp)
-    cfg = config_dict.ConfigDict(cfg)
-    return cfg
+    """Load hyperparameters from workdir (see ``so3lr.model_config``)."""
+    from ...model_config import load_model_config
+    return config_dict.ConfigDict(load_model_config(workdir))
 
 
 def build_long_range_kwargs(

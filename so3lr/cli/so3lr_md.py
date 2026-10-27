@@ -15,7 +15,6 @@ import gc
 import os
 import sys
 import time
-import json
 import logging
 import pathlib
 import stat
@@ -76,10 +75,9 @@ def _model_num_features(model_path) -> Optional[int]:
     model itself is loaded.
     """
     try:
+        from ..model_config import load_model_config
         from ..model_registry import resolve_model
-        workdir = resolve_model(model_path).dir
-        with open(pathlib.Path(workdir) / 'hyperparameters.json') as fp:
-            return int(json.load(fp)['model']['num_features'])
+        return int(load_model_config(resolve_model(model_path).dir)['model']['num_features'])
     except Exception as e:  # pragma: no cover - informational fallback
         logger.warning(f"Could not determine the model's feature width: {e}")
         return None
@@ -1004,9 +1002,8 @@ def warn_legacy_kspace(kspace_electrostatics):
 def _is_legacy_model(model_dir) -> bool:
     """Return True if the resolved model is the legacy v1 SO3LR (legacy_so3lr_bool)."""
     try:
-        with open(pathlib.Path(model_dir) / 'hyperparameters.json', 'r') as fp:
-            cfg = json.load(fp)
-        return bool(cfg.get('model', {}).get('legacy_so3lr_bool', False))
+        from ..model_config import load_model_config
+        return bool(load_model_config(model_dir)['model'].get('legacy_so3lr_bool', False))
     except Exception:
         return False
 

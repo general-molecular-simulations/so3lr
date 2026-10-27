@@ -10,7 +10,6 @@ The tasks (``TASKS``): ``md`` (``so3lr nve|nvt|nvt-langevin|npt``), ``opt`` (``s
 """
 import dataclasses
 import functools
-import json
 import math
 import os
 
@@ -200,8 +199,8 @@ def model_problem(model_path):
     """Why flash cannot evaluate this model (None if it can)."""
     from so3lr.model_registry import resolve_model
     spec = resolve_model(model_path)
-    with open(spec.dir / "hyperparameters.json") as fp:
-        model = json.load(fp)["model"]
+    from so3lr.model_config import load_model_config
+    model = load_model_config(spec.dir)["model"]
     arch = LEGACY_ARCHITECTURE if model.get("legacy_so3lr_bool") is True else ARCHITECTURE
     shape = (tuple(model.get("degrees") or ()), model.get("num_heads"), model.get("num_features"))
     if shape not in SHAPES:
@@ -360,9 +359,9 @@ def device_problem():
 
 def model_cutoff(model_path):
     """The model's short-range cutoff in A."""
+    from so3lr.model_config import load_model_config
     from so3lr.model_registry import resolve_model
-    with open(resolve_model(model_path).dir / "hyperparameters.json") as fp:
-        return float(json.load(fp)["model"]["cutoff"])
+    return float(load_model_config(resolve_model(model_path).dir)["model"]["cutoff"])
 
 
 def frames_problem(settings, frames):
