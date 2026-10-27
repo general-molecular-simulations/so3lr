@@ -59,8 +59,8 @@ jobs:
           - group: 6
             name: "so3lr-other"
             sync_extra: ""
-            run_short: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_prepare_dimer.py -v --tb=short"
-            run_full: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_prepare_dimer.py tests/test_hessian.py -v --tb=short --full"
+            run_short: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_model_invariance.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_prepare_dimer.py -v --tb=short"
+            run_full: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_model_invariance.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_prepare_dimer.py tests/test_hessian.py -v --tb=short --full"
           - group: 7
             name: "pysages"
             sync_extra: "--extra pysages"
@@ -76,7 +76,10 @@ jobs:
           - group: 8
             name: "md-regressions"
             sync_extra: ""
-            run_short: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_md_state_precision.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_flash.py -v --tb=short"
+            # Plus the drift file's one short case (float32 NVE, about half a minute),
+            # in its own process like every drift case; it runs even when the first
+            # command fails, and the step fails if either did.
+            run_short: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_md_state_precision.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_flash.py -v --tb=short || s=$?; uv run --no-sync pytest tests/test_integrator_drift.py -v --tb=short || s=$?; exit ${s:-0}"
             # Each drift parameter still runs, but in its own interpreter: on
             # large CPU nodes, repeated XLA compilations in one process can
             # exhaust native compiler resources before later ensembles start.

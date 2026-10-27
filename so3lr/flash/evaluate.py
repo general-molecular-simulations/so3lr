@@ -1,8 +1,9 @@
 """SO3LR-Flash in ``so3lr eval``: the energies and forces of a dataset's structures.
 
 ``so3lr_eval.evaluate_so3lr_on`` runs it when every structure is periodic and orthorhombic
-(and wide enough for the cell grid), the targets are energy and/or forces, and flash takes
-the other settings (``check.flash_problem`` with task "eval"); else the neighbour-list model.
+(and wide enough for the cell grid) or has no box, the targets are energy and/or forces,
+and flash takes the other settings (``check.flash_problem`` with task "eval"); else the
+neighbour-list model.
 The structures run one at a time (``md.SinglePoints``), grouped by atoms, charge and spin,
 then by PME mesh and box, so each engine is built once and the boxes it is laid out for
 come in order.
@@ -16,7 +17,7 @@ from so3lr.mlff.data.dataloader_sparse_ase import charge_and_multiplicity
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported, supported_atomic_numbers_for_model)
 
-from .check import NPT_BOX_MARGIN
+from .check import NPT_BOX_MARGIN, in_vacuum
 from .engine import pme_mesh_shape
 from .md import FlashUnavailable, SinglePoints, _pme
 
@@ -31,15 +32,17 @@ def charge_and_spin(atoms, total_charge=None, num_unpaired_electrons=None):
 
 
 def _order(frames, systems, settings):
-    """The structures by atoms, charge and spin (in order of first appearance), then PME mesh
-    and box; and whether a group has more than one box."""
+    """The structures by atoms, charge and spin, and whether they have a box (each such
+    group in order of first appearance; md.SinglePoints builds an engine for each), then
+    PME mesh and box; and whether a group has more than one box."""
     pme = [p for p in _pme(settings) if p]
     groups, meshes, boxes, keys = {}, {}, {}, []
     for atoms, system in zip(frames, systems):
-        group = groups.setdefault((atoms.numbers.tobytes(),) + system, len(groups))
-        L = tuple(float(v) for v in np.diag(atoms.cell[:]))
+        vacuum = in_vacuum(atoms)
+        group = groups.setdefault((atoms.numbers.tobytes(), vacuum) + system, len(groups))
+        L = () if vacuum else tuple(float(v) for v in np.diag(atoms.cell[:]))
         if L not in meshes:
-            meshes[L] = tuple(pme_mesh_shape(L, p[1]) for p in pme)
+            meshes[L] = tuple(pme_mesh_shape(L, p[1]) for p in pme) if L else ()
         boxes.setdefault(group, set()).add(L)
         keys.append((group, meshes[L], L))
     return sorted(range(len(frames)), key=keys.__getitem__), any(len(b) > 1 for b in boxes.values())

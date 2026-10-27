@@ -1,4 +1,4 @@
-"""Whether the flash engine can run a task: settings, model, box, device.
+"""Whether the flash engine can run a task: settings, model, box (or none), device.
 
 Imports no kernels, so ``so3lr_md.run_on_flash`` can decide cheaply and fall back without
 touching Pallas. Every check fails closed: a setting or a model hyperparameter flash
@@ -19,6 +19,10 @@ import numpy as np
 # NPT: the cell grid is laid out for a box this much smaller, so the box moves without
 # a compile (and is laid out again if it leaves the margin)
 NPT_BOX_MARGIN = 0.03
+# free space (no box): the least room (A) the atoms' size may grow by before the engine's box
+# and long-range reach are laid out again; a quarter of the size where that is more
+# (``vacuum_box``), so atoms that keep growing are laid out again a few times only
+VACUUM_PAD = 10.0
 ENGINES = ("auto", "flash", "standard")
 # the AMD GPUs (gfx targets) flash is tested on: the MI355X
 ROCM_TARGETS = ("gfx950",)
@@ -243,20 +247,77 @@ def box_problem(L, rc, rc_lr):
     return None
 
 
+def in_vacuum(atoms):
+    """Whether atoms are in free space, as perform_md takes them: not periodic, or periodic
+    with no cell."""
+    return not atoms.pbc.any() or (atoms.pbc.all() and not np.any(atoms.cell[:]))
+
+
+def vacuum_size(R, xp=np):
+    """Twice the largest distance of positions R from their centroid: no two atoms are
+    farther apart, and it stays the same as they move together (xp: numpy or jax.numpy)."""
+    d = R - R.mean(0)
+    return 2.0 * xp.sqrt(xp.max(xp.sum(d * d, -1)))
+
+
+def vacuum_box(size, rc, rc_lr):
+    """(cube side, long-range reach) the engine takes free space in, for atoms of
+    ``vacuum_size`` size with room to grow by (``VACUUM_PAD``): the reach takes every pair
+    within rc_lr (every pair, when the atoms are smaller than that), and the periodic box
+    is so wide that no atom is within the reach of another's image (``vacuum_fits``), and
+    wide enough for the cell grid."""
+    pad = max(VACUUM_PAD, 0.25 * size)
+    reach = min(rc_lr, size + pad)
+    L = size + pad + max(rc, reach)
+    while box_problem([L] * 3, rc, reach):
+        L += 0.25 * rc
+    return L, reach
+
+
+def vacuum_fits(size, L, rc, rc_lr, reach):
+    """Whether atoms of size (``vacuum_size``) compute as in free space in the box L with
+    the long-range reach (``vacuum_box``): every image is farther than both cutoffs (rc,
+    the reach), and the reach takes every pair within rc_lr."""
+    ok = size <= L - max(rc, reach)
+    return ok if reach >= rc_lr else ok & (size <= reach)
+
+
+def vacuum_problem(settings):
+    """Why flash cannot run these settings in free space (None if it can)."""
+    if settings.get("ensemble") == "npt":
+        return "its NPT needs a box"
+    for key in ("kspace_electrostatics", "kspace_dispersion"):
+        if settings.get(key):
+            return f"its k-space ({key}) needs a box"
+    if _restart_box(settings) is not None:
+        return "the restart has a box and the structure none"
+    return None
+
+
+def _restart_box(settings):
+    """The box a restart starts in (its checkpoint's), None with no restart or no box."""
+    if not settings.get("restart_load_path"):
+        return None
+    with np.load(settings["restart_load_path"]) as saved:
+        box = np.asarray(saved["box"]) if "box" in saved.files else None
+    return box if box is not None and np.any(box) else None
+
+
 def structure_problem(settings, atoms, rc):
     """Why flash cannot take this structure, or the restart's box (None if it can); rc: the
-    model's cutoff (``model_cutoff``)."""
+    model's cutoff (``model_cutoff``). A structure in free space (``in_vacuum``) takes any
+    size: the engine lays out a box for it."""
+    if in_vacuum(atoms):
+        return vacuum_problem(settings)
     if not atoms.pbc.all() or atoms.cell.rank < 3:
-        return "it needs a box periodic in all three directions"
+        return "it needs a box periodic in all three directions, or no box"
     cell = np.asarray(atoms.cell[:])
     if np.abs(cell - np.diag(np.diag(cell))).max() > 1e-9:
         return "it needs an orthorhombic box"
     sides = np.diag(cell)
-    if settings.get("restart_load_path"):                # a restart starts in its own box
-        with np.load(settings["restart_load_path"]) as saved:
-            box = np.asarray(saved["box"]) if "box" in saved.files else None
-        if box is not None and np.any(box):
-            sides = np.diag(box) if box.ndim == 2 else np.broadcast_to(box.reshape(-1), (3,))
+    box = _restart_box(settings)
+    if box is not None:                                  # a restart starts in its own box
+        sides = np.diag(box) if box.ndim == 2 else np.broadcast_to(box.reshape(-1), (3,))
     shrink = 1.0 - (NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0)
     return box_problem([float(v) * shrink for v in sides], rc, float(settings.get("lr_cutoff") or 12.0))
 
@@ -334,6 +395,7 @@ def _engines_problem(settings, frames, task):
         return None
     n = len({atoms.numbers.tobytes() for atoms in frames})
     if n > EVAL_AUTO_ENGINES:
-        return (f"the structures have {n} different sets of atoms, an engine to build and compile for "
-                f"each (auto takes up to {EVAL_AUTO_ENGINES}; --engine flash runs any number)")
+        return (f"the structures have more than {EVAL_AUTO_ENGINES} different sets of atoms, an engine "
+                f"to build and compile for each (auto takes up to {EVAL_AUTO_ENGINES}; --engine flash "
+                f"runs any number)")
     return None

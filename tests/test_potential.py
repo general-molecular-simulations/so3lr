@@ -3,14 +3,6 @@ import numpy as np
 import pytest
 
 
-@pytest.fixture
-def x64():
-    old = jax.config.jax_enable_x64
-    jax.config.update("jax_enable_x64", True)
-    yield
-    jax.config.update("jax_enable_x64", old)
-
-
 @pytest.mark.parametrize("model", ["so3lr-tauri-s", "so3lr"])
 def test_float64_runs_in_float64(x64, monkeypatch, model):
     """A float64 run computes in float64 though the checkpoint's parameters are float32: a

@@ -511,7 +511,8 @@ def flash_options(f: Callable) -> Callable:
                      help='auto: the flash engine (GPU kernels with their own cell grid and '
                           'no per-edge arrays: 2.5x faster, and tens of millions of atoms on one '
                           'GPU) whenever it computes what the other options ask for -- an NVIDIA '
-                          'GPU or an AMD MI355X, a periodic orthorhombic box, real-space long range or PME, '
+                          'GPU or an AMD MI355X, a periodic orthorhombic box or none (gas phase), '
+                          'real-space long range or PME, '
                           'so3lr-tauri-s/m/l or the legacy so3lr; for MD nve/nvt/nvt-langevin/isotropic '
                           'npt, for eval the targets energy and forces -- else the neighbour-list potential; the '
                           'log says which and why. flash or standard forces one. [default: auto]')(f)
@@ -1485,7 +1486,7 @@ def eval_model(
     overwrite: bool,
     # Help option
     help: bool,
-    # the engine (SO3LR-Flash for energies and forces of periodic structures)
+    # the engine (SO3LR-Flash for energies and forces of periodic structures and ones with no box)
     engine: str = 'auto',
     flash_mode: str = 'auto',
     flash_mixed: bool = True,
