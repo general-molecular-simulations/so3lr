@@ -64,7 +64,7 @@ from jax.experimental.pallas import triton as plgpu
 import jaxpme
 
 from so3lr.flash import blocks
-from so3lr.flash.check import box_problem, cell_grid, is_rocm, vacuum_box, vacuum_fits, vacuum_size
+from so3lr.flash.check import MAX_CELLS, box_problem, cell_grid, is_rocm, vacuum_box, vacuum_fits, vacuum_size
 from so3lr.mlff.nn.embed.embed_sparse import PAIR_FLOOR_WIDTH, nlh_reference_distance
 from so3lr.mlff.nn.observable.observable_sparse import c6_raw_potential
 from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
@@ -1153,7 +1153,6 @@ TABLE_INTERVALS = 4096       # radial filter tables on [0, 1.05 cutoff]
 PAIR_INTERVALS = 16384       # long-range pair tables on [0, lr cutoff]
 PME_CHUNK = 1 << 20          # atoms spread or gathered at a time in the PME mesh
 MAX_REBUILDS = 6             # rebuilds after overflows in a row, at most, before giving up
-MAX_CELLS = 1 << 28          # cells of the grid, at most (cell_start: 1 GiB)
 
 
 # memory modes, fastest first: (engine options, staged, peak KiB per atom of so3lr-tauri-m on an

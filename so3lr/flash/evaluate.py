@@ -1,9 +1,9 @@
 """SO3LR-Flash in ``so3lr eval``: the energies and forces of a dataset's structures.
 
 ``so3lr_eval.evaluate_so3lr_on`` runs it when every structure is periodic and orthorhombic
-(and wide enough for the cell grid) or has no box, the targets are energy and/or forces,
-and flash takes the other settings (``check.flash_problem`` with task "eval"); else the
-neighbour-list model.
+(in a box the cell grid fits) or has no box (with atoms close enough for it), the targets
+are energy and/or forces, and flash takes the other settings (``check.flash_problem`` with
+task "eval"); else the neighbour-list model.
 The structures run one at a time (``md.SinglePoints``), grouped by atoms, charge and spin,
 then by PME mesh and box, so each engine is built once and the boxes it is laid out for
 come in order.
