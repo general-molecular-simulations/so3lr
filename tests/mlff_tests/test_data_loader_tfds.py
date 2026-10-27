@@ -1,7 +1,10 @@
 """Tests for the TFDS dataloader and its optional runtime dependencies.
 
 Validates compute_edges_np, standardize_dataset_fields, and create_graph_tuple_tf
-for both non-PBC and PBC cases, including a real temporary TFDS disk round trip.
+for both non-PBC and PBC cases, including a real temporary TFDS disk round trip
+through the locked ``tfds`` extra. The PBC-field stripping in _numpy_tuple_iterator
+is checked through the real _preprocess pipeline
+(test_preprocess_preserves_explicit_pbc_with_nonzero_cell).
 """
 
 import jraph
@@ -224,61 +227,6 @@ def test_standardize_infers_pbc_from_cell():
             sample['pbc'].numpy(), [True, True, True],
             err_msg="pbc should be inferred as [True,True,True] from non-zero cell"
         )
-
-
-# ---------------------------------------------------------------------------
-# Test 4: numpy iterator strips PBC fields for non-PBC
-# ---------------------------------------------------------------------------
-def test_numpy_tuple_iterator_strips_non_pbc():
-    element = _make_water_element()
-    graph, lr_dict = create_graph_tuple_tf(
-        element, cutoff=5.0, calculate_neighbors_lr=False
-    )
-
-    # Build a one-element TF dataset and iterate as numpy (mimics _numpy_tuple_iterator)
-    ds = tf.data.Dataset.from_tensors((graph, lr_dict))
-    for np_graph, np_lr in ds.as_numpy_iterator():
-        cell = np_graph.globals.get('cell')
-        has_pbc = cell is not None and np.any(cell != 0.0)
-        assert not has_pbc
-
-        # Apply the same stripping logic as _numpy_tuple_iterator
-        if not has_pbc:
-            globals_new = {k: v for k, v in np_graph.globals.items() if k != 'cell'}
-            edges_new = {k: v for k, v in np_graph.edges.items() if k != 'cell_offset'}
-            np_graph = np_graph._replace(globals=globals_new, edges=edges_new)
-
-        offsets = np.asarray(np_lr['cell_offsets_lr'])
-        cell_offsets_lr = offsets if has_pbc and offsets.shape[0] > 0 else None
-
-        assert 'cell' not in np_graph.globals
-        assert 'cell_offset' not in np_graph.edges
-        assert cell_offsets_lr is None
-
-
-# ---------------------------------------------------------------------------
-# Test 5: numpy iterator keeps PBC fields for periodic systems
-# ---------------------------------------------------------------------------
-def test_numpy_tuple_iterator_keeps_pbc():
-    element = _make_nacl_element()
-    graph, lr_dict = create_graph_tuple_tf(
-        element, cutoff=4.0, calculate_neighbors_lr=True, cutoff_lr=6.0
-    )
-
-    ds = tf.data.Dataset.from_tensors((graph, lr_dict))
-    for np_graph, np_lr in ds.as_numpy_iterator():
-        cell = np_graph.globals.get('cell')
-        has_pbc = cell is not None and np.any(cell != 0.0)
-        assert has_pbc
-
-        # Do NOT strip for PBC
-        offsets = np.asarray(np_lr['cell_offsets_lr'])
-        cell_offsets_lr = offsets if has_pbc and offsets.shape[0] > 0 else None
-
-        assert 'cell' in np_graph.globals
-        assert 'cell_offset' in np_graph.edges
-        assert cell_offsets_lr is not None
-        assert cell_offsets_lr.shape[1] == 3
 
 
 @pytest.mark.parametrize('pbc', [[False, False, False], [True, False, True]])

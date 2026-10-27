@@ -253,10 +253,17 @@ def test_monotone_and_finite_gradient_including_zero():
     assert np.isfinite(np.asarray(g(jnp.array([0.0, 0.5, 1.2])))).all()
 
 
-def test_reference_table_is_symmetric_in_the_pair():
-    """Indexed [min(Z), max(Z)], so O-H and H-O must give the same length."""
-    assert _rmin('O', 'H') == _rmin('H', 'O')
-    assert _rmin('C', 'S') == _rmin('S', 'C')
+def test_floor_is_symmetric_in_the_pair():
+    """The table is indexed [min(Z), max(Z)], so an O-H edge and an H-O edge
+    must be floored identically. This goes through floor_descriptor_distance:
+    _rmin sorts the pair itself and so could not notice a missing min/max."""
+    d = jnp.array([0.0, 0.2, 0.5])
+    for e1, e2 in [('O', 'H'), ('C', 'S')]:
+        forward = np.asarray(_floor(e1, e2, d))
+        reverse = np.asarray(_floor(e2, e1, d))
+        # The floor is active at d = 0, so the comparison is not identity vs identity.
+        assert forward[0] > 0, (e1, e2)
+        npt.assert_array_equal(forward, reverse)
 
 
 def test_clash_stays_finite_and_repulsive_end_to_end():

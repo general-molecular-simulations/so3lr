@@ -10,17 +10,23 @@ import pytest
 TEST_DIR = Path(__file__).parent
 
 
-@pytest.mark.parametrize("calculate_neighbors_lr", [True, False])
-def test_data_load_no_pbc(calculate_neighbors_lr: bool):
-    filename = 'test_data/data_set.xyz'
-    f = TEST_DIR / filename
+@pytest.fixture(scope='module', params=[True, False])
+def no_pbc_data(request):
+    """data_set.xyz loaded once per calculate_neighbors_lr value and shared by
+    the two tests below (batching does not modify the loaded graphs).
 
-    loader = AseDataLoaderSparse(input_file=f)
+    Returns (calculate_neighbors_lr, loader, all_data, data_stats)."""
+    loader = AseDataLoaderSparse(input_file=TEST_DIR / 'test_data/data_set.xyz')
     all_data, data_stats = loader.load(
         cutoff=4.,
-        calculate_neighbors_lr=calculate_neighbors_lr,
+        calculate_neighbors_lr=request.param,
         cutoff_lr=75.
     )
+    return request.param, loader, all_data, data_stats
+
+
+def test_data_load_no_pbc(no_pbc_data):
+    calculate_neighbors_lr, loader, all_data, data_stats = no_pbc_data
 
     npt.assert_equal(len(all_data), 100)
     npt.assert_equal(loader.cardinality(), 100)
@@ -100,13 +106,10 @@ def test_data_load_no_pbc(calculate_neighbors_lr: bool):
         npt.assert_equal(num_unpaired_electrons, 0)
         npt.assert_equal(len(senders), len(receivers))
 
-        npt.assert_equal(len(idx_j_lr), len(idx_j_lr))
         if calculate_neighbors_lr:
             npt.assert_equal(num_pairs, num_atoms*num_atoms - num_atoms)
             npt.assert_equal(len(idx_i_lr), num_pairs)
             npt.assert_equal(len(idx_j_lr), num_pairs)
-            npt.assert_equal(np.isnan(idx_i_lr).any(), False)
-            npt.assert_equal(np.isnan(idx_j_lr).any(), False)
         else:
             npt.assert_equal(idx_i_lr, np.array([]).reshape(-1))
             npt.assert_equal(idx_j_lr, np.array([]).reshape(-1))
@@ -150,8 +153,6 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
         npt.assert_equal(len(idx_i_lr), num_pairs)
         npt.assert_equal(len(idx_j_lr), num_pairs)
         npt.assert_equal(cell_offsets_lr.shape, (num_pairs, 3))
-        npt.assert_equal(np.isnan(idx_i_lr).any(), False)
-        npt.assert_equal(np.isnan(idx_j_lr).any(), False)
         # Indices must reference valid atoms in the 192-atom cell.
         npt.assert_(idx_i_lr.min() >= 0 and idx_i_lr.max() < 192)
         npt.assert_(idx_j_lr.min() >= 0 and idx_j_lr.max() < 192)
@@ -211,26 +212,9 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
             npt.assert_equal(cell_offset.shape, (len(senders), 3))
 
 
-@pytest.mark.parametrize("calculate_neighbors_lr", [True, False])
-def test_jraph_dynamically_batch(calculate_neighbors_lr: bool):
-    """
-    Loaded data is compatible with dynamically_batch_with_lr(...).
-
-    Args:
-        calculate_neighbors_lr ():
-
-    Returns:
-
-    """
-    filename = 'test_data/data_set.xyz'
-    f = TEST_DIR / filename
-
-    loader = AseDataLoaderSparse(input_file=f)
-    all_data, data_stats = loader.load(
-        cutoff=4.,
-        calculate_neighbors_lr=calculate_neighbors_lr,
-        cutoff_lr=75.
-    )
+def test_jraph_dynamically_batch(no_pbc_data):
+    """Loaded data is compatible with dynamically_batch_with_lr(...)."""
+    calculate_neighbors_lr, _, all_data, _ = no_pbc_data
 
     num_atoms = 24
 

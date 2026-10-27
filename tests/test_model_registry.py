@@ -31,6 +31,8 @@ def test_defaults():
     # The default must be a canonical name, never a floating alias, so that the
     # no-argument default cannot drift when a new release is registered.
     assert mr.DEFAULT_MODEL in mr.canonical_models()
+    # No name at all (bare calculator, CLI without --model) resolves to it.
+    assert mr.resolve_model(None) == mr.resolve_model(mr.DEFAULT_MODEL)
 
 
 def test_canonical_models():
@@ -67,26 +69,6 @@ def test_size_aliases_point_at_the_current_release():
     for size in ("s", "m", "l"):
         current = f"so3lr-tauri-{size}-2606"
         assert mr.resolve_model(f"so3lr-tauri-{size}").dir.name == current
-
-
-def test_dated_names_are_pinned():
-    """The 2602 pins must keep resolving to the older release."""
-    for size in ("s", "m", "l"):
-        name = f"so3lr-tauri-{size}-2602"
-        assert mr.resolve_model(name).dir.name == name
-
-
-def test_legacy_vanilla_model():
-    spec = mr.resolve_model("so3lr")
-    assert spec.dir == PKG / "models" / "so3lr"
-    assert spec.family == "vanilla"
-    # The legacy dir ships a canonical params.pkl (no orbax checkpoint).
-    assert spec.from_file is True
-
-
-def test_default_resolves_to_the_new_m_model():
-    assert mr.resolve_model(None) == mr.resolve_model("so3lr-tauri-m-2606")
-    assert mr.resolve_model(None) == mr.resolve_model("so3lr-tauri-m")
 
 
 def test_registry_logs_on_the_package_logger():

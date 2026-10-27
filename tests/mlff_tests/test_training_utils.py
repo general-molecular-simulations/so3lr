@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 import jax.numpy as jnp
 import numpy.testing as npt
+import optax
 import pytest
 from so3lr.mlff import training_utils
 
@@ -180,20 +183,84 @@ def test_log_gradient_values_is_not_overwritten():
     They were written to metrics['grad_norm'], which the unconditional global
     norm assignment then overwrote, making log_gradient_values a pure no-op.
     """
-    import inspect
-    src = inspect.getsource(training_utils.make_training_step_fn)
-    assert "metrics['grad_norm_per_leaf']" in src
-    # The global norm still lands under its own key, and no longer clobbers.
-    assert src.count("metrics['grad_norm'] =") == 1
+    def loss_fn(params, batch):
+        loss = 0.5 * (jnp.sum(params['a'] ** 2) + jnp.sum(params['b'] ** 2))
+        return loss, {'loss': loss}
+
+    params = {'a': jnp.array([3., 4.]), 'b': jnp.array([1.])}
+    optimizer = optax.sgd(0.1)
+    step_fn = training_utils.make_training_step_fn(
+        optimizer, loss_fn, log_gradient_values=True)
+    _, _, metrics = step_fn(params, optimizer.init(params), {})
+
+    # The gradient of this loss is the params themselves: per-leaf norms 5 and 1.
+    npt.assert_allclose(metrics['grad_norm_per_leaf']['a'], 5., rtol=1e-6)
+    npt.assert_allclose(metrics['grad_norm_per_leaf']['b'], 1., rtol=1e-6)
+    # The global norm still lands under its own key.
+    npt.assert_allclose(metrics['grad_norm'], jnp.sqrt(26.), rtol=1e-6)
 
 
-def test_fit_skips_checkpoints_with_non_finite_loss():
+class _RecordingManager:
+    """Stands in for the orbax manager: no existing checkpoint, records saves."""
+
+    def __init__(self):
+        self.saved_steps = []
+
+    def latest_step(self):
+        return None
+
+    def save(self, step, **kwargs):
+        self.saved_steps.append(step)
+        return True
+
+    def wait_until_finished(self):
+        pass
+
+
+class _OneBatchIterator:
+    """The loader interface fit_from_iterator expects, one batch per epoch."""
+
+    def next_epoch(self, split, mode, epoch_index=None, **kwargs):
+        return iter([('graph', {})])
+
+
+@pytest.mark.parametrize('entry_point', ['fit', 'fit_from_iterator'])
+@pytest.mark.parametrize('eval_loss, saved_steps', [(float('nan'), []), (1.0, [1])])
+def test_fit_skips_checkpoints_with_non_finite_loss(
+        tmp_path, monkeypatch, entry_point, eval_loss, saved_steps):
     """fit() used to save NaN-loss checkpoints; orbax ranks with best_mode='min'
     and a NaN can be retained as 'best', evicting the real best weights.
-    fit() saves through _log_and_checkpoint; fit_from_iterator has its own guard."""
-    import inspect
-    for fn in (training_utils._log_and_checkpoint, training_utils.fit_from_iterator):
-        src = inspect.getsource(fn)
-        assert 'jnp.isfinite(eval_loss)' in src, (
-            f'{fn.__name__} saves checkpoints without a finite-loss guard'
-        )
+    fit() saves through _log_and_checkpoint; fit_from_iterator has its own guard.
+    The finite case shows the stubbed loop does reach the save."""
+    manager = _RecordingManager()
+    for name in ('make_checkpoint_manager', 'make_training_checkpoint_manager'):
+        monkeypatch.setattr(training_utils.checkpoint_utils, name,
+                            lambda **kwargs: manager)
+    monkeypatch.setattr(training_utils, 'dynamically_batch_with_lr',
+                        lambda *args, **kwargs: iter([('graph', {})]))
+    monkeypatch.setattr(training_utils.jraph, 'get_number_of_padding_with_graphs_nodes',
+                        lambda graph: 0)
+    monkeypatch.setattr(
+        training_utils, 'make_training_step_fn',
+        lambda *args: lambda params, opt_state, batch: (
+            params, opt_state, {'loss': jnp.array(1.0)}))
+    monkeypatch.setattr(
+        training_utils, 'make_validation_step_fn',
+        lambda *args: lambda params, batch: {'loss': jnp.array(eval_loss)})
+
+    kwargs = dict(
+        model=None, optimizer=SimpleNamespace(init=lambda params: ()), loss_fn=None,
+        graph_to_batch_fn=lambda *args: {'num_of_non_padded_graphs': 1},
+        batch_max_num_nodes=8, batch_max_num_edges=16,
+        batch_max_num_graphs=4, batch_max_num_pairs=0,
+        num_epochs=1, params={'w': jnp.array(0.0)}, ckpt_dir=tmp_path,
+        eval_every_num_steps=1, use_wandb=False,
+    )
+    if entry_point == 'fit':
+        training_utils.fit(training_data=[('graph', {})],
+                           validation_data=[('graph', {})], **kwargs)
+    else:
+        training_utils.fit_from_iterator(training_iterator=_OneBatchIterator(),
+                                         validation_iterator=_OneBatchIterator(),
+                                         **kwargs)
+    assert manager.saved_steps == saved_steps

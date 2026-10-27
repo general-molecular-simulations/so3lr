@@ -6,54 +6,11 @@ from ase.io import read
 from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 from so3lr.model_registry import resolve_model
 
+from model_references import TOLERANCES, V2_MODELS, reference_path
+
 # Original/legacy SO3LR model, resolved via the registry so the test is
 # decoupled from the on-disk layout (the model now lives under models/so3lr).
 MODEL_DIR = resolve_model('so3lr').dir
-
-
-@pytest.mark.parametrize('name', ['dha'])
-def test_molecules(name: str):
-    package_dir = pathlib.Path(__file__).parent.parent.resolve()
-
-    target_predictions = np.load(package_dir / f'tests/test_data/{name}_ase.npz')
-
-    atoms = read(package_dir / f'tests/test_data/{name}.xyz')
-
-    calc = AseCalculatorSparse.create_from_workdir(
-        workdir=MODEL_DIR,
-        lr_cutoff=12.,
-        dispersion_energy_cutoff_lr_damping=2.,
-        from_file=True,
-        dtype=np.float64
-    )
-
-    atoms.calc = calc
-
-    # for ASE we remove the cell
-    atoms.cell = None
-    atoms.pbc = False
-
-    energy = atoms.get_potential_energy()
-    forces = atoms.get_forces()
-
-    npt.assert_allclose(
-        target_predictions['energy'],
-        energy,
-        atol=1e-5,
-        rtol=1e-6
-    )
-
-    npt.assert_allclose(
-        target_predictions['forces'],
-        forces,
-        atol=1e-4
-    )
-
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(target_predictions['energy'], np.zeros_like(energy))
-
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
 def test_bounding_cell_does_not_change_free_molecule():
@@ -80,7 +37,12 @@ def test_bounding_cell_does_not_change_free_molecule():
 
 
 def test_water():
+    """Periodic water box against saved references, and its energy decomposition.
 
+    The components are read from the same evaluation (requesting observables
+    does not change the energy, see test_observables.py), so the 1536-atom box
+    is evaluated once for both checks.
+    """
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
     target_predictions = np.load(package_dir / f'tests/test_data/water_ase.npz')
@@ -94,7 +56,9 @@ def test_water():
         lr_cutoff=12.,
         dispersion_energy_cutoff_lr_damping=2.,
         from_file=True,
-        dtype=np.float64
+        dtype=np.float64,
+        has_aux=True,
+        observables=['zbl_repulsion', 'nn_energy', 'electrostatic_energy', 'dispersion_energy']
     )
 
     atoms.calc = calc
@@ -122,6 +86,20 @@ def test_water():
     with npt.assert_raises(AssertionError):
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
+    # The energy components sum to the total for the periodic box too.
+    results = calc.results['aux']
+    sum_components = sum(
+        np.sum(results[key])
+        for key in ('nn_energy', 'electrostatic_energy', 'dispersion_energy', 'zbl_repulsion')
+    )
+    npt.assert_allclose(
+        sum_components,
+        energy,
+        rtol=1e-4,
+        atol=1e-5,
+        err_msg="Energy components don't sum to total for water box"
+    )
+
 
 @pytest.mark.parametrize('name', ['dha'])
 def test_so3lr_ase_calculator(name: str):
@@ -134,7 +112,8 @@ def test_so3lr_ase_calculator(name: str):
     atoms = read(package_dir / f'tests/test_data/{name}.xyz')
 
     # Reference predictions were generated with the legacy (v1) model, so pin to
-    # it explicitly; the no-arg default is so3lr-tauri-m-2606 (see test_default_model_*).
+    # it explicitly; the no-arg default is so3lr-tauri-m-2606 (see
+    # tests/test_model_registry.py::test_defaults).
     calc = So3lrCalculator(
         model="so3lr",
         dtype=np.float64
@@ -177,13 +156,16 @@ def test_so3lr_ase_calculator(name: str):
 
 @pytest.mark.parametrize('calculate_stress', [True, False])
 def test_so3lr_ase_calculator_stress(calculate_stress: bool):
+    """Stress only when asked for. A contract test, so the 192-atom cell suffices:
+    below twice the cutoff the calculator uses explicit images, and stress values
+    are checked against finite differences in test_ase_small_cell.py."""
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
     atoms = read(
         package_dir / f'tests/test_data/water_64.xyz'
-    ) * [2, 2, 2]
+    )
 
     calc = So3lrCalculator(
         model="so3lr",
@@ -251,112 +233,41 @@ def test_so3lr_s_water():
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
 
 
-@pytest.mark.parametrize('name', ['dha'])
-def test_default_model_is_current_m(name: str):
-    """The no-arg default must equal the current M model and differ from legacy."""
+def test_shipped_default_has_a_reference():
+    """Changing DEFAULT_MODEL must come with a saved reference for the new default."""
+    from so3lr.model_registry import DEFAULT_MODEL
+    assert DEFAULT_MODEL in V2_MODELS
+
+
+@pytest.mark.parametrize('model', V2_MODELS)
+def test_v2_ase_calculator(model: str, x64):
+    """Regression check for bundled v2 models against saved references
+    (tests/model_references.py). Needs x64: the tight bounds hold in float64 only."""
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
-    atoms = read(package_dir / f'tests/test_data/{name}.xyz')
+    target = np.load(reference_path(model))
+
+    atoms = read(package_dir / 'tests/test_data/dha.xyz')
     atoms.cell = None
     atoms.pbc = False
-
-    def predict(model):
-        a = atoms.copy()
-        a.calc = So3lrCalculator(model=model, dtype=np.float64)
-        return a.get_potential_energy(), a.get_forces()
-
-    default_energy, default_forces = predict(None)        # no-arg default
-    m_energy, m_forces = predict("so3lr-tauri-m")
-    legacy_energy, _ = predict("so3lr")
-
-    # Outputs must be finite.
-    assert np.isfinite(default_energy)
-    assert np.all(np.isfinite(default_forces))
-
-    # The bare default must be exactly the current M release.
-    npt.assert_allclose(default_energy, m_energy, rtol=1e-10, atol=1e-10)
-    npt.assert_allclose(default_forces, m_forces, rtol=1e-10, atol=1e-10)
-
-    # It must be a genuinely different model from the legacy v1 model.
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(m_energy, legacy_energy, atol=1e-4)
-
-
-@pytest.mark.parametrize('name', ['dha'])
-def test_so3lr_s_ase_calculator(name: str):
-    """Regression check for bundled so3lr-tauri-s-2602 against saved references."""
-    from so3lr import So3lrCalculator
-
-    package_dir = pathlib.Path(__file__).parent.parent.resolve()
-
-    target_predictions = np.load(package_dir / f'tests/test_data/{name}_so3lr_s_ase.npz')
-
-    atoms = read(package_dir / f'tests/test_data/{name}.xyz')
-
-    calc = So3lrCalculator(
-        model="so3lr-tauri-s-2602",
-        dtype=np.float64
-    )
-
-    atoms.calc = calc
-
-    # for ASE we remove the cell
-    atoms.cell = None
-    atoms.pbc = False
-
+    # Energy and forces from the plain calculator users run; c6_ratios, a head of
+    # the v2 models, from a second one that returns it as an observable.
+    atoms.calc = So3lrCalculator(model=model, dtype=np.float64)
     energy = atoms.get_potential_energy()
     forces = atoms.get_forces()
-
-    npt.assert_allclose(
-        target_predictions['energy'],
-        energy,
-        atol=2e-5,
-        rtol=1e-6
-    )
-
-    npt.assert_allclose(
-        target_predictions['forces'],
-        forces,
-        atol=1e-4
-    )
-
-    # c6_ratios is a dedicated head of the new models; check it against the
-    # saved reference via the aux observable output.
-    calc_obs = So3lrCalculator(
-        model="so3lr-tauri-s-2602",
-        dtype=np.float64,
-        has_aux=True,
-        observables=['c6_ratios']
-    )
     atoms_obs = atoms.copy()
-    atoms_obs.calc = calc_obs
-    _ = atoms_obs.get_potential_energy()
-    c6_ratios = np.asarray(calc_obs.results['aux']['c6_ratios'])
+    atoms_obs.calc = So3lrCalculator(model=model, dtype=np.float64, has_aux=True,
+                                     observables=['c6_ratios'])
+    atoms_obs.get_potential_energy()
+    c6_ratios = np.asarray(atoms_obs.calc.results['aux']['c6_ratios'])
 
-    npt.assert_allclose(
-        target_predictions['c6_ratios'],
-        c6_ratios,
-        atol=1e-5
-    )
-
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(
-            target_predictions['c6_ratios'],
-            np.zeros_like(c6_ratios)
-        )
-
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(
-            target_predictions['energy'],
-            np.zeros_like(energy)
-        )
-
-    with npt.assert_raises(AssertionError):
-        npt.assert_allclose(
-            target_predictions['forces'],
-            np.zeros_like(forces)
-        )
+    for key, value in (('energy', energy), ('forces', forces), ('c6_ratios', c6_ratios)):
+        npt.assert_allclose(value, target[key], rtol=0, atol=TOLERANCES[key],
+                            err_msg=f'{model} {key}')
+    # The references are not degenerate.
+    assert abs(target['energy']) > 1.0 and np.abs(target['forces']).max() > 0.1
+    assert np.abs(target['c6_ratios']).max() > 0.1
 
 
 def test_calculate_hessian_is_forwarded_by_make_ase_calculator():

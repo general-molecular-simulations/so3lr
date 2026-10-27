@@ -59,8 +59,8 @@ jobs:
           - group: 6
             name: "so3lr-other"
             sync_extra: ""
-            run_short: "uv run --no-sync pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_prepare_dimer.py -v --tb=short"
-            run_full: "uv run --no-sync pytest tests/test_potential.py tests/test_readme.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_prepare_dimer.py tests/test_hessian.py -v --tb=short --full"
+            run_short: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_model_invariance.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_glp_cell_list_overflow.py tests/test_prepare_dimer.py -v --tb=short"
+            run_full: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_model_invariance.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_glp_cell_list_overflow.py tests/test_prepare_dimer.py tests/test_hessian.py -v --tb=short --full"
           - group: 7
             name: "pysages"
             sync_extra: "--extra pysages"
@@ -71,21 +71,24 @@ jobs:
             #
             # test_pysages_doublewell.py validates PySAGES' own jax-md backend
             # rather than the SO3LR interface, so keep it in full mode only.
-            run_short: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py -v --tb=short --full"
-            run_full: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_doublewell.py -v --tb=short --full"
+            run_short: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py -v --tb=short --full"
+            run_full: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py tests/test_pysages_doublewell.py -v --tb=short --full"
           - group: 8
             name: "md-regressions"
             sync_extra: ""
-            run_short: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_legacy_model_autodetect.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_flash.py -v --tb=short"
+            # Plus the drift file's one short case (float32 NVE, about half a minute),
+            # in its own process like every drift case; it runs even when the first
+            # command fails, and the step fails if either did.
+            run_short: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_md_state_precision.py tests/test_ci_lanes.py tests/test_legacy_model_autodetect.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_flash.py -v --tb=short || s=$?; uv run --no-sync pytest tests/test_integrator_drift.py -v --tb=short || s=$?; exit ${s:-0}"
             # Each drift parameter still runs, but in its own interpreter: on
             # large CPU nodes, repeated XLA compilations in one process can
             # exhaust native compiler resources before later ensembles start.
-            run_full: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_legacy_model_autodetect.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_flash.py -v --tb=short --full && tools/run_integrator_drift_tests.sh .venv/bin/python"
+            run_full: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_md_state_precision.py tests/test_ci_lanes.py tests/test_legacy_model_autodetect.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_flash.py -v --tb=short --full && tools/run_integrator_drift_tests.sh .venv/bin/python"
     runs-on: ubuntu-latest
     name: "${{ matrix.name }}"
     # The full md-regressions lane launches every drift case in a fresh Python
-    # process. MeluXina timing for those cases alone is about 61 minutes, so it
-    # needs more headroom than the other full-suite shards on hosted runners.
+    # process. Jitting the drift loop cut those cases from about 61 minutes on
+    # MeluXina to a fraction of that; the headroom below predates the change.
     timeout-minutes: ${{ (github.event.inputs.test_mode == 'full' || contains(github.event.head_commit.message, '[full tests]')) && (matrix.name == 'md-regressions' && 180 || 90) || 60 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

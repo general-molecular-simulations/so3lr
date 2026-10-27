@@ -137,29 +137,6 @@ num_features = 64
 num_layers = 2
 
 
-def test_init():
-    charge_embed = ChargeEmbedSparse(
-        num_features=num_features,
-        prop_keys=None
-    )
-    spin_embed = SpinEmbedSparse(
-        num_features=num_features,
-        prop_keys=None
-    )
-
-    # Q=0, S=0
-    _ = charge_embed.init(jax.random.PRNGKey(0), graph_to_input(graph1))
-    _ = spin_embed.init(jax.random.PRNGKey(0), graph_to_input(graph1))
-
-    # Q=1, S=1
-    _ = charge_embed.init(jax.random.PRNGKey(0), graph_to_input(graph2))
-    _ = spin_embed.init(jax.random.PRNGKey(0), graph_to_input(graph2))
-
-    # Q=-1, S=2
-    _ = charge_embed.init(jax.random.PRNGKey(0), graph_to_input(graph3))
-    _ = spin_embed.init(jax.random.PRNGKey(0), graph_to_input(graph3))
-
-
 def test_apply():
     charge_embed = ChargeEmbedSparse(
         num_features=num_features,

@@ -18,13 +18,16 @@ def test_data_load(calculate_neighbors_lr: bool):
     f = TEST_DIR / filename
 
     loader = NpzDataLoaderSparse(input_file=f)
+    npt.assert_equal(loader.cardinality(), 2000)
+    # Build only the frames the checks below inspect, not all 2000.
+    sample_indices = np.arange(0, 100, 10)
     all_data, data_stats = loader.load(
         cutoff=5.,
         calculate_neighbors_lr=calculate_neighbors_lr,
-        cutoff_lr=10.
+        cutoff_lr=10.,
+        pick_idx=sample_indices,
     )
-    npt.assert_equal(len(all_data), 2000)
-    npt.assert_equal(loader.cardinality(), 2000)
+    npt.assert_equal(len(all_data), len(sample_indices))
 
     npt.assert_equal(data_stats['max_num_of_nodes'], 9)
     npt.assert_equal(data_stats['max_num_of_edges'], 72)
@@ -34,8 +37,7 @@ def test_data_load(calculate_neighbors_lr: bool):
     npt.assert_(isinstance(graph0, jraph.GraphsTuple))
     npt.assert_(isinstance(lr0, dict))
 
-    for i in range(0, 100)[::10]:
-        graph, lr = all_data[i]
+    for graph, lr in all_data:
         forces = graph.nodes.get('forces')
         positions = graph.nodes.get('positions')
         atomic_numbers = graph.nodes.get('atomic_numbers')
@@ -43,7 +45,7 @@ def test_data_load(calculate_neighbors_lr: bool):
         senders = graph.senders
         receivers = graph.receivers
         energy = graph.globals.get('energy')
-        cell = graph.edges.get('cell')
+        cell = graph.globals.get('cell')
         cell_offset = graph.edges.get('cell_offset')
         stress = graph.globals['stress']
         total_charge = graph.globals['total_charge']
@@ -98,7 +100,6 @@ def test_data_load(calculate_neighbors_lr: bool):
         npt.assert_equal(len(senders), len(receivers))
         npt.assert_equal(len(senders), 72)
 
-        npt.assert_equal(len(idx_j_lr), len(idx_j_lr))
         if calculate_neighbors_lr:
             npt.assert_equal(num_pairs, num_atoms * num_atoms - num_atoms)
             npt.assert_equal(len(idx_i_lr), num_pairs)
@@ -115,16 +116,18 @@ def test_data_load(calculate_neighbors_lr: bool):
 def test_data_load_with_pbc(calculate_neighbors_lr: bool):
     filename = 'test_data/data_set_pbc.npz'
     f = TEST_DIR / filename
+    sample_indices = np.arange(0, 50, 10)
     loader = NpzDataLoaderSparse(input_file=f)
     if calculate_neighbors_lr:
         # PBC long-range is now supported, so we just load and check
         all_data, data_stats = loader.load(
             cutoff=4.,
             calculate_neighbors_lr=calculate_neighbors_lr,
-            cutoff_lr=15.
+            cutoff_lr=15.,
+            pick_idx=sample_indices,
         )
 
-        npt.assert_equal(len(all_data), 50)
+        npt.assert_equal(len(all_data), len(sample_indices))
         npt.assert_equal(data_stats['max_num_of_nodes'], 110)
 
         graph0, lr0 = all_data[0]
@@ -132,20 +135,36 @@ def test_data_load_with_pbc(calculate_neighbors_lr: bool):
         npt.assert_(isinstance(lr0, dict))
         # PBC long-range should have cell_offsets
         npt.assert_(lr0.get('cell_offsets_lr') is not None)
+
+        # Long-range pair bookkeeping must be self-consistent (as in the ASE
+        # loader test): n_pairs == len(idx_i_lr) == len(idx_j_lr) and one (3,)
+        # cell shift per pair. With cutoff_lr=15 A and a 110-atom periodic cell
+        # there must be many pairs.
+        num_pairs = int(np.asarray(lr0['n_pairs'])[0])
+        idx_i_lr = np.asarray(lr0['idx_i_lr'])
+        idx_j_lr = np.asarray(lr0['idx_j_lr'])
+        cell_offsets_lr = np.asarray(lr0['cell_offsets_lr'])
+        npt.assert_(num_pairs > 0)
+        npt.assert_equal(len(idx_i_lr), num_pairs)
+        npt.assert_equal(len(idx_j_lr), num_pairs)
+        npt.assert_equal(cell_offsets_lr.shape, (num_pairs, 3))
+        # Indices must reference valid atoms in the 110-atom cell.
+        npt.assert_(idx_i_lr.min() >= 0 and idx_i_lr.max() < 110)
+        npt.assert_(idx_j_lr.min() >= 0 and idx_j_lr.max() < 110)
     else:
         all_data, data_stats = loader.load(
             cutoff=4.,
             calculate_neighbors_lr=calculate_neighbors_lr,
-            cutoff_lr=15.
+            cutoff_lr=15.,
+            pick_idx=sample_indices,
         )
-        npt.assert_equal(len(all_data), 50)
+        npt.assert_equal(len(all_data), len(sample_indices))
         npt.assert_equal(data_stats['max_num_of_nodes'], 110)
 
         graph0, lr0 = all_data[0]
         npt.assert_(isinstance(graph0, jraph.GraphsTuple))
 
-        for i in range(0, 50)[::5]:
-            graph, lr = all_data[i]
+        for graph, lr in all_data:
             positions = graph.nodes.get('positions')
             atomic_numbers = graph.nodes.get('atomic_numbers')
             senders = graph.senders
@@ -202,10 +221,12 @@ def test_jraph_dynamically_batch(calculate_neighbors_lr: bool):
     f = TEST_DIR / filename
 
     loader = NpzDataLoaderSparse(input_file=f)
+    # 27 frames: the largest slice used below is all_data[:9 * 3].
     all_data, data_stats = loader.load(
         cutoff=4.,
         calculate_neighbors_lr=calculate_neighbors_lr,
-        cutoff_lr=75.
+        cutoff_lr=75.,
+        pick_idx=np.arange(27),
     )
 
     num_atoms = 9

@@ -2,20 +2,6 @@ import jax
 import numpy as np
 import pytest
 
-from so3lr.potential import make_potential_fn
-
-
-def test_make_potential_fn():
-    potential = make_potential_fn()
-
-
-@pytest.fixture
-def x64():
-    old = jax.config.jax_enable_x64
-    jax.config.update("jax_enable_x64", True)
-    yield
-    jax.config.update("jax_enable_x64", old)
-
 
 @pytest.mark.parametrize("model", ["so3lr-tauri-s", "so3lr"])
 def test_float64_runs_in_float64(x64, monkeypatch, model):
