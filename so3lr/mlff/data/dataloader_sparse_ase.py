@@ -34,16 +34,12 @@ def compute_senders_and_receivers_np(
 
 
 # Calculate residue information for dimer calculations
-def parse_selection_range(selection_str):
-    """Parse selection string like '1-4' into number of atoms."""
-    if not selection_str or selection_str == "":
-        return 0
-    if '-' in selection_str:
-        start, end = selection_str.split('-')
-        return int(end) - int(start) + 1
-    else:
-        # Single atom selection
-        return 1
+def selection_indices(selection):
+    """0-based atom indices of a 1-based selection like '1-4' or '5' (empty if blank)."""
+    start, _, end = str(selection).partition('-')
+    if not start:
+        return np.array([], dtype=int)
+    return np.arange(int(start) - 1, int(end or start))
     
 
 @dataclass
@@ -298,20 +294,19 @@ def ASE_to_jraph(
     selection_b = mol.info.get('selection_b', None)
     # Only create residue info if all dimer properties are present
     if all(x is not None for x in [charge_a, charge_b, selection_a, selection_b]):
-        # Parse monomer sizes
-        n_monomer_a = parse_selection_range(selection_a)
-        n_monomer_b = parse_selection_range(selection_b)
-        # Validate that selections cover all atoms
-        if n_monomer_a > 0 and n_monomer_b > 0 and (n_monomer_a + n_monomer_b) == num_atoms:
+        idx_a, idx_b = selection_indices(selection_a), selection_indices(selection_b)
+        # Validate that the selections split all atoms into two non-empty monomers
+        both = np.sort(np.concatenate([idx_a, idx_b]))
+        if len(idx_a) and len(idx_b) and np.array_equal(both, np.arange(num_atoms)):
+            residue_segments = np.zeros(num_atoms, np.int32)
             if structure_type == 'dimer_translated':
                 # Separated monomers: each keeps its own charge.
+                residue_segments[idx_b] = 1
                 residue_charge = np.array([[int(charge_a), int(charge_b)]])
-                residue_segments = np.repeat(np.array([0, 1], np.int32), [n_monomer_a, n_monomer_b])
             else:
-                # The dimer itself (prepare_dimer_xyz writes both into one file): one residue with
-                # the total charge, so both kinds batch together with the same fields.
-                residue_charge = np.array([[int(total_charge[0]), 0]])
-                residue_segments = np.zeros(num_atoms, np.int32)
+                # The dimer itself (prepare_dimer_xyz writes both into one file): one residue that
+                # takes the total charge, so both kinds batch together with the same fields.
+                residue_charge = np.zeros((1, 2), dtype=int)
 
     if mol.get_pbc().any():
         i, j, S = neighbor_list('ijS', mol, cutoff, self_interaction=self_interaction)

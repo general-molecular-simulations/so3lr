@@ -236,27 +236,41 @@ class TestConsistencyBetweenCalculators:
 
 # --- Per-residue charge conservation (residue_charge / residue_segments) ---------
 
-def _residue_charges(inputs):
+def _residue_charges(inputs, **module_kwargs):
     """PartialChargesSparse charges for random features; inputs as the model receives them."""
     n = len(inputs['atomic_numbers'])
     inp = dict(inputs, x=np.random.default_rng(0).normal(size=(n, 8)))
-    mod = PartialChargesSparse(prop_keys={}, output_is_zero_at_init=False)
+    mod = PartialChargesSparse(prop_keys={}, output_is_zero_at_init=False, **module_kwargs)
     return np.asarray(mod.apply(mod.init(jax.random.PRNGKey(0), inp), inp)['partial_charges'])
 
 
-@pytest.mark.parametrize('segments, targets', [
-    pytest.param([0, 0, 0, 1, 1, 1, 1], [1., -1.], id='two-residues'),
-    pytest.param([0, 0, 2, 2, 2, 1, 1], [1., -1., 1.], id='three-residues'),
+@pytest.mark.parametrize('segments, residue_charge, total_charge, override, expected', [
+    pytest.param([0, 0, 0, 1, 1, 1, 1], [1., -1.], 0., None, [1., -1.], id='two-residues'),
+    pytest.param([0, 0, 2, 2, 2, 1, 1], [1., -1., 1.], 1., None, [1., -1., 1.], id='three-residues'),
+    # a dimer stored as one residue ([0, 0]) takes the total charge, or its override
+    pytest.param([0] * 7, [0., 0.], 1., None, [1., 0.], id='whole-dimer'),
+    pytest.param([0] * 7, [0., 0.], 1., -2., [-2., 0.], id='whole-dimer-override'),
 ])
-def test_residue_charges_single_structure(segments, targets):
-    """The unbatched path (PotentialSparse, base_calculator): one structure, (R,) targets."""
+def test_residue_charges_single_structure(segments, residue_charge, total_charge, override, expected):
+    """The unbatched path (PotentialSparse, base_calculator): one structure, (R,) residue charges."""
     n = len(segments)
     q = _residue_charges(dict(
         atomic_numbers=np.full(n, 6),
         batch_segments=np.zeros(n, np.int32), node_mask=np.ones(n, bool),
-        graph_mask=np.array([True]), total_charge=np.zeros(1),
-        residue_segments=np.array(segments), residue_charge=np.array(targets)))
-    npt.assert_allclose(np.bincount(segments, weights=q), targets, atol=1e-5)
+        graph_mask=np.array([True]), total_charge=np.array([total_charge]),
+        residue_segments=np.array(segments), residue_charge=np.array(residue_charge)),
+        total_charge_override=override)
+    npt.assert_allclose(np.bincount(segments, weights=q, minlength=len(expected)), expected, atol=1e-5)
+
+
+def test_residue_segments_follow_the_selections():
+    """Monomer A need not come first in the file."""
+    d = molecule('NH3') + molecule('H2O')          # atoms 1-4: NH3 (monomer B), 5-7: H2O (A)
+    d.info.update(structure_type='dimer_translated', charge=1, charge_a=0, charge_b=1,
+                  selection_a='5-7', selection_b='1-4')
+    graph, _ = ASE_to_jraph(d, cutoff=5.0, calculate_neighbors_lr=False)
+    npt.assert_array_equal(graph.nodes['residue_segments'], [1, 1, 1, 1, 0, 0, 0])
+    npt.assert_array_equal(graph.globals['residue_charge'], [[0, 1]])
 
 
 def test_residue_charges_batched_through_the_loader():

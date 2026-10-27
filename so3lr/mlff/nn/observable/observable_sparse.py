@@ -638,8 +638,8 @@ class PartialChargesSparse(BaseSubModule):
     # which is a research knob rather than a correction. Left at None, nothing
     # changes.
     #
-    # Does not apply to the ``residue_charge`` path: when per-residue charges are
-    # supplied they keep taking precedence, as before.
+    # With per-residue charges, residue 0 takes the difference between the
+    # (overridden) total and the residue charges.
     total_charge_override: Optional[float] = None
     module_name: str = 'partial_charges_sparse'
 
@@ -669,8 +669,9 @@ class PartialChargesSparse(BaseSubModule):
                 node_mask (Array): Node mask, shape: (num_nodes)
                 graph_mask (Array): Graph mask, shape: (num_graphs)
                 total_charge (Array): Target total charge per structure, shape: (num_graphs)
-                residue_charge (Array, optional): Target charge per residue for dimer calculations,
-                    shape: (num_graphs, num_residues), or (num_residues) for a single structure.
+                residue_charge (Array, optional): How total_charge splits into residues (dimer
+                    monomers); residue 0 takes any difference to total_charge.
+                    Shape: (num_graphs, num_residues), or (num_residues) for a single structure.
                 residue_segments (Array, optional): 0-based residue id of each atom within its
                     structure (< num_residues), shape: (num_nodes).
 
@@ -687,8 +688,6 @@ class PartialChargesSparse(BaseSubModule):
         total_charge = inputs['total_charge']  # (num_graphs)
 
         if self.total_charge_override is not None:
-            # Applied before the residue rebinding below, so residue_charge
-            # still wins when it is provided.
             total_charge = jnp.full_like(total_charge, self.total_charge_override)
 
         num_graphs = len(graph_mask)
@@ -726,6 +725,8 @@ class PartialChargesSparse(BaseSubModule):
         residue_charge = inputs.get('residue_charge')
         if residue_charge is not None:
             residue_charge = jnp.asarray(residue_charge, x_q.dtype).reshape(num_graphs, -1)
+            # The total charge stays authoritative (overrides apply): residue 0 takes the rest.
+            residue_charge = residue_charge.at[:, 0].add(total_charge - residue_charge.sum(axis=1))
             num_residues = residue_charge.shape[1]
             batch_segments = batch_segments * num_residues + jnp.asarray(inputs['residue_segments'], jnp.int32)
             total_charge = residue_charge.reshape(-1)
