@@ -327,7 +327,6 @@ model:
   residual_mlp_1: true
   residual_mlp_2: false
   use_charge_embed: true
-  legacy_so3lr_bool: false
   use_final_bias_bool: false
   use_residual_scalars: true
   use_rms_norm: true

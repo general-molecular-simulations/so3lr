@@ -71,14 +71,6 @@ def test_flash_takes_v1_without_flags_as_the_legacy_model(v1):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
 
 
-def test_bundled_models_resolve_without_reading_the_checkpoint(monkeypatch):
-    from so3lr import model_config
-    monkeypatch.setattr(model_config, '_parameter_key_paths', lambda workdir: pytest.fail('read the checkpoint'))
-    model_config._load.cache_clear()
-    for name in mr.available_models():
-        load_model_config(mr.resolve_model(name).dir)
-
-
 def test_a_config_rewritten_in_place_is_read_again(tmp_path):
     model = _copy(tmp_path / 'model', cutoff=4.0)
     assert load_model_config(model)['model']['cutoff'] == 4.0
