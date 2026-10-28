@@ -1453,6 +1453,7 @@ def nve_md(**kwargs) -> None:
 @kspace_electrostatics_options
 @kspace_dispersion_options
 @flash_options
+@md_precision_option
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def eval_model(
@@ -1491,6 +1492,7 @@ def eval_model(
     flash_mode: str = 'auto',
     flash_mixed: bool = True,
     flash_devices: int = 1,
+    md_precision: Optional[str] = None,
 ) -> None:
     """
     Evaluate SO3LR model on a dataset.
@@ -1564,7 +1566,8 @@ def eval_model(
         kspace_dispersion=kspace_dispersion, kspace_dispersion_smearing=kspace_dispersion_smearing,
         kspace_dispersion_spacing=kspace_dispersion_spacing,
         kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
-        engine=engine, flash_mode=flash_mode, flash_mixed=flash_mixed, flash_devices=flash_devices)
+        engine=engine, flash_mode=flash_mode, flash_mixed=flash_mixed, flash_devices=flash_devices,
+        md_precision=md_precision)
     # before JAX starts: what flash may run (the structures are checked once read)
     reserve_gpu(settings, task='eval')
     # Log hardware info

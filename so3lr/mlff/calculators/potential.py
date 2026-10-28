@@ -28,6 +28,12 @@ def cast_float_params(params, dtype):
         lambda v: jnp.asarray(v, dtype) if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating) else v, params)
 
 
+def require_x64(dtype):
+    """Raise for float64 without x64, which JAX truncates to float32 with a warning only."""
+    if np.dtype(dtype) == np.float64 and not jax.config.jax_enable_x64:
+        raise ValueError("float64 needs jax.config.update('jax_enable_x64', True) first")
+
+
 def load_hyperparameters(workdir: str):
     """Load hyperparameters from workdir (see ``so3lr.model_config``)."""
     from ...model_config import load_model_config
@@ -206,7 +212,8 @@ class PotentialSparse:
             from_file: Whether to load from pickle file
             add_shift: Whether to add energy shift
             long_range_kwargs: Dictionary with keyword arguments for the long-range modules
-            dtype: Data type for computation
+            dtype: the model's dtype; the graph is cast to it (its edges formed before, in
+                the positions' dtype, as jaxmd_utils.neighbor_list_featurizer does)
             model: Model type ('so3krates')
             output_intermediate_quantities: Optional sequence of intermediate quantities to output
             charge_embed_total_charge: Override the total charge seen by the charge
@@ -218,6 +225,7 @@ class PotentialSparse:
         Returns:
             PotentialSparse instance
         """
+        require_x64(dtype)
 
         if add_shift is True and (dtype == np.float32 or dtype == jnp.float32):
             logging.warning(
@@ -296,7 +304,7 @@ class PotentialSparse:
             return x
 
         def potential_fn(graph: Graph, has_aux: bool = False):
-            x = graph_to_mlff_input(graph)
+            x = graph_to_mlff_input(cast_float_params(graph, dtype))
             y = obs_fn(params, **x)
 
             shifted_energy = shift(y['energy'], x['atomic_numbers']).reshape(-1).astype(dtype)

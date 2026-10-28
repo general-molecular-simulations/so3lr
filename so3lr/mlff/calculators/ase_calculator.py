@@ -12,7 +12,7 @@ from ase.calculators.calculator import Calculator
 from so3lr.graph import Graph as So3lrGraph
 from so3lr.mlff.calculators import exact_neighbors
 from so3lr.mlff.geometric.cutoff import add_cell_offsets_sparse
-from so3lr.mlff.calculators.potential import PotentialSparse
+from so3lr.mlff.calculators.potential import PotentialSparse, require_x64
 from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
 from so3lr.pbc import is_fully_periodic, lattice_rows
 
@@ -190,6 +190,7 @@ class AseCalculatorSparse(Calculator):
         """
         if neighbor_backend not in ('auto', 'glp', 'exact'):
             raise ValueError(f"neighbor_backend must be 'auto', 'glp' or 'exact', got {neighbor_backend!r}.")
+        require_x64(dtype)
         self.neighbor_backend = neighbor_backend
         self._exact_nb = None
         self._exact_nb_natoms = None
