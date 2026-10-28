@@ -242,11 +242,12 @@ def cell_grid(L, rc, rc_lr):
 
 def grid_problem(L, rc, rc_lr):
     """Why the engine cannot hold the cell grid (``cell_grid``) of an orthorhombic box of
-    sides L that ``box_problem`` takes (None if it can): fewer than MAX_CELLS cells."""
+    sides L that ``box_problem`` takes (None if it can): fewer than MAX_CELLS cells. The
+    engine raises it when it lays out a box (``_layout``)."""
     grid = cell_grid(L, rc, rc_lr)
     if grid is not None and math.prod(grid[0]) >= MAX_CELLS:
         return (f"box {[round(v) for v in L]} A too large for the cell grid "
-                f"({' x '.join(map(str, grid[0]))} cells, 2^28 or more)")
+                f"({' x '.join(map(str, grid[0]))} cells, 2^{MAX_CELLS.bit_length() - 1} or more)")
     return None
 
 
@@ -316,21 +317,30 @@ def _restart_box(settings):
     return box if box is not None and np.any(box) else None
 
 
-def structure_problem(settings, atoms, rc):
+def _span(atoms):
+    """The ``vacuum_size`` of atoms, NaN with none (or with a position not finite)."""
+    R = np.asarray(atoms.get_positions(), np.float64)
+    return float(vacuum_size(R)) if len(R) else math.nan
+
+
+def structure_problem(settings, atoms, rc, span=None):
     """Why flash cannot take this structure, or the restart's box (None if it can); rc: the
     model's cutoff (``model_cutoff``). A structure in free space (``in_vacuum``) runs in a
     box the engine lays out around it (``vacuum_box``), whose cell grid one atom far from
-    the rest (a dimer translated apart) makes too large."""
+    the rest (a dimer translated apart) makes too large; span: its ``_span``, if known."""
     rc_lr = float(settings.get("lr_cutoff") or 12.0)
     if in_vacuum(atoms):
         problem = vacuum_problem(settings)
-        if problem is None:
-            size = vacuum_size(np.asarray(atoms.get_positions(), np.float64))
-            L, reach = vacuum_box(size, rc, rc_lr)
-            problem = grid_problem([L] * 3, rc, reach)
-            if problem:
-                problem = f"its atoms span {size:.0f} A (one far from the rest?), a free-space {problem}"
-        return problem
+        if problem:
+            return problem
+        if not len(atoms):
+            return "it has no atoms"
+        size = _span(atoms) if span is None else span
+        if not math.isfinite(size):
+            return "its positions are not all finite"
+        L, reach = vacuum_box(size, rc, rc_lr)
+        problem = grid_problem([L] * 3, rc, reach)
+        return problem and f"its atoms span {size:.0f} A (one far from the rest?), a free-space {problem}"
     if not atoms.pbc.all() or atoms.cell.rank < 3:
         return "it needs a box periodic in all three directions, or no box"
     cell = np.asarray(atoms.cell[:])
@@ -392,19 +402,20 @@ def frames_problem(settings, frames):
     """Why flash cannot take one of these structures (None if it can take them all): each
     distinct box checked once, and in free space each structure that spans more than those
     before it (the box laid out around the atoms grows with their span)."""
-    rc, seen, span = model_cutoff(settings.get("model_path")), set(), -1.0
+    rc, seen, widest = model_cutoff(settings.get("model_path")), set(), -1.0
     for i, atoms in enumerate(frames):
+        span = None
         if in_vacuum(atoms):
-            size = vacuum_size(np.asarray(atoms.get_positions(), np.float64))
-            if size <= span:
+            span = _span(atoms)
+            if span <= widest:                           # NaN is checked (and declined)
                 continue
-            span = size
+            widest = span
         else:
             key = (tuple(bool(p) for p in atoms.pbc), np.asarray(atoms.cell[:]).tobytes())
             if key in seen:
                 continue
             seen.add(key)
-        problem = structure_problem(settings, atoms, rc)
+        problem = structure_problem(settings, atoms, rc, span)
         if problem:
             return problem if len(frames) == 1 else f"structure {i}: {problem}"
     return None

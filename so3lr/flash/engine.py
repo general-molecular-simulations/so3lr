@@ -64,7 +64,7 @@ from jax.experimental.pallas import triton as plgpu
 import jaxpme
 
 from so3lr.flash import blocks
-from so3lr.flash.check import MAX_CELLS, box_problem, cell_grid, is_rocm, vacuum_box, vacuum_fits, vacuum_size
+from so3lr.flash.check import box_problem, cell_grid, grid_problem, is_rocm, vacuum_box, vacuum_fits, vacuum_size
 from so3lr.mlff.nn.embed.embed_sparse import PAIR_FLOOR_WIDTH, nlh_reference_distance
 from so3lr.mlff.nn.observable.observable_sparse import c6_raw_potential
 from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
@@ -1357,16 +1357,13 @@ class FlashSO3LR:
         small = [v * (1.0 - self.box_margin) for v in L]
         if box_problem(small, self.rc, self.reach):
             small = L                     # near the smallest box: no room to shrink in this layout
-        problem = box_problem(small, self.rc, self.reach)
+        problem = box_problem(small, self.rc, self.reach) or grid_problem(small, self.rc, self.reach)
         if problem:
-            raise ValueError(problem)
+            raise ValueError(problem + (" (an atom far from the rest? free space takes a box around all of them)"
+                                        if self.vacuum else ""))
         self.L, self.L_lo = L, small
         self.box = jnp.asarray(L, jnp.float64 if jax.config.jax_enable_x64 else self.dtype)
         self.nc, self.kc = cell_grid(small, self.rc, self.reach)
-        if math.prod(self.nc) >= MAX_CELLS:
-            raise ValueError(f"cell grid {self.nc} has 2^28 cells or more: a {L[0]:.0f} A box is too large"
-                             + (" (an atom far from the rest? free space takes a box around all of them)"
-                                if self.vacuum else ""))
         self.mesh_el, self.mesh_disp = self._meshes(L)
         for m in (self.mesh_el, self.mesh_disp):
             if m and math.prod(m) >= 2 ** 31:
