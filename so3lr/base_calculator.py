@@ -4,6 +4,7 @@ import jax.numpy as jnp
 from so3lr.mlff.calculators.potential import (
     build_long_range_kwargs, cast_float_params, load_model_from_workdir, require_x64)
 from so3lr.mlff.nn.embed.embed_sparse import pair_displacements
+from so3lr.mlff.nn.observable.observable_sparse import EnergySparse
 from so3lr.model_registry import resolve_model
 
 
@@ -47,6 +48,10 @@ def make_so3lr(
     )
 
     model.reset_input_convention('displacements')
+    # per-atom energies, summed per structure in forward in the positions' dtype
+    for observable in model.observables:
+        if isinstance(observable, EnergySparse):
+            observable.reset_output_convention('per_atom')
     if precision is not None:
         require_x64(precision)
         params = cast_float_params(params, precision)
@@ -77,12 +82,16 @@ def make_so3lr(
         )
         inputs['displacements'], inputs['displacements_lr'] = pair_displacements(inputs)
 
-        # the parameters too: the checkpoint's are float32
+        # the parameters too when precision is None: the checkpoint's are float32
         dtype = precision or positions.dtype
-        output = model.apply(cast_float_params(params, dtype), cast_float_params(inputs, dtype))
+        output = model.apply(params if precision else cast_float_params(params, dtype),
+                             cast_float_params(inputs, dtype))
 
-        # We sum over all energies, in the positions' dtype
-        summed_energy = jnp.sum(jnp.where(graph_mask, output['energy'].astype(positions.dtype), 0.))
+        # the structures' energies, summed over their atoms in the positions' dtype
+        energy = jax.ops.segment_sum(output['energy'].astype(positions.dtype), batch_segments,
+                                     num_segments=len(graph_mask))
+        output['energy'] = jnp.where(graph_mask, energy, 0.)
+        summed_energy = jnp.sum(output['energy'])
 
         return -summed_energy, output
 

@@ -188,6 +188,7 @@ def pair_displacements(inputs: Dict):
     idx_i_lr, idx_j_lr, cell_offsets_lr = inputs.get('idx_i_lr'), inputs.get('idx_j_lr'), inputs.get('cell_offset_lr')
     if idx_i_lr is None or len(idx_i_lr) == 0:
         return r_ij, None
+    assert idx_j_lr is not None and len(idx_j_lr) > 0
     if cell_offsets_lr is None:
         return r_ij, positions[idx_j_lr] - positions[idx_i_lr]
     if cell is not None:

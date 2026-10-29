@@ -663,8 +663,7 @@ def test_eval_on_flash_matches_neighbour_lists(tmp_path, pme):
     (the engine's box moves), the third with a water fewer and a charge of +1 (a new engine;
     the charge embedding, made of parameters alone, in float64 on both engines). The energies are
     So3lrCalculator's in float64 and the force metrics and forces so3lr eval's on the
-    neighbour-list model (whose energies are 3.5e-8 eV/atom off float64 here: make_so3lr
-    takes no dtype)."""
+    neighbour-list model."""
     from ase.calculators.singlepoint import SinglePointCalculator
     from ase.io import read, write
     from so3lr import So3lrCalculator

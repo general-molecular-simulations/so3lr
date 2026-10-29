@@ -14,6 +14,7 @@ from so3lr.mlff.calculators import exact_neighbors
 from so3lr.mlff.geometric.cutoff import add_cell_offsets_sparse
 from so3lr.mlff.calculators.potential import PotentialSparse, require_x64
 from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
+from so3lr.md_settings_validation import state_precision
 from so3lr.pbc import is_fully_periodic, lattice_rows
 
 from glp.calculators.utils import get_strain, strain_system
@@ -95,6 +96,7 @@ class AseCalculatorSparse(Calculator):
             charge_embed_total_charge: Optional[float] = None,
             charge_equilibration_total_charge: Optional[float] = None,
             neighbor_backend: str = 'auto',
+            md_precision: Optional[str] = None,
             **kwargs
     ):
         if observables is not None and len(observables) > 0:
@@ -154,6 +156,7 @@ class AseCalculatorSparse(Calculator):
                    kspace_smearing=kspace_smearing,
                    kspace_spacing=kspace_spacing,
                    neighbor_backend=neighbor_backend,
+                   md_precision=md_precision,
                    )
 
     def __init__(
@@ -173,6 +176,7 @@ class AseCalculatorSparse(Calculator):
             kspace_smearing: Optional[float] = None,
             kspace_spacing: Optional[float] = None,
             neighbor_backend: str = 'auto',
+            md_precision: Optional[str] = None,
             *args,
             **kwargs
     ):
@@ -187,6 +191,10 @@ class AseCalculatorSparse(Calculator):
             'auto'  (default) 'exact' whenever the minimum image would be wrong
                     (non-orthorhombic cell, or any height <= 2 * cutoff), else 'glp'.
                     Finite systems always use 'glp'.
+
+        dtype is the model's. The positions, displacements, energy sum and results are in the
+        MD state's dtype, as in so3lr's MD: md_precision (float64 if unset, which needs x64;
+        without it, dtype).
         """
         if neighbor_backend not in ('auto', 'glp', 'exact'):
             raise ValueError(f"neighbor_backend must be 'auto', 'glp' or 'exact', got {neighbor_backend!r}.")
@@ -212,7 +220,8 @@ class AseCalculatorSparse(Calculator):
         def total_energy(graph, aux=has_aux):
             """Total energy of the graph, with the model's aux output when aux is set."""
             out = potential(graph, has_aux=aux)
-            return (out[0].sum(), out[1]) if aux else out.sum()
+            energy = (out[0] if aux else out).astype(graph.positions.dtype).sum()
+            return (energy, out[1]) if aux else energy
 
         def energy_at(R, system, neighbors, aux=has_aux):
             return total_energy(_system_to_graph(system._replace(R=R), neighbors), aux)
@@ -360,7 +369,13 @@ class AseCalculatorSparse(Calculator):
                 # Common setting for simulations in a box of water.
                 self.lr_cutoff = potential.long_range_cutoff
 
-        self.dtype = dtype
+        # the geometry's dtype (the model's is the potential's)
+        precision = np.dtype(dtype).name
+        if md_precision is not None:
+            md_precision = np.dtype(md_precision).name
+            require_x64(md_precision)
+        geometry = state_precision(precision, {'md_precision': md_precision})  # validates md_precision
+        self.dtype = np.dtype(geometry if jax.config.jax_enable_x64 else precision)
         self.head_index = head_index
         self.kspace_electrostatics = kspace_electrostatics
         self.kspace_smearing = kspace_smearing
