@@ -1092,6 +1092,7 @@ def to_jax_md_custom(
         total_charge: float = 0.,
         precision: jnp.dtype = jnp.float32,
         num_unpaired_electrons: float = 0.,
+        remove_net_force: bool = False,
         **neighbor_kwargs
 ):
     """Create neighbor functions and a jax-md energy function for the MD engine.
@@ -1117,6 +1118,8 @@ def to_jax_md_custom(
         total_charge: Total charge of the system.
         precision: Precision to use for the auxiliary graph arrays.
         num_unpaired_electrons: Number of unpaired electrons (spin).
+        remove_net_force: Forces minus their mean, so they sum to zero
+            (see :func:`so3lr.jaxmd_utils.without_net_force`).
         **neighbor_kwargs: Additional keyword arguments for neighbor functions.
 
     Returns:
@@ -1138,8 +1141,19 @@ def to_jax_md_custom(
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
         precision=precision,
+        remove_net_force=remove_net_force,
         **neighbor_kwargs,
     )
+
+
+def remove_kspace_net_force(all_settings: Dict) -> bool:
+    """Whether the forces are made to sum to zero: with a k-space part (PME or
+    Ewald, electrostatics or dispersion) unless ``kspace_remove_net_force: false``.
+    PME's mesh is fixed in space, so its forces leave a small net force that drifts
+    the whole box over a run (AMBER removes it the same way, netfrc)."""
+    kspace = (all_settings.get('kspace_electrostatics') is not None
+              or all_settings.get('kspace_dispersion') is not None)
+    return bool(kspace and all_settings.get('kspace_remove_net_force', True))
 
 
 def process_model(
@@ -1155,6 +1169,7 @@ def process_model(
     precision: jnp.dtype = jnp.float32,
     fractional_coordinates: bool = False,
     has_aux: bool = False,
+    remove_net_force: bool = False,
 ) -> Tuple[callable, callable, callable]:
     """
     Process the model and create the neighbor functions and energy function.
@@ -1177,6 +1192,9 @@ def process_model(
                     coordinates or not (needs to be True for periodic systems).
                                             Defaults to False.
         has_aux (bool, optional): Unused; the returned function takes has_aux per call.
+        remove_net_force (bool, optional): Forces minus their mean, so they sum to
+                    zero (k-space; see :func:`remove_kspace_net_force`).
+                                            Defaults to False.
 
     Returns:
         Tuple[callable, callable, callable]: Short- and long-range neighbor functions
@@ -1205,6 +1223,7 @@ def process_model(
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
         minimum_cell_size_multiplier=minimum_cell_size_multiplier,
+        remove_net_force=remove_net_force,
     )
 
     return neighbor_fn, neighbor_fn_lr, energy_or_obs_fn
@@ -1881,6 +1900,8 @@ def perform_md(
     charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
     charge_equilibration_total_charge = all_settings.get('charge_equilibration_total_charge', None)
     kspace_npt_cycles = all_settings.get('kspace_npt_cycles', 100)
+    if remove_kspace_net_force(all_settings):
+        logger.info('K-space: net force removed (forces minus their mean; kspace_remove_net_force).')
 
     # Dispersion PME settings
     kspace_dispersion = all_settings.get('kspace_dispersion', None)
@@ -2235,6 +2256,7 @@ def perform_md(
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
         minimum_cell_size_multiplier=minimum_cell_size_multiplier,
+        remove_net_force=remove_kspace_net_force(all_settings),
         has_aux=len(observables)>0,
     )
     if cell is not None:
@@ -3167,6 +3189,7 @@ def perform_min(
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
         minimum_cell_size_multiplier=minimum_cell_size_multiplier,
+        remove_net_force=remove_kspace_net_force(all_settings),
     )
 
     k_grid, k_smearing = setup_kspace_grid(

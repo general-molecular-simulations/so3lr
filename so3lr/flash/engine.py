@@ -30,7 +30,9 @@ exists), and tiled execution (the per-atom work runs over fixed-size atom tiles)
 * Long range in real space, or with particle-mesh Ewald for electrostatics and/or
   dispersion (``pme_electrostatics=(smearing, spacing)``, ``pme_dispersion=...``: the
   mesh as jaxpme builds it for ``--kspace-electrostatics pme`` /
-  ``kspace_dispersion: pme``).
+  ``kspace_dispersion: pme``). The mesh is fixed in space, so its forces leave a small
+  net force; with ``remove_net_force`` (default) the forces are returned minus their mean
+  (as AMBER's netfrc), which keeps an MD box from drifting as a whole.
 * ``energy_forces_strain`` also returns dE/d(strain) (the isotropic virial, box and
   positions scaled together, as jax-md's NPT takes it); the box is an argument of the
   compiled programs (``set_box``), so a box that moves compiles nothing.
@@ -1216,7 +1218,7 @@ class FlashSO3LR:
                  equilibration_charge=None, tile=1 << 17, max_neighbours=None, lr_scratch=1024,
                  keep_layer_inputs=True, keep_attention=False, split_channels=False,
                  split_blocks=False, pme_electrostatics=None, pme_dispersion=None, box_margin=0.0,
-                 devices=1, atoms_per_program=None, size=None):
+                 devices=1, atoms_per_program=None, size=None, remove_net_force=True):
         degrees = [int(d) for d in statics["degrees"]]
         self.nh = int(statics["num_heads"])
         # one head per degree entry, each on its own block of G features (so3lr-tauri-s/m: 4 x 32,
@@ -1321,6 +1323,8 @@ class FlashSO3LR:
         self.pme_disp = tuple(float(v) for v in pme_dispersion) if pme_dispersion and self.disp else None
         if self.vacuum and (self.pme_el or self.pme_disp):
             raise ValueError("PME needs a box")
+        # the mesh's net force taken out of the forces (the rest of the model has none)
+        self.net_free = bool(remove_net_force) and bool(self.pme_el or self.pme_disp)
         # the pair tables' end: 8 sigma, past which phi is in closed form (_far_field); with
         # PME the cutoff (the dispersion mesh's table shares the grid)
         self.r_tab = self.rc_lr if self.pme_el or self.pme_disp or not self.elec else min(self.rc_lr, 8.0 * sig)
@@ -1935,7 +1939,7 @@ class FlashSO3LR:
         """(energy, forces, overflow, dE/d(strain)); on several devices one program per
         device (shard_map), each computing its own rows, R and the results the same on all."""
         if self.P == 1:
-            return self._energy_forces_rows(R)
+            return self._without_net_force(*self._energy_forces_rows(R))
         from jax.sharding import PartitionSpec
         rep = PartitionSpec()
 
@@ -1945,8 +1949,16 @@ class FlashSO3LR:
                 return self._energy_forces_rows(R)
             finally:
                 self._Lt = keep
-        return jax.shard_map(per_device, mesh=self.device_mesh, in_specs=(rep, rep), out_specs=(rep,) * 4,
-                             check_vma=False)(R, self.box if self._Lt is None else self._Lt)
+        return self._without_net_force(*jax.shard_map(
+            per_device, mesh=self.device_mesh, in_specs=(rep, rep), out_specs=(rep,) * 4,
+            check_vma=False)(R, self.box if self._Lt is None else self._Lt))
+
+    def _without_net_force(self, energy, forces, *rest):
+        """The forces minus their mean with PME (``remove_net_force``); the energy and
+        dE/d(strain) as they are."""
+        if self.net_free:
+            forces = forces - jnp.mean(forces, axis=0, keepdims=True)
+        return (energy, forces, *rest)
 
     def _energy_forces_rows(self, R):
         n, dt, M = self.n, self.dtype, self.M
@@ -2101,7 +2113,7 @@ class FlashSO3LR:
             cnt = st["nb"][4]
             energy, f3, most = self._backward_staged(R, st)
             if not self._recover(R, int(int(jnp.max(cnt)) > self.K or int(most) > self.maxh)):
-                return energy, jnp.stack(f3[:3], -1), self._strain(f3[3], R)
+                return self._without_net_force(energy, jnp.stack(f3[:3], -1), self._strain(f3[3], R))
         raise RuntimeError(f"Flash: overflowed again after {MAX_REBUILDS} rebuilds")
 
     def widen(self):

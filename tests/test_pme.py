@@ -180,7 +180,9 @@ def _cli_md_energy_and_forces(atoms, settings):
     box. Running perform_md itself would integrate and write a trajectory, so a
     change to those calls there must be repeated here. Left out are
     setup_jax_globals (process-wide: this module enables x64 and conftest sets the
-    matmul precision) and everything after the neighbour lists.
+    matmul precision), the k-space net-force removal (the ASE calculator returns the
+    model's forces as they are; tests/test_kspace_net_force.py covers it) and
+    everything after the neighbour lists.
     """
     from so3lr import kspace_defaults as KS
     from so3lr.cli import so3lr_md

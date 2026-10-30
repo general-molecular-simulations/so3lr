@@ -14,6 +14,29 @@ def nbrs_cutoff(potential):
     return potential.long_range_cutoff if potential.long_range_cutoff is not None else potential.cutoff
 
 
+@jax.custom_jvp
+def without_net_force(R):
+    """Identity on the positions whose derivative drops the mean over atoms.
+
+    Smooth PME (and the dispersion PME) is not translation invariant: the charges
+    are spread on a mesh fixed in space, so the analytic forces carry a small net
+    force (~1e-3 of the atomic forces), and nothing else in the model cancels it.
+    Over an MD run it accumulates into a drift of the whole box, which the MSD
+    then counts as diffusion. Passing the positions through this function gives
+    every atom's force minus the mean force, so the total force is zero (AMBER's
+    netfrc). The energy is unchanged, and so is its derivative with respect to the
+    box (the pressure): the box enters after the positions.
+    """
+    return R
+
+
+@without_net_force.defjvp
+def _without_net_force_jvp(primals, tangents):
+    R, = primals
+    dR, = tangents
+    return R, dR - jnp.mean(dR, axis=0, keepdims=True)
+
+
 def neighbor_list_featurizer(
         displacement_fn,
         species,
@@ -137,6 +160,7 @@ def to_jax_md(
         total_charge: float = 0.0,  # net charge of the system (e)
         num_unpaired_electrons: float = 0.0,  # spin: number of unpaired electrons
         precision=None,  # the model's dtype; None leaves the graph in R.dtype (PotentialSparse casts it to its own)
+        remove_net_force: bool = False,  # forces summing to zero (k-space): without_net_force
         **neighbor_kwargs
 ):
     """Build the (short-range, long-range) neighbor functions and a jax-md
@@ -210,6 +234,8 @@ def to_jax_md(
             has_aux=False,
             **energy_fn_kwargs
     ):
+        if remove_net_force:
+            R = without_net_force(R)
         graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
         # back in the positions' dtype before the sum (a float64 MD state sums in float64)
         out = cast_float_params(potential(graph, has_aux=True) if has_aux else potential(graph), R.dtype)

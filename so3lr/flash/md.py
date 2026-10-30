@@ -129,7 +129,7 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
                      equilibration_charge=total_charge if equil is None else float(equil),
                      pme_electrostatics=pme_el, pme_dispersion=pme_disp,
                      box_margin=box_margin, devices=devices,
-                     size=size, **kw)
+                     size=size, remove_net_force=settings.get("kspace_remove_net_force", True), **kw)
     logger.info(f"Flash: {n} atoms, memory mode {mode} ({'staged' if staged else 'jitted'}), "
                 f"~{mode_kib(mode, statics):.1f} KiB/atom at peak")
     if vacuum:

@@ -45,7 +45,7 @@ HANDLED = {
     "min_start_dt", "min_max_dt", "min_n_min", "force_convergence", "force_conv", "kspace_electrostatics",
     "kspace_smearing", "kspace_spacing", "kspace_interp_nodes", "kspace_dispersion",
     "kspace_dispersion_smearing", "kspace_dispersion_spacing", "kspace_dispersion_interp_nodes",
-    "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
+    "kspace_remove_net_force", "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
     "engine", "flash_mode", "flash_mixed", "flash_devices", "md_precision",
 }
 # settings that only concern the neighbour-list engine, other commands sharing a settings
