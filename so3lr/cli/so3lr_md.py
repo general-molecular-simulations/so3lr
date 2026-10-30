@@ -1723,31 +1723,15 @@ def apply_atom_constraints_to_state(
 COM_DRIFT_WARN_A_PER_PS = 1e-4  # 0.1 A per ns
 
 
-def _column_mass(moving, mass):
-    """The array and its masses as an [n, 1] column (jax-md keeps a scalar, [n] or [n, 1])."""
-    moving = jnp.asarray(moving)
-    m = jnp.broadcast_to(jnp.reshape(jnp.asarray(mass, moving.dtype), (-1, 1)), (moving.shape[0], 1))
-    return moving, m
-
-
-def remove_com_momentum(momentum, mass):
-    """Momenta with zero total momentum, and the removed centre-of-mass speed in A/ps
-    (m_i v_com off every momentum, the smallest change in kinetic energy that does it)."""
-    momentum, m = _column_mass(momentum, mass)
-    v_com = jnp.sum(momentum, axis=0) / jnp.sum(m)
-    return momentum - m * v_com, float(jnp.linalg.norm(v_com)) * units.metal_unit_system()['time']
-
-
-def remove_com_velocity(velocity, mass):
-    """Velocities with zero centre-of-mass velocity, and the removed speed in A/ps."""
-    velocity, m = _column_mass(velocity, mass)
-    v_com = jnp.sum(m * velocity, axis=0) / jnp.sum(m)
-    return velocity - v_com, float(jnp.linalg.norm(v_com)) * units.metal_unit_system()['time']
-
-
-def log_restart_com_motion(speed: float) -> None:
-    """A box restarted with centre-of-mass motion was drifting: periodic k-space runs before
-    the net force was removed (kspace_remove_net_force) random-walk the total momentum."""
+def restart_com_velocity(momentum, mass):
+    """The centre-of-mass velocity of restarted momenta (zero for a single atom) and the
+    masses as an [n, 1] column, logged: a warning when the box was drifting. Periodic k-space
+    runs before the net force was removed (kspace_remove_net_force) random-walk the total
+    momentum, and with zero-sum forces nothing removes it later."""
+    momentum = jnp.asarray(momentum)
+    m = jnp.broadcast_to(jnp.reshape(jnp.asarray(mass, momentum.dtype), (-1, 1)), (momentum.shape[0], 1))
+    v_com = jnp.sum(momentum, axis=0) / jnp.sum(m) * (momentum.shape[0] > 1)
+    speed = float(jnp.linalg.norm(v_com)) * units.metal_unit_system()['time']    # A/ps
     if speed > COM_DRIFT_WARN_A_PER_PS:
         logger.warning(
             f'Restart: the box was drifting as a whole at {speed:.2e} A/ps '
@@ -1757,20 +1741,23 @@ def log_restart_com_motion(speed: float) -> None:
         )
     else:
         logger.info(f'Restart: removed centre-of-mass motion of {speed:.2e} A/ps.')
+    return v_com, m
+
+
+def remove_restart_com_momentum(momentum, mass):
+    """Restarted momenta with zero total momentum: m_i v_com off every momentum, the
+    smallest change in kinetic energy that does it."""
+    v_com, m = restart_com_velocity(momentum, mass)
+    return (momentum - m * v_com).astype(jnp.asarray(momentum).dtype)
 
 
 def remove_restart_com_motion(state):
-    """The restarted jax-md state without centre-of-mass motion (logged)."""
-    if state.position.shape[0] < 2:
-        return state
+    """The restarted jax-md state without centre-of-mass motion."""
     if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState):
-        velocity, speed = remove_com_velocity(state.velocity, state.mass)
-        state = state.set(velocity=velocity.astype(state.velocity.dtype))
-    else:
-        momentum, speed = remove_com_momentum(state.momentum, state.mass)
-        state = state.set(momentum=momentum.astype(state.momentum.dtype))
-    log_restart_com_motion(speed)
-    return state
+        # stores velocity; its momentum is a read-only property
+        v_com, _ = restart_com_velocity(state.momentum, state.mass)
+        return state.set(velocity=(state.velocity - v_com).astype(state.velocity.dtype))
+    return state.set(momentum=remove_restart_com_momentum(state.momentum, state.mass))
 
 
 def constrain_md_carry(
@@ -1953,7 +1940,8 @@ def perform_md(
     charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
     charge_equilibration_total_charge = all_settings.get('charge_equilibration_total_charge', None)
     kspace_npt_cycles = all_settings.get('kspace_npt_cycles', 100)
-    if remove_kspace_net_force(all_settings):
+    remove_net_force = remove_kspace_net_force(all_settings)
+    if remove_net_force:
         logger.info('K-space: net force removed (forces minus their mean; kspace_remove_net_force).')
 
     # Dispersion PME settings
@@ -2201,10 +2189,9 @@ def perform_md(
             position = e.loaded_state['position']
             initial_geometry_dict['masses'] = e.loaded_state['mass']
             initial_geometry_dict['momenta'] = e.loaded_state['momentum']
-            if mobile_mask is None and position.shape[0] > 1:
-                initial_geometry_dict['momenta'], speed = remove_com_momentum(
+            if mobile_mask is None:
+                initial_geometry_dict['momenta'] = remove_restart_com_momentum(
                     e.loaded_state['momentum'], e.loaded_state['mass'])
-                log_restart_com_motion(speed)
             box = e.loaded_state['box']
             if np.all(box == 0) or box is None:
                 box = jnp.array([0.0], dtype=dtype)
@@ -2315,7 +2302,7 @@ def perform_md(
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
         minimum_cell_size_multiplier=minimum_cell_size_multiplier,
-        remove_net_force=remove_kspace_net_force(all_settings),
+        remove_net_force=remove_net_force,
         has_aux=len(observables)>0,
     )
     if cell is not None:

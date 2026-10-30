@@ -48,8 +48,8 @@ from so3lr.cli.so3lr_md import (
     handle_units,
     init_hdf5_store,
     load_state,
-    log_restart_com_motion,
-    remove_com_momentum,
+    remove_kspace_net_force,
+    remove_restart_com_momentum,
     remove_restart_com_motion,
     run_dtypes,
     save_restart_checkpoints,
@@ -132,7 +132,7 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
                      equilibration_charge=total_charge if equil is None else float(equil),
                      pme_electrostatics=pme_el, pme_dispersion=pme_disp,
                      box_margin=box_margin, devices=devices,
-                     size=size, remove_net_force=settings.get("kspace_remove_net_force", True), **kw)
+                     size=size, remove_net_force=remove_kspace_net_force(settings), **kw)
     logger.info(f"Flash: {n} atoms, memory mode {mode} ({'staged' if staged else 'jitted'}), "
                 f"~{mode_kib(mode, statics):.1f} KiB/atom at peak")
     if vacuum:
@@ -441,9 +441,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                 position = position * box
             geo["masses"] = jnp.asarray(loaded["mass"], sdt)
             geo["momenta"] = jnp.asarray(loaded["momentum"], sdt)
-            if geo["momenta"].shape[0] > 1:
-                geo["momenta"], speed = remove_com_momentum(geo["momenta"], geo["masses"])
-                log_restart_com_motion(speed)
+            geo["momenta"] = remove_restart_com_momentum(geo["momenta"], geo["masses"])
         if not vacuum:
             atoms = atoms.copy()
             atoms.set_cell(np.diag(np.asarray(box, np.float64)))      # the engine starts in this box

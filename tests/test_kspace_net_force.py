@@ -124,30 +124,27 @@ def _drifting(n=6, speed_internal=0.01, seed=0):
     return p + mass[:, None] * v_com, p, mass
 
 
-def test_remove_com_momentum_and_velocity():
-    from so3lr.cli.so3lr_md import remove_com_momentum, remove_com_velocity
-    drifting, still, mass = _drifting()
-    a_per_ps = 0.01 * jax_md.units.metal_unit_system()['time']
-    for m in (mass, mass[:, None]):                      # jax-md keeps [n] or [n, 1]
-        p, speed = remove_com_momentum(drifting, m)
-        npt.assert_allclose(p, still, atol=1e-13)
-        assert speed == pytest.approx(a_per_ps)
-        v, speed = remove_com_velocity(drifting / mass[:, None], m)
-        npt.assert_allclose(v, still / mass[:, None], atol=1e-13)
-        assert speed == pytest.approx(a_per_ps)
-
-
-def test_restart_state_loses_com_motion(caplog):
-    from so3lr.cli.so3lr_md import remove_restart_com_motion
+def test_restart_loses_com_motion(caplog):
+    """Momentum states, the flexible-cell state (which stores velocity) and bare momenta;
+    a warning only when the box was drifting."""
+    from so3lr.cli.so3lr_md import remove_restart_com_momentum, remove_restart_com_motion
     drifting, still, mass = _drifting()
     zeros = jnp.zeros_like(drifting)
-    state = jax_md.simulate.NVEState(position=zeros, momentum=drifting, force=zeros, mass=mass[:, None])
+    nve = jax_md.simulate.NVEState(position=zeros, momentum=drifting, force=zeros, mass=mass[:, None])
+    flex = jax_md.simulate.NPTNoseHooverFlexState(
+        position=zeros, velocity=drifting / mass[:, None], force=zeros, mass=mass[:, None],
+        reference_box=None, box_position=None, box_velocity=None, box_mass=None,
+        barostat=None, thermostat=None, stress_tensor=None)
     with caplog.at_level('INFO', logger='SO3LR'):
-        npt.assert_allclose(remove_restart_com_motion(state).momentum, still, atol=1e-13)
-    assert 'drifting as a whole' in caplog.text
+        for m in (mass, mass[:, None]):                  # jax-md keeps [n] or [n, 1]
+            npt.assert_allclose(remove_restart_com_momentum(drifting, m), still, atol=1e-13)
+        npt.assert_allclose(remove_restart_com_motion(nve).momentum, still, atol=1e-13)
+        npt.assert_allclose(remove_restart_com_motion(flex).momentum, still, atol=1e-13)
+    assert caplog.text.count('drifting as a whole') == 4
+    assert f"{0.01 * jax_md.units.metal_unit_system()['time']:.2e} A/ps" in caplog.text
     caplog.clear()
     with caplog.at_level('INFO', logger='SO3LR'):
-        remove_restart_com_motion(state.set(momentum=still))
+        npt.assert_allclose(remove_restart_com_motion(nve.set(momentum=still)).momentum, still, atol=1e-13)
     assert 'drifting' not in caplog.text and 'removed centre-of-mass motion' in caplog.text
 
 
