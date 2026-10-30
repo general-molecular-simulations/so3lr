@@ -7,8 +7,10 @@ calculator's glp neighbour list is compared with ASE's after squeezing waters to
 """
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from ase.calculators.calculator import Calculator
 from ase.io import read
 from ase.neighborlist import neighbor_list as ase_neighbor_list
@@ -18,6 +20,14 @@ from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
 
 WATER = Path(__file__).parent / 'test_data' / 'water_64.xyz'
 CUTOFF, LR_CUTOFF = 2.5, 3.0     # short cutoffs give a 4x4x4 cell list on the 12.4 A box
+
+
+@pytest.fixture(autouse=True)
+def _on_cpu():
+    """glp builds the list eagerly from hundreds of small ops. On a GPU each one compiles
+    separately, which can take hours, so run this neighbour-list logic on the CPU."""
+    with jax.default_device(jax.devices('cpu')[0]):
+        yield
 
 
 def squeeze(atoms, n_waters):
