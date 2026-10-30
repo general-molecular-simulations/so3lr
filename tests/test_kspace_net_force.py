@@ -113,3 +113,64 @@ def test_md_forces_sum_to_zero_with_pme():
     # energy and pressure unchanged
     assert e1 == e0
     npt.assert_allclose(w1, w0, rtol=1e-12, atol=1e-12)
+
+
+def _drifting(n=6, speed_internal=0.01, seed=0):
+    """Thermal-looking momenta plus a centre-of-mass velocity along x."""
+    mass = jnp.asarray(np.random.default_rng(seed).uniform(1.0, 16.0, n))
+    p = jax.random.normal(jax.random.PRNGKey(seed), (n, 3), dtype=jnp.float64)
+    p = p - mass[:, None] * (p.sum(0) / mass.sum())
+    v_com = jnp.array([speed_internal, 0.0, 0.0])
+    return p + mass[:, None] * v_com, p, mass
+
+
+def test_remove_com_momentum_and_velocity():
+    from so3lr.cli.so3lr_md import remove_com_momentum, remove_com_velocity
+    drifting, still, mass = _drifting()
+    a_per_ps = 0.01 * jax_md.units.metal_unit_system()['time']
+    for m in (mass, mass[:, None]):                      # jax-md keeps [n] or [n, 1]
+        p, speed = remove_com_momentum(drifting, m)
+        npt.assert_allclose(p, still, atol=1e-13)
+        assert speed == pytest.approx(a_per_ps)
+        v, speed = remove_com_velocity(drifting / mass[:, None], m)
+        npt.assert_allclose(v, still / mass[:, None], atol=1e-13)
+        assert speed == pytest.approx(a_per_ps)
+
+
+def test_restart_state_loses_com_motion(caplog):
+    from so3lr.cli.so3lr_md import remove_restart_com_motion
+    drifting, still, mass = _drifting()
+    zeros = jnp.zeros_like(drifting)
+    state = jax_md.simulate.NVEState(position=zeros, momentum=drifting, force=zeros, mass=mass[:, None])
+    with caplog.at_level('INFO', logger='SO3LR'):
+        npt.assert_allclose(remove_restart_com_motion(state).momentum, still, atol=1e-13)
+    assert 'drifting as a whole' in caplog.text
+    caplog.clear()
+    with caplog.at_level('INFO', logger='SO3LR'):
+        remove_restart_com_motion(state.set(momentum=still))
+    assert 'drifting' not in caplog.text and 'removed centre-of-mass motion' in caplog.text
+
+
+@pytest.mark.slow
+def test_cli_restart_removes_com_drift(tmp_path):
+    """A restart file whose box drifts (written before the net-force removal) continues
+    without the drift, and the log says so."""
+    import subprocess
+    from subprocess_env import so3lr_subprocess_env
+    acetone = pathlib.Path(__file__).parent / 'test_data' / 'acetone.xyz'
+
+    def so3lr(*args):
+        run = subprocess.run(['so3lr', 'nvt', '--input', str(acetone), '--engine', 'standard', '--no-relax',
+                              '--md-cycles', '2', '--md-steps', '2', *args],
+                             cwd=tmp_path, capture_output=True, text=True, env=so3lr_subprocess_env(), timeout=900)
+        assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
+
+    so3lr('--output', 'a.xyz', '--restart-save', 'a.npz')
+    a = dict(np.load(tmp_path / 'a.npz', allow_pickle=False))
+    mass = a['mass'].reshape(-1, 1)
+    a['momentum'] = a['momentum'] + mass * np.array([0.01, 0.0, 0.0])    # ~1 A/ps
+    np.savez(tmp_path / 'drift.npz', **a)
+    so3lr('--output', 'b.xyz', '--restart-load', 'drift.npz', '--restart-save', 'b.npz')
+    assert 'drifting as a whole' in (tmp_path / 'b.log').read_text()
+    total = np.load(tmp_path / 'b.npz')['momentum'].sum(0)
+    assert np.abs(total).max() < 1e-8 * mass.sum(), total

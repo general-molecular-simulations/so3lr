@@ -48,6 +48,9 @@ from so3lr.cli.so3lr_md import (
     handle_units,
     init_hdf5_store,
     load_state,
+    log_restart_com_motion,
+    remove_com_momentum,
+    remove_restart_com_motion,
     run_dtypes,
     save_restart_checkpoints,
     setup_jax_globals,
@@ -424,6 +427,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                                                     fractional_coordinates=npt, precision=sdt)
             if npt:
                 validate_npt_restart_coupling(state, rbox, s.get("npt_coupling") or "isotropic")
+            state = remove_restart_com_motion(state)
             if not vacuum:                   # (structure_problem: a restart in free space has no box)
                 box = jnp.asarray(box_to_diag(rbox), sdt)
         except RestartInNewEnsembleError as e:
@@ -437,6 +441,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                 position = position * box
             geo["masses"] = jnp.asarray(loaded["mass"], sdt)
             geo["momenta"] = jnp.asarray(loaded["momentum"], sdt)
+            if geo["momenta"].shape[0] > 1:
+                geo["momenta"], speed = remove_com_momentum(geo["momenta"], geo["masses"])
+                log_restart_com_motion(speed)
         if not vacuum:
             atoms = atoms.copy()
             atoms.set_cell(np.diag(np.asarray(box, np.float64)))      # the engine starts in this box
