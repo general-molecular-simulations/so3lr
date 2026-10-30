@@ -55,6 +55,42 @@ def test_remove_kspace_net_force_settings(settings, expected):
     assert remove_kspace_net_force(settings) is expected
 
 
+@pytest.mark.parametrize('settings, expected', [
+    (dict(ensemble='nvt'), True),
+    (dict(ensemble='npt', kspace_electrostatics='pme'), True),
+    (dict(ensemble='nvt', kspace_remove_net_force=False), False),                 # the old behaviour
+    (dict(ensemble='nvt-langevin', langevin_removecmmotion=True), True),
+    (dict(ensemble='nvt-langevin', langevin_removecmmotion=False), False),        # thermal COM motion
+])
+def test_restart_removes_com_motion_settings(settings, expected):
+    from so3lr.cli.so3lr_md import restart_removes_com_motion
+    assert restart_removes_com_motion(settings) is expected
+
+
+def test_flash_single_points_keep_the_model_forces(monkeypatch):
+    """so3lr eval and the flash ASE calculator return the forces So3lrCalculator does; only
+    MD and opt take them without the net force."""
+    import so3lr.flash.md as flash_md
+    seen = {}
+
+    class Engine:
+        device_mesh, builds = None, 0
+
+        def energy_forces(self, R):
+            return 0.0, jnp.zeros_like(R)
+
+    def build_engine(atoms, settings, dtype, box_margin=None, positions=None, remove_net_force=None):
+        seen['remove_net_force'] = remove_net_force
+        return Engine(), False
+
+    monkeypatch.setattr(flash_md, 'build_engine', build_engine)
+    for check in ('flash_problem', 'structure_problem'):          # no GPU, a small box
+        monkeypatch.setattr(flash_md, check, lambda *args, **kwargs: None)
+    points = flash_md.SinglePoints(dict(kspace_electrostatics='pme', precision='float64'), task='eval')
+    points(read(WATER))
+    assert seen['remove_net_force'] is False
+
+
 @functools.cache
 def _md_energy_fn(remove_net_force):
     """The float64 energy function `so3lr npt` integrates for water_64 with PME

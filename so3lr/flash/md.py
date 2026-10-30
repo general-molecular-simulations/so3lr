@@ -51,6 +51,7 @@ from so3lr.cli.so3lr_md import (
     remove_kspace_net_force,
     remove_restart_com_momentum,
     remove_restart_com_motion,
+    restart_removes_com_motion,
     run_dtypes,
     save_restart_checkpoints,
     setup_jax_globals,
@@ -94,11 +95,13 @@ def dtypes(settings):
     return run_dtypes(settings)
 
 
-def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
+def build_engine(atoms, settings, dtype, box_margin=None, positions=None, remove_net_force=None):
     """FlashSO3LR for ``atoms`` with the model, charges, PME and memory mode of
     ``settings``; the cell grid laid out for a box ``box_margin`` smaller (default: NPT's
     margin in NPT, else none). Atoms in free space (``check.in_vacuum``): the engine's box
-    laid out for them at ``positions`` (default the atoms')."""
+    laid out for them at ``positions`` (default the atoms'). ``remove_net_force``: the
+    forces minus their mean with PME (default: ``remove_kspace_net_force(settings)``, as MD
+    and opt take them; single points keep the model's forces)."""
     if box_margin is None:
         box_margin = NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0
     precision = "float64" if dtype == jnp.float64 else "float32"
@@ -132,7 +135,9 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
                      equilibration_charge=total_charge if equil is None else float(equil),
                      pme_electrostatics=pme_el, pme_dispersion=pme_disp,
                      box_margin=box_margin, devices=devices,
-                     size=size, remove_net_force=remove_kspace_net_force(settings), **kw)
+                     size=size, **kw,
+                     remove_net_force=remove_kspace_net_force(settings) if remove_net_force is None
+                     else remove_net_force)
     logger.info(f"Flash: {n} atoms, memory mode {mode} ({'staged' if staged else 'jitted'}), "
                 f"~{mode_kib(mode, statics):.1f} KiB/atom at peak")
     if vacuum:
@@ -368,7 +373,7 @@ class SinglePoints:
                 gc.collect()                 # the last engine's arrays, before the next one's
                 self.engine, staged = build_engine(
                     atoms, dict(self.settings, total_charge=key[1], num_unpaired_electrons=key[2]), self.dtype,
-                    box_margin=self.box_margin)
+                    box_margin=self.box_margin, remove_net_force=False)    # the model's forces, as So3lrCalculator's
                 self._ef = self.engine.energy_forces_staged if staged else self.engine.energy_forces
                 self._key, self._builds = key, 0
             elif box != self._box and not vacuum:
@@ -427,7 +432,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                                                     fractional_coordinates=npt, precision=sdt)
             if npt:
                 validate_npt_restart_coupling(state, rbox, s.get("npt_coupling") or "isotropic")
-            state = remove_restart_com_motion(state)
+            if restart_removes_com_motion(s):
+                state = remove_restart_com_motion(state)
             if not vacuum:                   # (structure_problem: a restart in free space has no box)
                 box = jnp.asarray(box_to_diag(rbox), sdt)
         except RestartInNewEnsembleError as e:
@@ -441,7 +447,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                 position = position * box
             geo["masses"] = jnp.asarray(loaded["mass"], sdt)
             geo["momenta"] = jnp.asarray(loaded["momentum"], sdt)
-            geo["momenta"] = remove_restart_com_momentum(geo["momenta"], geo["masses"])
+            if restart_removes_com_motion(s):
+                geo["momenta"] = remove_restart_com_momentum(geo["momenta"], geo["masses"])
         if not vacuum:
             atoms = atoms.copy()
             atoms.set_cell(np.diag(np.asarray(box, np.float64)))      # the engine starts in this box

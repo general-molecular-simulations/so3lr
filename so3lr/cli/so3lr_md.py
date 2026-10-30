@@ -1156,6 +1156,16 @@ def remove_kspace_net_force(all_settings: Dict) -> bool:
     return bool(kspace and all_settings.get('kspace_remove_net_force', True))
 
 
+def restart_removes_com_motion(all_settings: Dict) -> bool:
+    """Whether a restart zeroes the centre-of-mass motion: not when the run keeps the old
+    behaviour (``kspace_remove_net_force: false``), and not for a Langevin run that leaves
+    it thermal (``langevin_removecmmotion: false``)."""
+    if not all_settings.get('kspace_remove_net_force', True):
+        return False
+    return not (str(all_settings.get('ensemble')).lower() == 'nvt-langevin'
+                and all_settings.get('langevin_removecmmotion') is False)
+
+
 def process_model(
     potential: PotentialSparse,
     species: jnp.ndarray,
@@ -1727,7 +1737,8 @@ def restart_com_velocity(momentum, mass):
     """The centre-of-mass velocity of restarted momenta (zero for a single atom) and the
     masses as an [n, 1] column, logged: a warning when the box was drifting. Periodic k-space
     runs before the net force was removed (kspace_remove_net_force) random-walk the total
-    momentum, and with zero-sum forces nothing removes it later."""
+    momentum, and with zero-sum forces nothing removes it later (restart_removes_com_motion
+    says when this runs)."""
     momentum = jnp.asarray(momentum)
     m = jnp.broadcast_to(jnp.reshape(jnp.asarray(mass, momentum.dtype), (-1, 1)), (momentum.shape[0], 1))
     v_com = jnp.sum(momentum, axis=0) / jnp.sum(m) * (momentum.shape[0] > 1)
@@ -1735,9 +1746,10 @@ def restart_com_velocity(momentum, mass):
     if speed > COM_DRIFT_WARN_A_PER_PS:
         logger.warning(
             f'Restart: the box was drifting as a whole at {speed:.2e} A/ps '
-            f'({speed * 1e3:.2g} A per ns); removed the centre-of-mass motion. Trajectories '
-            f'written before this restart contain the drift (it inflates MSDs and diffusion '
-            f'coefficients) unless the centre-of-mass motion is removed in the analysis.'
+            f'({speed * 1e3:.2g} A per ns), as k-space runs did before kspace_remove_net_force; '
+            f'removed the centre-of-mass motion. Trajectories written before this restart '
+            f'contain the drift (it inflates MSDs and diffusion coefficients) unless the '
+            f'centre-of-mass motion is removed in the analysis.'
         )
     else:
         logger.info(f'Restart: removed centre-of-mass motion of {speed:.2e} A/ps.')
@@ -2162,6 +2174,9 @@ def perform_md(
     hdf5_store = None
 
     current_cycle = 0
+    # a restarted PySAGES state keeps the momenta its snapshot holds
+    com_free_restart = (mobile_mask is None and not restart_pysages
+                        and restart_removes_com_motion(all_settings))
     # Loading restart
     if restart:
         logger.info(f'Loading state from {restart_load_path}.')
@@ -2175,7 +2190,7 @@ def perform_md(
             )
             if str(ensemble).lower() == 'npt':
                 validate_npt_restart_coupling(state, box, npt_coupling)
-            if mobile_mask is None:
+            if com_free_restart:
                 state = remove_restart_com_motion(state)
             position = state.position
         except RestartInNewEnsembleError as e:
@@ -2189,7 +2204,7 @@ def perform_md(
             position = e.loaded_state['position']
             initial_geometry_dict['masses'] = e.loaded_state['mass']
             initial_geometry_dict['momenta'] = e.loaded_state['momentum']
-            if mobile_mask is None:
+            if com_free_restart:
                 initial_geometry_dict['momenta'] = remove_restart_com_momentum(
                     e.loaded_state['momentum'], e.loaded_state['mass'])
             box = e.loaded_state['box']
