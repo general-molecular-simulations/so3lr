@@ -370,9 +370,6 @@ training:
   training_seed: 42
   use_adaptive_robust_loss: true
   use_robust_loss: false
-  use_wandb: true
-  wandb_init_args:
-    group: so3lr_v2_june
-    name: sv2j_b128_l2nnn_2_nano_lr_full_2_38f2_wnp3_gs05_d10_e10k_lr01
-    project: so3lr_v2
-workdir: redacted
+  use_wandb: false
+  wandb_init_args: {}
+workdir: so3lr-tauri-s-2606
