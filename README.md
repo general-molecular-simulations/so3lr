@@ -145,8 +145,7 @@ If you use SO3LR, please cite the paper below and give the model you used, e.g.
 
 ## License
 
-SO3LR is released under the [MIT License](./LICENSE), except the robust loss in
-[`so3lr/mlff/utils/robust_loss_jax/`](./so3lr/mlff/utils/robust_loss_jax/),
-derived from Google Research, which remains under Apache-2.0 (see the `LICENSE`
-there). These licenses cover the source code; they do not relicense the
-checkpoints, datasets or scientific reference data.
+The code and the legacy SO3LR model weights are released under the
+[MIT License](LICENSE), and the SO3LR Tauri weights under
+[CC BY-NC 4.0](licenses/LICENSE.CC-BY-NC-4.0). See [NOTICES](NOTICES.md) for
+details.

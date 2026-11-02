@@ -9,7 +9,9 @@ These files are a JAX adaptation of the Google Research implementation of
 - `data/partition_spline.npz`
 
 Unlike the rest of SO3LR (MIT), they remain under the Apache License 2.0,
-reproduced in [`LICENSE`](./LICENSE) in this folder. The Python sources keep the
+reproduced in
+[`licenses/LICENSE.ROBUST-LOSS-APACHE-2.0`](../../../../licenses/LICENSE.ROBUST-LOSS-APACHE-2.0)
+and listed in the repository's `NOTICES.md`. The Python sources keep the
 upstream notice, *Copyright 2024 The Google Research Authors*. They replace the
 upstream numerical backend with JAX, so they are modified copies; the upstream
 commit used for the original port was not recorded.

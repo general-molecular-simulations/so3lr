@@ -4,11 +4,8 @@ version = "0.2.0"
 description = "SO3krates Universal Pairwise Force Field with Long Range Interactions (SO3LR) for Molecular Simulation"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-license = "MIT AND Apache-2.0"
-license-files = [
-    "LICENSE",
-    "so3lr/mlff/utils/robust_loss_jax/LICENSE",
-]
+license = "MIT AND Apache-2.0 AND CC-BY-NC-4.0"
+license-files = ["LICENSE", "NOTICES.md", "licenses/LICENSE.*"]
 authors = [
     { name = "Adil Kabylda" },
     { name = "Thorben Frank" },
