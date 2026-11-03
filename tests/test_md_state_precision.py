@@ -207,19 +207,17 @@ def test_jax_md_potential_computes_in_its_dtype(x64):
 
 def test_float64_without_x64_raises():
     """JAX truncates float64 to float32 without x64, with a warning only: the ASE calculator and the
-    potential refuse it before loading the model, and the calculator a float64 md_precision."""
+    potential refuse it before loading the model."""
     from so3lr import So3lrCalculator, So3lrPotential
     with jax.enable_x64(False):
         for make in (So3lrCalculator, So3lrPotential):
             with pytest.raises(ValueError, match='float64 needs'):
                 make(model=MODEL, dtype=np.float64)
-        with pytest.raises(ValueError, match='float64 needs'):
-            So3lrCalculator(model=MODEL, md_precision='float64')
 
 
 def test_ase_calculator_forms_displacements_before_the_cast(x64):
     """So3lrCalculator in float32 (its default) around float64 positions, as in so3lr's MD: 400 A
-    from the origin it gives the forces at the origin, in float64; md_precision float32 does not."""
+    from the origin it gives the forces at the origin, in float64; without x64 (float32) it does not."""
     from ase.io import read
     from so3lr import So3lrCalculator
     near = read(ACETONE)
@@ -230,10 +228,9 @@ def test_ase_calculator_forms_displacements_before_the_cast(x64):
         calc = So3lrCalculator(model=MODEL, **kwargs)
         return [calc.get_forces(atoms) for atoms in (near, far)]
 
-    # md_precision takes a numpy dtype, as dtype does
-    (f_near, f_far), (g_near, g_far) = forces(), forces(md_precision=np.float32)
+    f_near, f_far = forces()
+    with jax.enable_x64(False):
+        g_near, g_far = forces()
     assert f_near.dtype == np.float64
-    with pytest.raises(ValueError, match='precision must be'):
-        So3lrCalculator(model=MODEL, md_precision='float16')
     moved, moved_float32 = np.abs(f_near - f_far).max(), np.abs(g_near - g_far).max()
     assert moved < 1e-5 < moved_float32, (moved, moved_float32)

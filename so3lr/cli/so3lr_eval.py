@@ -287,7 +287,6 @@ def evaluate_so3lr_on(
         flash_mode: str = 'auto',
         flash_mixed: bool = True,
         flash_devices: int = 1,
-        md_precision: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset and calculate error metrics.
@@ -314,11 +313,10 @@ def evaluate_so3lr_on(
     model_path : str or None
         Path to the model to evaluate. If None, the default SO3LR model is used.
     precision : str
-        The model's precision ('float32' or 'float64').
-    md_precision : str or None
-        The geometry's precision around a float32 model, on both engines as in MD
+        The model's precision ('float32' or 'float64'). Around a float32 model the geometry
+        is float64 (float32 with flash_mixed False) on both engines, as in MD
         (so3lr.md_settings_validation.state_precision): displacements are formed in it
-        before the model. None: float64, or float32 with flash_mixed False.
+        before the model.
     targets : str
         Comma-separated list of targets to evaluate (forces, energy, dipole_vec,
         hirshfeld_ratios).
