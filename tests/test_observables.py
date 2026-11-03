@@ -26,7 +26,7 @@ from so3lr.mlff.utils.jraph_utils import dynamically_batch_with_lr, graph_to_bat
 from so3lr.model_registry import resolve_model
 from so3lr.prepare_dimer_xyz import add_dimer_properties, create_translated_dimer
 
-# float64 calculators need x64 (without it they now raise instead of running in float32)
+# float64 calculators need x64 (they raise without it)
 pytestmark = pytest.mark.usefixtures('x64')
 
 # Original/legacy SO3LR model, resolved via the registry so the test is

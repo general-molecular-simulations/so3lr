@@ -27,8 +27,7 @@ def make_so3lr(
     # ``workdir`` (legacy arg) takes precedence over ``model``; either may be a
     # bundled model name or a filesystem path. None -> DEFAULT_MODEL.
     spec = resolve_model(workdir if workdir is not None else model)
-    if precision is not None:
-        require_x64(precision)  # before the model loads
+    require_x64(precision)  # before the model loads
 
     long_range_kwargs = build_long_range_kwargs(
         lr_cutoff, dispersion_energy_cutoff_lr_damping, 'sparse',

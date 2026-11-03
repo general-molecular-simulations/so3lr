@@ -17,7 +17,7 @@ from so3lr.md_settings_validation import canonical_precision, state_precision
 ACETONE = pathlib.Path(__file__).resolve().parent / 'test_data' / 'acetone.xyz'
 
 
-@pytest.fixture
+@pytest.fixture  # per test, unlike conftest's per module
 def x64():
     """float64 arrays for the test, then back to the previous setting (the CLI turns x64 on itself)."""
     previous = jax.config.jax_enable_x64

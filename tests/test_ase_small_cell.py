@@ -17,7 +17,7 @@ from ase.geometry import cellpar_to_cell
 
 from so3lr.mlff.calculators.exact_neighbors import cell_heights, needs_exact
 
-# float64 calculators need x64 (without it they now raise instead of running in float32)
+# float64 calculators need x64 (they raise without it)
 pytestmark = pytest.mark.usefixtures('x64')
 
 LR = 12.0
