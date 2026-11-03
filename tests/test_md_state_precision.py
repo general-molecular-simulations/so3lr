@@ -168,8 +168,10 @@ def test_eval_model_forms_displacements_before_the_cast(tmp_path, x64):
     assert moved < 1e-5 < moved_cast_first, (moved, moved_cast_first)
 
 
-def test_eval_precision_is_the_models_and_predictions_are_saved_unrounded(tmp_path, x64):
-    """so3lr eval in float32 computes in float32, and in float64 it saves So3lrCalculator's float64 energy, not one rounded to 6 digits."""
+def test_eval_precision_is_the_models_and_predictions_are_saved_unrounded(tmp_path):
+    """so3lr eval in float32 computes in float32, and in float64 it saves So3lrCalculator's
+    float64 energy, not one rounded to 6 digits. No x64 fixture: eval turns x64 on itself, once
+    per process (setup_jax_globals), so a fixture turning it off afterwards would leave it off."""
     from ase.calculators.singlepoint import SinglePointCalculator
     from ase.io import read, write
     from so3lr import So3lrCalculator

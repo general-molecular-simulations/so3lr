@@ -30,7 +30,7 @@ def cast_float_params(params, dtype):
 
 def require_x64(dtype):
     """Raise for float64 without x64, which JAX truncates to float32 with a warning only."""
-    if np.dtype(dtype) == np.float64 and not jax.config.jax_enable_x64:
+    if dtype is not None and np.dtype(dtype) == np.float64 and not jax.config.jax_enable_x64:
         raise ValueError("float64 needs jax.config.update('jax_enable_x64', True) first")
 
 
