@@ -1,5 +1,5 @@
 """The MD state's precision (md_precision, float64 by default) around a float32 model, on the
-neighbour-list engine as on flash."""
+neighbour-list engine as on flash, in so3lr eval and the jax-md potential; float64 needs x64."""
 import pathlib
 import subprocess
 
@@ -17,7 +17,7 @@ from so3lr.md_settings_validation import canonical_precision, state_precision
 ACETONE = pathlib.Path(__file__).resolve().parent / 'test_data' / 'acetone.xyz'
 
 
-@pytest.fixture
+@pytest.fixture  # per test, unlike conftest's per module
 def x64():
     """float64 arrays for the test, then back to the previous setting (the CLI turns x64 on itself)."""
     previous = jax.config.jax_enable_x64
@@ -114,3 +114,126 @@ def test_restart_into_another_ensemble_gives_jax_arrays_in_the_state_dtype(tmp_p
     for key in ('position', 'momentum', 'mass', 'box'):
         value = err.value.loaded_state[key]
         assert isinstance(value, jax.Array) and value.dtype == jnp.float64, key
+
+
+# so3lr eval and the ASE calculator: `precision` is the model's dtype there too.
+
+MODEL = 'so3lr-tauri-s-2606'
+
+
+def _near_and_far():
+    """Acetone at the origin and the same molecule 400 A away."""
+    from ase.io import read
+    near = read(ACETONE)
+    far = near.copy()
+    far.positions += 400.0
+    return near, far
+
+
+def _eval_batch(frames, tmp_path):
+    """frames as one padded batch of so3lr eval's model inputs (read back from an extxyz)."""
+    from ase.io import write
+    from so3lr.mlff.data import AseDataLoaderSparse
+    from so3lr.mlff.utils import jraph_utils
+    from so3lr.model_config import load_model_config
+    from so3lr.model_registry import resolve_model
+    write(tmp_path / 'frames.extxyz', frames)
+    cutoff = load_model_config(resolve_model(MODEL).dir)['model']['cutoff']
+    data, stats = AseDataLoaderSparse(str(tmp_path / 'frames.extxyz')).load(
+        cutoff=cutoff, cutoff_lr=12.0, calculate_neighbors_lr=True)
+    n = len(data)
+    (batch,) = jraph_utils.dynamically_batch_with_lr(
+        data, n_node=stats['max_num_of_nodes'] * n + 1, n_edge=stats['max_num_of_edges'] * n + 1,
+        n_graph=n + 1, n_pairs=stats['max_num_of_pairs'] * n + 1)
+    return jraph_utils.graph_to_batch_fn(*batch)
+
+
+def test_eval_model_forms_displacements_before_the_cast(tmp_path, x64):
+    """so3lr eval's model in float32 around float64 positions: 400 A from the origin the forces are
+    the molecule's at the origin, as in MD. Cast to float32 first, the displacements lose that."""
+    from so3lr.base_calculator import make_so3lr
+    from so3lr.mlff.calculators.potential import cast_float_params
+    near, far = _near_and_far()
+    inputs = _eval_batch([near, far], tmp_path)
+    n = len(near)
+    model = jax.jit(make_so3lr(model=MODEL, precision=jnp.float32))
+
+    out = model(inputs)
+    forces, energy = np.asarray(out['forces']), np.asarray(out['energy'])
+    # the structures' energies summed over their atoms in float64 too, not inside the model
+    assert forces.dtype == energy.dtype == np.float64
+    assert abs(energy[0] - energy[1]) < 1e-4, energy
+    cast_first = np.asarray(model(cast_float_params(inputs, jnp.float32))['forces'])
+    moved, moved_cast_first = (np.abs(f[:n] - f[n:2 * n]).max() for f in (forces, cast_first))
+    assert moved < 1e-5 < moved_cast_first, (moved, moved_cast_first)
+
+
+def test_eval_precision_is_the_models_and_predictions_are_saved_unrounded(tmp_path):
+    """so3lr eval in float32 computes in float32, and in float64 it saves So3lrCalculator's
+    float64 energy, not one rounded to 6 digits. No x64 fixture: eval turns x64 on itself, once
+    per process (setup_jax_globals), so a fixture turning it off afterwards would leave it off."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from ase.io import read, write
+    from so3lr import So3lrCalculator
+    from so3lr.cli.so3lr_eval import evaluate_so3lr_on
+    atoms = read(ACETONE)
+    atoms.calc = SinglePointCalculator(atoms, energy=0.0, forces=np.zeros((len(atoms), 3)))
+    write(tmp_path / 'data.extxyz', atoms)
+    saved = {}
+    for precision in ('float32', 'float64'):
+        evaluate_so3lr_on(str(tmp_path / 'data.extxyz'), model_path=MODEL, precision=precision,
+                          targets='energy,forces', engine='standard', save_to=str(tmp_path / f'{precision}.extxyz'))
+        saved[precision] = read(tmp_path / f'{precision}.extxyz')
+    f32, f64 = (saved[p].arrays['forces_so3lr'] for p in ('float32', 'float64'))
+    assert 0 < np.abs(f32 - f64).max() < 1e-3
+
+    atoms.calc = So3lrCalculator(model=MODEL, lr_cutoff=12.0, dtype=np.float64)
+    assert abs(saved['float64'].info['energy_so3lr'] - atoms.get_potential_energy()) < 1e-8
+
+
+def test_jax_md_potential_computes_in_its_dtype(x64):
+    """So3lrPotential(dtype=float32) through to_jax_md around float64 positions: a float32 model on
+    float64 displacements."""
+    from ase.io import read
+    from so3lr import So3lrPotential, to_jax_md
+    atoms = read(ACETONE)
+    R = jnp.asarray(atoms.positions, jnp.float64)
+    displacement, _ = space.free()
+
+    def forces(dtype):
+        neighbor_fn, neighbor_fn_lr, energy_fn = to_jax_md(
+            So3lrPotential(model=MODEL, dtype=dtype), displacement, None, species=jnp.asarray(atoms.numbers),
+            disable_cell_list=True, fractional_coordinates=False)
+        return jax.grad(energy_fn)(R, neighbor=neighbor_fn.allocate(R).idx, neighbor_lr=neighbor_fn_lr.allocate(R).idx)
+
+    f32, f64 = forces(jnp.float32), forces(jnp.float64)
+    assert f32.dtype == jnp.float64
+    assert 0 < np.abs(f32 - f64).max() < 1e-3
+
+
+def test_float64_without_x64_raises():
+    """JAX truncates float64 to float32 without x64, with a warning only: the ASE calculator and the
+    potential refuse it before loading the model."""
+    from so3lr import So3lrCalculator, So3lrPotential
+    with jax.enable_x64(False):
+        for make in (So3lrCalculator, So3lrPotential):
+            with pytest.raises(ValueError, match='float64 needs'):
+                make(model=MODEL, dtype=np.float64)
+
+
+def test_ase_calculator_forms_displacements_before_the_cast(x64):
+    """So3lrCalculator in float32 (its default) around float64 positions, as in so3lr's MD: 400 A
+    from the origin it gives the forces at the origin, in float64; without x64 (float32) it does not."""
+    from so3lr import So3lrCalculator
+    near, far = _near_and_far()
+
+    def forces(**kwargs):
+        calc = So3lrCalculator(model=MODEL, **kwargs)
+        return [calc.get_forces(atoms) for atoms in (near, far)]
+
+    f_near, f_far = forces()
+    with jax.enable_x64(False):
+        g_near, g_far = forces()
+    assert f_near.dtype == np.float64
+    moved, moved_float32 = np.abs(f_near - f_far).max(), np.abs(g_near - g_far).max()
+    assert moved < 1e-5 < moved_float32, (moved, moved_float32)

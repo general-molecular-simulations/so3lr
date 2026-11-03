@@ -1,7 +1,9 @@
 import jax
 import jax.numpy as jnp
 
-from so3lr.mlff.calculators.potential import build_long_range_kwargs, cast_float_params, load_model_from_workdir
+from so3lr.mlff.calculators.potential import (
+    build_long_range_kwargs, cast_float_params, load_model_from_workdir, require_x64)
+from so3lr.mlff.nn.embed.embed_sparse import pair_displacements
 from so3lr.model_registry import resolve_model
 
 
@@ -18,10 +20,14 @@ def make_so3lr(
     kspace_interp_nodes=4,
     kspace_dispersion=None,
     kspace_dispersion_interp_nodes=4,
+    precision=None,
 ):
+    """precision: the model's dtype (None: the positions'). The displacements are formed in the
+    positions' dtype before the cast, as in ``jaxmd_utils.neighbor_list_featurizer``."""
     # ``workdir`` (legacy arg) takes precedence over ``model``; either may be a
     # bundled model name or a filesystem path. None -> DEFAULT_MODEL.
     spec = resolve_model(workdir if workdir is not None else model)
+    require_x64(precision)  # before the model loads
 
     long_range_kwargs = build_long_range_kwargs(
         lr_cutoff, dispersion_energy_cutoff_lr_damping, 'sparse',
@@ -40,6 +46,12 @@ def make_so3lr(
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge
     )
+
+    model.reset_input_convention('displacements')
+    # per-atom energies, summed in forward
+    model.reset_output_convention('per_atom')
+    if precision is not None:
+        params = cast_float_params(params, precision)  # once; forward's cast is then a no-op
 
     # No theory-level expansion here: load_model_from_workdir above already did
     # it. This used to hold a copy of the tiling that could never fire (the
@@ -65,12 +77,17 @@ def make_so3lr(
             positions=positions,
             **other_inputs
         )
+        inputs['displacements'], inputs['displacements_lr'] = pair_displacements(inputs)
 
-        # in the positions' precision (the checkpoint's parameters are float32)
-        output = model.apply(cast_float_params(params, positions.dtype), inputs)
+        # the parameters too: the checkpoint's are float32
+        dtype = positions.dtype if precision is None else precision
+        output = model.apply(cast_float_params(params, dtype), cast_float_params(inputs, dtype))
 
-        # We sum over all energies
-        summed_energy = jnp.sum(jnp.where(graph_mask, output['energy'], 0.))
+        # the structures' energies, summed over their atoms in the positions' dtype
+        energy = jax.ops.segment_sum(output['energy'].astype(positions.dtype), batch_segments,
+                                     num_segments=len(graph_mask))
+        output['energy'] = jnp.where(graph_mask, energy, 0.)
+        summed_energy = jnp.sum(output['energy'])
 
         return -summed_energy, output
 

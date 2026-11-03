@@ -168,7 +168,7 @@ def pytest_collection_modifyitems(config, items):
 @pytest.fixture(scope="module")
 def x64():
     """float64 for the requesting module. Without x64, a calculator asked for
-    dtype=np.float64 silently computes in float32. The flag is global to the
+    dtype=np.float64 raises. The flag is global to the
     process, so it is restored afterwards."""
     old = jax.config.jax_enable_x64
     jax.config.update("jax_enable_x64", True)

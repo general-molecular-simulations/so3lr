@@ -32,7 +32,8 @@ def neighbor_list_featurizer(
         precision: the model's dtype. Displacements are formed in the dtype of
             ``R`` and the graph's floating arrays are cast to ``precision`` after,
             so a float64 MD state around a float32 model keeps float64 edges up to
-            the model. ``None`` follows ``R.dtype`` (the public helper).
+            the model. ``None`` leaves the graph in ``R.dtype`` (PotentialSparse
+            casts it to its own dtype).
     """
     from so3lr.mlff.calculators.potential import cast_float_params
 
@@ -135,7 +136,7 @@ def to_jax_md(
         fractional_coordinates: bool = True,
         total_charge: float = 0.0,  # net charge of the system (e)
         num_unpaired_electrons: float = 0.0,  # spin: number of unpaired electrons
-        precision=None,  # the model's dtype; None -> follow positions dtype
+        precision=None,  # the model's dtype; None leaves the graph in R.dtype (PotentialSparse casts it to its own)
         **neighbor_kwargs
 ):
     """Build the (short-range, long-range) neighbor functions and a jax-md

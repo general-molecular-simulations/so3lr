@@ -8,6 +8,9 @@ from so3lr.model_registry import resolve_model
 
 from model_references import TOLERANCES, V2_MODELS, reference_path
 
+# float64 calculators need x64 (they raise without it)
+pytestmark = pytest.mark.usefixtures('x64')
+
 # Original/legacy SO3LR model, resolved via the registry so the test is
 # decoupled from the on-disk layout (the model now lives under models/so3lr).
 MODEL_DIR = resolve_model('so3lr').dir
@@ -30,8 +33,7 @@ def test_bounding_cell_does_not_change_free_molecule():
     boxed.pbc = False
     boxed.calc = atoms.calc
 
-    # Tolerances cover float32 when x64 is off; the minimum-image error this
-    # guards against is ~1e-2 eV and ~1e-2 eV/A.
+    # The minimum-image error this guards against is ~1e-2 eV and ~1e-2 eV/A.
     npt.assert_allclose(boxed.get_potential_energy(), energy, atol=1e-4)
     npt.assert_allclose(boxed.get_forces(), forces, atol=1e-3)
 
@@ -66,8 +68,7 @@ def test_water():
     energy = atoms.get_potential_energy()
     forces = atoms.get_forces()
 
-    # The reference is float64; without x64 the run is float32 (~1e-6 relative),
-    # so the tolerance must not depend on whether an earlier test enabled x64.
+    # The reference is float64.
     npt.assert_allclose(
         target_predictions['energy'],
         energy,
@@ -240,9 +241,9 @@ def test_shipped_default_has_a_reference():
 
 
 @pytest.mark.parametrize('model', V2_MODELS)
-def test_v2_ase_calculator(model: str, x64):
+def test_v2_ase_calculator(model: str):
     """Regression check for bundled v2 models against saved references
-    (tests/model_references.py). Needs x64: the tight bounds hold in float64 only."""
+    (tests/model_references.py); the tight bounds hold in float64 only."""
     from so3lr import So3lrCalculator
 
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
