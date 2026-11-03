@@ -136,7 +136,7 @@ def to_jax_md(
         fractional_coordinates: bool = True,
         total_charge: float = 0.0,  # net charge of the system (e)
         num_unpaired_electrons: float = 0.0,  # spin: number of unpaired electrons
-        precision=None,  # the model's dtype; None -> the potential's (PotentialSparse casts the graph)
+        precision=None,  # the model's dtype; None leaves the graph in R.dtype (PotentialSparse casts it to its own)
         **neighbor_kwargs
 ):
     """Build the (short-range, long-range) neighbor functions and a jax-md

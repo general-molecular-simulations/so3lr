@@ -365,7 +365,8 @@ class AseCalculatorSparse(Calculator):
                 self.lr_cutoff = potential.long_range_cutoff
 
         # the geometry's dtype (the model's is the potential's)
-        self.dtype = np.dtype(np.float64 if jax.config.jax_enable_x64 else dtype)
+        model_dtype = np.float32 if dtype is None else dtype  # None: the checkpoint's float32
+        self.dtype = np.dtype(np.float64 if jax.config.jax_enable_x64 else model_dtype)
         self.head_index = head_index
         self.kspace_electrostatics = kspace_electrostatics
         self.kspace_smearing = kspace_smearing

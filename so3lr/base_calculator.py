@@ -80,7 +80,7 @@ def make_so3lr(
         inputs['displacements'], inputs['displacements_lr'] = pair_displacements(inputs)
 
         # the parameters too: the checkpoint's are float32
-        dtype = precision or positions.dtype
+        dtype = positions.dtype if precision is None else precision
         output = model.apply(cast_float_params(params, dtype), cast_float_params(inputs, dtype))
 
         # the structures' energies, summed over their atoms in the positions' dtype
