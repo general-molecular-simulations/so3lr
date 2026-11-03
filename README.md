@@ -4,53 +4,61 @@
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb)
 [![cite-link](https://img.shields.io/badge/how_to-cite-000000)](#citation)
 [![preprint-link](https://img.shields.io/badge/paper-JACS-FFCE34)](https://doi.org/10.1021/jacs.5c09558)
-[![data](https://zenodo.org/badge/DOI/10.5281/zenodo.14779793.svg)](https://doi.org/10.5281/zenodo.14779793)
+[![data](https://zenodo.org/badge/DOI/10.5281/zenodo.22920714.svg)](https://doi.org/10.5281/zenodo.22920714)
 
 ![Logo](./logo.png)
 
-**SO3LR** — pronounced *Solar* — is a pretrained machine-learned force field for
-(bio)molecular simulations. It combines the fast and stable SO3krates neural
-network for semi-local interactions with universal pairwise force fields for
-short-range repulsion, long-range electrostatics and dispersion.
+## About
 
-📖 **[Documentation: so3lr.github.io](https://so3lr.github.io/)**
+SO3LR - pronounced *Solar* - is a pretrained machine-learned force field for
+(bio)molecular simulations. It integrates the fast and stable SO3krates neural
+network for semi-local interactions with universal pairwise force fields designed
+for short-range repulsion, long-range electrostatics, and dispersion interactions.
 
 ## Installation
 
-Try SO3LR with no installation in the
+Try SO3LR without any local installation using our
 [Colab notebook](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb).
 
-SO3LR supports Python 3.12 and 3.13. Install it from a checkout with
-[uv](https://docs.astral.sh/uv/) and the committed lockfile:
+SO3LR supports Python 3.12 and 3.13. We recommend installing it with
+[uv](https://docs.astral.sh/uv/):
 
 ```shell
 git clone https://github.com/general-molecular-simulations/so3lr.git
 cd so3lr
-uv sync --locked                  # CPU
-uv sync --locked --extra cuda12   # or: CUDA 12 on Linux x86-64
-uv run so3lr --help
+uv sync --locked --extra cuda12   # GPU; drop --extra cuda12 for CPU
+source .venv/bin/activate
+so3lr --help
 ```
 
-Already have JAX on a cluster (CUDA or ROCm)? Run `uv pip install .` in that
-environment. Optional extras and other options:
-[installation guide](https://so3lr.github.io/installation/).
+More details about JAX installation can be found [here](https://docs.jax.dev/en/latest/installation.html).
+
+If JAX is already installed on your cluster (CUDA or ROCm), run `uv pip install .`
+in that environment. See the [installation guide](https://so3lr.github.io/installation/)
+for optional extras.
 
 ## Quick start
 
-Units are eV and Å. The default long-range cutoff, 12 Å, targets periodic
-condensed-phase systems; for gas-phase molecules use 100 Å (`--lr-cutoff 100`).
+SO3LR provides a command-line interface for geometry optimization, molecular
+dynamics and evaluation. Each command can be run with `--help` to see all
+available options.
 
 ```shell
+# Geometry optimization
 so3lr opt --input geometry.xyz --force-conv 0.05
+
+# NVT and NPT molecular dynamics
 so3lr nvt --input geometry.xyz --temperature 300 --dt 0.5 --md-cycles 100 --md-steps 100
 so3lr npt --input geometry.xyz --temperature 300 --pressure 1.0 --dt 0.5 --md-cycles 100 --md-steps 100
+
+# Evaluation on a dataset
 so3lr eval --datafile dataset.extxyz --lr-cutoff 100 --save-to predictions.extxyz
 ```
 
-For longer runs, use a settings file: `so3lr --settings settings.yaml`; see
-[molecular dynamics](https://so3lr.github.io/usage/md/).
+For longer simulations, use a settings file, `so3lr --settings settings.yaml`
+(see [molecular dynamics](https://so3lr.github.io/usage/md/)).
 
-In Python, use SO3LR as an ASE calculator:
+To use SO3LR as an ASE calculator:
 
 ```python
 from ase.io import read
@@ -64,60 +72,58 @@ energy = atoms.get_potential_energy()
 forces = atoms.get_forces()
 ```
 
+Units are eV and Å. The default long-range cutoff of 12 Å is meant for periodic,
+condensed-phase systems; for gas-phase simulations, we suggest using
+`--lr-cutoff 100`.
+
 ## Models
 
-The models ship inside the package; select one by name, no download needed.
-The SO3LR Tauri models cover H to At (Z = 1–85).
+The models are bundled with the package and selected by name. The SO3LR Tauri
+models cover H to At (Z = 1–85).
 
-- **`so3lr-tauri-m`** *(default)*: start here; the model we use for biomolecular MD.
-- **`so3lr-tauri-l`**: the most accurate, recommended for reactions; 3.7× slower
+- `so3lr-tauri-m` (default): start here; the model we use for biomolecular MD.
+- `so3lr-tauri-l`: the most accurate, recommended for reactions; 3.7× slower
   than `-m`.
-- **`so3lr-tauri-s`**: 1.4× faster than `-m`.
-- **`so3lr`**: the original model from the
+- `so3lr-tauri-s`: 1.4× faster than `-m`.
+- `so3lr`: the original model from the
   [JACS paper](https://doi.org/10.1021/jacs.5c09558), for H, C, N, O, F, P, S and
   Cl, kept to reproduce published results.
 
-Speeds are for MD of 12,288-atom water with PME on one NVIDIA A100.
-
-Use the same name everywhere (`So3lrCalculator(model=...)`, `--model`, `model:`
-in a settings file), or a path for a fine-tuned model. To pin a release for
-papers and benchmarks, add its date: `so3lr-tauri-m-2606`.
+Use the same name in Python (`So3lrCalculator(model=...)`), on the command line
+(`--model`) and in settings files (`model:`), or pass a path to a fine-tuned
+model. To pin a release for papers and benchmarks, add its date:
+`so3lr-tauri-m-2606`.
 
 ## Documentation
 
-| | |
-|---|---|
-| [Quick start](https://so3lr.github.io/quickstart/) | First simulation, step by step |
-| [Models](https://so3lr.github.io/models/) | Sizes, naming, checksums, custom models |
-| [Command line](https://so3lr.github.io/usage/cli/) · [Settings file](https://so3lr.github.io/usage/settings/) | Every command, flag and YAML key |
-| [Molecular dynamics](https://so3lr.github.io/usage/md/) | Ensembles, engines, restarts, frozen atoms, output |
-| [ASE calculator](https://so3lr.github.io/usage/ase/) · [Dataset evaluation](https://so3lr.github.io/usage/evaluation/) | Python interface, metrics and predictions |
-| [Long-range electrostatics](https://so3lr.github.io/advanced/electrostatics/) | Ewald / PME / P3M and `so3lr tune-ewald` |
-| [Enhanced sampling](https://so3lr.github.io/advanced/enhanced-sampling/) | PySAGES methods and collective variables |
-| [Observables](https://so3lr.github.io/advanced/observables/) · [Gradients and Hessians](https://so3lr.github.io/advanced/derivatives/) | Energy components, charges, embeddings, derivatives |
-| [Binding energies](https://so3lr.github.io/advanced/binding-energies/) | Dimer interaction energies |
-| [Fine-tuning](https://so3lr.github.io/training/finetuning/) · [Training from scratch](https://so3lr.github.io/training/from-scratch/) | Adapting the model to your data |
-| [API reference](https://so3lr.github.io/reference/api/) · [FAQ](https://so3lr.github.io/reference/faq/) | The Python surface, common questions |
+The full documentation is at [so3lr.github.io](https://so3lr.github.io/), including:
 
-The [`examples`](./examples) folder has notebooks for evaluation, NVT/NPT with
-JAX-MD and a production run.
+- [Command line](https://so3lr.github.io/usage/cli/) and [settings file](https://so3lr.github.io/usage/settings/)
+- [Molecular dynamics](https://so3lr.github.io/usage/md/)
+- [ASE calculator](https://so3lr.github.io/usage/ase/) and [dataset evaluation](https://so3lr.github.io/usage/evaluation/)
+- [Long-range electrostatics](https://so3lr.github.io/advanced/electrostatics/) (Ewald, PME, P3M)
+- [Enhanced sampling](https://so3lr.github.io/advanced/enhanced-sampling/) with PySAGES
+- [Observables](https://so3lr.github.io/advanced/observables/), [gradients and Hessians](https://so3lr.github.io/advanced/derivatives/)
+- [Binding energies](https://so3lr.github.io/advanced/binding-energies/)
+- [Fine-tuning](https://so3lr.github.io/training/finetuning/) and [training from scratch](https://so3lr.github.io/training/from-scratch/)
+- [API reference](https://so3lr.github.io/reference/api/) and [FAQ](https://so3lr.github.io/reference/faq/)
 
 ## Datasets
 
-The quantum-mechanical datasets used to train and test SO3LR are on Zenodo:
-[10.5281/zenodo.14779793](https://doi.org/10.5281/zenodo.14779793).
+The quantum mechanical datasets used for training and testing SO3LR Tauri are
+available on Zenodo: [10.5281/zenodo.22920714](https://doi.org/10.5281/zenodo.22920714). The data for the legacy SO3LR
+model are at [10.5281/zenodo.14779793](https://doi.org/10.5281/zenodo.14779793).
 
 ## Contributing
 
-The code and models are still evolving and feedback is invaluable: please
-[open an issue](https://github.com/general-molecular-simulations/so3lr/issues)
-for errors, inconsistencies or feature ideas. See [`DEVELOPERS.md`](./DEVELOPERS.md)
-for development environments, tests and the lockfile policy.
+The code and models are still evolving, and your feedback is invaluable. We would
+appreciate if you [open an issue](https://github.com/general-molecular-simulations/so3lr/issues)
+for any errors, inconsistencies or feature ideas. See [`DEVELOPERS.md`](./DEVELOPERS.md)
+for development environments and tests.
 
 ## Citation
 
-If you use SO3LR, please cite the paper below and give the model you used, e.g.
-`so3lr-tauri-m-2606`:
+If you use SO3LR, please cite the papers below:
 
 ```bibtex
 @article{kabylda2025molecular,
