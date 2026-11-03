@@ -189,11 +189,11 @@ class AseCalculatorSparse(Calculator):
                     Finite systems always use 'glp'.
 
         dtype is the model's. The positions, displacements, energy sum and results are in the
-        MD state's dtype, as in so3lr's MD: float64 with x64, else dtype.
+        MD state's dtype, as in so3lr's MD by default: float64 with x64, else float32.
         """
         if neighbor_backend not in ('auto', 'glp', 'exact'):
             raise ValueError(f"neighbor_backend must be 'auto', 'glp' or 'exact', got {neighbor_backend!r}.")
-        require_x64(dtype)
+        require_x64(dtype)  # for a direct construction; create_from_workdir's potential checks first
         self.neighbor_backend = neighbor_backend
         self._exact_nb = None
         self._exact_nb_natoms = None

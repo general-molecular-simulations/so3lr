@@ -49,7 +49,7 @@ def make_so3lr(
     )
 
     model.reset_input_convention('displacements')
-    # per-atom energies, summed per structure in forward in the positions' dtype
+    # per-atom energies, summed in forward
     model.reset_output_convention('per_atom')
     if precision is not None:
         params = cast_float_params(params, precision)  # once; forward's cast is then a no-op

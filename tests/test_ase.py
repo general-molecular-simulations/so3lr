@@ -8,6 +8,9 @@ from so3lr.model_registry import resolve_model
 
 from model_references import TOLERANCES, V2_MODELS, reference_path
 
+# float64 calculators need x64 (without it they now raise instead of running in float32)
+pytestmark = pytest.mark.usefixtures('x64')
+
 # Original/legacy SO3LR model, resolved via the registry so the test is
 # decoupled from the on-disk layout (the model now lives under models/so3lr).
 MODEL_DIR = resolve_model('so3lr').dir

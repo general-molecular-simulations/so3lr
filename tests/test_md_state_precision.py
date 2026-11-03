@@ -121,6 +121,15 @@ def test_restart_into_another_ensemble_gives_jax_arrays_in_the_state_dtype(tmp_p
 MODEL = 'so3lr-tauri-s-2606'
 
 
+def _near_and_far():
+    """Acetone at the origin and the same molecule 400 A away."""
+    from ase.io import read
+    near = read(ACETONE)
+    far = near.copy()
+    far.positions += 400.0
+    return near, far
+
+
 def _eval_batch(frames, tmp_path):
     """frames as one padded batch of so3lr eval's model inputs (read back from an extxyz)."""
     from ase.io import write
@@ -142,12 +151,9 @@ def _eval_batch(frames, tmp_path):
 def test_eval_model_forms_displacements_before_the_cast(tmp_path, x64):
     """so3lr eval's model in float32 around float64 positions: 400 A from the origin the forces are
     the molecule's at the origin, as in MD. Cast to float32 first, the displacements lose that."""
-    from ase.io import read
     from so3lr.base_calculator import make_so3lr
     from so3lr.mlff.calculators.potential import cast_float_params
-    near = read(ACETONE)
-    far = near.copy()
-    far.positions += 400.0
+    near, far = _near_and_far()
     inputs = _eval_batch([near, far], tmp_path)
     n = len(near)
     model = jax.jit(make_so3lr(model=MODEL, precision=jnp.float32))
@@ -163,8 +169,7 @@ def test_eval_model_forms_displacements_before_the_cast(tmp_path, x64):
 
 
 def test_eval_precision_is_the_models_and_predictions_are_saved_unrounded(tmp_path, x64):
-    """so3lr eval in float32 computes in float32 (it computed in float64 whatever the flag), and in
-    float64 it saves So3lrCalculator's float64 energy, not one rounded to 6 digits."""
+    """so3lr eval in float32 computes in float32, and in float64 it saves So3lrCalculator's float64 energy, not one rounded to 6 digits."""
     from ase.calculators.singlepoint import SinglePointCalculator
     from ase.io import read, write
     from so3lr import So3lrCalculator
@@ -186,7 +191,7 @@ def test_eval_precision_is_the_models_and_predictions_are_saved_unrounded(tmp_pa
 
 def test_jax_md_potential_computes_in_its_dtype(x64):
     """So3lrPotential(dtype=float32) through to_jax_md around float64 positions: a float32 model on
-    float64 displacements (the float32 parameters were promoted, so it computed in float64)."""
+    float64 displacements."""
     from ase.io import read
     from so3lr import So3lrPotential, to_jax_md
     atoms = read(ACETONE)
@@ -217,11 +222,8 @@ def test_float64_without_x64_raises():
 def test_ase_calculator_forms_displacements_before_the_cast(x64):
     """So3lrCalculator in float32 (its default) around float64 positions, as in so3lr's MD: 400 A
     from the origin it gives the forces at the origin, in float64; without x64 (float32) it does not."""
-    from ase.io import read
     from so3lr import So3lrCalculator
-    near = read(ACETONE)
-    far = near.copy()
-    far.positions += 400.0
+    near, far = _near_and_far()
 
     def forces(**kwargs):
         calc = So3lrCalculator(model=MODEL, **kwargs)

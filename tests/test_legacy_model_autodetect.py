@@ -16,6 +16,9 @@ from so3lr import model_registry as mr
 from so3lr.model_config import load_model_config
 from so3lr.mlff.nn.observable.dispersion_ref_data import supported_atomic_numbers_for_model
 
+# float64 calculators need x64 (without it they now raise instead of running in float32)
+pytestmark = pytest.mark.usefixtures('x64')
+
 
 def _copy(target, **model_keys):
     """The bundled legacy model with its config's model keys changed (None removes one)."""
