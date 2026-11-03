@@ -162,7 +162,6 @@ def test_eval_model_forms_displacements_before_the_cast(tmp_path, x64):
     assert moved < 1e-5 < moved_cast_first, (moved, moved_cast_first)
 
 
-
 def test_eval_precision_is_the_models_and_predictions_are_saved_unrounded(tmp_path, x64):
     """so3lr eval in float32 computes in float32 (it computed in float64 whatever the flag), and in
     float64 it saves So3lrCalculator's float64 energy, not one rounded to 6 digits."""

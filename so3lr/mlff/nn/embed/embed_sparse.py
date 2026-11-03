@@ -177,24 +177,23 @@ def pair_displacements(inputs: Dict):
     inputs carry a cell (long-range: and cell_offset_lr). In the positions' dtype."""
     positions, cell, batch_segments = inputs['positions'], inputs.get('cell'), inputs.get('batch_segments')
 
-    def displacements(idx_i, idx_j, cell_offsets):
+    def displacements(idx_i, idx_j, cell, cell_offsets):
         r_ij = positions[idx_j] - positions[idx_i]  # (num_pairs, 3)
         if cell is None:
             return r_ij
         return add_cell_offsets_sparse(r_ij=r_ij, cell=cell, cell_offsets=cell_offsets,
                                        batch_segments=batch_segments, idx_i=idx_i)
 
-    r_ij = displacements(inputs['idx_i'], inputs['idx_j'], inputs.get('cell_offset'))
+    r_ij = displacements(inputs['idx_i'], inputs['idx_j'], cell, inputs.get('cell_offset'))
     idx_i_lr, idx_j_lr, cell_offsets_lr = inputs.get('idx_i_lr'), inputs.get('idx_j_lr'), inputs.get('cell_offset_lr')
     if idx_i_lr is None or len(idx_i_lr) == 0:
         return r_ij, None
     assert idx_j_lr is not None and len(idx_j_lr) > 0
-    if cell_offsets_lr is None:
-        return r_ij, positions[idx_j_lr] - positions[idx_i_lr]
-    if cell is not None:
+    cell_lr = cell if cell_offsets_lr is not None else None  # without offsets: the plain differences
+    if cell_lr is not None:
         logging.warning(
             'The use of long range indices with PBCs has not been tested thoroughly yet, so use with care!')
-    return r_ij, displacements(idx_i_lr, idx_j_lr, cell_offsets_lr)
+    return r_ij, displacements(idx_i_lr, idx_j_lr, cell_lr, cell_offsets_lr)
 
 
 class GeometryEmbedSparse(BaseSubModule):
@@ -234,13 +233,12 @@ class GeometryEmbedSparse(BaseSubModule):
         """
         idx_i = inputs['idx_i']  # shape: (num_pairs)
         idx_j = inputs['idx_j']  # shape: (num_pairs)
+        positions = inputs['positions']  # (N, 3)
         if self.input_convention == 'positions':
-            positions = inputs['positions']  # (N, 3)
             r_ij, r_ij_lr = pair_displacements(inputs)
 
         # Here it is assumed that PBC (if present) have already been respected in displacement calculation.
         elif self.input_convention == 'displacements':
-            positions = inputs['positions']
             r_ij = inputs['displacements']  # shape : (num_pairs, 3)
             r_ij_lr = inputs.get('displacements_lr')  # shape : (num_pairs_lr, 3)
         else:

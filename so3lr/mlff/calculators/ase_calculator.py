@@ -14,7 +14,6 @@ from so3lr.mlff.calculators import exact_neighbors
 from so3lr.mlff.geometric.cutoff import add_cell_offsets_sparse
 from so3lr.mlff.calculators.potential import PotentialSparse, require_x64
 from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
-from so3lr.md_settings_validation import state_precision
 from so3lr.pbc import is_fully_periodic, lattice_rows
 
 from glp.calculators.utils import get_strain, strain_system
@@ -366,8 +365,7 @@ class AseCalculatorSparse(Calculator):
                 self.lr_cutoff = potential.long_range_cutoff
 
         # the geometry's dtype (the model's is the potential's)
-        precision = np.dtype(dtype).name
-        self.dtype = np.dtype(state_precision(precision, {}) if jax.config.jax_enable_x64 else precision)
+        self.dtype = np.dtype(np.float64 if jax.config.jax_enable_x64 else dtype)
         self.head_index = head_index
         self.kspace_electrostatics = kspace_electrostatics
         self.kspace_smearing = kspace_smearing
