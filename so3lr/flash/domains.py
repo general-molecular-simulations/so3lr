@@ -41,7 +41,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .engine import FlashSO3LR, mode_kib
+from .engine import MAX_REBUILDS, FlashSO3LR, mode_kib
 
 
 @partial(jax.jit, donate_argnums=(0,))
@@ -52,6 +52,17 @@ def _scatter_set(arr, idx, val):
 @partial(jax.jit, donate_argnums=(0,))
 def _scatter_add(arr, idx, val):
     return arr.at[idx].add(val, mode="drop")
+
+
+def _halo(statics):
+    """The local halo: an atom's features depend on atoms within layers x cutoff."""
+    return int(statics["num_layers"]) * float(statics["cutoff"]) + 0.1
+
+
+def _pad(m):
+    """A row count with 2% to spare, rounded up to 1024: sizes only grow, so MD steps
+    reuse the compiled programs."""
+    return int(math.ceil(m * 1.02 / 1024) * 1024)
 
 
 def _staged(eng, name, make):
@@ -70,7 +81,7 @@ def pick_splits(n, box, statics, free_bytes, mode="fast", devices=1, kib_per_row
     domains are then fewer. kib_per_row: what a domain's engine holds per row, if measured
     (default: the whole-system engine's estimate for ``mode`` with a quarter more, which
     is about twice what the domain engines hold)."""
-    halo = int(statics["num_layers"]) * float(statics["cutoff"]) + 0.1
+    halo = _halo(statics)
     L = [float(v) for v in np.diag(np.asarray(box, np.float64).reshape(3, 3))]
     density = n / math.prod(L)
     per_atom = (kib_per_row or mode_kib(mode, statics) * 1.25) * 1024
@@ -100,8 +111,8 @@ class FlashDomains:
             raise ValueError("FlashDomains takes devices itself; its domains' engines run on one each")
         self.params, self.statics = params, statics
         self.devices = jax.local_devices()[:devices] if isinstance(devices, int) else list(devices)
-        if isinstance(devices, int) and len(self.devices) < devices:
-            raise ValueError(f"{devices} devices asked for, {len(self.devices)} visible")
+        if not self.devices or isinstance(devices, int) and len(self.devices) < devices:
+            raise ValueError(f"devices={devices}: 1 to {len(jax.local_devices())} here")
         self.splits = tuple(int(k) for k in splits)
         self.z = np.asarray(z).astype(np.int32)
         self.n = int(self.z.shape[0])
@@ -114,15 +125,16 @@ class FlashDomains:
         self.L = [float(v) for v in np.diag(box)]
         self.rc = float(statics["cutoff"])
         self.rc_lr = float(statics["long_range_cutoff"])
-        self.halo = int(statics["num_layers"]) * self.rc + 0.1
+        self.halo = _halo(statics)
         self.halo_lr = self.rc_lr + 0.1
+        hmax = max(self.halo, self.halo_lr)
         for L, k in zip(self.L, self.splits):
-            if k > 1 and L / k + 2.0 * max(self.halo, self.halo_lr) + 0.1 > L:
+            if k > 1 and L / k + 2.0 * hmax + 0.1 > L:
                 raise ValueError(f"a domain of {L / k:.1f} A with its halo overlaps itself in a box of "
                                  f"{L:.1f} A: fewer splits")
-            if k > 1 and L / k < max(self.halo, self.halo_lr):
+            if k > 1 and L / k < hmax:
                 raise ValueError(f"domains of {L / k:.1f} A are narrower than the halo "
-                                 f"({max(self.halo, self.halo_lr):.1f} A): fewer splits")
+                                 f"({hmax:.1f} A): fewer splits")
         self.engine_kw = engine_kw
         self.dtype = statics.get("dtype", jnp.float32)
         self.total_charge, self.total_spin = float(total_charge), float(total_spin)
@@ -139,14 +151,14 @@ class FlashDomains:
         self.grid = max(5.0, self.rc + 0.5)
         self._engines, self._shape, self._cuts, self._dummy = {}, {}, {}, {}
         # each domain and its neighbours (flat ids, padded with nd: an empty domain)
-        nd = math.prod(self.splits)
+        self.nd = nd = math.prod(self.splits)
         offsets = [(i - 1, j - 1, k - 1) for i, j, k in np.ndindex(3, 3, 3)]
         self._nbrs = {}
         for d in self._domains():
             near = sorted({self._flat(tuple((d[a] + o[a]) % self.splits[a] for a in range(3))) for o in offsets})
             self._nbrs[d] = np.asarray(near + [nd] * (27 - len(near)), np.int32)
         self._m_pad = 0
-        self.timings, self.stats = {}, []
+        self.timings = {}
 
     # ---- devices ---------------------------------------------------------------------
     def _each(self, fn):
@@ -180,11 +192,10 @@ class FlashDomains:
 
     # ---- domains and their atoms ------------------------------------------------
     def _domains(self):
-        kx, ky, kz = self.splits
-        return [(i, j, k) for i in range(kx) for j in range(ky) for k in range(kz)]
+        return list(np.ndindex(*self.splits))
 
     def _flat(self, d):
-        return (d[0] * self.splits[1] + d[1]) * self.splits[2] + d[2]
+        return int(np.ravel_multi_index(d, self.splits))
 
     def _domain_of(self, R):
         dom = jnp.zeros((self.n,), jnp.int32)
@@ -207,12 +218,11 @@ class FlashDomains:
     def _index(self, dom):
         """The atoms sorted by domain: (order, where each domain starts, how many each
         has; one more, empty, domain at the end)."""
-        nd = math.prod(self.splits)
-        counts = jnp.bincount(dom, length=nd + 1).astype(jnp.int32)
+        counts = jnp.bincount(dom, length=self.nd + 1).astype(jnp.int32)
         starts = jnp.concatenate([jnp.zeros((1,), jnp.int32), jnp.cumsum(counts)[:-1].astype(jnp.int32)])
         m = int(jnp.max(counts))
         if m > self._m_pad:                 # only grows: MD steps compile nothing
-            self._m_pad = int(math.ceil(m * 1.02 / 1024) * 1024)
+            self._m_pad = _pad(m)
         return jnp.argsort(dom).astype(jnp.int32), starts, counts
 
     def _candidates(self, index, nbrs):
@@ -229,14 +239,16 @@ class FlashDomains:
             self._cuts[key] = jax.jit(cand)
         return self._cuts[key](*index, nbrs)
 
+    def _keep(self, R, cand, idx3, h):
+        """Which of the neighbourhood's atoms (cand, n where none) are in domain idx3 or its
+        halo h."""
+        return self._inside(R.at[cand].get(mode="fill", fill_value=0.0), idx3, h) & (cand < self.n)
+
     def _count(self, R, cand, idx3, h):
         """Atoms of domain idx3 with a halo h (of its neighbourhood cand)."""
         if "count" not in self._cuts:
-            n = self.n
-
             def count(R, cand, idx3, h):
-                p = R.at[cand].get(mode="fill", fill_value=0.0)
-                return jnp.sum(self._inside(p, idx3, h) & (cand < n), dtype=jnp.int32)
+                return jnp.sum(self._keep(R, cand, idx3, h), dtype=jnp.int32)
             self._cuts["count"] = jax.jit(count)
         return int(self._cuts["count"](R, cand, idx3, h))
 
@@ -249,7 +261,7 @@ class FlashDomains:
             n, splits, Ls = self.n, self.splits, self.L
 
             def cut(R, dom, z, cand, idx3, flat, h, dummy, z_dummy):
-                keep = self._inside(R.at[cand].get(mode="fill", fill_value=0.0), idx3, h) & (cand < n)
+                keep = self._keep(R, cand, idx3, h)
                 m = jnp.sum(keep, dtype=jnp.int32)
                 rows = jnp.nonzero(keep, size=n_pad, fill_value=cand.shape[0])[0]
                 ids = jnp.concatenate([cand, jnp.full((1,), n, cand.dtype)])[rows].astype(jnp.int32)
@@ -270,19 +282,18 @@ class FlashDomains:
             self._cuts[n_pad] = jax.jit(cut)
         return self._cuts[n_pad]
 
-    def _sites(self, sub_L):
-        """Dummy sites per plane of the gap along the first split axis."""
+    def _plane(self, sub_L):
+        """The gap's axis (the first split one), the other two, and the dummy sites along
+        each of them per plane."""
         ax = next(a for a in range(3) if self.splits[a] > 1)
         o = [a for a in range(3) if a != ax]
-        return int(sub_L[o[0]] // self.grid) * int(sub_L[o[1]] // self.grid)
+        return ax, o, int(sub_L[o[0]] // self.grid), int(sub_L[o[1]] // self.grid)
 
     def _dummies(self, sub_L, h, count):
         """count positions in planes ``grid`` apart in the gap of the first split axis,
         the first and last plane rc + 0.5 A from the real atoms on either side."""
-        ax = next(a for a in range(3) if self.splits[a] > 1)
-        o = [a for a in range(3) if a != ax]
+        ax, o, g1, g2 = self._plane(sub_L)
         D = self.L[ax] / self.splits[ax]
-        g1, g2 = int(sub_L[o[0]] // self.grid), int(sub_L[o[1]] // self.grid)
         k = np.arange(count)
         p = np.zeros((count, 3))
         p[:, ax] = D + 2.0 * h + self.rc + 0.5 + self.grid * (k // (g1 * g2))
@@ -295,10 +306,13 @@ class FlashDomains:
         the padded size or the domain box grows."""
         old = self._engines.get((p, key))
         if old is None or old[0] != (n_pad, tuple(sub_L)):
+            # a new engine starts from the old one's widened rows and scratch
+            kw = dict(self.engine_kw, **(dict(max_neighbours=old[1].K, lr_scratch=old[1].maxh) if old else {}))
+            del old                                         # freed before the new one is built
             self._engines.pop((p, key), None)
             params = self._on(p, "params", lambda: self.params)
             eng = FlashSO3LR(params, self.statics, np.asarray(zz), np.diag(sub_L),
-                             total_charge=self.total_charge, total_spin=self.total_spin, **self.engine_kw)
+                             total_charge=self.total_charge, total_spin=self.total_spin, **kw)
             eng.x0_table = self._on(p, "x0", lambda: eng._embed_table(
                 jnp.asarray(self.zu), jnp.asarray(self.counts, eng.dtype), self.total_charge,
                 self.total_spin))                # before anything is traced
@@ -319,13 +333,16 @@ class FlashDomains:
         # the padded size and the gap only grow, so MD steps reuse one compiled engine
         n_pad, gap0 = self._shape.get(key, (0, 0.0))
         if max(counts) > n_pad:
-            n_pad = int(math.ceil(max(counts) * 1.02 / 1024) * 1024)
-        sub_L = [self.L[ax] / k + 2.0 * h + gap0 if k > 1 else self.L[ax] for ax, k in enumerate(self.splits)]
+            n_pad = _pad(max(counts))
+
+        def domain_box(gap):
+            return [self.L[ax] / k + 2.0 * h + gap if k > 1 else self.L[ax] for ax, k in enumerate(self.splits)]
         # enough planes of dummies for the emptiest domain; the gap widens to hold them
-        layers = max(1, -(-(n_pad - min(counts)) // self._sites(sub_L)))
+        _, _, g1, g2 = self._plane(domain_box(gap0))
+        layers = max(1, -(-(n_pad - min(counts)) // (g1 * g2)))
         gap = max(gap0, 2.0 * self.rc + 1.0 + self.grid * (layers - 1))
         self._shape[key] = (n_pad, gap)
-        sub_L = [self.L[ax] / k + 2.0 * h + gap if k > 1 else self.L[ax] for ax, k in enumerate(self.splits)]
+        sub_L = domain_box(gap)
         if (key, n_pad, gap) not in self._dummy:
             self._dummy = {(key, n_pad, gap): self._dummies(sub_L, h, n_pad).astype(Rs[0].dtype),
                            **{k: v for k, v in self._dummy.items() if k[0] != key}}
@@ -341,14 +358,13 @@ class FlashDomains:
                 eng = self._engine(key, n_pad, sub_L, zz, p)
                 eng.z, eng.elem = zz, lut[zz]
                 fn(p, eng, pos, prep(p, ids, own, real))
-                self.stats.append((sweep, d, int(m), n_pad))
         self._each(work)
 
     # ---- the three passes on one domain -------------------------------------------
     @staticmethod
     def _local_forward(eng, pos):
         """Per atom: energy without the long range, raw charge, a0 and c6 ratios."""
-        while True:
+        for _ in range(MAX_REBUILDS + 1):
             st = eng._forward_staged(pos)
             out = _staged(eng, "head_local", lambda: lambda x, R, nb: eng._head_local(x, eng._pos3(R), nb)[:4])(
                 st["x"], pos, st["nb"])
@@ -356,6 +372,7 @@ class FlashDomains:
                 return out
             del st, out
             eng.widen()
+        raise RuntimeError(f"Flash domains: overflowed again after {MAX_REBUILDS} rebuilds")
 
     @staticmethod
     def _long_range(eng, pos, q, a0, c6):
@@ -367,31 +384,33 @@ class FlashDomains:
                 return eng._long_range(pos3, eng.build_grid(pos3), q, a0, c6, zero,
                                        (zero + 0.0, zero + 0.0, zero + 0.0, zero + 0.0))
             return lr
-        while True:
+        for _ in range(MAX_REBUILDS + 1):
             e, gq, ga0, gc6, f3, most = _staged(eng, "long_range", make)(pos, q, a0, c6)
             if int(most) <= eng.maxh:
                 return e, gq, ga0, gc6, jnp.stack(f3[:3], -1)
-            eng.maxh = int(int(most) * 1.25)
+            eng.maxh = min(int(int(most) * 1.25), eng.n)
             eng._build_jit()
+        raise RuntimeError(f"Flash domains: overflowed again after {MAX_REBUILDS} rebuilds")
 
     @staticmethod
     def _local_forces(eng, pos, w, g_raw, ga0, gc6):
         """Forces of sum_i w[i] e_local[i] + g_raw[i] raw_q[i] + ga0[i] a0[i] + gc6[i] c6[i],
         with the repulsion's forces of the atoms with w = 1 only."""
-        def head(c, x, R, nb):
+        def head(x, R, nb):
             f3 = _staged(eng, "head_local_f3", lambda: lambda x, R, nb: eng._head_local(x, eng._pos3(R), nb)[4])(
                 x, R, nb)
             f3 = tuple(v * w for v in f3)
             g_x = _staged(eng, "head_bwd_w", lambda: lambda x, w, gr, ga, gc: eng._head_backward(
                 x, gr, ga, gc, w_e=w))(x, w, g_raw, ga0, gc6)
             return None, g_x, f3, jnp.int32(0)
-        while True:
+        for _ in range(MAX_REBUILDS + 1):
             st = eng._forward_staged(pos)
             cnt = st["nb"][4]
             _, f3, _ = eng._backward_staged(pos, st, head)
             if int(jnp.max(cnt)) <= eng.K:
                 return jnp.stack(f3[:3], -1)
             eng.widen()
+        raise RuntimeError(f"Flash domains: overflowed again after {MAX_REBUILDS} rebuilds")
 
     # ---- the force call --------------------------------------------------------------
     def energy_forces(self, R):
@@ -405,7 +424,7 @@ class FlashDomains:
         R = R if R.dtype == jnp.float64 else R.astype(self.dtype)
         n, dt = self.n, self.dtype
         acc = jnp.promote_types(dt, R.dtype)
-        self.stats, self.timings = [], {}
+        self.timings = {}
         clock = [time.perf_counter()]
         each = self._each
 
@@ -430,7 +449,8 @@ class FlashDomains:
             for k, v in zip("eqac", self._local_forward(eng, pos)):
                 out[k][p] = _scatter_set(out[k][p], extra[0], v)
         self._sweep(Rs, doms, indexes, self.halo, 1, per_atom, lambda p, ids, own, real: [jnp.where(own, ids, n)])
-        e_local, raw_q, a0, c6 = (self._summed(out.pop(k)) for k in "eqac")
+        e_local = self._summed(out.pop("e"), everywhere=False)
+        raw_q, a0, c6 = (self._summed(out.pop(k)) for k in "qac")
         lap("1. per-atom values", e_local[0], raw_q, a0, c6)
 
         # 2. the long range of each domain's own atoms, from the equilibrated charges
@@ -438,7 +458,7 @@ class FlashDomains:
         q = each(lambda p: raw_q[p] + jax.device_put(shift, self.devices[p]))
         del raw_q
         lrs = {k: zeros() for k in "eqac"}
-        res = {"f": zeros(3)}
+        f_parts = zeros(3)
 
         def lr_prep(p, ids, own, real):
             # the spare rows (dummies, far from everything real): no charge
@@ -450,16 +470,17 @@ class FlashDomains:
             e, gq, ga, gc, f = self._long_range(eng, pos, qd, ad, cd)
             for k, v in zip("eqac", (e, gq, ga, gc)):
                 lrs[k][p] = _scatter_set(lrs[k][p], mine, v)
-            res["f"][p] = _scatter_set(res["f"][p], mine, f)
+            f_parts[p] = _scatter_set(f_parts[p], mine, f)
         self._sweep(Rs, doms, indexes, self.halo_lr, 2, long_range, lr_prep)
         del q, a0, c6
-        e_lr, gq, ga0, gc6 = (self._summed(lrs.pop(k)) for k in "eqac")
+        e_lr = self._summed(lrs.pop("e"), everywhere=False)
+        gq, ga0, gc6 = (self._summed(lrs.pop(k)) for k in "qac")
         energy = e_local[0].astype(acc).sum() + e_lr[0].astype(acc).sum()
         # dE/d(raw charge): through the shift that equilibrates the charges
         g_mean = (gq[0].astype(acc).sum() / n).astype(dt)
         g_raw = each(lambda p: gq[p] - jax.device_put(g_mean, self.devices[p]))
         del e_local, e_lr, gq
-        lap("2. long range", res["f"], g_raw)
+        lap("2. long range", f_parts, g_raw)
 
         # 3. each domain backpropagates its own atoms' terms; the gradients with respect to
         # its halo too are partial forces, summed over the domains (and the devices, with the
@@ -471,10 +492,10 @@ class FlashDomains:
 
         def forces(p, eng, pos, extra):
             w, gr, ga, gc, rows = extra
-            res["f"][p] = _scatter_add(res["f"][p], rows, self._local_forces(eng, pos, w, gr, ga, gc))
+            f_parts[p] = _scatter_add(f_parts[p], rows, self._local_forces(eng, pos, w, gr, ga, gc))
         self._sweep(Rs, doms, indexes, self.halo, 3, forces, forces_prep)
         del g_raw, ga0, gc6, Rs, doms, indexes
-        f = self._summed(res["f"], everywhere=False)[0]
+        f = self._summed(f_parts, everywhere=False)[0]
         lap("3. forces", f)
         return energy, f
 

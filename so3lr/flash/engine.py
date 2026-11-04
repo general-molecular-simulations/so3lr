@@ -2058,12 +2058,12 @@ class FlashSO3LR:
     def _backward_staged(self, R, st, head=None):
         """The heads and the layers' backward from a forward's state (consumed): energy,
         forces and the strain derivative's per-atom terms, the most long-range partners
-        of any atom. ``head(stages, x, R, nb)`` -> (energy, dE/dx, forces so far, most)
-        replaces the heads and long range (domains.py)."""
+        of any atom. ``head(x, R, nb)`` -> (energy, dE/dx, forces so far, most) replaces
+        the heads and long range (domains.py)."""
         c = self._stages()
         nb, x, saved = st.pop("nb"), st.pop("x"), st.pop("saved")
         nbr, cnt = nb[3], nb[4]
-        energy, g_x, f3, most = head(c, x, R, nb) if head else c["head"](x, R, nb)
+        energy, g_x, f3, most = (head or c["head"])(x, R, nb)
         del x
         g_ev = jnp.zeros((self.n, self.M), self.dtype)
         for li in reversed(range(self.statics["num_layers"])):
