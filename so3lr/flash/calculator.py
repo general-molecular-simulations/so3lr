@@ -14,9 +14,9 @@ charge and spin come from ``atoms.info`` as for ``So3lrCalculator`` (``charge``,
 0; ``multiplicity`` - 1, default 0). No stress: the engine's strain derivative is
 isotropic only.
 """
-import jax
 from ase.calculators.calculator import Calculator, all_changes
 
+from ..mlff.calculators.potential import require_x64
 from .check import validate_options
 
 
@@ -40,8 +40,7 @@ class FlashCalculator(Calculator):
         super().__init__(**kwargs)
         if precision not in ("float32", "float64"):
             raise ValueError(f"precision must be float32 or float64 (received {precision!r})")
-        if precision == "float64" and not jax.config.jax_enable_x64:
-            raise ValueError("precision float64 needs jax.config.update('jax_enable_x64', True) first")
+        require_x64(precision)
         settings = dict(
             model_path=model, lr_cutoff=lr_cutoff, dispersion_damping=dispersion_damping, precision=precision,
             kspace_electrostatics=kspace_electrostatics, kspace_smearing=kspace_smearing,

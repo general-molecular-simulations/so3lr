@@ -26,11 +26,12 @@ from collections import defaultdict
 
 from ..jraph_utils import jraph_to_ase_atoms
 from ..base_calculator import make_so3lr
+from ..mlff.calculators.potential import cast_float_params
 from ..mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported,
     supported_atomic_numbers_for_config,
 )
-from .so3lr_md import setup_logger
+from .so3lr_md import run_dtypes, setup_logger
 from ..pbc import is_fully_periodic
 
 # Get logger
@@ -312,7 +313,10 @@ def evaluate_so3lr_on(
     model_path : str or None
         Path to the model to evaluate. If None, the default SO3LR model is used.
     precision : str
-        Precision to use for the calculation ('float32' or 'float64').
+        The model's precision ('float32' or 'float64'). Around a float32 model the geometry
+        is float64 (float32 with flash_mixed False) on both engines, as in MD
+        (so3lr.md_settings_validation.state_precision): displacements are formed in it
+        before the model.
     targets : str
         Comma-separated list of targets to evaluate (forces, energy, dipole_vec,
         hirshfeld_ratios).
@@ -487,7 +491,10 @@ def evaluate_so3lr_on(
             predicted=frames, overwrite=overwrite, total_time_start=total_time_start)
     del frames
 
-    so3lr_calc = make_so3lr(
+    # the model in `precision`, the geometry in the MD state's dtype, as on flash and in MD
+    model_dtype, state_dtype = run_dtypes(flash_settings)
+    model_fn = make_so3lr(
+        precision=model_dtype,
         workdir=workdir_path,
         kspace_electrostatics=kspace_electrostatics,
         kspace_interp_nodes=kspace_interp_nodes,
@@ -500,6 +507,9 @@ def evaluate_so3lr_on(
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge
     )
+
+    def so3lr_calc(inputs):
+        return model_fn(cast_float_params(inputs, state_dtype))
 
     # Read the short-range cutoff from the resolved model's hyperparameters.
     from ..model_config import load_model_config
@@ -591,7 +601,6 @@ def evaluate_so3lr_on(
     # structures are grouped by mesh shape: one compilation per distinct shape,
     # and structures with different cells but the same mesh share a batch.
     # Outputs are put back into dataset order afterwards.
-    work_dtype = jnp.float64 if precision == 'float64' else jnp.float32
     if kspace_enabled:
         buckets = {}                      # mesh-shape key -> [dataset index]
         for idx, (_g, _) in enumerate(data):
@@ -624,10 +633,10 @@ def evaluate_so3lr_on(
             box = jnp.asarray(data[idx_list[0]][0].globals['cell']).reshape(3, 3)
             k_grid, k_smear = setup_kspace_grid(
                 kspace_electrostatics, kspace_smearing, kspace_spacing, box,
-                dtype=work_dtype)
+                dtype=state_dtype)
             k_grid_d, k_smear_d = setup_kspace_grid(
                 kspace_dispersion, kspace_dispersion_smearing,
-                kspace_dispersion_spacing, box, dtype=work_dtype)
+                kspace_dispersion_spacing, box, dtype=state_dtype)
             groups.append(([data[i] for i in idx_list],
                            {'k_grid': k_grid, 'k_smearing': k_smear,
                             'k_grid_disp': k_grid_d, 'k_smearing_disp': k_smear_d}))

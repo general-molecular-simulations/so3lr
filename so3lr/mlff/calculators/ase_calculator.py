@@ -12,7 +12,7 @@ from ase.calculators.calculator import Calculator
 from so3lr.graph import Graph as So3lrGraph
 from so3lr.mlff.calculators import exact_neighbors
 from so3lr.mlff.geometric.cutoff import add_cell_offsets_sparse
-from so3lr.mlff.calculators.potential import PotentialSparse
+from so3lr.mlff.calculators.potential import PotentialSparse, require_x64
 from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
 from so3lr.pbc import is_fully_periodic, lattice_rows
 
@@ -187,9 +187,13 @@ class AseCalculatorSparse(Calculator):
             'auto'  (default) 'exact' whenever the minimum image would be wrong
                     (non-orthorhombic cell, or any height <= 2 * cutoff), else 'glp'.
                     Finite systems always use 'glp'.
+
+        dtype is the model's. The positions, displacements, energy sum and results are in the
+        MD state's dtype, as in so3lr's MD by default: float64 with x64, else float32.
         """
         if neighbor_backend not in ('auto', 'glp', 'exact'):
             raise ValueError(f"neighbor_backend must be 'auto', 'glp' or 'exact', got {neighbor_backend!r}.")
+        require_x64(dtype)  # for a direct construction; create_from_workdir's potential checks first
         self.neighbor_backend = neighbor_backend
         self._exact_nb = None
         self._exact_nb_natoms = None
@@ -211,7 +215,8 @@ class AseCalculatorSparse(Calculator):
         def total_energy(graph, aux=has_aux):
             """Total energy of the graph, with the model's aux output when aux is set."""
             out = potential(graph, has_aux=aux)
-            return (out[0].sum(), out[1]) if aux else out.sum()
+            energy = (out[0] if aux else out).astype(graph.positions.dtype).sum()
+            return (energy, out[1]) if aux else energy
 
         def energy_at(R, system, neighbors, aux=has_aux):
             return total_energy(_system_to_graph(system._replace(R=R), neighbors), aux)
@@ -359,7 +364,9 @@ class AseCalculatorSparse(Calculator):
                 # Common setting for simulations in a box of water.
                 self.lr_cutoff = potential.long_range_cutoff
 
-        self.dtype = dtype
+        # the geometry's dtype (the model's is the potential's)
+        model_dtype = np.float32 if dtype is None else dtype  # None: the checkpoint's float32
+        self.dtype = np.dtype(np.float64 if jax.config.jax_enable_x64 else model_dtype)
         self.head_index = head_index
         self.kspace_electrostatics = kspace_electrostatics
         self.kspace_smearing = kspace_smearing
