@@ -1892,20 +1892,20 @@ class FlashSO3LR:
             f3 = add(f3, f, w)
         return e_atom, gq, gc6, tuple(f3)
 
-    def _head_backward(self, x, g_raw, ga0, gc6):
-        """dE/dx of sum_i e_local[i] + g_raw[i] raw_q[i] + ga0[i] a0[i] + gc6[i] c6[i], written
-        over x (dead after)."""
-        def heads_bwd(start, x_t, gr_t, ga_t, gc_t):
+    def _head_backward(self, x, g_raw, ga0, gc6, w_e=None):
+        """dE/dx of sum_i w_e[i] e_local[i] + g_raw[i] raw_q[i] + ga0[i] a0[i] + gc6[i] c6[i]
+        (w_e 1 if None), written over x (dead after)."""
+        def heads_bwd(start, x_t, gr_t, ga_t, gc_t, w_t):
             zt = lax.dynamic_slice_in_dim(self.z, start, self.tile)
 
             def f(xx):
                 e_l, rq, a, c = self._heads(xx, zt)
-                s = e_l.sum() + (gr_t * rq).sum()
+                s = (e_l if w_t is None else w_t * e_l).sum() + (gr_t * rq).sum()
                 if self.disp:
                     s = s + (ga_t * a).sum() + (gc_t * c).sum()
                 return s
             return (jax.grad(f)(x_t),)
-        return self._map_rows(heads_bwd, [x, g_raw, ga0, gc6], [x])[0]
+        return self._map_rows(heads_bwd, [x, g_raw, ga0, gc6, w_e], [x])[0]
 
     def _post_backward(self, li, x_l, ev_l, kept, g_x, g_ev, pos3, nbr, cnt):
         """dE/d(layer li's attention output), from dE/d(its output); the attention output
@@ -2055,14 +2055,15 @@ class FlashSO3LR:
             del out
         return {"nb": nb, "x": x, "saved": saved}
 
-    def _backward_staged(self, R, st):
+    def _backward_staged(self, R, st, head=None):
         """The heads and the layers' backward from a forward's state (consumed): energy,
         forces and the strain derivative's per-atom terms, the most long-range partners
-        of any atom."""
+        of any atom. ``head(x, R, nb)`` -> (energy, dE/dx, forces so far, most) replaces
+        the heads and long range (domains.py)."""
         c = self._stages()
         nb, x, saved = st.pop("nb"), st.pop("x"), st.pop("saved")
         nbr, cnt = nb[3], nb[4]
-        energy, g_x, f3, most = c["head"](x, R, nb)
+        energy, g_x, f3, most = (head or c["head"])(x, R, nb)
         del x
         g_ev = jnp.zeros((self.n, self.M), self.dtype)
         for li in reversed(range(self.statics["num_layers"])):
