@@ -1073,7 +1073,8 @@ def test_md_on_two_gpus(tmp_path):
 
 
 def _domain_inputs(model=None, precision="float64"):
-    """24,000 waters (62 A) with a 10 A long-range cutoff: (args of FlashSO3LR, positions)."""
+    """8,000 waters (24,000 atoms, 62 A) with a 10 A long-range cutoff: (args of
+    FlashSO3LR, positions)."""
     from so3lr.flash.loader import load_params
     atoms = _water((5, 5, 5))
     params, statics = load_params(model, precision=precision, lr_cutoff=10.0)
@@ -1097,6 +1098,8 @@ def test_domains_match_one_call(model):
         FlashDomains(*args, splits=(2, 2, 2), pme_electrostatics=(2.0, 1.55))
     with pytest.raises(ValueError, match="narrower than the halo"):
         FlashDomains(*args, splits=(8, 1, 1))
+    with pytest.raises(ValueError, match="at least one above 1"):
+        FlashDomains(*args, splits=(1, 1, 1))
 
 
 @GPU
@@ -1113,11 +1116,27 @@ def test_domains_match_one_call_in_float32():
 
 
 @GPUS
-def test_domains_on_several_gpus():
-    """Domains dealt over two GPUs give one call's energy and forces: float64, 3x2x1."""
+@pytest.mark.parametrize("precision,tol_e,tol_f", [("float64", 1e-12, 1e-10), ("float32", 1e-6, 1e-4)])
+def test_domains_on_several_gpus(precision, tol_e, tol_f):
+    """Domains dealt over two GPUs give one call's energy and forces, 3x2x1 (in float32
+    at the matmul precision FlashDomains sets, also in its worker threads)."""
     from so3lr.flash.domains import FlashDomains
-    args, R = _domain_inputs()
-    e_ref, f_ref = E.FlashSO3LR(*args).energy_forces(R)
+    args, R = _domain_inputs(precision=precision)
+    with jax.default_matmul_precision("highest"):
+        e_ref, f_ref = E.FlashSO3LR(*args).energy_forces(R)
     e, f = FlashDomains(*args, splits=(3, 2, 1), devices=2).energy_forces(R)
-    _check("energy", e, e_ref, 1e-12)
-    _check("forces", f, f_ref, 1e-10)
+    _check("energy", e, e_ref, tol_e)
+    _check("forces", f, f_ref, tol_f)
+
+
+def test_pick_splits_takes_only_allowed_splits():
+    """pick_splits returns (1, 1, 1) when the system fits and otherwise only splits
+    FlashDomains accepts (domains at least the larger halo wide, not overlapping
+    themselves), or raises."""
+    from so3lr.flash.domains import pick_splits
+    statics = dict(num_layers=3, cutoff=4.5, long_range_cutoff=12.0, num_features=128, degrees=[1, 2, 3, 4])
+    assert pick_splits(10 ** 5, np.diag([100.0] * 3), statics, 64 << 30) == (1, 1, 1)
+    k = pick_splits(10 ** 9, np.diag([2160.0] * 3), statics, 64 << 30)[0]
+    assert k > 1 and 2160.0 / k >= 12.1 and 2160.0 / k + 2 * 12.1 + 0.1 <= 2160.0
+    with pytest.raises(ValueError, match="no domain split fits"):
+        pick_splits(10 ** 9, np.diag([40.0] * 3), statics, 4 << 30)

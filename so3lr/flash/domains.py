@@ -32,6 +32,7 @@ On several GPUs (``devices``) each holds the whole system's per-atom arrays and 
 every P-th domain, one thread per GPU; between the sweeps the per-atom values are summed
 on the first GPU and copied back to every GPU.
 """
+import gc
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -78,20 +79,27 @@ def pick_splits(n, box, statics, free_bytes, mode="fast", devices=1, kib_per_row
     """Domains per side (the same along every axis) for n atoms spread evenly over the
     box: the fewest whose largest domain with its halo fits ``mode`` in free_bytes, or on
     several devices a few more if the atoms (halos included) of the device with the most
-    domains are then fewer. kib_per_row: what a domain's engine holds per row, if measured
-    (default: the whole-system engine's estimate for ``mode`` with a quarter more, which
-    is about twice what the domain engines hold)."""
+    domains are then fewer; (1, 1, 1) if the whole system fits (then call FlashSO3LR).
+    kib_per_row: what a domain's engine holds per row, if measured (default: the
+    whole-system engine's estimate for ``mode`` with a quarter more, which is about twice
+    what the domain engines hold)."""
     halo = _halo(statics)
+    hmax = max(halo, float(statics["long_range_cutoff"]) + 0.1)
     L = [float(v) for v in np.diag(np.asarray(box, np.float64).reshape(3, 3))]
     density = n / math.prod(L)
     per_atom = (kib_per_row or mode_kib(mode, statics) * 1.25) * 1024
 
     def atoms(k):                      # atoms of one domain with its halo
         return density * math.prod(v / k + 2.0 * halo if k > 1 else v for v in L)
-    k0 = next((k for k in range(1, 64) if atoms(k) * per_atom + (2 << 30) <= free_bytes), None)
+
+    def allowed(k):                    # FlashDomains' rules for the domains' width
+        return all(v / k >= hmax and v / k + 2.0 * hmax + 0.1 <= v for v in L)
+    if atoms(1) * per_atom + (2 << 30) <= free_bytes:
+        return (1, 1, 1)               # no need for domains: one FlashSO3LR call
+    k0 = next((k for k in range(2, 64) if allowed(k) and atoms(k) * per_atom + (2 << 30) <= free_bytes), None)
     if k0 is None:
         raise ValueError("no domain split fits")
-    ks = [k for k in range(k0, k0 + 4) if k == 1 or min(L) / k >= halo]
+    ks = [k for k in range(k0, k0 + 4) if allowed(k)]
     k = min(ks, key=lambda k: -(-k ** 3 // devices) * atoms(k)) if devices > 1 else k0
     return (k, k, k)
 
@@ -114,6 +122,9 @@ class FlashDomains:
         if not self.devices or isinstance(devices, int) and len(self.devices) < devices:
             raise ValueError(f"devices={devices}: 1 to {len(jax.local_devices())} here")
         self.splits = tuple(int(k) for k in splits)
+        if len(self.splits) != 3 or min(self.splits) < 1 or max(self.splits) == 1:
+            raise ValueError(f"splits {splits}: three positive counts, at least one above 1 "
+                             "(one domain is the whole system: FlashSO3LR)")
         self.z = np.asarray(z).astype(np.int32)
         self.n = int(self.z.shape[0])
         if self.n >= 2 ** 31 - 1:
@@ -165,7 +176,8 @@ class FlashDomains:
         """[fn(p) for each device p], one thread per device, each with its device as the
         default."""
         def run(p):
-            with jax.default_device(self.devices[p]):
+            # both contexts are thread-local: set in each worker
+            with jax.default_device(self.devices[p]), jax.default_matmul_precision(self.matmul_precision):
                 return fn(p)
         if len(self.devices) == 1:
             return [run(0)]
@@ -308,8 +320,11 @@ class FlashDomains:
         if old is None or old[0] != (n_pad, tuple(sub_L)):
             # a new engine starts from the old one's widened rows and scratch
             kw = dict(self.engine_kw, **(dict(max_neighbours=old[1].K, lr_scratch=old[1].maxh) if old else {}))
-            del old                                         # freed before the new one is built
+            # the old engine is freed before the new one is built (it holds itself in
+            # cycles, through its jitted programs: collect them)
+            del old
             self._engines.pop((p, key), None)
+            gc.collect()
             params = self._on(p, "params", lambda: self.params)
             eng = FlashSO3LR(params, self.statics, np.asarray(zz), np.diag(sub_L),
                              total_charge=self.total_charge, total_spin=self.total_spin, **kw)
@@ -435,7 +450,7 @@ class FlashDomains:
             clock[0] = now
 
         # the positions, each atom's domain and the atoms sorted by domain on every device
-        Rs = [R] + [jax.device_put(R, d) for d in self.devices[1:]]
+        Rs = [jax.device_put(R, d) for d in self.devices]
         doms = each(lambda p: self._domain_of(Rs[p]))
         indexes = each(lambda p: self._index(doms[p]))
 
