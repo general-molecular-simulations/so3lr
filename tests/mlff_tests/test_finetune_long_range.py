@@ -96,8 +96,9 @@ def test_residual_readout_leaves_the_pretrained_model_unchanged(residual_inputs)
     base = get_energy_and_force_fn_sparse(base_net)(params, **_water_inputs())
     new = get_energy_and_force_fn_sparse(net)(merged, **_water_inputs())
     np.testing.assert_allclose(np.asarray(new['energy']), np.asarray(base['energy']), rtol=1e-6)
+    # float32 GPU sums run in no fixed order: a few 1e-6 eV/A between the two programs
     np.testing.assert_allclose(np.asarray(new['forces']), np.asarray(base['forces']),
-                               rtol=1e-5, atol=1e-6)
+                               rtol=1e-5, atol=1e-5)
 
     # ...but it is not dead: a non-zero last layer moves the energy.
     bumped = jax.tree_util.tree_map(lambda a: a, merged)
