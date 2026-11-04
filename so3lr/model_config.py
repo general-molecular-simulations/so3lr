@@ -22,11 +22,14 @@ logger = logging.getLogger("SO3LR")
 def load_model_config(workdir):
     """``hyperparameters.json`` of a model directory as a dict (a copy; cached per file version)."""
     path = pathlib.Path(workdir).expanduser().resolve() / 'hyperparameters.json'
-    return copy.deepcopy(_load(path, path.stat().st_mtime_ns))
+    st = path.stat()
+    # mtime alone misses a rewrite within the filesystem's timestamp resolution; a file
+    # replaced by a rename has a new inode, and an edit usually changes the size
+    return copy.deepcopy(_load(path, (st.st_mtime_ns, st.st_ino, st.st_size)))
 
 
 @functools.lru_cache(maxsize=None)
-def _load(path, mtime_ns):
+def _load(path, version):
     cfg = json.loads(path.read_text())
     model = cfg['model']
     if 'legacy_so3lr_bool' in model and 'use_final_bias_bool' in model:

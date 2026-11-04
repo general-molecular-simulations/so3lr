@@ -3006,7 +3006,7 @@ notebooks = [
 requires-dist = [
     { name = "ase", specifier = ">=3.26,<4" },
     { name = "click", specifier = ">=8.2,<9" },
-    { name = "flax", specifier = "<0.12.9" },
+    { name = "flax", specifier = ">=0.12.1,<0.12.9" },
     { name = "glp", git = "https://github.com/fbruenig/glp.git?rev=2294f4f59e940be64c45bf5e4d1bea5cb90809f8" },
     { name = "h5py", specifier = ">=3.11,<4" },
     { name = "importlib-resources", marker = "extra == 'tfds'", specifier = ">=6,<8" },

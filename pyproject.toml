@@ -31,8 +31,9 @@ dependencies = [
     "click>=8.2,<9",
     # Caps only, so existing cluster JAX installs are kept: jaxlib 0.11.1 has
     # an XLA:CPU regression (jax-ml/jax#40101) that makes the PME/P3M mesh
-    # scatter hang, and flax >=0.12.9 requires jax >=0.11.1.
-    "flax<0.12.9",
+    # scatter hang, and flax >=0.12.9 requires jax >=0.11.1. flax <=0.12.0
+    # imports jax's removed mutable_array and fails to import with jax 0.10.x.
+    "flax>=0.12.1,<0.12.9",
     "glp @ git+https://github.com/fbruenig/glp.git@2294f4f59e940be64c45bf5e4d1bea5cb90809f8",
     "h5py>=3.11,<4",
     "jax<0.11",
