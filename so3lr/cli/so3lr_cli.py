@@ -19,7 +19,8 @@ from .. import __version__
 # same table into parameter keys, so the two cannot drift apart.
 from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
 from ..md_observables import MD_OBSERVABLES
-from ..md_settings_validation import DEFAULT_PRESSURE, load_settings_yaml, resolve_ensemble, validate_md_counts
+from ..md_settings_validation import (
+    DEFAULT_PRECISION, DEFAULT_PRESSURE, PRECISIONS, load_settings_yaml, resolve_ensemble, validate_md_counts)
 from ..flash.check import ENGINES, FLASH_MODES, reserve_gpu
 # Import-cheap (standard library only); the --model help is built from it so the
 # listed names and the default cannot go stale when a release lands.
@@ -150,7 +151,6 @@ def get_hardware_info():
 
 
 # Default settings
-DEFAULT_PRECISION = 'float32'
 DEFAULT_LR_CUTOFF = 12.0  # Angstrom
 DEFAULT_SEED = 52
 DEFAULT_TOTAL_CHARGE = 0
@@ -212,7 +212,7 @@ Optimize a structure with all options:
   so3lr opt --input geometry.xyz --output so3lr_opt.xyz 
       --total-charge 0 --min-cycles 10 --min-steps 10
       --min-start-dt 0.05 --min-max-dt 0.1 --min-n-min 2
-      --force-conv 0.05 --precision float32 --lr-cutoff 12.0 
+      --force-conv 0.05 --precision mixed --lr-cutoff 12.0 
       --dispersion-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25 
       --log-file so3lr_opt.log --model /path/to/model
 
@@ -220,7 +220,7 @@ Run NVT simulation with all options:
   so3lr nvt --input geometry.xyz --output so3lr_nvt.hdf5 --temperature 300
       --model /path/to/model --dt 0.5 --md-cycles 100 --md-steps 100
       --nhc-chain 3 --nhc-steps 2 --nhc-thermo 100.0 --relax --force-conv 0.05
-      --seed 42 --log-file so3lr_nvt.log --precision float32
+      --seed 42 --log-file so3lr_nvt.log --precision mixed
       --lr-cutoff 12.0 --dispersion-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25
       --total-charge 0 --save-buffer 50
       --restart-save so3lr_nvt.npz --restart-load so3lr_nvt_previous.npz
@@ -229,7 +229,7 @@ Run Langevin NVT simulation with all options:
   so3lr nvt-langevin --input geometry.xyz --output so3lr_nvt.hdf5 --temperature 300
       --model /path/to/model --dt 0.5 --md-cycles 100 --md-steps 100
       --langevin-removecmmotion True --langevin-thermo 1.0 --relax --force-conv 0.05
-      --seed 42 --log-file so3lr_nvt.log --precision float32
+      --seed 42 --log-file so3lr_nvt.log --precision mixed
       --lr-cutoff 12.0 --dispersion-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25
       --total-charge 0 --save-buffer 50
       --restart-save so3lr_nvt.npz --restart-load so3lr_nvt_previous.npz
@@ -239,7 +239,7 @@ Run NPT simulation with all options:
       --pressure 1.0 --model /path/to/model --dt 0.5
       --md-cycles 100 --md-steps 100 --nhc-chain 3 --nhc-steps 2 --nhc-thermo 100.0
       --nhc-baro 1000.0 --relax --seed 42
-      --log-file npt_md.log --precision float32 --lr-cutoff 12.0
+      --log-file npt_md.log --precision mixed --lr-cutoff 12.0
       --dispersion-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25 --total-charge 0
       --save-buffer 50 --force-conv 0.05
       --restart-save so3lr_npt.npz --restart-load so3lr_npt_previous.npz
@@ -247,7 +247,7 @@ Run NPT simulation with all options:
 Run NVE simulation with all options:
   so3lr nve --input geometry.xyz --output so3lr_nve.hdf5 --temperature 300
       --model /path/to/model --dt 0.5 --md-cycles 100 --md-steps 100
-      --seed 42 --log-file so3lr_nve.log --precision float32
+      --seed 42 --log-file so3lr_nve.log --precision mixed
       --lr-cutoff 12.0 --dispersion-damping 2.0 --buffer-sr 1.25 --buffer-lr 1.25
       --total-charge 0 --save-buffer 50
       --restart-save so3lr_nve.npz --restart-load so3lr_nve_previous.npz
@@ -255,7 +255,7 @@ Run NVE simulation with all options:
 Evaluate SO3LR on a dataset with all options:
   so3lr eval --datafile data.extxyz --batch-size 10 --lr-cutoff 12.0
       --dispersion-damping 2.0 --jit-compile --save-to predictions.extxyz
-      --targets forces,dipole_vec,hirshfeld_ratios --precision float32
+      --targets forces,dipole_vec,hirshfeld_ratios --precision mixed
       --model /path/to/model --log-file eval.log
 
 Finetune SO3LR on a new dataset:
@@ -403,12 +403,16 @@ def common_io_options(f: Callable) -> Callable:
     return f
 
 
+PRECISION_HELP = ('float32 or float64 throughout, or mixed: a float32 model around a float64 MD state '
+                  '(positions, momenta, box, energy sums), whose displacements are formed in float64. '
+                  f'[default: {DEFAULT_PRECISION}]')
+
+
 def common_model_options(f: Callable) -> Callable:
     """Common model options for all commands."""
     f = click.option('--model', '--model_path', '--model-path', 'model_path', type=str, default=None,
                      callback=_validate_model_choice, help=MODEL_HELP)(f)
-    f = click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
-                     help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')(f)
+    f = click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(PRECISIONS), help=PRECISION_HELP)(f)
     f = click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
                      help=f'Long-range cutoff distance in Å. The default ({DEFAULT_LR_CUTOFF}) '
                           f'is intended for condensed-phase systems with periodic boundaries; '
@@ -520,11 +524,8 @@ def flash_options(f: Callable) -> Callable:
                      type=click.Choice(list(FLASH_MODES)),
                      help='SO3LR-Flash memory mode, fastest first; auto picks the fastest that fits. '
                           '[default: auto]')(f)
-    f = click.option('--flash-mixed/--no-flash-mixed', 'flash_mixed', default=True,
-                     help='With --precision float32: keep the positions (and the MD state: '
-                          'momenta, energy sums) in float64 and form displacements in float64. '
-                          'For MD and opt, the older form of --md-precision (on: float64, off: '
-                          'float32), which takes precedence. [default: on]')(f)
+    f = click.option('--flash-mixed/--no-flash-mixed', 'flash_mixed', default=None,
+                     help='Deprecated: --precision mixed (on) or float32 (off).')(f)
     f = click.option('--flash-devices', 'flash_devices', default=1, type=click.IntRange(min=1),
                      help='SO3LR-Flash on this many GPUs of the node: each computes an equal share '
                           'of the atoms, for systems that fit on one GPU but should run faster. '
@@ -553,14 +554,6 @@ def kspace_options(f: Callable) -> Callable:
                      type=click.IntRange(min=1),
                      help='Frequency (in MD cycles) to re-tune k-space grid in NPT. [default: None]')(f)
     return f
-
-
-def md_precision_option(f: Callable) -> Callable:
-    """The MD state's precision, on both engines (--precision is the model's)."""
-    return click.option('--md-precision', 'md_precision', default=None, type=click.Choice(['float32', 'float64']),
-                        help='Precision of the MD state (positions, momenta, box, energy sums) around a '
-                             'float32 model: displacements are formed in it before the model. '
-                             'A float64 model always has a float64 state. [default: float64]')(f)
 
 
 def kspace_dispersion_options(f: Callable) -> Callable:
@@ -661,7 +654,7 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     # Minimization (overrides cycles/steps if set)
     'force_convergence',
     # flash engine
-    'engine', 'flash_mode', 'flash_mixed', 'flash_devices', 'md_precision',
+    'engine', 'flash_mode', 'flash_mixed', 'flash_devices',
     # Eval keys (allowed in the same YAML even though `so3lr eval` does not use
     # --settings yet, since users often share a single YAML across runs)
     'datafile', 'save_to', 'targets', 'batch_size', 'jit_compile',
@@ -1026,9 +1019,8 @@ def run_md_simulation(
     # the engine (SO3LR-Flash for nve / nvt / nvt-langevin / npt)
     engine: str = 'auto',
     flash_mode: str = 'auto',
-    flash_mixed: bool = True,
+    flash_mixed: Optional[bool] = None,
     flash_devices: int = 1,
-    md_precision: Optional[str] = None,
 ) -> None:
     """Shared runner for NVT, NVT-Langevin, NPT, and NVE MD simulations."""
     if not input_file or help:
@@ -1088,7 +1080,6 @@ def run_md_simulation(
         'flash_mode': flash_mode,
         'flash_mixed': flash_mixed,
         'flash_devices': flash_devices,
-        'md_precision': md_precision,
     }
 
     # Only insert kspace_npt_cycles when the user explicitly passed
@@ -1154,7 +1145,6 @@ def run_md_simulation(
 @click.option('--force-conv', default=None, type=float,
               help='Force convergence criterion in eV/Å, overrides --min-cycles and --min-steps. [default: None]')
 @flash_options
-@md_precision_option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def fire_optimization(
     input_file: Optional[str],
@@ -1185,9 +1175,8 @@ def fire_optimization(
     overwrite: bool = False,
     engine: str = 'auto',
     flash_mode: str = 'auto',
-    flash_mixed: bool = True,
+    flash_mixed: Optional[bool] = None,
     flash_devices: int = 1,
-    md_precision: Optional[str] = None,
 ) -> None:
     """
     Run geometry optimization using the FIRE algorithm.
@@ -1291,7 +1280,6 @@ def fire_optimization(
         'flash_mode': flash_mode,
         'flash_mixed': flash_mixed,
         'flash_devices': flash_devices,
-        'md_precision': md_precision,
     }
     reserve_gpu(settings, task='opt')   # before JAX starts
     get_hardware_info()
@@ -1318,7 +1306,6 @@ def fire_optimization(
 @common_md_options
 @thermostat_options
 @flash_options
-@md_precision_option
 def nvt_md(**kwargs) -> None:
     """
     Run NVT (constant volume and temperature) MD simulation using the Nose-Hoover chain thermostat.
@@ -1337,7 +1324,6 @@ def nvt_md(**kwargs) -> None:
 @common_md_options
 @langevin_options
 @flash_options
-@md_precision_option
 def nvt_langevin_md(**kwargs) -> None:
     """
     Run NVT (constant volume and temperature) MD simulation using the Langevin thermostat.
@@ -1359,7 +1345,6 @@ def nvt_langevin_md(**kwargs) -> None:
 @thermostat_options
 @barostat_options
 @flash_options
-@md_precision_option
 def npt_md(**kwargs) -> None:
     """
     Run NPT (constant pressure and temperature) MD simulation using the Nose-Hoover chain thermostat and barostat.
@@ -1379,7 +1364,6 @@ def npt_md(**kwargs) -> None:
 @kspace_options
 @common_md_options
 @flash_options
-@md_precision_option
 def nve_md(**kwargs) -> None:
     """
     Run NVE (constant volume and energy) MD simulation with no thermostat.
@@ -1411,8 +1395,7 @@ def nve_md(**kwargs) -> None:
 # Model settings group
 @click.option('--model', '--model_path', 'model_path', type=str, default=None,
               callback=_validate_model_choice, help=MODEL_HELP)
-@click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(['float32', 'float64']),
-              help=f'Numerical precision for calculations. [default: {DEFAULT_PRECISION}]')
+@click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(PRECISIONS), help=PRECISION_HELP)
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
               help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')
 @click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
@@ -1489,7 +1472,7 @@ def eval_model(
     # the engine (SO3LR-Flash for energies and forces of periodic structures and ones with no box)
     engine: str = 'auto',
     flash_mode: str = 'auto',
-    flash_mixed: bool = True,
+    flash_mixed: Optional[bool] = None,
     flash_devices: int = 1,
 ) -> None:
     """

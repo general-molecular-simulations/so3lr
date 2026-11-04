@@ -31,7 +31,7 @@ from ..mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported,
     supported_atomic_numbers_for_config,
 )
-from .so3lr_md import run_dtypes, setup_logger
+from .so3lr_md import resolve_run_precision, run_dtypes, setup_logger
 from ..pbc import is_fully_periodic
 
 # Get logger
@@ -267,7 +267,7 @@ def evaluate_so3lr_on(
         jit_compile: bool = True,
         save_to: Optional[str] = None,
         model_path: Optional[str] = None,
-        precision: str = 'float32',
+        precision: Optional[str] = None,
         targets: str = 'forces,dipole_vec,hirshfeld_ratios',
         log_file: Optional[str] = None,
         total_charge: Optional[int] = None,
@@ -285,7 +285,7 @@ def evaluate_so3lr_on(
         charge_equilibration_total_charge: Optional[float] = None,
         engine: str = 'auto',
         flash_mode: str = 'auto',
-        flash_mixed: bool = True,
+        flash_mixed: Optional[bool] = None,
         flash_devices: int = 1,
 ) -> Dict[str, Any]:
     """
@@ -313,10 +313,9 @@ def evaluate_so3lr_on(
     model_path : str or None
         Path to the model to evaluate. If None, the default SO3LR model is used.
     precision : str
-        The model's precision ('float32' or 'float64'). Around a float32 model the geometry
-        is float64 (float32 with flash_mixed False) on both engines, as in MD
-        (so3lr.md_settings_validation.state_precision): displacements are formed in it
-        before the model.
+        The run's precision, on both engines as in MD: 'float32' or 'float64' throughout,
+        or 'mixed' (the default), a float32 model around float64 positions; displacements
+        are formed in the positions' dtype before the model.
     targets : str
         Comma-separated list of targets to evaluate (forces, energy, dipole_vec,
         hirshfeld_ratios).
@@ -331,8 +330,8 @@ def evaluate_so3lr_on(
         'auto': SO3LR-Flash where it computes what is asked (every structure periodic
         and orthorhombic or without a box, the targets energy and/or forces, up to
         so3lr.flash.check.EVAL_AUTO_ENGINES sets of atoms; see so3lr.flash.evaluate),
-        else the neighbour-list model; 'flash' or 'standard' forces one. flash_mode,
-        flash_mixed and flash_devices as for MD.
+        else the neighbour-list model; 'flash' or 'standard' forces one. flash_mode and
+        flash_devices as for MD; flash_mixed is the deprecated older form of precision.
 
     Returns:
     --------
@@ -341,7 +340,8 @@ def evaluate_so3lr_on(
         and timing information.
     """
     # every option, for the flash engine's check (which declines one it does not know)
-    flash_settings = dict(locals())
+    flash_settings = resolve_run_precision(dict(locals()))
+    precision = flash_settings['precision']
 
     # Setup logging
     setup_logger(log_file)
@@ -491,7 +491,7 @@ def evaluate_so3lr_on(
             predicted=frames, overwrite=overwrite, total_time_start=total_time_start)
     del frames
 
-    # the model in `precision`, the geometry in the MD state's dtype, as on flash and in MD
+    # the model's and the geometry's dtypes for `precision`, as on flash and in MD
     model_dtype, state_dtype = run_dtypes(flash_settings)
     model_fn = make_so3lr(
         precision=model_dtype,

@@ -13,7 +13,7 @@ forces come from ``FlashSO3LR`` instead of the neighbour-list potential. NVE and
 integrate Cartesian positions (restart files are converted on load either way); NPT
 integrates fractional ones, as ``perform_md`` does. With no box the positions are free (never
 wrapped, as ``perform_md``'s) and the engine computes them in a box with room for the atoms
-and the cutoffs, laid out again if they outgrow it. With ``flash_mixed`` the MD state is
+and the cutoffs, laid out again if they outgrow it. With ``precision: mixed`` the MD state is
 float64 around a float32 model; trajectories are written in the model's precision.
 
 A step's new positions (and NPT box) depend only on the previous step's force (and
@@ -48,6 +48,7 @@ from so3lr.cli.so3lr_md import (
     handle_units,
     init_hdf5_store,
     load_state,
+    resolve_run_precision,
     run_dtypes,
     save_restart_checkpoints,
     setup_jax_globals,
@@ -381,8 +382,8 @@ class SinglePoints:
 def perform_md_flash(all_settings, restart=False, atoms=None):
     """``perform_md`` with the flash engine (``atoms``: the input structure, if read).
     Raises ``FlashUnavailable`` if the engine fails before the run starts."""
-    s = all_settings
-    setup_jax_globals(precision=s.get("precision", "float32"),
+    s = resolve_run_precision(dict(all_settings))
+    setup_jax_globals(precision=s["precision"],
                       matmul_precision=s.get("matmul_precision", "highest"))
     setup_logger(s.get("log_file"))
     validate_md_counts(s)
@@ -408,9 +409,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     # perform_md's cell checks (e.g. a long-range cutoff below 10 A needs k-space; None: no box)
     vacuum = cell_from_atoms_boundary_conditions(atoms, s.get("lr_cutoff", 12.0), s.get("kspace_electrostatics"),
                                                  s.get("kspace_smearing")) is None
-    precision = s.get("precision", "float32")
     dtype, sdt = dtypes(s)
-    mixed = sdt != dtype
     box = _start_box(atoms, vacuum, sdt)              # [0] in the trajectory and restart files
     geo = atoms_to_jnp(atoms, precision=sdt)
     position = geo["positions"]
@@ -453,7 +452,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     except Exception as exc:
         raise FlashUnavailable(f"{type(exc).__name__}: {exc}") from exc
     del start
-    logger.info(f"Flash precision: model {precision}, MD state {'float64 (mixed)' if mixed else precision}")
+    logger.info(f"Flash precision: {s['precision']} (model {jnp.dtype(dtype).name}, MD state {jnp.dtype(sdt).name})")
     ef = eng.energy_forces_staged if staged else eng.energy_forces
     _, shift = jax_md.space.free() if vacuum else jax_md.space.periodic(box)
     if not restart and s.get("relax_before_run", True):

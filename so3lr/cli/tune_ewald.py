@@ -524,9 +524,11 @@ def tune(
     # setup_jax_globals so that every entry point sets the same things up
     # consistently. Previously this only toggled x64 and never set the matmul
     # precision, so tune-ewald drifted from the MD path on the same hardware.
-    from .so3lr_md import setup_jax_globals
+    from ..md_settings_validation import model_precision
+    from .so3lr_md import resolve_run_precision, run_dtypes, setup_jax_globals
+    settings = resolve_run_precision(dict(settings))
     setup_jax_globals(
-        precision=settings.get('precision', 'float32'),
+        precision=settings['precision'],
         matmul_precision=settings.get('matmul_precision', 'highest'),
     )
 
@@ -536,7 +538,7 @@ def tune(
 
     # Model parameters
     model_path = settings.get('model_path')
-    precision = settings.get('precision')
+    precision = model_precision(settings['precision'])  # the model's; the geometry's: run_dtypes
     lr_cutoff = settings.get('lr_cutoff')
     total_charge = settings.get('total_charge')
     dispersion_damping = settings.get('dispersion_damping')
@@ -596,7 +598,7 @@ def tune(
     if problem:
         raise ValueError(f'tune-ewald: {problem}.')
 
-    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
+    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=run_dtypes(settings)[1])
 
     # We don't want fractional coordinates here
 

@@ -16,14 +16,15 @@ isotropic only.
 """
 from ase.calculators.calculator import Calculator, all_changes
 
-from ..mlff.calculators.potential import require_x64
+from ..md_settings_validation import available_precision
 from .check import validate_options
 
 
 class FlashCalculator(Calculator):
     """Energy and forces from SO3LR-Flash. model: a bundled name or a model directory (None:
-    the default model); precision float32 (positions in float64 with flash_mixed, which
-    needs jax_enable_x64) or float64 (needs jax_enable_x64); k-space: PME or none, for
+    the default model); precision: float32 or float64 throughout, or mixed, a float32 model
+    around float64 positions (the default; float32 without jax_enable_x64, which mixed and
+    float64 need; flash_mixed is its deprecated older form); k-space: PME or none, for
     electrostatics and dispersion (spacing and smearing in A, None: so3lr's defaults);
     flash_mode: a memory mode of ``engine.MODES`` or auto (the fastest that fits);
     flash_devices: GPUs of this node to split the atoms over; matmul_precision: what the
@@ -32,15 +33,13 @@ class FlashCalculator(Calculator):
 
     implemented_properties = ["energy", "free_energy", "forces"]
 
-    def __init__(self, model=None, *, lr_cutoff=12.0, dispersion_damping=2.0, precision="float32",
+    def __init__(self, model=None, *, lr_cutoff=12.0, dispersion_damping=2.0, precision=None,
                  kspace_electrostatics=None, kspace_smearing=None, kspace_spacing=None,
                  kspace_dispersion=None, kspace_dispersion_smearing=None, kspace_dispersion_spacing=None,
                  charge_embed_total_charge=None, charge_equilibration_total_charge=None,
-                 flash_mode="auto", flash_mixed=True, flash_devices=1, matmul_precision="highest", **kwargs):
+                 flash_mode="auto", flash_mixed=None, flash_devices=1, matmul_precision="highest", **kwargs):
         super().__init__(**kwargs)
-        if precision not in ("float32", "float64"):
-            raise ValueError(f"precision must be float32 or float64 (received {precision!r})")
-        require_x64(precision)
+        precision = available_precision(dict(precision=precision, flash_mixed=flash_mixed))
         settings = dict(
             model_path=model, lr_cutoff=lr_cutoff, dispersion_damping=dispersion_damping, precision=precision,
             kspace_electrostatics=kspace_electrostatics, kspace_smearing=kspace_smearing,
@@ -49,7 +48,7 @@ class FlashCalculator(Calculator):
             kspace_dispersion_spacing=kspace_dispersion_spacing,
             charge_embed_total_charge=charge_embed_total_charge,
             charge_equilibration_total_charge=charge_equilibration_total_charge,
-            engine="flash", flash_mode=flash_mode, flash_mixed=flash_mixed, flash_devices=flash_devices)
+            engine="flash", flash_mode=flash_mode, flash_devices=flash_devices)
         validate_options(settings)
         from .md import SinglePoints
         # no grid margin: a cell that changes is laid out again (and compiles)

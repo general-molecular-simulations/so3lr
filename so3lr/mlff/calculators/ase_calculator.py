@@ -13,6 +13,7 @@ from so3lr.graph import Graph as So3lrGraph
 from so3lr.mlff.calculators import exact_neighbors
 from so3lr.mlff.geometric.cutoff import add_cell_offsets_sparse
 from so3lr.mlff.calculators.potential import PotentialSparse, require_x64
+from so3lr.md_settings_validation import available_precision, model_precision, state_precision
 from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
 from so3lr.pbc import is_fully_periodic, lattice_rows
 
@@ -66,6 +67,18 @@ def matrix_to_voigt(matrix):
     return voigt_vector
 
 
+def model_dtype(precision, dtype, default):
+    """The model's dtype for a run ``precision`` (so3lr.md_settings_validation), else ``dtype``,
+    else ``default``; a dtype that contradicts precision raises."""
+    if precision is None:
+        return default if dtype is None else dtype
+    model = np.dtype(model_precision(precision))
+    if dtype is not None and np.dtype(dtype) != model:
+        raise ValueError(f"dtype {np.dtype(dtype).name} contradicts precision {precision!r}; "
+                         "pass precision alone")
+    return model
+
+
 class AseCalculatorSparse(Calculator):
     implemented_properties = ['energy', 'forces', 'stress', 'free_energy', 'hessian']
 
@@ -82,7 +95,7 @@ class AseCalculatorSparse(Calculator):
             buffer_size_multiplier: float = 1.25,
             skin: float = 0.,
             add_energy_shift: bool = False,
-            dtype: np.dtype = np.float64,
+            dtype: Optional[np.dtype] = None,
             model: str = 'so3krates',
             head_index: int = 5,
             has_aux: bool = False,
@@ -95,8 +108,10 @@ class AseCalculatorSparse(Calculator):
             charge_embed_total_charge: Optional[float] = None,
             charge_equilibration_total_charge: Optional[float] = None,
             neighbor_backend: str = 'auto',
+            precision: Optional[str] = None,
             **kwargs
     ):
+        dtype = model_dtype(precision, dtype, np.float64)
         if observables is not None and len(observables) > 0:
             output_intermediate_quantities = [o.replace('_grad','').replace('_jac','') for o in (observables)]
         else:
@@ -154,6 +169,7 @@ class AseCalculatorSparse(Calculator):
                    kspace_smearing=kspace_smearing,
                    kspace_spacing=kspace_spacing,
                    neighbor_backend=neighbor_backend,
+                   precision=precision,
                    )
 
     def __init__(
@@ -173,6 +189,7 @@ class AseCalculatorSparse(Calculator):
             kspace_smearing: Optional[float] = None,
             kspace_spacing: Optional[float] = None,
             neighbor_backend: str = 'auto',
+            precision: Optional[str] = None,
             *args,
             **kwargs
     ):
@@ -188,8 +205,9 @@ class AseCalculatorSparse(Calculator):
                     (non-orthorhombic cell, or any height <= 2 * cutoff), else 'glp'.
                     Finite systems always use 'glp'.
 
-        dtype is the model's. The positions, displacements, energy sum and results are in the
-        MD state's dtype, as in so3lr's MD by default: float64 with x64, else float32.
+        precision: the run's, as in so3lr's MD: float32 or float64 throughout, or mixed, a float32
+        model whose positions, displacements, energy sum and results are float64. Unset: mixed
+        (float32 without x64) for a float32 model, float64 for a float64 one. dtype is the model's.
         """
         if neighbor_backend not in ('auto', 'glp', 'exact'):
             raise ValueError(f"neighbor_backend must be 'auto', 'glp' or 'exact', got {neighbor_backend!r}.")
@@ -364,9 +382,15 @@ class AseCalculatorSparse(Calculator):
                 # Common setting for simulations in a box of water.
                 self.lr_cutoff = potential.long_range_cutoff
 
-        # the geometry's dtype (the model's is the potential's)
-        model_dtype = np.float32 if dtype is None else dtype  # None: the checkpoint's float32
-        self.dtype = np.dtype(np.float64 if jax.config.jax_enable_x64 else model_dtype)
+        # the geometry's dtype (the model's is the potential's); dtype None: the checkpoint's float32
+        dtype = np.dtype(model_dtype(precision, dtype, np.float32))
+        if precision is None and dtype == np.float64:
+            precision = 'float64'
+        self.precision = available_precision({'precision': precision})
+        if model_precision(self.precision) != dtype.name:
+            raise ValueError(f"precision {self.precision} needs a {model_precision(self.precision)} "
+                             f"model, not {dtype.name}")
+        self.dtype = np.dtype(state_precision(self.precision))
         self.head_index = head_index
         self.kspace_electrostatics = kspace_electrostatics
         self.kspace_smearing = kspace_smearing
