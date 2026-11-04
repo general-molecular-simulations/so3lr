@@ -16,8 +16,7 @@ network for semi-local interactions with universal pairwise force fields designe
 for short-range repulsion, long-range electrostatics, and dispersion interactions.
 
 The parts of [mlff](https://github.com/thorben-frank/mlff) that SO3LR uses are
-now part of this repository (`so3lr.mlff`), so mlff no longer needs to be
-installed separately.
+now part of this repository (`so3lr.mlff`).
 
 ## Installation
 
