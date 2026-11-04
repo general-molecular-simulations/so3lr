@@ -313,7 +313,8 @@ def perform_min_flash(all_settings, atoms):
         start = (eng.energy_forces_staged if staged else eng.energy_forces)(position)
     except Exception as exc:
         raise FlashUnavailable(f"{type(exc).__name__}: {exc}") from exc
-    logger.info(f"Flash precision: {s['precision']} (model {jnp.dtype(dtype).name}, positions {jnp.dtype(sdt).name})")
+    logger.info(f"Flash precision: {s.get('precision', 'mixed')} (model {jnp.dtype(dtype).name}, "
+                f"positions {jnp.dtype(sdt).name})")
     _, shift = jax_md.space.free() if vacuum else jax_md.space.periodic(box)
     # as perform_min: a trajectory only for an extxyz (or hdf5, renamed .xyz) output
     out = s.get("output_file")

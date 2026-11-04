@@ -71,10 +71,10 @@ def available_precision(settings) -> str:
     there an unset precision is float32, and a mixed or float64 one raises."""
     import jax
     from so3lr.mlff.calculators.potential import require_x64
+    precision = resolve_precision(settings)  # validates also what an unset precision ignores
     if (not jax.config.jax_enable_x64 and settings.get('precision') is None
             and settings.get('flash_mixed') is None):
         return 'float32'
-    precision = resolve_precision(settings)
     require_x64(state_precision(precision))
     return precision
 

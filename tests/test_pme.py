@@ -187,10 +187,9 @@ def _cli_md_energy_and_forces(atoms, settings):
     from so3lr.jaxmd_utils import nbrs_cutoff
     from so3lr.model_registry import DEFAULT_MODEL
 
-    from so3lr.md_settings_validation import model_precision, resolve_precision
+    from so3lr.md_settings_validation import resolve_precision
 
     s = settings
-    precision = model_precision(s.get('precision'))  # the model's, as perform_md's local
     model_dtype, dtype = so3lr_md.run_dtypes({'precision': resolve_precision(s)})  # as setup_run
     lr_cutoff = s.get('lr_cutoff')
     kspace_electrostatics = s.get('kspace_electrostatics', None)
@@ -230,7 +229,7 @@ def _cli_md_energy_and_forces(atoms, settings):
         box=box,
         total_charge=s.get('total_charge'),
         num_unpaired_electrons=s.get('num_unpaired_electrons', 0),
-        precision=precision,  # the string, as perform_md passes it
+        precision=model_dtype,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=s.get('buffer_size_multiplier_lr'),
         buffer_size_multiplier_sr=s.get('buffer_size_multiplier_sr'),

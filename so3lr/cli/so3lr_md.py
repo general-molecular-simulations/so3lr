@@ -324,7 +324,7 @@ _JAX_GLOBALS_CONFIGURED: Dict[str, Any] = {}
 
 def run_dtypes(settings):
     """(the model's dtype, the MD state's) for settings set up by setup_run, on both engines."""
-    precision = settings['precision']
+    precision = settings.get('precision')
     return (jnp.float64 if model_precision(precision) == 'float64' else jnp.float32,
             jnp.float64 if state_precision(precision) == 'float64' else jnp.float32)
 
@@ -2070,6 +2070,8 @@ def perform_md(
 
     # the model's dtype and the MD state's
     model_dtype, dtype = run_dtypes(all_settings)
+    logger.info(f"Precision: {all_settings['precision']} (model {np.dtype(model_dtype).name}, "
+                f"MD state {np.dtype(dtype).name})")
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
@@ -3005,6 +3007,7 @@ def perform_min(
     Returns:
         Union[jnp.ndarray, List[jnp.ndarray]]: Optimized structure or trajectory.
     """
+    setup_logger(all_settings.get('log_file'))  # first: setup_run may warn of a deprecated setting
     all_settings = setup_run(dict(all_settings))  # so3lr opt does not go through run()
 
     # Extract settings with defaults
@@ -3114,6 +3117,8 @@ def perform_min(
 
     # the model's dtype and the MD state's
     model_dtype, dtype = run_dtypes(all_settings)
+    logger.info(f"Precision: {all_settings['precision']} (model {np.dtype(model_dtype).name}, "
+                f"MD state {np.dtype(dtype).name})")
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
@@ -3681,6 +3686,7 @@ def run(
     relax_before_run = settings.get('relax_before_run', True)
     validate_md_counts(settings)
 
+    setup_logger(settings.get('log_file'))  # first: setup_run may warn of a deprecated setting
     setup_run(settings)
     input_file_path = settings.get('input_file')
     if input_file_path is not None:

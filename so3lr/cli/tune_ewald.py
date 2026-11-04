@@ -33,7 +33,7 @@ from ase.units import Bohr
 
 from so3lr.pbc import lattice_rows, minimum_image_problem
 from so3lr.cli.so3lr_md import load_model, atoms_to_jnp, process_model, dispersion_ratios
-from .so3lr_md import setup_logger
+from .so3lr_md import run_dtypes, setup_logger, setup_run
 
 # Setup logging
 logger = logging.getLogger("SO3LR")
@@ -520,8 +520,6 @@ def tune(
         settings (dict): Dictionary containing the settings for the tuning process.
     """
 
-    from .so3lr_md import run_dtypes, setup_run
-
     # Setup logger (first: setup_run may warn of a deprecated setting)
     log_file = settings.get('log_file')
     setup_logger(log_file)
@@ -594,7 +592,7 @@ def tune(
 
     # We don't want fractional coordinates here
 
-    box = jnp.array(cell)
+    box = jnp.array(cell, dtype=state_dtype)
     if box.shape == (3, 3) and np.all(box[~np.eye(box.shape[0], dtype=bool)] == 0):
         # orthorhombic boxes are reduced to 3 entries
         box = jnp.diag(box)
