@@ -63,7 +63,9 @@ import h5py
 from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
-from ..md_settings_validation import canonical_precision, resolve_ensemble, state_precision, validate_md_counts
+from ..md_settings_validation import (
+    DEFAULT_PRECISION, model_precision, resolve_ensemble, resolve_precision, state_precision,
+    validate_md_counts)
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -315,62 +317,58 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
     return logger
 
 
-# Track whether setup_jax_globals has already configured the process so a
-# second call from a different entry point doesn't log "Matmul precision: ..."
-# twice and so we can tell if a caller's --precision/--matmul-precision is
-# being silently ignored because something configured JAX before us.
+# Whether setup_jax_globals has configured the process: a second call from another entry
+# point logs nothing and warns if its matmul_precision would be ignored.
 _JAX_GLOBALS_CONFIGURED: Dict[str, Any] = {}
 
 
 def run_dtypes(settings):
-    """(the model's dtype, the MD state's) for a run's settings, on both engines (see
-    md_settings_validation.state_precision); without x64 both are float32."""
-    precision = canonical_precision(settings.get('precision'))
-    model = jnp.float64 if precision == 'float64' else jnp.float32
-    if not jax.config.jax_enable_x64:
-        return model, model
-    return model, (jnp.float64 if state_precision(precision, settings) == 'float64' else jnp.float32)
+    """(the model's dtype, the MD state's) for settings set up by setup_run, on both engines."""
+    precision = settings.get('precision')
+    return (jnp.float64 if model_precision(precision) == 'float64' else jnp.float32,
+            jnp.float64 if state_precision(precision) == 'float64' else jnp.float32)
 
 
-def setup_jax_globals(precision: str = 'float32', matmul_precision: str = 'highest') -> None:
+def setup_run(settings):
+    """Resolve settings' precision to the run's once (resolve_precision, so the deprecated
+    flash_mixed it folds in is read and warned about once) and configure JAX for it
+    (setup_jax_globals, before any array is built); returns the settings."""
+    settings['precision'], settings['flash_mixed'] = resolve_precision(settings), None
+    setup_jax_globals(precision=settings['precision'],
+                      matmul_precision=settings.get('matmul_precision', 'highest'))
+    return settings
+
+
+def setup_jax_globals(precision: str = DEFAULT_PRECISION, matmul_precision: str = 'highest') -> None:
     """Configure JAX process-globals that every SO3LR entry point depends on.
 
-    Must be called before any JAX op runs. Idempotent — subsequent calls with
-    identical arguments are silent; with different arguments they warn and
-    keep the first-call values (changing matmul_precision after the first
-    JIT'd function may silently re-trace).
+    Must be called before any JAX op runs. Every call turns jax_enable_x64 on (again);
+    a later call with a different matmul_precision warns and keeps the first-call value
+    (changing it after the first JIT'd function may silently re-trace).
 
     Args:
-        precision: 'float32' or 'float64'. Drives jax_enable_x64 (always on,
-            since x64 is required for high_precision_sum / mixed-precision
-            integrator ops; the precision setting controls array dtype, not
-            kernel availability).
+        precision: the run's (float32, float64 or mixed), only logged: x64 is always on,
+            since high_precision_sum and mixed-precision integrator ops need it; the
+            precision controls the arrays' dtypes, not kernel availability.
         matmul_precision: 'default' / 'high' / 'highest'. 'highest' forces
             full float32 matmuls (no TF32 fallback) which avoids drift on
             GPUs at the cost of throughput.
     """
-    if _JAX_GLOBALS_CONFIGURED:
-        prev_mp = _JAX_GLOBALS_CONFIGURED.get('matmul_precision')
-        prev_p = _JAX_GLOBALS_CONFIGURED.get('precision')
-        if prev_mp != matmul_precision or prev_p != precision:
-            logger.warning(
-                f"setup_jax_globals called again with different values "
-                f"(precision: {prev_p} -> {precision}, "
-                f"matmul_precision: {prev_mp} -> {matmul_precision}); "
-                f"keeping the original. Set both globals in your first call."
-            )
-        return
-
-    # Always enable x64 so that high_precision_sum and mixed-precision
-    # integrator ops work correctly. The 'precision' setting controls
+    # Always enable x64 (also after a caller turned it off again) so that high_precision_sum
+    # and mixed-precision integrator ops work correctly. The 'precision' setting controls
     # which dtype arrays are created in, not whether x64 is available.
     jax.config.update("jax_enable_x64", True)
-
+    if _JAX_GLOBALS_CONFIGURED:
+        prev_mp = _JAX_GLOBALS_CONFIGURED.get('matmul_precision')
+        if prev_mp != matmul_precision:
+            logger.warning(
+                f"setup_jax_globals called again with matmul_precision {matmul_precision} "
+                f"(was {prev_mp}); keeping the original. Set it in your first call."
+            )
+        return
     # Reduces drift for x32 precision simulations. Must be set before any
     # JIT compilation that touches matmuls.
     jax.config.update("jax_default_matmul_precision", matmul_precision)
-
-    _JAX_GLOBALS_CONFIGURED['precision'] = precision
     _JAX_GLOBALS_CONFIGURED['matmul_precision'] = matmul_precision
     logger.info(
         f"JAX globals set: precision={precision}, "
@@ -1833,16 +1831,10 @@ def perform_md(
                                     already available. Defaults to None.
     """
     all_settings = resolve_ensemble(all_settings)  # also for direct Python callers
-    all_settings['precision'] = canonical_precision(all_settings.get('precision'))
-    # Direct Python callers do not necessarily enter through run(). Configure
-    # precision before constructing any arrays, as perform_min already does.
-    setup_jax_globals(
-        precision=all_settings.get('precision', 'float32'),
-        matmul_precision=all_settings.get('matmul_precision', 'highest'),
-    )
-    # Setup logger
+    # Setup logger (first: setup_run may warn of a deprecated setting)
     log_file = all_settings.get('log_file')
     setup_logger(log_file)
+    setup_run(all_settings)  # before any array: direct Python callers may bypass run()
 
     # Extract settings with defaults
     input_file = all_settings.get('input_file')
@@ -1864,7 +1856,6 @@ def perform_md(
 
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = all_settings.get('precision')
     lr_cutoff = all_settings.get('lr_cutoff')
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
@@ -2077,8 +2068,10 @@ def perform_md(
     else:
         shift_displacement = 'free'
 
-    # the MD state's dtype; the model runs in `precision`
-    dtype = run_dtypes(all_settings)[1]
+    # the model's dtype and the MD state's
+    model_dtype, dtype = run_dtypes(all_settings)
+    logger.info(f"Precision: {all_settings['precision']} (model {np.dtype(model_dtype).name}, "
+                f"MD state {np.dtype(dtype).name})")
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
@@ -2210,7 +2203,7 @@ def perform_md(
         logger.info(f"Using custom MLFF potential from: {selected_model}")
     potential = load_model(
         selected_model,
-        precision=jnp.float64 if precision == 'float64' else jnp.float32,
+        precision=model_dtype,
         lr_cutoff=lr_cutoff,
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics,
@@ -2230,7 +2223,7 @@ def perform_md(
         box=box,
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
-        precision=precision,
+        precision=model_dtype,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
@@ -2522,9 +2515,9 @@ def perform_md(
         else:
             num_atoms = len(output_atom_indices)
 
-        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(precision))
+        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(model_dtype))
         if not np.any(trajectory_box):
-            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(precision))
+            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(model_dtype))
         elif trajectory_box.ndim == 1 and trajectory_box.shape == (3,):
             _cell_a0 = np.diag(trajectory_box)
         else:
@@ -2559,7 +2552,7 @@ def perform_md(
             cell_a0=_cell_a0,
             input_file=input_file,
             model_path=model_path,
-            dtype=np.dtype(precision),  # trajectories in the model's precision
+            dtype=np.dtype(model_dtype),  # trajectories in the model's precision
             fractional_coordinates=(
                 fractional_coordinates and not output_cartesian_positions
             ),
@@ -2763,10 +2756,10 @@ def perform_md(
             out_pos = output_position_array(
                 state.position, box, fractional_coordinates, output_cartesian_positions
             )
-            positions.append(np.asarray(out_pos, precision))
-            momenta.append(np.asarray(state.momentum, precision))
+            positions.append(np.asarray(out_pos, model_dtype))
+            momenta.append(np.asarray(state.momentum, model_dtype))
             if box is not None:
-                boxes.append(np.asarray(lattice_rows(box), precision))
+                boxes.append(np.asarray(lattice_rows(box), model_dtype))
 
             # Calculate observables
             if len(observables)>0:
@@ -3014,14 +3007,8 @@ def perform_min(
     Returns:
         Union[jnp.ndarray, List[jnp.ndarray]]: Optimized structure or trajectory.
     """
-    all_settings = dict(all_settings, precision=canonical_precision(all_settings.get('precision')))
-    # Configure JAX process-globals (x64, matmul precision). Idempotent if
-    # already called by run(); needed here for `so3lr opt`, which previously
-    # silently ignored --precision float64 because it never went through run().
-    setup_jax_globals(
-        precision=all_settings.get('precision', 'float32'),
-        matmul_precision=all_settings.get('matmul_precision', 'highest'),
-    )
+    setup_logger(all_settings.get('log_file'))  # first: setup_run may warn of a deprecated setting
+    all_settings = setup_run(dict(all_settings))  # so3lr opt does not go through run()
 
     # Extract settings with defaults
     output_file = all_settings.get('output_file')
@@ -3047,7 +3034,6 @@ def perform_min(
 
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = all_settings.get('precision')
     lr_cutoff = all_settings.get('lr_cutoff')
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
@@ -3129,8 +3115,10 @@ def perform_min(
     else:
         shift_displacement = 'free'
 
-    # the MD state's dtype; the model runs in `precision`
-    dtype = run_dtypes(all_settings)[1]
+    # the model's dtype and the MD state's
+    model_dtype, dtype = run_dtypes(all_settings)
+    logger.info(f"Precision: {all_settings['precision']} (model {np.dtype(model_dtype).name}, "
+                f"MD state {np.dtype(dtype).name})")
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
@@ -3145,7 +3133,7 @@ def perform_min(
         logger.info(f"Using custom MLFF potential from: {selected_model}")
     potential = load_model(
         selected_model,
-        precision=jnp.float64 if precision == 'float64' else jnp.float32,
+        precision=model_dtype,
         lr_cutoff=lr_cutoff,
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics,
@@ -3162,7 +3150,7 @@ def perform_min(
         box=box,
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
-        precision=precision,
+        precision=model_dtype,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
@@ -3695,14 +3683,11 @@ def run(
     """
 
     settings = resolve_ensemble(settings)  # before the optional relaxation
-    settings['precision'] = canonical_precision(settings.get('precision'))
     relax_before_run = settings.get('relax_before_run', True)
     validate_md_counts(settings)
 
-    setup_jax_globals(
-        precision=settings.get('precision', 'float32'),
-        matmul_precision=settings.get('matmul_precision', 'highest'),
-    )
+    setup_logger(settings.get('log_file'))  # first: setup_run may warn of a deprecated setting
+    setup_run(settings)
     input_file_path = settings.get('input_file')
     if input_file_path is not None:
         try:

@@ -438,13 +438,13 @@ def test_free_space_box_has_no_images_within_reach(rc_lr):
 
 
 @pytest.mark.parametrize("bad", [dict(engine="Flash"), dict(engine="neighbour-list"), dict(flash_mode="Fast"),
-                                 dict(flash_mixed="false"), dict(flash_devices=0), dict(flash_devices="2"),
+                                 dict(flash_devices=0), dict(flash_devices="2"),
                                  dict(flash_devices=2, flash_mode="lean"), dict(flash_devices=4096)])
 def test_bad_engine_options_raise(bad):
     """Settings files bypass the CLI's choices: a value flash does not take is an error."""
     with pytest.raises(ValueError):
         check.validate_options(bad)
-    check.validate_options(dict(engine="flash", flash_mode="lean", flash_mixed=False))
+    check.validate_options(dict(engine="flash", flash_mode="lean"))
     check.validate_options(dict(engine="standard", flash_mode="lean", flash_devices=4096))
 
 
@@ -517,8 +517,9 @@ def test_flash_refuses_untrained_elements(monkeypatch):
     """Flash runs the neighbour-list engine's element check before anything else (so no
     GPU is needed here): Rn is past what so3lr-tauri-m was trained on, an error rather than a
     value gathered from another element's row of the reference tables."""
+    from so3lr.cli import so3lr_md
     from so3lr.flash import md as flash_md
-    monkeypatch.setattr(flash_md, "setup_jax_globals", lambda **kwargs: None)
+    monkeypatch.setattr(so3lr_md, "setup_jax_globals", lambda **kwargs: None)  # via setup_run
     atoms = _water((3, 3, 3))
     atoms.numbers[0] = 86
     with pytest.raises(ValueError, match="Z=86"):

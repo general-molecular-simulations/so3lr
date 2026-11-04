@@ -109,13 +109,11 @@ def _off(value):
 
 
 def validate_options(settings):
-    """Raise on an engine, flash_mode, flash_mixed or flash_devices value flash does not take
-    (a settings file bypasses the CLI's choices)."""
+    """Raise on an engine, flash_mode or flash_devices value flash does not take (a settings
+    file bypasses the CLI's choices)."""
     for key, allowed in (("engine", ENGINES), ("flash_mode", FLASH_MODES)):
         if settings.get(key) is not None and settings[key] not in allowed:
             raise ValueError(f"{key} must be one of {', '.join(allowed)} (received {settings[key]!r})")
-    if settings.get("flash_mixed") is not None and not isinstance(settings["flash_mixed"], bool):
-        raise ValueError(f"flash_mixed must be true or false (received {settings['flash_mixed']!r})")
     n = settings.get("flash_devices")
     if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
         raise ValueError(f"flash_devices must be a positive integer (received {n!r})")
