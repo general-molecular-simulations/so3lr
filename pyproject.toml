@@ -94,11 +94,13 @@ notebooks = [
 ]
 
 [tool.poetry]
+# The README logo lives in the package folder but is not a runtime file.
+exclude = ["so3lr/logo.png"]
 include = [
     # Publication and contributor documents belong in the source archive, not
     # at the top of site-packages when a wheel is installed.
     { path = "DEVELOPERS.md", format = "sdist" },
-    { path = "logo.png", format = "sdist" },
+    { path = "so3lr/logo.png", format = "sdist" },
     # Keep non-Python runtime inputs explicit even though Poetry currently
     # discovers files located inside the package automatically.
     { path = "so3lr/cli/*.yaml", format = ["sdist", "wheel"] },

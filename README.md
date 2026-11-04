@@ -6,7 +6,7 @@
 [![preprint-link](https://img.shields.io/badge/paper-JACS-FFCE34)](https://doi.org/10.1021/jacs.5c09558)
 [![data](https://zenodo.org/badge/DOI/10.5281/zenodo.22920714.svg)](https://doi.org/10.5281/zenodo.22920714)
 
-![Logo](./logo.png)
+![Logo](./so3lr/logo.png)
 
 ## About
 
