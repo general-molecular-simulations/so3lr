@@ -20,7 +20,7 @@ for short-range repulsion, long-range electrostatics, and dispersion interaction
 Try SO3LR without any local installation using our
 [Colab notebook](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb).
 
-We recommend installing SO3LR with [uv](https://docs.astral.sh/uv/):
+We recommend installing SO3LR with [uv](https://docs.astral.sh/uv/) (it's magical):
 
 ```shell
 git clone https://github.com/general-molecular-simulations/so3lr.git
@@ -30,19 +30,18 @@ source .venv/bin/activate
 so3lr --help
 ```
 
-More details about JAX installation can be found [here](https://docs.jax.dev/en/latest/installation.html).
-
 If JAX is already installed on your cluster (CUDA or ROCm), install SO3LR
-into that environment with pip:
+into that environment:
 
 ```shell
 git clone https://github.com/general-molecular-simulations/so3lr.git
 cd so3lr
-pip install .
+uv pip install .   # or: pip install .
 so3lr --help
 ```
 
 See the [installation guide](https://so3lr.github.io/installation/) for optional extras.
+More details about JAX installation can be found [here](https://docs.jax.dev/en/latest/installation.html).
 
 ## Quick start
 
