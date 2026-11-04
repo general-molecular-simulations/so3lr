@@ -15,16 +15,12 @@ SO3LR - pronounced *Solar* - is a pretrained machine-learned force field for
 network for semi-local interactions with universal pairwise force fields designed
 for short-range repulsion, long-range electrostatics, and dispersion interactions.
 
-The parts of [mlff](https://github.com/thorben-frank/mlff) that SO3LR uses are
-now part of this repository (`so3lr.mlff`).
-
 ## Installation
 
 Try SO3LR without any local installation using our
 [Colab notebook](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb).
 
-SO3LR supports Python 3.12 and 3.13. We recommend installing it with
-[uv](https://docs.astral.sh/uv/):
+We recommend installing SO3LR with [uv](https://docs.astral.sh/uv/):
 
 ```shell
 git clone https://github.com/general-molecular-simulations/so3lr.git
@@ -36,9 +32,17 @@ so3lr --help
 
 More details about JAX installation can be found [here](https://docs.jax.dev/en/latest/installation.html).
 
-If JAX is already installed on your cluster (CUDA or ROCm), run `uv pip install .`
-in that environment. See the [installation guide](https://so3lr.github.io/installation/)
-for optional extras.
+If JAX is already installed on your cluster (CUDA or ROCm), install SO3LR
+into that environment with pip:
+
+```shell
+git clone https://github.com/general-molecular-simulations/so3lr.git
+cd so3lr
+pip install .
+so3lr --help
+```
+
+See the [installation guide](https://so3lr.github.io/installation/) for optional extras.
 
 ## Quick start
 
@@ -92,10 +96,9 @@ models cover H to At (Z = 1–85).
   [JACS paper](https://doi.org/10.1021/jacs.5c09558), for H, C, N, O, F, P, S and
   Cl, kept to reproduce published results.
 
-Use the same name in Python (`So3lrCalculator(model=...)`), on the command line
-(`--model`) and in settings files (`model:`), or pass a path to a fine-tuned
-model. To pin a release for papers and benchmarks, add its date:
-`so3lr-tauri-m-2606`.
+Use the same name on the command line (`--model`) and in settings files
+(`model:`), or pass a path to a fine-tuned model. To pin a release for papers
+and benchmarks, add its date: `so3lr-tauri-m-2606`.
 
 ## Documentation
 
