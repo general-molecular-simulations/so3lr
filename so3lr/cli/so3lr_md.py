@@ -344,41 +344,33 @@ def setup_run(settings):
 def setup_jax_globals(precision: str = DEFAULT_PRECISION, matmul_precision: str = 'highest') -> None:
     """Configure JAX process-globals that every SO3LR entry point depends on.
 
-    Must be called before any JAX op runs. Idempotent — subsequent calls with
-    identical arguments are silent; with different arguments they warn and
-    keep the first-call values (changing matmul_precision after the first
-    JIT'd function may silently re-trace).
+    Must be called before any JAX op runs. Every call turns jax_enable_x64 on (again);
+    a later call with a different matmul_precision warns and keeps the first-call value
+    (changing it after the first JIT'd function may silently re-trace).
 
     Args:
-        precision: the run's (float32, float64 or mixed), only logged. jax_enable_x64 is always on
-            since x64 is required for high_precision_sum / mixed-precision
-            integrator ops; the precision setting controls array dtype, not
-            kernel availability).
+        precision: the run's (float32, float64 or mixed), only logged: x64 is always on,
+            since high_precision_sum and mixed-precision integrator ops need it; the
+            precision controls the arrays' dtypes, not kernel availability.
         matmul_precision: 'default' / 'high' / 'highest'. 'highest' forces
             full float32 matmuls (no TF32 fallback) which avoids drift on
             GPUs at the cost of throughput.
     """
-    if _JAX_GLOBALS_CONFIGURED:
-        prev_mp = _JAX_GLOBALS_CONFIGURED.get('matmul_precision')
-        prev_p = _JAX_GLOBALS_CONFIGURED.get('precision')
-        if prev_mp != matmul_precision or prev_p != precision:
-            logger.warning(
-                f"setup_jax_globals called again with different values "
-                f"(precision: {prev_p} -> {precision}, "
-                f"matmul_precision: {prev_mp} -> {matmul_precision}); "
-                f"keeping the original. Set both globals in your first call."
-            )
-        return
-
-    # Always enable x64 so that high_precision_sum and mixed-precision
-    # integrator ops work correctly. The 'precision' setting controls
+    # Always enable x64 (also after a caller turned it off again) so that high_precision_sum
+    # and mixed-precision integrator ops work correctly. The 'precision' setting controls
     # which dtype arrays are created in, not whether x64 is available.
     jax.config.update("jax_enable_x64", True)
-
+    if _JAX_GLOBALS_CONFIGURED:
+        prev_mp = _JAX_GLOBALS_CONFIGURED.get('matmul_precision')
+        if prev_mp != matmul_precision:
+            logger.warning(
+                f"setup_jax_globals called again with matmul_precision {matmul_precision} "
+                f"(was {prev_mp}); keeping the original. Set it in your first call."
+            )
+        return
     # Reduces drift for x32 precision simulations. Must be set before any
     # JIT compilation that touches matmuls.
     jax.config.update("jax_default_matmul_precision", matmul_precision)
-
     _JAX_GLOBALS_CONFIGURED['precision'] = precision
     _JAX_GLOBALS_CONFIGURED['matmul_precision'] = matmul_precision
     logger.info(
@@ -1842,12 +1834,12 @@ def perform_md(
                                     already available. Defaults to None.
     """
     all_settings = resolve_ensemble(all_settings)  # also for direct Python callers
+    # Setup logger (first: setup_run may warn of a deprecated setting)
+    log_file = all_settings.get('log_file')
+    setup_logger(log_file)
     # Direct Python callers do not necessarily enter through run(). Configure
     # precision before constructing any arrays, as perform_min already does.
     setup_run(all_settings)
-    # Setup logger
-    log_file = all_settings.get('log_file')
-    setup_logger(log_file)
 
     # Extract settings with defaults
     input_file = all_settings.get('input_file')

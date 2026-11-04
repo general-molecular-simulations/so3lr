@@ -125,6 +125,26 @@ def test_unknown_settings_key_warns_and_the_run_goes_on(tmp_path, monkeypatch):
     assert captured['md_T'] == YAML_DEFAULTS['md_T']
 
 
+@pytest.mark.parametrize("args, precision", [
+    ([], 'mixed'), (['--precision', 'float32'], 'float32'), (['--precision', 'float64'], 'float64'),
+    (['--no-flash-mixed'], 'float32'), (['--precision', 'float32', '--flash-mixed'], 'mixed')])
+def test_the_run_gets_the_precision(tmp_path, monkeypatch, args, precision):
+    """--precision is the run's (default mixed); the deprecated --flash-mixed/--no-flash-mixed
+    still makes a float32 model's run mixed/float32. In-process with perform_md stubbed."""
+    from so3lr.cli import so3lr_cli, so3lr_md
+
+    captured = {}
+    monkeypatch.setattr(so3lr_md, 'setup_jax_globals', lambda **kwargs: None)
+    monkeypatch.setattr(so3lr_md, 'perform_md', lambda settings, *args, **kwargs: captured.update(settings))
+    monkeypatch.setattr(so3lr_cli, 'reserve_gpu', lambda *args, **kwargs: None)
+    monkeypatch.setattr(so3lr_md, 'setup_logger', lambda *args, **kwargs: None)
+    result = CliRunner().invoke(cli, [
+        'nvt', '--input', str(PROJECT_ROOT / 'tests' / 'test_data' / 'acetone.xyz'),
+        '--output', str(tmp_path / 'out.hdf5'), '--no-relax', '--engine', 'standard', *args])
+    assert result.exit_code == 0, result.output
+    assert captured['precision'] == precision and captured['flash_mixed'] is None
+
+
 def test_cli_import_does_not_load_jax():
     """`so3lr --help` must not pay for JAX/Flax start-up (see AGENTS.md); a fresh
     interpreter, since this one has imported JAX already."""

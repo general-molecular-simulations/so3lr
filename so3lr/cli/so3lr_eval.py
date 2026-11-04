@@ -346,7 +346,7 @@ def evaluate_so3lr_on(
     setup_logger(log_file)
     # Configure JAX process-globals (x64, matmul precision) before any array: eval bypasses
     # run(), where MD configures them
-    precision = setup_run(flash_settings)['precision']
+    setup_run(flash_settings)
 
     total_time_start = time.time()
 

@@ -655,6 +655,8 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     'force_convergence',
     # flash engine
     'engine', 'flash_mode', 'flash_mixed', 'flash_devices',
+    # retired: a value raises with what replaced it (md_settings_validation.resolve_precision)
+    'md_precision',
     # Eval keys (allowed in the same YAML even though `so3lr eval` does not use
     # --settings yet, since users often share a single YAML across runs)
     'datafile', 'save_to', 'targets', 'batch_size', 'jit_compile',

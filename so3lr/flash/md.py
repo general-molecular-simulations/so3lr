@@ -381,8 +381,8 @@ class SinglePoints:
 def perform_md_flash(all_settings, restart=False, atoms=None):
     """``perform_md`` with the flash engine (``atoms``: the input structure, if read).
     Raises ``FlashUnavailable`` if the engine fails before the run starts."""
+    setup_logger(all_settings.get("log_file"))  # first: setup_run may warn of a deprecated setting
     s = setup_run(dict(all_settings))
-    setup_logger(s.get("log_file"))
     validate_md_counts(s)
     atoms = read(s["input_file"]) if atoms is None else atoms
     # process_model's element check: past the trained elements the tables are gathered
