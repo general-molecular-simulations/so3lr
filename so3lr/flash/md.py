@@ -48,10 +48,9 @@ from so3lr.cli.so3lr_md import (
     handle_units,
     init_hdf5_store,
     load_state,
-    resolve_run_precision,
     run_dtypes,
     save_restart_checkpoints,
-    setup_jax_globals,
+    setup_run,
     setup_logger,
     validate_and_log_input,
     validate_npt_restart_coupling,
@@ -382,9 +381,7 @@ class SinglePoints:
 def perform_md_flash(all_settings, restart=False, atoms=None):
     """``perform_md`` with the flash engine (``atoms``: the input structure, if read).
     Raises ``FlashUnavailable`` if the engine fails before the run starts."""
-    s = resolve_run_precision(dict(all_settings))
-    setup_jax_globals(precision=s["precision"],
-                      matmul_precision=s.get("matmul_precision", "highest"))
+    s = setup_run(dict(all_settings))
     setup_logger(s.get("log_file"))
     validate_md_counts(s)
     atoms = read(s["input_file"]) if atoms is None else atoms

@@ -12,8 +12,9 @@ from ase.calculators.calculator import Calculator
 from so3lr.graph import Graph as So3lrGraph
 from so3lr.mlff.calculators import exact_neighbors
 from so3lr.mlff.geometric.cutoff import add_cell_offsets_sparse
-from so3lr.mlff.calculators.potential import PotentialSparse, require_x64
-from so3lr.md_settings_validation import available_precision, model_precision, state_precision
+from so3lr.mlff.calculators.potential import PotentialSparse
+from so3lr.md_settings_validation import (
+    available_precision, canonical_precision, model_precision, state_precision)
 from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
 from so3lr.pbc import is_fully_periodic, lattice_rows
 
@@ -67,16 +68,19 @@ def matrix_to_voigt(matrix):
     return voigt_vector
 
 
-def model_dtype(precision, dtype, default):
-    """The model's dtype for a run ``precision`` (so3lr.md_settings_validation), else ``dtype``,
-    else ``default``; a dtype that contradicts precision raises."""
-    if precision is None:
-        return default if dtype is None else dtype
-    model = np.dtype(model_precision(precision))
-    if dtype is not None and np.dtype(dtype) != model:
-        raise ValueError(f"dtype {np.dtype(dtype).name} contradicts precision {precision!r}; "
-                         "pass precision alone")
-    return model
+def calculator_precision(precision, dtype=None):
+    """A calculator's run precision (so3lr.md_settings_validation) from ``precision`` and/or
+    ``dtype``, the older spelling of the model's (float64: precision float64). Unset: mixed, or
+    float32 without x64; a dtype that contradicts precision raises, as do mixed and float64
+    without x64."""
+    if dtype is not None:
+        name = np.dtype(dtype).name
+        if precision is None and name == 'float64':
+            precision = 'float64'
+        if name != model_precision(precision):
+            raise ValueError(f"dtype {name} contradicts precision {canonical_precision(precision)}; "
+                             "pass precision alone")
+    return available_precision({'precision': precision})
 
 
 class AseCalculatorSparse(Calculator):
@@ -111,7 +115,9 @@ class AseCalculatorSparse(Calculator):
             precision: Optional[str] = None,
             **kwargs
     ):
-        dtype = model_dtype(precision, dtype, np.float64)
+        # before the model loads; the older default: a float64 model
+        precision = calculator_precision(precision, np.float64 if dtype is None and precision is None else dtype)
+        dtype = np.dtype(model_precision(precision))
         if observables is not None and len(observables) > 0:
             output_intermediate_quantities = [o.replace('_grad','').replace('_jac','') for o in (observables)]
         else:
@@ -206,12 +212,11 @@ class AseCalculatorSparse(Calculator):
                     Finite systems always use 'glp'.
 
         precision: the run's, as in so3lr's MD: float32 or float64 throughout, or mixed, a float32
-        model whose positions, displacements, energy sum and results are float64. Unset: mixed
-        (float32 without x64) for a float32 model, float64 for a float64 one. dtype is the model's.
+        model whose positions, displacements, energy sum and results are float64
+        (calculator_precision, which also reads dtype, the model's).
         """
         if neighbor_backend not in ('auto', 'glp', 'exact'):
             raise ValueError(f"neighbor_backend must be 'auto', 'glp' or 'exact', got {neighbor_backend!r}.")
-        require_x64(dtype)  # for a direct construction; create_from_workdir's potential checks first
         self.neighbor_backend = neighbor_backend
         self._exact_nb = None
         self._exact_nb_natoms = None
@@ -382,14 +387,8 @@ class AseCalculatorSparse(Calculator):
                 # Common setting for simulations in a box of water.
                 self.lr_cutoff = potential.long_range_cutoff
 
-        # the geometry's dtype (the model's is the potential's); dtype None: the checkpoint's float32
-        dtype = np.dtype(model_dtype(precision, dtype, np.float32))
-        if precision is None and dtype == np.float64:
-            precision = 'float64'
-        self.precision = available_precision({'precision': precision})
-        if model_precision(self.precision) != dtype.name:
-            raise ValueError(f"precision {self.precision} needs a {model_precision(self.precision)} "
-                             f"model, not {dtype.name}")
+        # the geometry's dtype (the model's is the potential's)
+        self.precision = calculator_precision(precision, dtype)
         self.dtype = np.dtype(state_precision(self.precision))
         self.head_index = head_index
         self.kspace_electrostatics = kspace_electrostatics

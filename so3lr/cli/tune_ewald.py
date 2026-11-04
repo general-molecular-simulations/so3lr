@@ -525,12 +525,8 @@ def tune(
     # consistently. Previously this only toggled x64 and never set the matmul
     # precision, so tune-ewald drifted from the MD path on the same hardware.
     from ..md_settings_validation import model_precision
-    from .so3lr_md import resolve_run_precision, run_dtypes, setup_jax_globals
-    settings = resolve_run_precision(dict(settings))
-    setup_jax_globals(
-        precision=settings['precision'],
-        matmul_precision=settings.get('matmul_precision', 'highest'),
-    )
+    from .so3lr_md import run_dtypes, setup_run
+    settings = setup_run(dict(settings))
 
     # Setup logger
     log_file = settings.get('log_file')
@@ -538,7 +534,8 @@ def tune(
 
     # Model parameters
     model_path = settings.get('model_path')
-    precision = model_precision(settings['precision'])  # the model's; the geometry's: run_dtypes
+    precision = model_precision(settings['precision'])  # the model's
+    model_dtype, state_dtype = run_dtypes(settings)
     lr_cutoff = settings.get('lr_cutoff')
     total_charge = settings.get('total_charge')
     dispersion_damping = settings.get('dispersion_damping')
@@ -598,7 +595,7 @@ def tune(
     if problem:
         raise ValueError(f'tune-ewald: {problem}.')
 
-    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=run_dtypes(settings)[1])
+    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=state_dtype)
 
     # We don't want fractional coordinates here
 
@@ -619,7 +616,7 @@ def tune(
     # the solver for the method being timed.
     potential = load_model(
         model_path,
-        precision=jnp.float64 if precision == 'float64' else jnp.float32,
+        precision=model_dtype,
         lr_cutoff=lr_cutoff,
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics if kspace_electrostatics != 'cutoff' else None,

@@ -1,5 +1,5 @@
 """Import-light settings helpers shared by the CLI and ``so3lr_md``: loading a
-settings YAML, resolving the ensemble and the MD state's precision, checking the MD counts."""
+settings YAML, resolving the ensemble and the run's precision, checking the MD counts."""
 
 import difflib
 import logging
@@ -57,6 +57,8 @@ def resolve_precision(settings) -> str:
     precision, flash_mixed = canonical_precision(settings.get('precision')), settings.get('flash_mixed')
     if flash_mixed is None:
         return precision
+    if not isinstance(flash_mixed, bool):
+        raise ValueError(f"flash_mixed must be true or false (received {flash_mixed!r})")
     if precision != 'float64':
         precision = 'mixed' if flash_mixed else 'float32'
     logging.getLogger("SO3LR").warning(

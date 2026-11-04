@@ -47,6 +47,8 @@ def test_precision_helpers():
     assert all('flash_mixed is deprecated' in call.args[0] for call in warning.call_args_list)
     with pytest.raises(ValueError, match='md_precision was replaced'):
         resolve_precision({'md_precision': 'float32'})
+    with pytest.raises(ValueError, match='flash_mixed must be true or false'):
+        resolve_precision({'flash_mixed': 'false'})  # a settings file bypasses the CLI's choices
 
 
 def test_without_x64_an_unset_precision_is_float32_and_mixed_or_float64_raise():

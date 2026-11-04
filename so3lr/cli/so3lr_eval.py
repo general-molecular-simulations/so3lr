@@ -31,7 +31,7 @@ from ..mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported,
     supported_atomic_numbers_for_config,
 )
-from .so3lr_md import resolve_run_precision, run_dtypes, setup_logger
+from .so3lr_md import run_dtypes, setup_logger, setup_run
 from ..pbc import is_fully_periodic
 
 # Get logger
@@ -340,11 +340,13 @@ def evaluate_so3lr_on(
         and timing information.
     """
     # every option, for the flash engine's check (which declines one it does not know)
-    flash_settings = resolve_run_precision(dict(locals()))
-    precision = flash_settings['precision']
+    flash_settings = dict(locals())
 
     # Setup logging
     setup_logger(log_file)
+    # Configure JAX process-globals (x64, matmul precision) before any array: eval bypasses
+    # run(), where MD configures them
+    precision = setup_run(flash_settings)['precision']
 
     total_time_start = time.time()
 
@@ -442,12 +444,6 @@ def evaluate_so3lr_on(
         logger.info(f"Using bundled SO3LR model: {_name}")
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
-
-    # Configure JAX process-globals (x64, matmul precision). Without this
-    # call, `so3lr eval --precision float64` would silently downcast to
-    # float32 because eval bypasses run() (where MD configures these).
-    from .so3lr_md import setup_jax_globals
-    setup_jax_globals(precision=precision, matmul_precision='highest')
 
     kspace_enabled = (kspace_electrostatics is not None
                       or kspace_dispersion is not None)
