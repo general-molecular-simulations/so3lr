@@ -444,7 +444,7 @@ def test_bad_engine_options_raise(bad):
     """Settings files bypass the CLI's choices: a value flash does not take is an error."""
     with pytest.raises(ValueError):
         check.validate_options(bad)
-    check.validate_options(dict(engine="flash", flash_mode="lean", flash_mixed=False))
+    check.validate_options(dict(engine="flash", flash_mode="lean"))
     check.validate_options(dict(engine="standard", flash_mode="lean", flash_devices=4096))
 
 

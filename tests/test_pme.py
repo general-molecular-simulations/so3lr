@@ -187,11 +187,11 @@ def _cli_md_energy_and_forces(atoms, settings):
     from so3lr.jaxmd_utils import nbrs_cutoff
     from so3lr.model_registry import DEFAULT_MODEL
 
-    from so3lr.md_settings_validation import canonical_precision, model_precision
+    from so3lr.md_settings_validation import model_precision, resolve_precision
 
     s = settings
     precision = model_precision(s.get('precision'))  # the model's, as perform_md's local
-    model_dtype, dtype = so3lr_md.run_dtypes({'precision': canonical_precision(s.get('precision'))})
+    model_dtype, dtype = so3lr_md.run_dtypes({'precision': resolve_precision(s)})  # as setup_run
     lr_cutoff = s.get('lr_cutoff')
     kspace_electrostatics = s.get('kspace_electrostatics', None)
     kspace_smearing = s.get('kspace_smearing', KS.DEFAULT_KSPACE_SMEARING)

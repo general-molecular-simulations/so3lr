@@ -317,10 +317,8 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
     return logger
 
 
-# Track whether setup_jax_globals has already configured the process so a
-# second call from a different entry point doesn't log "Matmul precision: ..."
-# twice and so we can tell if a caller's --precision/--matmul-precision is
-# being silently ignored because something configured JAX before us.
+# Whether setup_jax_globals has configured the process: a second call from another entry
+# point logs nothing and warns if its matmul_precision would be ignored.
 _JAX_GLOBALS_CONFIGURED: Dict[str, Any] = {}
 
 
@@ -371,7 +369,6 @@ def setup_jax_globals(precision: str = DEFAULT_PRECISION, matmul_precision: str 
     # Reduces drift for x32 precision simulations. Must be set before any
     # JIT compilation that touches matmuls.
     jax.config.update("jax_default_matmul_precision", matmul_precision)
-    _JAX_GLOBALS_CONFIGURED['precision'] = precision
     _JAX_GLOBALS_CONFIGURED['matmul_precision'] = matmul_precision
     logger.info(
         f"JAX globals set: precision={precision}, "
@@ -1837,9 +1834,7 @@ def perform_md(
     # Setup logger (first: setup_run may warn of a deprecated setting)
     log_file = all_settings.get('log_file')
     setup_logger(log_file)
-    # Direct Python callers do not necessarily enter through run(). Configure
-    # precision before constructing any arrays, as perform_min already does.
-    setup_run(all_settings)
+    setup_run(all_settings)  # before any array: direct Python callers may bypass run()
 
     # Extract settings with defaults
     input_file = all_settings.get('input_file')
@@ -1861,7 +1856,6 @@ def perform_md(
 
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = model_precision(all_settings.get('precision'))  # the model's; the state's: run_dtypes
     lr_cutoff = all_settings.get('lr_cutoff')
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
@@ -2074,7 +2068,7 @@ def perform_md(
     else:
         shift_displacement = 'free'
 
-    # the MD state's dtype; the model runs in `precision`
+    # the model's dtype and the MD state's
     model_dtype, dtype = run_dtypes(all_settings)
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
@@ -2227,7 +2221,7 @@ def perform_md(
         box=box,
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
-        precision=precision,
+        precision=model_dtype,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
@@ -2519,9 +2513,9 @@ def perform_md(
         else:
             num_atoms = len(output_atom_indices)
 
-        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(precision))
+        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(model_dtype))
         if not np.any(trajectory_box):
-            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(precision))
+            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(model_dtype))
         elif trajectory_box.ndim == 1 and trajectory_box.shape == (3,):
             _cell_a0 = np.diag(trajectory_box)
         else:
@@ -2556,7 +2550,7 @@ def perform_md(
             cell_a0=_cell_a0,
             input_file=input_file,
             model_path=model_path,
-            dtype=np.dtype(precision),  # trajectories in the model's precision
+            dtype=np.dtype(model_dtype),  # trajectories in the model's precision
             fractional_coordinates=(
                 fractional_coordinates and not output_cartesian_positions
             ),
@@ -2760,10 +2754,10 @@ def perform_md(
             out_pos = output_position_array(
                 state.position, box, fractional_coordinates, output_cartesian_positions
             )
-            positions.append(np.asarray(out_pos, precision))
-            momenta.append(np.asarray(state.momentum, precision))
+            positions.append(np.asarray(out_pos, model_dtype))
+            momenta.append(np.asarray(state.momentum, model_dtype))
             if box is not None:
-                boxes.append(np.asarray(lattice_rows(box), precision))
+                boxes.append(np.asarray(lattice_rows(box), model_dtype))
 
             # Calculate observables
             if len(observables)>0:
@@ -3011,10 +3005,7 @@ def perform_min(
     Returns:
         Union[jnp.ndarray, List[jnp.ndarray]]: Optimized structure or trajectory.
     """
-    # Configure JAX process-globals (x64, matmul precision). Idempotent if
-    # already called by run(); needed here for `so3lr opt`, which previously
-    # silently ignored --precision float64 because it never went through run().
-    all_settings = setup_run(dict(all_settings))
+    all_settings = setup_run(dict(all_settings))  # so3lr opt does not go through run()
 
     # Extract settings with defaults
     output_file = all_settings.get('output_file')
@@ -3040,7 +3031,6 @@ def perform_min(
 
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = model_precision(all_settings.get('precision'))  # the model's; the state's: run_dtypes
     lr_cutoff = all_settings.get('lr_cutoff')
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
@@ -3122,7 +3112,7 @@ def perform_min(
     else:
         shift_displacement = 'free'
 
-    # the MD state's dtype; the model runs in `precision`
+    # the model's dtype and the MD state's
     model_dtype, dtype = run_dtypes(all_settings)
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
@@ -3155,7 +3145,7 @@ def perform_min(
         box=box,
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
-        precision=precision,
+        precision=model_dtype,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,

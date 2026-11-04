@@ -520,21 +520,16 @@ def tune(
         settings (dict): Dictionary containing the settings for the tuning process.
     """
 
-    # Configure JAX process-globals (x64 + matmul precision). Centralised in
-    # setup_jax_globals so that every entry point sets the same things up
-    # consistently. Previously this only toggled x64 and never set the matmul
-    # precision, so tune-ewald drifted from the MD path on the same hardware.
-    from ..md_settings_validation import model_precision
     from .so3lr_md import run_dtypes, setup_run
-    settings = setup_run(dict(settings))
 
-    # Setup logger
+    # Setup logger (first: setup_run may warn of a deprecated setting)
     log_file = settings.get('log_file')
     setup_logger(log_file)
+    # the run's precision and JAX's globals (x64, matmul precision), as on every entry point
+    settings = setup_run(dict(settings))
 
     # Model parameters
     model_path = settings.get('model_path')
-    precision = model_precision(settings['precision'])  # the model's
     model_dtype, state_dtype = run_dtypes(settings)
     lr_cutoff = settings.get('lr_cutoff')
     total_charge = settings.get('total_charge')
@@ -641,7 +636,7 @@ def tune(
         displacement=displacement,
         box=box,
         total_charge=total_charge,
-        precision=precision,
+        precision=model_dtype,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
