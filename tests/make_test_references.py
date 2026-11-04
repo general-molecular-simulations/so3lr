@@ -2,7 +2,7 @@
 
 Usage::
 
-    python tools/make_test_references.py so3lr-tauri-m-2606
+    python tests/make_test_references.py so3lr-tauri-m-2606
 
 Writes ``tests/test_data/dha_<model>_ase.npz`` with the energy, forces and
 c6_ratios that ``tests/test_ase.py::test_v2_ase_calculator`` checks, computed in
@@ -22,7 +22,7 @@ from ase.io import read
 from so3lr import So3lrCalculator
 from so3lr.model_registry import canonical_models
 
-TEST_DATA = pathlib.Path(__file__).resolve().parent.parent / 'tests' / 'test_data'
+TEST_DATA = pathlib.Path(__file__).resolve().parent / 'test_data'
 
 
 def main():

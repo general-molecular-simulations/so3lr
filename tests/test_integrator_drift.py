@@ -245,7 +245,7 @@ def _assert_drift_below(ensemble, dtype, precision, threshold):
     )
 
 
-# Every case runs with --full (tools/run_integrator_drift_tests.sh, one process
+# Every case runs with --full (tests/run_integrator_drift_tests.sh, one process
 # each). The short suite runs only float32 NVE: the CLI default precision, the
 # plain integrator, about half a minute.
 SLOW = pytest.mark.slow

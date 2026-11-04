@@ -1,7 +1,7 @@
 """Saved model predictions the regression tests compare against.
 
 Each reference is ``tests/test_data/dha_<model>_ase.npz`` (energy, forces,
-c6_ratios), written by ``tools/make_test_references.py``. Exact releases only,
+c6_ratios), written by ``tests/make_test_references.py``. Exact releases only,
 never floating aliases: a reference pins one checkpoint's outputs. A plain module
 (like subprocess_env.py) so test files share it without importing each other.
 """

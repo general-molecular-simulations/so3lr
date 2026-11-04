@@ -83,7 +83,7 @@ jobs:
             # Each drift parameter still runs, but in its own interpreter: on
             # large CPU nodes, repeated XLA compilations in one process can
             # exhaust native compiler resources before later ensembles start.
-            run_full: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_md_state_precision.py tests/test_ci_lanes.py tests/test_legacy_model_autodetect.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_flash.py -v --tb=short --full && tools/run_integrator_drift_tests.sh .venv/bin/python"
+            run_full: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_md_state_precision.py tests/test_ci_lanes.py tests/test_legacy_model_autodetect.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_flash.py -v --tb=short --full && tests/run_integrator_drift_tests.sh .venv/bin/python"
     runs-on: ubuntu-latest
     name: "${{ matrix.name }}"
     # The full md-regressions lane launches every drift case in a fresh Python
