@@ -1,0 +1,235 @@
+import flax.linen as nn
+from so3lr.mlff.nn.stacknet import StackNetSparse
+from so3lr.mlff.nn.embed import GeometryEmbedSparse
+from so3lr.mlff.nn.layer import SO3kratesLayerSparse
+from so3lr.mlff.nn.observable import EnergySparse
+from so3lr.mlff.nn.observable import ElectrostaticEnergySparse
+from so3lr.mlff.nn.observable import ElectrostaticEnergyKspace
+from so3lr.mlff.nn.observable import DispersionEnergyKspace
+from so3lr.mlff.nn.observable import DispersionEnergySparse
+from so3lr.mlff.nn.observable import ZBLRepulsionSparse
+from so3lr.mlff.nn.observable import NLHRepulsionSparse
+from so3lr.mlff.nn.observable import DipoleVecSparse
+from so3lr.mlff.nn.observable import HirshfeldSparse
+from so3lr.mlff.nn.observable import C6RatiosSparse
+from so3lr.mlff.nn.observable import PartialChargesSparse
+
+from typing import Optional, Sequence
+
+from .representation_utils import make_embedding_modules
+
+
+def init_so3krates_sparse(
+        num_layers: int = 2,
+        num_features: int = 128,
+        num_heads: int = 4,
+        num_features_head: int = 32,
+        radial_basis_fn: str = 'bernstein',
+        num_radial_basis_fn: int = 16,
+        cutoff_fn: str = 'exponential',
+        cutoff: float = 5.,
+        cutoff_lr: Optional[float] = None,
+        degrees: Sequence[int] = [1, 2, 3, 4],
+        residual_mlp_1: bool = True,
+        residual_mlp_2: bool = True,
+        layer_normalization_1: bool = False,
+        layer_normalization_2: bool = False,
+        use_rms_norm: bool = False,  # Use RMSNorm instead of LayerNorm (no learnable params)
+        qk_norm: bool = False,  # Apply RMSNorm to Q and K in attention (stabilizes training)
+        use_residual_scalars: bool = False,  # Per-layer learnable residual scalars
+        message_normalization: str = 'sqrt_num_features',
+        avg_num_neighbors: float = None,
+        qk_non_linearity: str = 'silu',
+        activation_fn: str = 'silu',
+        layers_behave_like_identity_fn_at_init: bool = False,
+        output_is_zero_at_init: bool = True,
+        use_charge_embed: bool = False,
+        # Override the total charge seen by the charge embedding. None -> follow
+        # the graph's total_charge.
+        charge_embed_total_charge: Optional[float] = None,
+        # Override the total charge that charge equilibration conserves to.
+        # None -> follow the graph's total_charge. Independent of the above, so
+        # either path can be redirected without touching the other.
+        charge_equilibration_total_charge: Optional[float] = None,
+        use_spin_embed: bool = False,
+        energy_regression_dim: int = 128,
+        energy_final_mlp_widths: Optional[Sequence[int]] = None,
+        energy_activation_fn: str = 'identity',
+        energy_learn_atomic_type_scales: bool = False,
+        energy_learn_atomic_type_shifts: bool = False,
+        electrostatic_energy_bool: bool = False,
+        electrostatic_energy_scale: float = 1.0,
+        electrostatic_energy_kspace_method: str = 'pme',
+        electrostatic_energy_kspace_interp_nodes: int = 4,
+        dispersion_energy_bool: bool = False,
+        dispersion_energy_cutoff_lr_damping: Optional[float] = None,
+        dispersion_energy_scale: float = 1.0,
+        dispersion_energy_kspace_do_ewald_bool: bool = False,
+        dispersion_energy_kspace_interp_nodes: int = 4,
+        zbl_repulsion_bool: bool = False,
+        legacy_so3lr_bool: bool = False,  # Use original vanilla-SO3LR heads (learnable ZBL, attention Hirshfeld, no c6 head).
+        use_final_bias_bool: bool = True,
+        return_representations_bool: bool = False,
+        input_convention: str = 'positions',
+        neighborlist_format_lr: str = 'sparse',  # or 'ordered_sparse'
+        output_intermediate_quantities: Optional[Sequence[str]] = None,
+):
+    embedding_modules = make_embedding_modules(
+        num_features=num_features,
+        use_spin_embed=use_spin_embed,
+        use_charge_embed=use_charge_embed,
+        charge_embed_total_charge=charge_embed_total_charge
+    )
+
+    geometry_embed = GeometryEmbedSparse(
+        degrees=degrees,
+        radial_basis_fn=radial_basis_fn,
+        num_radial_basis_fn=num_radial_basis_fn,
+        cutoff_fn=cutoff_fn,
+        cutoff=cutoff,
+        input_convention=input_convention,
+        prop_keys=None
+    )
+
+    layers = [SO3kratesLayerSparse(
+        degrees=degrees,
+        use_spherical_filter=True,
+        num_heads=num_heads,
+        num_features_head=num_features_head,
+        qk_non_linearity=getattr(nn.activation, qk_non_linearity) if qk_non_linearity != 'identity' else lambda u: u,
+        residual_mlp_1=residual_mlp_1,
+        residual_mlp_2=residual_mlp_2,
+        layer_normalization_1=layer_normalization_1,
+        layer_normalization_2=layer_normalization_2,
+        use_rms_norm=use_rms_norm,
+        qk_norm=qk_norm,
+        message_normalization=message_normalization,
+        avg_num_neighbors=avg_num_neighbors,
+        activation_fn=getattr(nn.activation, activation_fn) if activation_fn != 'identity' else lambda u: u,
+        behave_like_identity_fn_at_init=layers_behave_like_identity_fn_at_init
+    ) for i in range(num_layers)]
+
+    partial_charges = PartialChargesSparse(
+        prop_keys=None,
+        output_is_zero_at_init=output_is_zero_at_init,
+        regression_dim=energy_regression_dim,
+        total_charge_override=charge_equilibration_total_charge,
+        activation_fn=getattr(
+            nn.activation, energy_activation_fn
+        ) if energy_activation_fn != 'identity' else lambda u: u,
+    )
+
+    hirshfeld_ratios = HirshfeldSparse(
+        prop_keys=None,
+        output_is_zero_at_init=output_is_zero_at_init,
+        regression_dim=energy_regression_dim,
+        activation_fn=getattr(
+            nn.activation, energy_activation_fn
+        ) if energy_activation_fn != 'identity' else lambda u: u,
+        legacy=legacy_so3lr_bool,
+    )
+
+    # Legacy SO3LR has no dedicated C6 head; C6 is derived from Hirshfeld ratios.
+    c6_ratios = None if legacy_so3lr_bool else C6RatiosSparse(
+        prop_keys=None,
+        output_is_zero_at_init=output_is_zero_at_init,
+        regression_dim=energy_regression_dim,
+        activation_fn=getattr(
+            nn.activation, energy_activation_fn
+        ) if energy_activation_fn != 'identity' else lambda u: u,
+    )
+
+    # do_dispersion_kspace is True when dispersion_energy_kspace_do_ewald_bool
+    # is explicitly set (even to False, meaning PME not Ewald). The flag is None
+    # when dispersion kspace is not configured at all.
+    _do_disp_kspace = dispersion_energy_kspace_do_ewald_bool is not None
+
+    dispersion_energy = DispersionEnergySparse(
+        prop_keys=None,
+        hirshfeld_ratios=hirshfeld_ratios,
+        c6_ratios=c6_ratios,
+        cutoff_lr=cutoff_lr,
+        cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
+        dispersion_energy_scale=dispersion_energy_scale,
+        neighborlist_format=neighborlist_format_lr,
+        do_dispersion_kspace=_do_disp_kspace,
+        legacy=legacy_so3lr_bool,
+    )
+
+    dispersion_energy_kspace = DispersionEnergyKspace(
+        prop_keys=None,
+        hirshfeld_ratios=hirshfeld_ratios,
+        c6_ratios=c6_ratios,
+        do_ewald=dispersion_energy_kspace_do_ewald_bool if dispersion_energy_kspace_do_ewald_bool is not None else False,
+        interpolation_nodes=dispersion_energy_kspace_interp_nodes,
+        legacy=legacy_so3lr_bool,
+    )
+
+    electrostatic_energy_kspace = ElectrostaticEnergyKspace(
+        prop_keys=None,
+        partial_charges=partial_charges,
+        kspace_method=electrostatic_energy_kspace_method,
+        electrostatic_energy_scale=electrostatic_energy_scale,
+        interpolation_nodes=electrostatic_energy_kspace_interp_nodes
+    )
+
+    electrostatic_energy = ElectrostaticEnergySparse(
+        prop_keys=None,
+        partial_charges=partial_charges,
+        cutoff_lr=cutoff_lr,
+        electrostatic_energy_scale=electrostatic_energy_scale,
+        neighborlist_format=neighborlist_format_lr
+    )
+
+    dipole_vec = DipoleVecSparse(
+        prop_keys=None,
+        partial_charges=partial_charges
+    )
+
+    # Legacy SO3LR uses the original learnable ZBL repulsion; newer models use NLH.
+    # Both share module_name='zbl_repulsion'.
+    if legacy_so3lr_bool:
+        zbl_repulsion = ZBLRepulsionSparse(prop_keys=None)
+    else:
+        zbl_repulsion = NLHRepulsionSparse(prop_keys=None)
+
+    energy = EnergySparse(
+        prop_keys=None,
+        output_is_zero_at_init=output_is_zero_at_init,
+        regression_dim=energy_regression_dim,
+        final_mlp_widths=energy_final_mlp_widths,
+        activation_fn=getattr(
+            nn.activation, energy_activation_fn
+        ) if energy_activation_fn != 'identity' else lambda u: u,
+        learn_atomic_type_scales=energy_learn_atomic_type_scales,
+        learn_atomic_type_shifts=energy_learn_atomic_type_shifts,
+        electrostatic_energy=electrostatic_energy,
+        electrostatic_energy_kspace=electrostatic_energy_kspace,
+        dispersion_energy=dispersion_energy,
+        dispersion_energy_kspace=dispersion_energy_kspace,
+        partial_charges=partial_charges,
+        hirshfeld_ratios=hirshfeld_ratios,
+        zbl_repulsion=zbl_repulsion,
+        electrostatic_energy_bool=electrostatic_energy_bool,
+        dispersion_energy_bool=dispersion_energy_bool,
+        zbl_repulsion_bool=zbl_repulsion_bool,
+        output_intermediate_quantities=output_intermediate_quantities,
+        use_final_bias_bool=use_final_bias_bool,
+    )
+
+    # Legacy SO3LR exposes only [energy, dipole_vec, hirshfeld] (observables_0/1/2);
+    # newer models add the c6 head (observables_3). Order is preserved so checkpoint
+    # parameter keys (observables_N) line up.
+    observables = [energy, dipole_vec, hirshfeld_ratios]
+    if not legacy_so3lr_bool:
+        observables.append(c6_ratios)
+
+    return StackNetSparse(
+        geometry_embeddings=[geometry_embed],
+        feature_embeddings=embedding_modules,
+        layers=layers,
+        observables=observables,
+        return_representations_bool=return_representations_bool,
+        use_residual_scalars=use_residual_scalars,
+        prop_keys=None
+    )

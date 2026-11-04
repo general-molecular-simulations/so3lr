@@ -1,31 +1,124 @@
-[tool.poetry]
+[project]
 name = "so3lr"
-version = "0.1.0"
+version = "0.2.0"
 description = "SO3krates Universal Pairwise Force Field with Long Range Interactions (SO3LR) for Molecular Simulation"
-authors = ["Adil Kabylda, Thorben Frank"]
-license = "MIT"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = "MIT AND Apache-2.0 AND CC-BY-NC-4.0"
+license-files = ["LICENSE", "NOTICES.md", "licenses/LICENSE.*"]
+authors = [
+    { name = "Adil Kabylda" },
+    { name = "Thorben Frank" },
+]
+keywords = [
+    "machine-learning",
+    "molecular-dynamics",
+    "interatomic-potential",
+    "force-field",
+    "jax",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "ase>=3.26,<4",
+    "click>=8.2,<9",
+    # Caps only, so existing cluster JAX installs are kept: jaxlib 0.11.1 has
+    # an XLA:CPU regression (jax-ml/jax#40101) that makes the PME/P3M mesh
+    # scatter hang, and flax >=0.12.9 requires jax >=0.11.1.
+    "flax<0.12.9",
+    "glp @ git+https://github.com/fbruenig/glp.git@2294f4f59e940be64c45bf5e4d1bea5cb90809f8",
+    "h5py>=3.11,<4",
+    "jax<0.11",
+    "jax-md @ git+https://github.com/kabylda/jax-md.git@a1618449f7f00df5aa3b1e50105dacb5193b2cda",
+    "jax-pme @ git+https://github.com/fbruenig/jax-pme.git@de9a3a9dfeb1f5b635a54a8f277c1ec3ecd2bf6d",
+    "jaxlib<0.11",
+    "jraph @ git+https://github.com/google-deepmind/jraph.git@51f5990104f7374492f8f3ea1cbc47feb411c69c",
+    "ml-collections>=1.1,<2",
+    "numpy>=1.26,<3",
+    "optax<0.3",
+    "orbax-checkpoint<0.13",
+    "pyyaml>=6,<7",
+    "tqdm>=4.67,<5",
+]
 
+[project.optional-dependencies]
+cuda12 = [
+    "jax[cuda12]<0.11; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+pysages = [
+    "pysages @ git+https://github.com/em819/PySAGES.git@79b56c2096294db78270aa6165789a199f05c33c",
+]
+tfds = [
+    "importlib-resources>=6,<8",
+    "tensorflow>=2.20,<2.22; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "tensorflow-cpu>=2.20,<2.22; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
+    "tensorflow-datasets>=4.9,<5",
+]
+wandb = [
+    "wandb>=0.29,<0.30",
+]
+# Fast neighbour search for the ASE calculator's exact periodic images
+# (small or skewed cells); without it the slower ASE search is used.
+matscipy = [
+    "matscipy>=1.0",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.12"
-numpy = "*"
-ase = "*"
-h5py = "*"
-setuptools = "<81"
-jax = "==0.5.3"
-jaxlib = "==0.5.3"
-orbax-checkpoint = "==0.11.13"
-mlff = { git = "https://github.com/kabylda/mlff.git", branch = "v1.0_dev_import", optional = false }
-jraph = { git = "https://github.com/kabylda/jraph.git", branch = "master", optional = false }
-jax-md = { git = "https://github.com/kabylda/jax-md.git", branch = "main" , optional = false }
-glp = { git = "https://github.com/kabylda/glp.git", branch = "electrostatics_neighbourlist", optional = false }
-jax-pme = { git = "https://github.com/fbruenig/jax-pme", branch = "main" , optional = false }
+[project.urls]
+Homepage = "https://github.com/general-molecular-simulations/so3lr"
+Documentation = "https://so3lr.github.io/"
+Repository = "https://github.com/general-molecular-simulations/so3lr.git"
+Issues = "https://github.com/general-molecular-simulations/so3lr/issues"
 
+[project.scripts]
+so3lr = "so3lr.cli.so3lr_cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<10",
+    "pytest-xdist>=3.8,<4",
+]
+notebooks = [
+    "ipykernel>=7.3,<8",
+    "nbclient>=0.11,<0.12",
+    "nbformat>=5.11,<6",
+    "nglview>=4.0.1,<5",
+    "py3dmol>=2.5.5,<3",
+]
+
+[tool.poetry]
+include = [
+    # Publication and contributor documents belong in the source archive, not
+    # at the top of site-packages when a wheel is installed.
+    { path = "DEVELOPERS.md", format = "sdist" },
+    { path = "logo.png", format = "sdist" },
+    # Keep non-Python runtime inputs explicit even though Poetry currently
+    # discovers files located inside the package automatically.
+    { path = "so3lr/cli/*.yaml", format = ["sdist", "wheel"] },
+    { path = "so3lr/config/*.yaml", format = ["sdist", "wheel"] },
+    { path = "so3lr/models/**/*", format = ["sdist", "wheel"] },
+    { path = "so3lr/mlff/nn/observable/*.npz", format = ["sdist", "wheel"] },
+    { path = "so3lr/mlff/utils/robust_loss_jax/data/*.npz", format = ["sdist", "wheel"] },
+    # the robust loss's Apache-2.0 notice travels with its code
+    { path = "so3lr/mlff/utils/robust_loss_jax/README.md", format = ["sdist", "wheel"] },
+]
+
+[tool.uv]
+required-version = ">=0.11.26"
+# GLP currently declares ``comms`` from its ``main`` branch.  Keep the
+# reproducible uv environment on the audited commit without emitting a second,
+# conflicting direct-URL requirement in wheel metadata (standard pip treats
+# the branch and commit URLs as two incompatible candidates).
+override-dependencies = [
+    "comms @ git+https://github.com/sirmarcel/comms.git@496034fd9bbb58d3b82dbe1affd11b33a7537c42",
+]
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core==2.2.1"]
 build-backend = "poetry.core.masonry.api"
-
-
-[tool.poetry.scripts]
-so3lr = "so3lr.cli.so3lr_cli:main"

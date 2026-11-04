@@ -1,30 +1,14 @@
 """Finetune utilities for SO3LR models."""
-import jax
-import jraph
-import numpy as np
-import jax.numpy as jnp
-import time
-import pprint
 import pathlib
 import logging
-from typing import Dict, List, Tuple, Union, Optional, Any
-from tqdm import tqdm
-import yaml
+from typing import Optional
+from so3lr.md_settings_validation import load_settings_yaml
 
-from ase.io import write
-from mlff.utils import jraph_utils, evaluation_utils
-from mlff.data import AseDataLoaderSparse
-from mlff.utils import calculator_utils
-from mlff.config import from_config
+from so3lr.mlff.config import from_config
 
 from ml_collections import config_dict
-from pathlib import Path
-import json
-from collections import defaultdict
 
-from ..jraph_utils import jraph_to_ase_atoms, unbatch_np
-from ..base_calculator import make_so3lr
-from .so3lr_md import load_model, setup_logger
+from .so3lr_md import setup_logger
 
 # Get logger
 logger = logging.getLogger("SO3LR")
@@ -44,12 +28,18 @@ def finetune_so3lr(
     # Setup logging
     setup_logger(log_file)
 
-    # Initialize the model
-    if model_path is None:
-        logger.info("Using default SO3LR potential")
-        model_path = package_dir / 'params'
+    # Initialize the model. Route through the central model registry so the
+    # default matches the documented SO3LR model (DEFAULT_MODEL), instead of
+    # silently falling back to the legacy `params/` checkpoint that lived next to
+    # this file. A user-supplied path is also resolved through the registry so
+    # that registered names and filesystem paths both work.
+    from so3lr.model_registry import resolve_model, available_models
+    workdir_path = resolve_model(model_path).dir
+    if model_path is None or model_path in available_models():
+        logger.info(f"Using bundled SO3LR model: {workdir_path.name}")
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
+    model_path = workdir_path
     
     if config_path is None:
         # Use the default config for finetuning.
@@ -58,8 +48,7 @@ def finetune_so3lr(
     else:
         logger.info(f"Using config for finetuning from: {config_path}")
     
-    with open(config_path, mode='r') as fp:
-        finetune_cfg = config_dict.ConfigDict(yaml.load(fp, Loader=yaml.FullLoader))
+    finetune_cfg = config_dict.ConfigDict(load_settings_yaml(config_path))
     
     finetune_cfg.workdir = workdir
     finetune_cfg.data.filepath = datafile
@@ -75,6 +64,11 @@ def finetune_so3lr(
     else:
         if finetune_cfg.training.num_valid is None:
             raise ValueError(f'num_valid must not be `None`. Either set it in your config at {config_path} or via the CLI argument `--num-valid`.')
+
+    # Catch misconfigurations (e.g. neighbors_lr_bool=True with no
+    # neighbors_lr_cutoff) up front rather than letting them fail late inside
+    # the data loader. Mirrors the call already present in so3lr_train.py.
+    from_config.check_config(finetune_cfg)
 
     from_config.run_fine_tuning(
         finetune_cfg,

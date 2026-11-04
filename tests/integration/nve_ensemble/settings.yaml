@@ -1,0 +1,28 @@
+# NVE ensemble test - microcanonical simulation
+# Tests running NVE (constant energy) dynamics
+
+input_file: acetone.xyz
+output_file: trajectory.hdf5
+log_file: so3lr.log
+
+# Model settings
+precision: float64
+lr_cutoff: 12
+buffer_size_multiplier_sr: 1.25
+buffer_size_multiplier_lr: 1.25
+
+# Key feature: NVE ensemble
+ensemble: nve
+md_T: 300.0  # Only used for initial velocity assignment
+md_dt: 0.5
+md_cycles: 3
+md_steps: 2
+relax_before_run: false  # Don't relax for NVE
+
+# Output settings
+# Deliberately does not divide md_cycles: the final one-frame tail must be
+# written and the restart must still record cycle 3.
+save_buffer: 2
+total_charge: 0
+seed: 42
+restart_save_path: nve_restart.npz

@@ -1,0 +1,30 @@
+# Initial velocities test - reading momenta from input file
+# Tests that velocities from extxyz are properly loaded
+
+input_file: input.xyz
+output_file: trajectory.hdf5
+log_file: so3lr.log
+
+# Model settings
+precision: float64
+lr_cutoff: 12.0  # SO3LR requires >= 10 A (see check_cell); matches the other non-PBC cases
+dispersion_damping: 1.0
+buffer_size_multiplier_sr: 1.25
+buffer_size_multiplier_lr: 1.25
+
+# MD settings - no relax to preserve initial velocities
+md_T: 300.0
+md_dt: 0.5
+md_cycles: 2
+md_steps: 2
+relax_before_run: false  # Important: don't relax to test velocity loading
+
+# Thermostat settings
+nhc_chain_length: 3
+nhc_steps: 2
+nhc_thermo: 100.0
+
+# Output settings
+save_buffer: 1
+total_charge: 0
+seed: 42

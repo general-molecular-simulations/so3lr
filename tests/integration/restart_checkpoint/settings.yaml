@@ -1,0 +1,39 @@
+# Restart checkpoint test - tests saving and loading restart files
+# This is a two-phase test (the harness runs both):
+# 1. setup_settings.yaml saves a restart file (setup phase)
+# 2. this file loads from the restart file (actual test)
+
+input_file: benzoic_acid_aq_1.xyz  # from tests/test_data
+output_file: trajectory.hdf5
+log_file: so3lr.log
+
+# Model settings
+# One benzoic acid molecule (15 atoms) in a periodic 25 A box. This case
+# validates restart-file round-tripping, not numerics: restart.npz stores only
+# positions/momenta/forces/masses, the box, the step counter and the thermostat
+# chain -- nothing that scales in kind with system size. The box must still be
+# periodic (box is one of the round-tripped fields) and at least twice lr_cutoff
+# for minimum image (check_cell() rejects lr_cutoff < 10 A). That bounds the box
+# length, not the atom count: a dilute box is enough, and the cost of this case
+# scaled with the atoms (it ran 1536 waters).
+precision: float64
+lr_cutoff: 10.0
+dispersion_damping: 2.0
+buffer_size_multiplier_sr: 1.25
+buffer_size_multiplier_lr: 1.25
+
+# MD settings
+ensemble: nvt
+md_T: 300.0
+md_dt: 0.5
+md_cycles: 2
+md_steps: 2
+relax_before_run: false
+
+# Key feature: load from restart
+restart_load_path: './restart.npz'
+
+# Output settings
+save_buffer: 1
+total_charge: 0
+seed: 42

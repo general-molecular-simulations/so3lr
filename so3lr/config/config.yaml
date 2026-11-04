@@ -1,0 +1,147 @@
+# =============================================================================
+# Default config trains a vanilla SO3krates (no long-range physics).
+# To train an SO3LR-flavored model, set the following keys to true and provide
+# a long-range cutoff:
+#   data.neighbors_lr_bool: true        # build long-range neighbor lists
+#   data.neighbors_lr_cutoff: 12.0      # long-range cutoff in Angstrom (example)
+#   model.electrostatic_energy_bool: true
+#   model.dispersion_energy_bool: true
+#   model.zbl_repulsion_bool: true      # already true by default
+# See https://so3lr.github.io/training/from-scratch/ for details.
+# =============================================================================
+workdir: first_experiment  # Output directory for checkpoints and hyperparameters.
+data:
+  filepath: null  # Path to the training data file. Supports any ASE-readable format (.xyz, .extxyz, .pdb, etc.) or .npz files.
+  # --- Multi-dataset alternative to `filepath` (uncomment to enable) ---
+  # Set `filepath: null` and provide a list of datasets here instead. Each entry mixes a path
+  # with a sampling `weight` (defaults to 1.0) and an optional `num_train` (TFDS dataloader only).
+  # datasets:
+  #   - path: /data/dataset_a.extxyz
+  #     weight: 1.0
+  #     # num_train: 5000  # Optional cap per-dataset; only used by the TFDS dataloader.
+  #   - path: /data/dataset_b.extxyz
+  #     weight: 0.5
+  energy_unit: eV  # Unit of energy labels in the data file.
+  length_unit: Angstrom  # Unit of position/distance labels in the data file.
+  electric_charge_unit: e  # Unit of charge labels in the data file.
+  dipole_vec_unit: e * Angstrom  # Unit of dipole vector labels in the data file.
+  shift_mode: null  # How to compute per-element energy shifts subtracted before training. Options: null (no shifts), mean (uniform per-atom shift), lse (per-element least-squares fit), custom (use energy_shifts below).
+  energy_shifts: null  # Per-element energy shifts in eV, used only when shift_mode is custom. Dict mapping atomic number to shift value.
+  split_seed: 42  # Random seed for splitting data into training, validation, and test sets. Change to get a different split.
+  neighbors_lr_bool: false  # Whether to compute long-range neighbor lists during data loading. Required when using electrostatic or dispersion modules.
+  neighbors_lr_cutoff: null  # Cutoff distance in Angstrom for long-range neighbor list construction during data loading. Independent from the model's cutoff_lr.
+  avg_num_neighbors: null  # Average number of (short-range) neighbors per atom. Auto-computed from data if null. Only needed when message_normalization is avg_num_neighbors.
+  filter:
+    min_distance: 0.5  # Remove structures whose closest distinct-atom distance is smaller (Angstrom); TFDS uses the minimum image on configured PBC axes.
+    max_force: 25.  # Remove structures with non-finite forces or any absolute force component above this value (eV/Angstrom).
+model:
+  num_layers: 2  # Number of SO3krates message passing layers.
+  num_features: 128  # Dimension of the invariant feature vectors.
+  num_heads: 4  # Number of attention heads for invariant and equivariant attention.
+  num_features_head: 32  # Dimension per attention head for both invariant features and Euclidean variables.
+  degrees:  # Degrees of spherical harmonics used in the equivariant (Euclidean) variables. E.g. [1,2] uses l=1 and l=2.
+    - 1
+    - 2
+    - 3
+    - 4
+  cutoff: 5.0  # Short-range cutoff in Angstrom. Defines the local neighborhood for message passing.
+  cutoff_fn: phys  # Cutoff function applied to short-range edges. Options: phys, cosine, exponential.
+  cutoff_lr: null  # Long-range cutoff in Angstrom for electrostatic and dispersion modules. Set to null to disable long-range truncation.
+  cutoff_lr_damping: 2.0  # Damping width in Angstrom for the long-range cutoff function. Controls how smoothly interactions decay near cutoff_lr.
+  num_radial_basis_fn: 32  # Number of radial basis functions for encoding interatomic distances.
+  radial_basis_fn: bernstein  # Type of radial basis functions. Options: bernstein, physnet, gaussian, fourier.
+  activation_fn: silu  # Activation function for MLPs in the message passing layers. Options: silu, gelu, swish, etc. (resolved via jax.nn).
+  qk_non_linearity: identity  # Non-linearity applied to query and key vectors before computing attention weights. Options: identity (none), silu, etc.
+  residual_mlp_1: true  # Apply a residual MLP to invariant features after the attention update within each layer.
+  residual_mlp_2: false  # Apply a residual MLP to invariant features after the equivariant exchange block within each layer.
+  message_normalization: sqrt_num_features  # Normalization for attention weights. Options: identity (1), sqrt_num_features (1/sqrt(d)), avg_num_neighbors (1/avg_neighbors).
+  layer_normalization_1: true  # Apply LayerNorm (or RMSNorm if use_rms_norm=true) to features after the first residual MLP.
+  layer_normalization_2: false  # Apply LayerNorm (or RMSNorm if use_rms_norm=true) to features after the second residual MLP.
+  use_rms_norm: false  # Use RMSNorm instead of LayerNorm for layer normalizations. RMSNorm has no learnable parameters.
+  qk_norm: false  # Apply RMSNorm to query and key vectors before attention. Can stabilize training with large feature dimensions.
+  use_residual_scalars: false  # Use per-layer learnable scalars (resid_lambda, x0_lambda) to interpolate between layer input and output.
+  layers_behave_like_identity_fn_at_init: true  # Initialize message passing layers to behave like the identity function (output equals input at init).
+  output_is_zero_at_init: true  # Initialize the final energy readout MLP so that predicted atomic energies are zero at initialization.
+  use_charge_embed: false  # Add an embedding of the total molecular charge to atomic features. Requires charge info in the input data.
+  use_spin_embed: false  # Add an embedding of the number of unpaired electrons to atomic features. Requires spin info in the input data.
+  energy_regression_dim: 128  # Hidden dimension of the energy readout MLP that maps final features to atomic energies.
+  energy_final_mlp_widths: null  # Optional list of hidden widths for a multi-layer energy readout MLP (e.g. [128, 64]). null = single hidden layer of size energy_regression_dim.
+  energy_activation_fn: silu  # Activation function applied in the energy readout MLP before the final linear layer. Options: identity (none), silu, etc.
+  energy_learn_atomic_type_scales: true  # Learn a per-element multiplicative scale factor for predicted atomic energies.
+  energy_learn_atomic_type_shifts: true  # Learn a per-element additive shift for predicted atomic energies.
+  input_convention: positions  # How atomic coordinates are provided to the model. Options: positions (absolute), displacements (relative to neighbors).
+  electrostatic_energy_bool: false  # Add a long-range Coulomb electrostatic energy module. Requires neighbors_lr_bool=true during data loading.
+  electrostatic_energy_scale: 4.0  # Damping for the electrostatic energy contribution.
+  dispersion_energy_bool: false  # Add a long-range dispersion (van der Waals) energy module. Requires neighbors_lr_bool=true during data loading.
+  dispersion_energy_cutoff_lr_damping: null  # Damping distance in Angstrom for dispersion energy long-range cutoff. Uses cutoff_lr_damping if null.
+  dispersion_energy_scale: 1.2  # Damping for the dispersion energy contribution.
+  zbl_repulsion_bool: true  # Add a Ziegler-Biersack-Littmark (ZBL) short-range repulsion term. Prevents unphysical atom overlap.
+  use_final_bias_bool: false  # Include a bias term in the final linear layer of the energy readout MLP.
+  legacy_so3lr_bool: false  # Use the legacy SO3LR-v1 architecture for reproducing the JACS paper. Should stay false for new training runs.
+  kspace_electrostatics: null  # K-space method for electrostatic + dispersion during training. Options: null (disabled), pme, p3m, ewald.
+  kspace_smearing: 2.0  # Smearing parameter (Angstrom) for Ewald splitting. Controls real-space vs k-space partition.
+  kspace_spacing: 1.0  # Mesh spacing (Angstrom) for PME/P3M grid, or wavelength for Ewald. Smaller = finer grid = more accurate.
+optimizer:
+  name: muon  # Optimizer name. Any optimizer from optax (adam, adamw, sgd, etc.) or optax.contrib (muon) is supported.
+  # NOTE: optimizer_args below are MUON-specific (ns_steps, beta, nesterov, adaptive). If you change
+  # `name` to a different optimiser (adam, adamw, sgd, ...), you MUST clear these (set to null or
+  # replace with that optimiser's kwargs) -- otherwise optax raises an opaque TypeError at init.
+  optimizer_args:  # Additional keyword arguments passed to the optimizer constructor. Set to null for default optimizer settings.
+    ns_steps: 5  # Newton-Schulz iterations for orthogonalization
+    beta: 0.95   # Momentum decay
+    nesterov: true  # Use Nesterov momentum
+    adaptive: false  # Scale updates by dual norm
+  learning_rate: 0.001  # Base learning rate, passed to the learning rate schedule.
+  learning_rate_schedule: exponential_decay  # Learning rate schedule from optax (e.g. exponential_decay, cosine_decay_schedule, constant_schedule).
+  learning_rate_schedule_args:  # Keyword arguments passed to the learning rate schedule constructor.
+    decay_rate: 0.75  # Factor by which the learning rate decays.
+    transition_steps: 125000  # Number of steps between each decay.
+  gradient_clipping: clip_by_global_norm  # Gradient clipping transform from optax (e.g. clip_by_global_norm). Set to identity for no clipping.
+  gradient_clipping_args:  # Keyword arguments for the gradient clipping transform (e.g. {max_norm: 1.0} for clip_by_global_norm).
+    max_norm: 10
+  num_of_nans_to_ignore: 0  # Number of consecutive NaN gradients to skip before raising an error. Useful for handling rare numerical instabilities.
+training:
+  allow_restart: true  # If a checkpoint dir already exists in workdir, RESUME training from it (no checkpoints are overwritten). Set false to refuse and require a fresh workdir. NB: a resumed run silently keeps the old wandb run-id, so iterating on hyperparameters into the same workdir produces a single wandb run with mixed settings.
+  num_epochs: 100  # Total number of training epochs (full passes over the training set).
+  num_train: 950  # Number of structures to use for training, drawn from the dataset.
+  num_valid: 50  # Number of structures to use for validation, drawn from the dataset.
+  batch_max_num_nodes: null  # Maximum total number of atoms (nodes) per batch, including one padding node. Auto-computed from batch_max_num_graphs if null.
+  batch_max_num_edges: null  # Maximum total number of short-range edges per batch, including one padding edge. Auto-computed from batch_max_num_graphs if null.
+  batch_max_num_pairs: null  # Maximum total number of long-range pairs per batch. Auto-computed as O(N^2) per graph if null and neighbors_lr_bool=true.
+  # When batch_max_num_nodes/edges are null, they are set to max_per_graph * (batch_max_num_graphs - 1) + 1.
+  # When explicitly set, batches are filled greedily until any of the three limits (nodes, edges, graphs) would be exceeded.
+  # For long training runs, it is recommended to evalute optimal batch_max parameters
+  batch_max_num_graphs: 6  # Maximum number of molecular graphs per batch. One slot is used by jraph for padding, so effective batch size is this value minus 1.
+  batch_n_proc: 1  # Number of parallel workers for batch queuing. Only used with the TFDS dataloader. Within TFDS dataloader, 1 is usually enough to precompute the next batch.
+  eval_every_num_steps: 1000  # Run validation metrics every this many gradient steps. Also controls checkpoint saving frequency.
+  loss_weights:
+    energy: 0.01  # Loss weight for per-structure energy (MSE normalized by number of atoms).
+    forces: 0.99  # Loss weight for per-atom forces (MSE averaged per graph).
+    # dipole_vec: 0.01  # Loss weight for per-structure dipole vector (MSE normalized by number of atoms). Uncomment if dipole labels are present in the dataset.
+    # hirshfeld_ratios: 0.01  # Loss weight for per-atom Hirshfeld volume ratios (per-atom MSE). Uncomment if Hirshfeld-ratio labels are present in the dataset.
+    # c6_ratios: 0.01  # Loss weight for per-atom C6 coefficient ratios (per-atom MSE). Uncomment if C6-ratio labels are present in the dataset.
+  # Loss function: standard L2 (use_adaptive_robust_loss and use_robust_loss false), fixed robust, or adaptive robust. See https://arxiv.org/abs/1701.03077.
+  use_adaptive_robust_loss: true  # Use adaptive robust loss where alpha and scale are learned per target. Cannot be combined with use_robust_loss.
+  adaptive_robust_loss_init_alpha: 1.0  # Initial alpha for adaptive robust loss. Range [0, 2]: 0=Cauchy (heavy-tailed), 2=L2 (standard MSE). Learned during training.
+  adaptive_robust_loss_init_scale: 1.0  # Initial scale for adaptive robust loss. Must be > 0. Controls the transition between quadratic and robust regime. Learned during training.
+  use_robust_loss: false  # Use fixed robust loss with the alpha below. Cannot be combined with use_adaptive_robust_loss.
+  robust_loss_alpha: 1.0  # Alpha parameter for fixed robust loss. Range [0, 2]: 0=Cauchy (very robust to outliers), 1=Charbonnier, 2=L2 (standard MSE).
+  # --- Optional training enhancements (all disabled by default; uncomment to enable) ---
+  # use_ema: false  # Keep an exponential moving average (EMA) of the weights. The raw weights keep training while the EMA shadow copy is used for validation metrics and saved in the checkpoint -- usually more stable/accurate at deployment.
+  # ema_decay: 0.999  # EMA decay factor; closer to 1.0 means slower, smoother averaging. Only used when use_ema is true.
+  # early_stopping_patience: null  # Stop training once the validation loss has not improved for this many consecutive evaluations (each eval happens every eval_every_num_steps). null disables early stopping.
+  # reduce_lr_on_plateau: false  # Shrink the learning rate when the validation loss plateaus. Multiplies the LR by an injectable factor on top of learning_rate_schedule above.
+  # reduce_lr_factor: 0.75  # Factor the learning rate is multiplied by on each plateau. Only used when reduce_lr_on_plateau is true.
+  # reduce_lr_patience: 1000  # Number of evaluations without improvement before the learning rate is reduced.
+  # stage_two_start_epoch: null  # Epoch at which to switch to a second set of loss weights (two-stage training). The best-loss, early-stopping and plateau trackers reset at the switch. null disables two-stage training.
+  # stage_two_loss_weights:  # Loss weights applied from stage_two_start_epoch onward. Same keys as loss_weights. Only used when stage_two_start_epoch is set.
+  #   energy: 0.1
+  #   forces: 0.9
+  model_seed: 42  # Random seed for model parameter initialization.
+  training_seed: 42  # Random seed for shuffling training batches each epoch.
+  log_gradient_values: false  # Log the L2 norm of gradients for each parameter group to WandB. Useful for debugging training dynamics.
+  use_wandb: false  # Opt in to sending metrics and the effective config to Weights & Biases (requires `pip install .[wandb]`). No W&B calls are made while false/absent.
+  wandb_init_args:  # Keyword arguments passed to wandb.init() only when use_wandb is true. Put credentials in the W&B environment/login, never in this file.
+    name: first_experiment  # Name of this run in the WandB dashboard.
+    project: mlff  # WandB project name.
+    group: null  # Optional group name for organizing related runs.

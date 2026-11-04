@@ -1,38 +1,181 @@
 name: CI
 on:
   push:
-    branches: [ main]
+    branches: [main]
+  # Stacked changes target other feature branches before reaching main.
+  # They need the same checks while they are being reviewed.
   pull_request:
-    branches: [ main]
 
   # Allows to run this workflow manually from the Actions tab
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Test mode: short (skip slow tests) or full (run all tests)'
+        required: false
+        default: 'short'
+        type: choice
+        options:
+          - short
+          - full
 jobs:
   ci:
     strategy:
       fail-fast: false
+      matrix:
+        include:
+          - group: 1
+            name: "mlff"
+            # The TFDS data-loader tests skip when TensorFlow is absent.
+            # Install the tfds extra so this lane exercises them in CI.
+            sync_extra: "--extra tfds"
+            run_short: "uv run --no-sync pytest tests/mlff_tests/ -v --tb=short"
+            run_full: "uv run --no-sync pytest tests/mlff_tests/ -v --tb=short --full"
+          - group: 2
+            name: "so3lr-cli"
+            sync_extra: ""
+            run_short: "uv run --no-sync pytest tests/test_cli_eval.py tests/test_eval_kspace.py tests/test_eval_output.py tests/test_tune_ewald_error_bounds.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_finetuning_strategies.py tests/test_cli.py tests/test_security_defaults.py -v --tb=short"
+            run_full: "uv run --no-sync pytest tests/test_cli_eval.py tests/test_eval_kspace.py tests/test_eval_output.py tests/test_tune_ewald_error_bounds.py tests/test_cli_train.py tests/test_cli_finetune.py tests/test_finetuning_strategies.py tests/test_cli.py tests/test_security_defaults.py -v --tb=short --full"
+          # tests/test_integration.py ran ~31-41 min as a single job -- the
+          # critical path for the whole workflow, and long enough that runners
+          # were twice reclaimed mid-run (SIGTERM, exit 143, no test failure).
+          # --shard splits it into duration-balanced thirds using the timings in
+          # tests/conftest.py, so a newly added test case is distributed
+          # automatically rather than needing to be named here.
+          - group: 3
+            name: "integration-1"
+            sync_extra: ""
+            run_short: "uv run --no-sync pytest tests/test_integration.py --shard 1/3 -v --tb=short"
+            run_full: "uv run --no-sync pytest tests/test_integration.py --shard 1/3 -v --tb=short --full"
+          - group: 4
+            name: "integration-2"
+            sync_extra: ""
+            run_short: "uv run --no-sync pytest tests/test_integration.py --shard 2/3 -v --tb=short"
+            run_full: "uv run --no-sync pytest tests/test_integration.py --shard 2/3 -v --tb=short --full"
+          - group: 5
+            name: "integration-3"
+            sync_extra: ""
+            run_short: "uv run --no-sync pytest tests/test_integration.py --shard 3/3 -v --tb=short"
+            run_full: "uv run --no-sync pytest tests/test_integration.py --shard 3/3 -v --tb=short --full"
+          - group: 6
+            name: "so3lr-other"
+            sync_extra: ""
+            run_short: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_model_invariance.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_glp_cell_list_overflow.py tests/test_prepare_dimer.py -v --tb=short"
+            run_full: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_model_invariance.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_glp_cell_list_overflow.py tests/test_prepare_dimer.py tests/test_hessian.py -v --tb=short --full"
+          - group: 7
+            name: "pysages"
+            sync_extra: "--extra pysages"
+            # All pysages-touching interface tests must run on every PR
+            # (including the @pytest.mark.slow integration tests) to guarantee
+            # the PySAGES <-> SO3LR interface is exercised before merge.
+            # Both run_short and run_full therefore pass --full.
+            #
+            # test_pysages_doublewell.py validates PySAGES' own jax-md backend
+            # rather than the SO3LR interface, so keep it in full mode only.
+            run_short: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py -v --tb=short --full"
+            run_full: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py tests/test_pysages_doublewell.py -v --tb=short --full"
+          - group: 8
+            name: "md-regressions"
+            sync_extra: ""
+            # Plus the drift file's one short case (float32 NVE, about half a minute),
+            # in its own process like every drift case; it runs even when the first
+            # command fails, and the step fails if either did.
+            run_short: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_md_state_precision.py tests/test_ci_lanes.py tests/test_legacy_model_autodetect.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_flash.py -v --tb=short || s=$?; uv run --no-sync pytest tests/test_integrator_drift.py -v --tb=short || s=$?; exit ${s:-0}"
+            # Each drift parameter still runs, but in its own interpreter: on
+            # large CPU nodes, repeated XLA compilations in one process can
+            # exhaust native compiler resources before later ensembles start.
+            run_full: "uv run --no-sync pytest tests/test_cli_errors.py tests/test_md_observables.py tests/test_md_output_integrity.py tests/test_model_registry.py tests/test_md_state_precision.py tests/test_ci_lanes.py tests/test_legacy_model_autodetect.py tests/test_npt_flex.py tests/test_npt_coupling_safety.py tests/test_flash.py -v --tb=short --full && tools/run_integrator_drift_tests.sh .venv/bin/python"
     runs-on: ubuntu-latest
+    name: "${{ matrix.name }}"
+    # The full md-regressions lane launches every drift case in a fresh Python
+    # process. Jitting the drift loop cut those cases from about 61 minutes on
+    # MeluXina to a fraction of that; the headroom below predates the change.
+    timeout-minutes: ${{ (github.event.inputs.test_mode == 'full' || contains(github.event.head_commit.message, '[full tests]')) && (matrix.name == 'md-regressions' && 180 || 90) || 60 }}
     steps:
-      - uses: actions/checkout@v2
-      
-      - uses: actions/setup-python@v2
-        with:
-          python-version: 3.12
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Get pip cache dir
-        id: pip-cache
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.11.26"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install the locked test environment
+        run: uv sync --locked --group dev ${{ matrix.sync_extra }}
+
+      - name: Runner facts (for stalls that only reproduce here)
         run: |
-          python -m pip install --upgrade pip wheel
-          echo "::set-output name=dir::$(pip cache dir)"
-
-      - name: pip cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.pip-cache.outputs.dir }}
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/setup.py') }}
-
+          nproc; free -g | head -2; lscpu | grep -E 'Model name|Flags' | cut -c1-200
       - name: Test with pytest
+        # TEST_MODE / HEAD_COMMIT_MESSAGE are passed through the environment
+        # rather than interpolated into the script body: a commit message
+        # containing a double quote used to be spliced in raw and broke the
+        # `if` into invalid bash (all jobs exited 2 before collecting a single
+        # test). head_commit is absent on pull_request events, so the variable
+        # is empty there and the [full tests] check is simply false.
+        env:
+          TEST_MODE: ${{ github.event.inputs.test_mode }}
+          # Dump every thread's stack if one test runs 15 min: a stall then
+          # leaves a traceback in the log instead of a blank 60-minute cancel.
+          PYTEST_ADDOPTS: "-o faulthandler_timeout=900"
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          pip install .
-          pytest tests/
-      
+          if [ "$TEST_MODE" = "full" ] || [[ "$HEAD_COMMIT_MESSAGE" == *"[full tests]"* ]]; then
+            echo "Running FULL test suite"
+            ${{ matrix.run_full }}
+          else
+            echo "Running SHORT test suite"
+            ${{ matrix.run_short }}
+          fi
+
+  package:
+    name: "package-py${{ matrix.python-version }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.11.26"
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Build the wheel and sdist
+        run: uv build
+
+      - name: Install the wheel into a fresh environment
+        run: |
+          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/wheel-env"
+          uv pip install --python "$RUNNER_TEMP/wheel-env/bin/python" dist/*.whl
+
+      - name: Smoke-test the installed wheel outside the checkout
+        run: |
+          env_dir="$RUNNER_TEMP/wheel-env"
+          cd "$(mktemp -d)"
+          # Locate the installed package without importing it (and JAX).
+          models_dir=$("$env_dir/bin/python" -c "import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec('so3lr').origin).parent / 'models')")
+          (cd "$models_dir" && sha256sum --quiet -c SHA256SUMS)
+          "$env_dir/bin/so3lr" --help >/dev/null
+          "$env_dir/bin/python" - <<'PY'
+          import numpy as np
+          from ase import Atoms
+          from so3lr import So3lrCalculator
+
+          atoms = Atoms("H2", positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]])
+          atoms.calc = So3lrCalculator(
+              model="so3lr-tauri-m-2606",
+              calculate_stress=False,
+              dtype=np.float32,
+          )
+          energy = atoms.get_potential_energy()
+          forces = atoms.get_forces()
+          assert np.isfinite(energy)
+          assert forces.shape == (2, 3)
+          assert np.isfinite(forces).all()
+          PY
