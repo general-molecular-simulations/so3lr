@@ -36,12 +36,10 @@ ensemble: "nvt"                            # Ensemble type: "nvt", "nvt-langevin
 total_charge: 0                            # Total charge of the system [Default: 0]
 num_unpaired_electrons: 0                  # Spin: number of unpaired electrons (2S). [Default: 0]
 seed: 52                                   # Random seed for MD and thermostat initialization [Default: 52]
-precision: "float32"                       # Numerical precision: "float32" or "float64" [Default: "float32"]
+precision: "mixed"                         # "float32" or "float64" throughout, or "mixed": a float32 model around a float64 MD state (positions, momenta, box, energy sums) [Default: "mixed"]
 matmul_precision: "highest"                # JAX matmul precision: "default" / "high" / "highest". "highest" forces full float32 and avoids TF32 drift on GPUs. [Default: "highest"]
 engine: "auto"                             # MD engine: "auto" (flash on an NVIDIA GPU or AMD MI355X when it covers the run, else the neighbour-list engine; the log says which), "flash" or "standard" [Default: "auto"]
 flash_mode: "auto"                         # Flash memory mode, fastest first: "fast", "default", "lean", "leanest", "minimal"; "auto" picks the fastest that fits [Default: "auto"]
-md_precision: null                         # MD state (positions, momenta, box, energy sums) around a float32 model, on both engines: "float64" or "float32"; null takes flash_mixed (float64 unless false). A float64 model always has a float64 state. [Default: null]
-flash_mixed: true                          # Older form of md_precision (true: float64, false: float32); md_precision takes precedence [Default: true]
 
 ## Input/Output Settings
 input_file: "path/to/geometry.xyz"         # Path to the initial geometry file (required)
