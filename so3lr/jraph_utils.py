@@ -29,8 +29,8 @@ def jraph_to_ase_atoms(graph):
     if hasattr(total_charge, 'shape') and total_charge.shape:
         total_charge = total_charge.item() if total_charge.size == 1 else int(total_charge[0])
     atoms.info['charge'] = int(total_charge)
-    atoms.info['energy'] = float(f'{float(graph.globals["energy"][0]):.6g}')
-    atoms.info['energy_so3lr'] = float(f'{float(graph.globals["energy_so3lr"][0]):.6g}')
+    atoms.info['energy'] = float(graph.globals["energy"][0])
+    atoms.info['energy_so3lr'] = float(graph.globals["energy_so3lr"][0])
     atoms.arrays['forces'] = graph.nodes['forces']
     atoms.arrays['forces_so3lr'] = graph.nodes['forces_so3lr']
     for key in ['hirshfeld_ratios', 'hirshfeld_ratios_so3lr', 'c6_ratios', 'c6_ratios_so3lr']:
@@ -38,7 +38,7 @@ def jraph_to_ase_atoms(graph):
             atoms.arrays[key] = graph.nodes[key]
     for key in ['dipole_vec', 'dipole_vec_so3lr']:
         if key in graph.globals and graph.globals[key] is not None:
-            atoms.info[key] = np.array([float(f'{x:.6g}') for x in graph.globals[key].flatten()])
+            atoms.info[key] = np.asarray(graph.globals[key], np.float64).flatten()
 
     # Write any additional observable quantities that were added to nodes
     _handled_node_keys = {'positions', 'atomic_numbers', 'forces', 'forces_so3lr',

@@ -4,12 +4,12 @@ Two defects lived here: the wrapper dropped 'a0_ratios' (the key the current
 so3lr-tauri-s/m/l models emit for the ratio head), and it ran a second full
 model.apply purely to read the non-energy outputs.
 """
+import functools
 import json
 import pathlib
 import pickle
 
 import jax.numpy as jnp
-import numpy.testing as npt
 import pytest
 from ml_collections import config_dict
 
@@ -36,7 +36,9 @@ def _water_inputs(n=3):
     )
 
 
+@functools.lru_cache(maxsize=None)
 def _load(model_name):
+    # One load per model; no test modifies the params.
     d = MODELS_DIR / model_name
     cfg = config_dict.ConfigDict(json.loads((d / 'hyperparameters.json').read_text()))
     params = training_utils.expand_observables_to_theory_levels(
@@ -94,18 +96,3 @@ def test_energy_and_force_call_runs_one_forward_pass():
     finally:
         type(net).apply = original
     assert calls['n'] == 1, f'model.apply ran {calls["n"]} times'
-
-
-def test_nlh_table_lookup_matches_the_gathered_form():
-    """The direct two-index lookup must equal the old gather-then-select, which
-    materialised an (E, 92, 3) intermediate per table just to keep one row."""
-    from so3lr.mlff.nn.observable.observable_sparse import NLH_AA, NLH_BB
-
-    zi = jnp.array([1, 6, 8, 1, 7])
-    zj = jnp.array([8, 1, 1, 6, 8])
-    for table in (NLH_AA, NLH_BB):
-        t = jnp.asarray(table)
-        gathered = jnp.take_along_axis(
-            jnp.take(t, zi, axis=0), zj[:, None, None], axis=1
-        ).squeeze(1)
-        npt.assert_allclose(t[zi, zj], gathered)

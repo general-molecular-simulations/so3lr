@@ -29,12 +29,14 @@ def neighbor_list_featurizer(
     ``neighbor_list_featurizer_custom``).
 
     Args:
-        precision: dtype for the auxiliary arrays (``total_charge``,
-            ``num_unpaired_electrons``, ``theory_mask``). When ``None`` these
-            follow the positions array ``R.dtype`` (the historical behaviour of
-            the public helper); pass an explicit dtype (e.g. ``jnp.float64``) to
-            force it (the CLI MD behaviour).
+        precision: the model's dtype. Displacements are formed in the dtype of
+            ``R`` and the graph's floating arrays are cast to ``precision`` after,
+            so a float64 MD state around a float32 model keeps float64 edges up to
+            the model. ``None`` leaves the graph in ``R.dtype`` (PotentialSparse
+            casts it to its own dtype).
     """
+    from so3lr.mlff.calculators.potential import cast_float_params
+
     def featurize(R, neighbor, neighbor_lr, **kwargs):
         idx_i = neighbor[0]  # shape: P
         idx_j = neighbor[1]  # shape: P
@@ -45,8 +47,6 @@ def neighbor_list_featurizer(
         Rb = R[idx_j]
         Ra_lr = R[idx_i_lr]
         Rb_lr = R[idx_j_lr]
-
-        aux_dtype = precision if precision is not None else R.dtype
 
         positions = None
         k_smearing = None
@@ -94,7 +94,7 @@ def neighbor_list_featurizer(
         dR = d(Ra, Rb)
         dR_lr = d(Ra_lr, Rb_lr)
 
-        theory_mask = (jnp.eye(16, dtype=precision) if precision is not None else jnp.eye(16))[5].reshape(1, -1)
+        theory_mask = jnp.eye(16, dtype=R.dtype)[5].reshape(1, -1)
 
         graph = Graph(
             positions=positions,
@@ -103,8 +103,8 @@ def neighbor_list_featurizer(
             centers=idx_i,
             others=idx_j,
             mask=None,
-            total_charge=jnp.asarray([total_charge], dtype=aux_dtype),
-            num_unpaired_electrons=jnp.asarray([num_unpaired_electrons], dtype=aux_dtype),
+            total_charge=jnp.asarray([total_charge], dtype=R.dtype),
+            num_unpaired_electrons=jnp.asarray([num_unpaired_electrons], dtype=R.dtype),
             edges_lr=dR_lr,
             idx_i_lr=idx_i_lr,
             idx_j_lr=idx_j_lr,
@@ -116,7 +116,7 @@ def neighbor_list_featurizer(
             theory_mask=theory_mask
         )
 
-        return graph
+        return graph if precision is None else cast_float_params(graph, precision)
 
     return featurize
 
@@ -136,7 +136,7 @@ def to_jax_md(
         fractional_coordinates: bool = True,
         total_charge: float = 0.0,  # net charge of the system (e)
         num_unpaired_electrons: float = 0.0,  # spin: number of unpaired electrons
-        precision=None,  # dtype for auxiliary arrays; None -> follow positions dtype
+        precision=None,  # the model's dtype; None leaves the graph in R.dtype (PotentialSparse casts it to its own)
         **neighbor_kwargs
 ):
     """Build the (short-range, long-range) neighbor functions and a jax-md
@@ -200,6 +200,8 @@ def to_jax_md(
         num_unpaired_electrons=num_unpaired_electrons,
     )
 
+    from so3lr.mlff.calculators.potential import cast_float_params
+
     # create an energy_fn that is compatible with jax_md
     def energy_fn(
             R,
@@ -209,9 +211,8 @@ def to_jax_md(
             **energy_fn_kwargs
     ):
         graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
-        if has_aux:
-            return potential(graph, has_aux=True)
-        else:
-            return potential(graph).sum()
+        # back in the positions' dtype before the sum (a float64 MD state sums in float64)
+        out = cast_float_params(potential(graph, has_aux=True) if has_aux else potential(graph), R.dtype)
+        return out if has_aux else out.sum()
 
     return neighbor_fn, neighbor_fn_lr, energy_fn

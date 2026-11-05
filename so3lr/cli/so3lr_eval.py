@@ -12,6 +12,7 @@ import logging
 from typing import Dict, List, Tuple, Optional, Any
 from tqdm import tqdm
 
+from ase import Atoms
 from ase.io import write
 from so3lr.mlff.utils import jraph_utils
 from so3lr.mlff.utils.kspace_utils import (
@@ -21,16 +22,16 @@ from so3lr.mlff.utils.kspace_utils import (
     setup_kspace_grid)
 from so3lr.mlff.data import AseDataLoaderSparse
 from pathlib import Path
-import json
 from collections import defaultdict
 
 from ..jraph_utils import jraph_to_ase_atoms
 from ..base_calculator import make_so3lr
+from ..mlff.calculators.potential import cast_float_params
 from ..mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported,
     supported_atomic_numbers_for_config,
 )
-from .so3lr_md import setup_logger
+from .so3lr_md import run_dtypes, setup_logger, setup_run
 from ..pbc import is_fully_periodic
 
 # Get logger
@@ -108,13 +109,6 @@ def process_predictions(
     # model has no c6 head, so guard against its absence.
     if 'c6_ratios' in output_prediction:
         main_graph.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
-
-    # Remove non-standard global fields that don't have one row per graph
-    # (residue_charge has shape (2,) per graph, residue_segments has shape
-    # (num_atoms,) per graph), which causes jraph.unbatch_np to fail when
-    # splitting globals evenly by the number of graphs.
-    for field in ('residue_charge', 'residue_segments'):
-        main_graph.globals.pop(field, None)
 
     # Add any observable quantities that are present in the predictions.
     # 'x' (atom embeddings) is excluded here — it's saved separately to an NPZ file.
@@ -255,7 +249,8 @@ def save_to_file(
 
     with _staged_output(Path(save_to), overwrite=overwrite) as temporary:
         for index, predicted_graph in enumerate(tqdm(predicted_graphs, desc="Saving predictions")):
-            atoms = jraph_to_ase_atoms(predicted_graph)
+            # graphs from the neighbour-list model, Atoms from the flash engine
+            atoms = predicted_graph if isinstance(predicted_graph, Atoms) else jraph_to_ase_atoms(predicted_graph)
             for _k in _label_keys_to_check:
                 if _k in atoms.info and _is_all_nan(atoms.info[_k]):
                     del atoms.info[_k]
@@ -272,7 +267,7 @@ def evaluate_so3lr_on(
         jit_compile: bool = True,
         save_to: Optional[str] = None,
         model_path: Optional[str] = None,
-        precision: str = 'float32',
+        precision: Optional[str] = None,
         targets: str = 'forces,dipole_vec,hirshfeld_ratios',
         log_file: Optional[str] = None,
         total_charge: Optional[int] = None,
@@ -288,6 +283,10 @@ def evaluate_so3lr_on(
         kspace_dispersion_interp_nodes: int = DEFAULT_KSPACE_DISPERSION_INTERP_NODES,
         charge_embed_total_charge: Optional[float] = None,
         charge_equilibration_total_charge: Optional[float] = None,
+        engine: str = 'auto',
+        flash_mode: str = 'auto',
+        flash_mixed: Optional[bool] = None,
+        flash_devices: int = 1,
 ) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset and calculate error metrics.
@@ -314,7 +313,9 @@ def evaluate_so3lr_on(
     model_path : str or None
         Path to the model to evaluate. If None, the default SO3LR model is used.
     precision : str
-        Precision to use for the calculation ('float32' or 'float64').
+        The run's precision, on both engines as in MD: 'float32' or 'float64' throughout,
+        or 'mixed' (the default), a float32 model around float64 positions; displacements
+        are formed in the positions' dtype before the model.
     targets : str
         Comma-separated list of targets to evaluate (forces, energy, dipole_vec,
         hirshfeld_ratios).
@@ -325,6 +326,12 @@ def evaluate_so3lr_on(
         Otherwise a pre-existing output raises RuntimeError. Each file is
         replaced separately; the outputs are not a multi-file transaction.
         Matches the --overwrite policy used by perform_md / perform_min.
+    engine : str
+        'auto': SO3LR-Flash where it computes what is asked (every structure periodic
+        and orthorhombic or without a box, the targets energy and/or forces, up to
+        so3lr.flash.check.EVAL_AUTO_ENGINES sets of atoms; see so3lr.flash.evaluate),
+        else the neighbour-list model; 'flash' or 'standard' forces one. flash_mode and
+        flash_devices as for MD; flash_mixed is the deprecated older form of precision.
 
     Returns:
     --------
@@ -332,8 +339,14 @@ def evaluate_so3lr_on(
         Dictionary containing evaluation metrics (MAE, MSE, RMSE for each target)
         and timing information.
     """
+    # every option, for the flash engine's check (which declines one it does not know)
+    flash_settings = dict(locals())
+
     # Setup logging
     setup_logger(log_file)
+    # Configure JAX process-globals (x64, matmul precision) before any array: eval bypasses
+    # run(), where MD configures them
+    setup_run(flash_settings)
 
     total_time_start = time.time()
 
@@ -432,16 +445,52 @@ def evaluate_so3lr_on(
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
 
-    # Configure JAX process-globals (x64, matmul precision). Without this
-    # call, `so3lr eval --precision float64` would silently downcast to
-    # float32 because eval bypasses run() (where MD configures these).
-    from .so3lr_md import setup_jax_globals
-    setup_jax_globals(precision=precision, matmul_precision='highest')
-
     kspace_enabled = (kspace_electrostatics is not None
                       or kspace_dispersion is not None)
 
-    so3lr_calc = make_so3lr(
+    # The engine: SO3LR-Flash where it computes what is asked, else the neighbour-list
+    # model below (engine='flash' / 'standard' forces one). The structures are read for
+    # it only if the settings, model and device allow it.
+    from .so3lr_md import run_on_flash
+    from ..flash.check import flash_problem
+    flash_settings['targets'] = target_list
+    frames = []
+    if (engine or 'auto') != 'standard' and flash_problem(flash_settings, [], task='eval') is None:
+        # the first structure, then the rest only if flash takes it, and with auto only up
+        # to one set of atoms more than it takes (most gas-phase datasets have many: the
+        # loader below reads them)
+        from ase.io import iread, read
+        from ..flash.check import EVAL_AUTO_ENGINES
+        frames = [read(str(datafile), index=0)]
+        if flash_problem(flash_settings, frames, task='eval') is None:
+            frames, kinds = [], set()
+            for atoms in iread(str(datafile), index=':'):
+                frames.append(atoms)
+                kinds.add(atoms.numbers.tobytes())
+                if (engine or 'auto') == 'auto' and len(kinds) > EVAL_AUTO_ENGINES:
+                    break
+
+    def eval_on_flash(flash_md):
+        from ..flash.evaluate import evaluate_flash
+        return evaluate_flash(frames, flash_settings, target_list, keep_predictions=save_predictions_bool)
+    ran, result = run_on_flash(flash_settings, frames, 'eval', eval_on_flash)
+    if ran:
+        (tot_abs, tot_sq, tot_n), (t_first, t_rest, n_rest) = result
+        logger.info(f'Completed evaluation on {len(frames)} / {len(frames)} structures (flash)')
+        # the compile time includes each engine's first call, which cannot be timed apart
+        logger.info(f'Engine builds and the calls that compiled: {t_first:.3f} seconds; '
+                    f'the other {n_rest} calls: {t_rest:.3f} seconds')
+        logger.info('-' * 50)
+        return _finish_evaluation(
+            target_list=target_list, tot_abs=tot_abs, tot_sq=tot_sq, tot_n=tot_n, total_time=t_rest,
+            compile_time=t_first, n_batches=n_rest, n_structures=n_rest, datafile=datafile, save_to=save_to,
+            predicted=frames, overwrite=overwrite, total_time_start=total_time_start)
+    del frames
+
+    # the model's and the geometry's dtypes for `precision`, as on flash and in MD
+    model_dtype, state_dtype = run_dtypes(flash_settings)
+    model_fn = make_so3lr(
+        precision=model_dtype,
         workdir=workdir_path,
         kspace_electrostatics=kspace_electrostatics,
         kspace_interp_nodes=kspace_interp_nodes,
@@ -455,9 +504,12 @@ def evaluate_so3lr_on(
         charge_equilibration_total_charge=charge_equilibration_total_charge
     )
 
+    def so3lr_calc(inputs):
+        return model_fn(cast_float_params(inputs, state_dtype))
+
     # Read the short-range cutoff from the resolved model's hyperparameters.
-    with open(workdir_path / "hyperparameters.json", "r") as fp:
-        cfg = json.load(fp)
+    from ..model_config import load_model_config
+    cfg = load_model_config(workdir_path)
     cutoff = cfg['model']['cutoff']
 
     logger.info(f"Using cutoff: {cutoff} Å")
@@ -545,7 +597,6 @@ def evaluate_so3lr_on(
     # structures are grouped by mesh shape: one compilation per distinct shape,
     # and structures with different cells but the same mesh share a batch.
     # Outputs are put back into dataset order afterwards.
-    work_dtype = jnp.float64 if precision == 'float64' else jnp.float32
     if kspace_enabled:
         buckets = {}                      # mesh-shape key -> [dataset index]
         for idx, (_g, _) in enumerate(data):
@@ -578,10 +629,10 @@ def evaluate_so3lr_on(
             box = jnp.asarray(data[idx_list[0]][0].globals['cell']).reshape(3, 3)
             k_grid, k_smear = setup_kspace_grid(
                 kspace_electrostatics, kspace_smearing, kspace_spacing, box,
-                dtype=work_dtype)
+                dtype=state_dtype)
             k_grid_d, k_smear_d = setup_kspace_grid(
                 kspace_dispersion, kspace_dispersion_smearing,
-                kspace_dispersion_spacing, box, dtype=work_dtype)
+                kspace_dispersion_spacing, box, dtype=state_dtype)
             groups.append(([data[i] for i in idx_list],
                            {'k_grid': k_grid, 'k_smearing': k_smear,
                             'k_grid_disp': k_grid_d, 'k_smearing_disp': k_smear_d}))
@@ -719,91 +770,102 @@ def evaluate_so3lr_on(
 
         logger.info('-' * 50)
 
-        # Compute final metrics from totals (only for targets with ground truth)
-        test_metrics = {}
-        for t in target_list:
-            if t not in tot_n:
-                continue
-            n = tot_n[t]
-            if n <= 0:
-                # Avoid division by zero; report NaNs if nothing was counted
-                mae = float('nan'); mse = float('nan'); rmse = float('nan')
-            else:
-                mae = tot_abs[t] / n
-                mse = tot_sq[t]  / n
-                rmse = float(np.sqrt(mse))
-            test_metrics[f'{t}_mae']  = float(mae)
-            test_metrics[f'{t}_mse']  = float(mse)
-            test_metrics[f'{t}_rmse'] = float(rmse)
-
-        # Compile timing metrics
-        time_per_batch = total_time / i if i > 0 else 0
-        time_per_structure = total_time / total_num_structures if total_num_structures > 0 else 0
-
-        metrics = {
-            'time_per_batch': float(time_per_batch),
-            'time_per_structure': float(time_per_structure),
-            'time_evaluation': float(total_time),
-            'time_compile': float(compile_time),
-            **test_metrics
-        }
-
-        # Convert numpy types to Python types for serialization
-        metrics = jax.tree_util.tree_map(lambda x: float(x), metrics)
-        metrics['datafile'] = str(datafile.as_uri())
-
-        # Display results: a per-target table (MAE / RMSE / N + unit) is much
-        # easier to read than a flat pprint dict where *_mae / *_mse / *_rmse
-        # keys interleave with timing fields. The returned `metrics` dict is
-        # unchanged so downstream callers keep working.
-        _UNIT_MAP = {
-            'energy': 'eV',
-            'forces': 'eV/Ang',
-            'dipole_vec': 'e*Ang',
-            'stress': 'eV/Ang^3',
-            'hirshfeld_ratios': 'dimensionless',
-            'a0_ratios': 'dimensionless',
-            'c6_ratios': 'dimensionless',
-        }
-        # Targets that actually have ground-truth counts (skip observables
-        # which have no MAE/RMSE because no label is available).
-        _scored_targets = [t for t in target_list if t in tot_n and tot_n[t] > 0]
-        logger.info('Evaluation metrics:')
-        if _scored_targets:
-            _hdr = f"  {'target':<20}  {'MAE':>12}  {'RMSE':>12}  {'N':>10}  unit"
-            logger.info(_hdr)
-            logger.info('  ' + '-' * (len(_hdr) - 2))
-            for t in _scored_targets:
-                mae = metrics.get(f'{t}_mae', float('nan'))
-                rmse = metrics.get(f'{t}_rmse', float('nan'))
-                n = tot_n[t]
-                unit = _UNIT_MAP.get(t, '')
-                logger.info(
-                    f"  {t:<20}  {mae:>12.3e}  {rmse:>12.3e}  {n:>10d}  {unit}"
-                )
-        else:
-            logger.info('  (no labelled targets evaluated)')
-        logger.info(
-            f"  Timing: total={metrics['time_evaluation']:.3f}s, "
-            f"compile={metrics['time_compile']:.3f}s, "
-            f"per-batch={metrics['time_per_batch']:.3f}s, "
-            f"per-structure={metrics['time_per_structure']:.3f}s"
-        )
-        logger.info('-' * 50)
-
-        # Save predictions if requested
-        if save_predictions_bool:
-            save_to_file(predicted, str(save_to), num_data, overwrite=overwrite)
-
-        total_time_end = time.time()
-        logger.info(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
-        logger.info('Evaluation completed successfully')
-
-        return metrics
+        return _finish_evaluation(
+            target_list=target_list, tot_abs=tot_abs, tot_sq=tot_sq, tot_n=tot_n, total_time=total_time,
+            compile_time=compile_time, n_batches=i, n_structures=total_num_structures, datafile=datafile,
+            save_to=save_to, predicted=predicted, overwrite=overwrite, total_time_start=total_time_start)
 
     except Exception as e:
         logger.error(f"Error during evaluation: {str(e)}")
         raise
+
+
+def _finish_evaluation(*, target_list, tot_abs, tot_sq, tot_n, total_time, compile_time, n_batches,
+                       n_structures, datafile, save_to, predicted, overwrite, total_time_start):
+    """The metrics from the per-target sums, the report, and the predictions saved (if
+    save_to): the end of ``evaluate_so3lr_on`` for either engine. total_time: seconds of
+    the n_batches timed calls, over n_structures structures."""
+    # Compute final metrics from totals (only for targets with ground truth)
+    test_metrics = {}
+    for t in target_list:
+        if t not in tot_n:
+            continue
+        n = tot_n[t]
+        if n <= 0:
+            # Avoid division by zero; report NaNs if nothing was counted
+            mae = float('nan'); mse = float('nan'); rmse = float('nan')
+        else:
+            mae = tot_abs[t] / n
+            mse = tot_sq[t]  / n
+            rmse = float(np.sqrt(mse))
+        test_metrics[f'{t}_mae']  = float(mae)
+        test_metrics[f'{t}_mse']  = float(mse)
+        test_metrics[f'{t}_rmse'] = float(rmse)
+
+    # Compile timing metrics
+    time_per_batch = total_time / n_batches if n_batches > 0 else 0
+    time_per_structure = total_time / n_structures if n_structures > 0 else 0
+
+    metrics = {
+        'time_per_batch': float(time_per_batch),
+        'time_per_structure': float(time_per_structure),
+        'time_evaluation': float(total_time),
+        'time_compile': float(compile_time),
+        **test_metrics
+    }
+
+    # Convert numpy types to Python types for serialization
+    metrics = jax.tree_util.tree_map(lambda x: float(x), metrics)
+    metrics['datafile'] = str(datafile.as_uri())
+
+    # Display results: a per-target table (MAE / RMSE / N + unit) is much
+    # easier to read than a flat pprint dict where *_mae / *_mse / *_rmse
+    # keys interleave with timing fields. The returned `metrics` dict is
+    # unchanged so downstream callers keep working.
+    _UNIT_MAP = {
+        'energy': 'eV',
+        'forces': 'eV/Ang',
+        'dipole_vec': 'e*Ang',
+        'stress': 'eV/Ang^3',
+        'hirshfeld_ratios': 'dimensionless',
+        'a0_ratios': 'dimensionless',
+        'c6_ratios': 'dimensionless',
+    }
+    # Targets that actually have ground-truth counts (skip observables
+    # which have no MAE/RMSE because no label is available).
+    _scored_targets = [t for t in target_list if t in tot_n and tot_n[t] > 0]
+    logger.info('Evaluation metrics:')
+    if _scored_targets:
+        _hdr = f"  {'target':<20}  {'MAE':>12}  {'RMSE':>12}  {'N':>10}  unit"
+        logger.info(_hdr)
+        logger.info('  ' + '-' * (len(_hdr) - 2))
+        for t in _scored_targets:
+            mae = metrics.get(f'{t}_mae', float('nan'))
+            rmse = metrics.get(f'{t}_rmse', float('nan'))
+            n = tot_n[t]
+            unit = _UNIT_MAP.get(t, '')
+            logger.info(
+                f"  {t:<20}  {mae:>12.3e}  {rmse:>12.3e}  {n:>10d}  {unit}"
+            )
+    else:
+        logger.info('  (no labelled targets evaluated)')
+    logger.info(
+        f"  Timing: total={metrics['time_evaluation']:.3f}s, "
+        f"compile={metrics['time_compile']:.3f}s, "
+        f"per-batch={metrics['time_per_batch']:.3f}s, "
+        f"per-structure={metrics['time_per_structure']:.3f}s"
+    )
+    logger.info('-' * 50)
+
+    # Save predictions if requested
+    if save_to is not None:
+        save_to_file(predicted, str(save_to), len(predicted), overwrite=overwrite)
+
+    total_time_end = time.time()
+    logger.info(f'Total execution time: {(total_time_end - total_time_start):.3f} seconds')
+    logger.info('Evaluation completed successfully')
+
+    return metrics
 
 
 def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:

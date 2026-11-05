@@ -34,22 +34,78 @@ from so3lr.mlff.sph_ops import init_sph_fn
 # tabulated NLH repulsion for that element pair already exceeds
 # PAIR_FLOOR_ENERGY. That is a per-pair length with nothing to hand-tune, and it
 # scales the way the failures do -- the heavier the pair, the further out.
-PAIR_FLOOR_ENERGY = 3.0    # [eV] engage only where the pair's repulsion exceeds this
+PAIR_FLOOR_ENERGY = 5.0    # [eV] engage only where the pair's repulsion exceeds this
 PAIR_FLOOR_WIDTH = 0.05    # [A] handover; the floor is exactly inert above it
-# 3 eV is measured, not chosen. Scanning all 18 pairs x 4 checkpoints at 0.01 A
-# with no floor, the outermost SEVERE failure (NaN, |E_nn| > 100 eV, or
-# |F| > 1e3 eV/A) is at 0.28 A for H-H and 1.05 A for S-S. r(3 eV) clears every
-# one of them, C-H being the tightest at 0.736 vs 0.68. Going to 5 eV no longer
-# reaches C-H. On the other side, r(3 eV) stays far from anything real: 0.698 A
-# for O-H against 0.863 A, the closest O-H approach in the whole 300-673 K /
-# 1-250 bar NPT water series, and 0.96 A at equilibrium. Reaching the handover
-# means putting 3 eV -- 35 kT at 1000 K -- into one pair coordinate.
+# 5 eV is bounded from both sides by measurement: the lower bound from dimer
+# scans of the three -2606 checkpoints, the upper bound from the 73 labelled test
+# sets. It is the value the SO3LR-2 paper's test-set errors were computed with
+# (SI, "Behaviour at close contact"); the per-pair numbers are MEASURED in
+# tests/mlff_tests/test_descriptor_floor.py, from floor_analysis/floor_pairs.csv
+# in the paper's evaluation data.
+#
+#   lower bound  the failure onset per pair -- the outermost separation where the
+#                UN-floored network diverges (|F| > 1e3 eV/A or NaN) on dimer
+#                scans. rmin must reach past it.
+#   upper bound  the closest REAL contact per pair across every labelled test set.
+#                The training data goes far closer than intuition suggests: the
+#                scaled-separation sets label down to 0.4 A, and real contacts
+#                reach O-H 0.666, N-H 0.668, C-H 0.691, H-H 0.407. Where the
+#                floor engages on those it is neutral-to-harmful, because the
+#                model is inaccurate but NOT diverging there -- it is
+#                interpolating, and flooring distorts what it learned.
+#
+# At 5 eV rmin sits below the closest real contact for EVERY pair, which is why
+# it beats the 3 eV this started at: on the affected subsets forces improve, e.g.
+# so3lr-tauri-l on geom_orca6 RMSE 4.55 -> 2.98 kcal/mol/A, and 48/63 model x
+# subset entries improve while 4 are negligibly worse. 23 of 26 pairs are also
+# protected. C-H is the price: 4.4-4.6 eV would protect it too while keeping
+# every rmin below its real contact, but was never evaluated.
+#
+# THREE PAIRS sit outside rmin's reach at this setting: P-P (onset 1.30 A),
+# P-S (1.26 A) and C-H (0.680, against a closest real contact of 0.691). Those
+# onsets were measured on BARE DIMERS, which are themselves deeply out of
+# distribution -- the model never saw two isolated P atoms -- so they overstate
+# the risk. Re-measured with the atoms carrying their normal valence
+# (PH3...PH3, PH3...H2S, and one C-H bond of CH4 compressed), only one of the
+# three is a real problem:
+#
+#   C-H  clean in CH4. Compressing one bonded C-H gives a monotone wall on all
+#        four checkpoints (legacy so3lr and the three -2606 models); the
+#        divergence survives in the bare C-H radical dimer on so3lr-tauri-l.
+#        Non-bonded C...H clashes (docking poses, overlapping solvent) were not
+#        scanned, and there the floor now clamps inside the measured band.
+#   P-P  fixed. Clean in PH3...PH3 on all four; the bare dimer on so3lr-tauri-l
+#        keeps bounded oscillations of a few tens of eV.
+#   P-S  NOT fixed, and worse than the dimer suggested. In PH3...H2S the energy
+#        dives to -1.8 keV on so3lr-tauri-m and -42 keV on so3lr-tauri-l around
+#        0.9-1.2 A, with forces reaching 4e5 eV/A -- i.e. inside a realistic
+#        geometry, only ~0.3 A below the 1.534 A closest P-S contact in the
+#        labelled data.
+#        A global energy cannot reach it: rmin is 1.07 A at 5 eV and 1.17 A at
+#        1 eV, and reaching the 1.26 A onset would take ~0.13 eV. It needs a
+#        per-pair override or a stronger P repulsion. Until then, treat P/S
+#        systems near contact as unguarded.
+#
+# WIDTH is still 0.05 because that is what the 73-set evaluation above was run
+# with. It buys ZERO protection -- that is set by rmin alone -- and adds
+# intrusion through the handover shoulder: at 0.05 it reaches the closest real
+# B-H, C-H, F-H, N-H and O-H contacts, moving them by under 0.005 A but scaling
+# the radial derivative there by 0.65-0.95. A narrower width intrudes less but
+# bends more sharply (curvature ~1/width), so 0.02 is a trade-off to evaluate,
+# not a free improvement.
 #
 # Deliberately NOT covered: below ~1.3 A the S-S curve has a shallow spurious
-# minimum behind a ~2 eV barrier on legacy so3lr and so3lr-tauri-s. It is bounded and
-# finite, and at 1.31 A the S-S repulsion is 0.007 eV, so flooring there would
+# minimum behind a ~2 eV barrier on legacy so3lr and so3lr-tauri-s. It is bounded
+# and finite, and at 1.31 A the S-S repulsion is 0.007 eV, so flooring there would
 # mean overriding the model where its own repulsion is negligible -- exactly the
 # interpolating regime this constant exists to protect. Reported, not patched.
+#
+# Scope: the floor runs in every model built on GeometryEmbedSparse -- legacy
+# so3lr (whose repulsion is ZBL, not the NLH table used here) and training and
+# fine-tuning forward passes included -- while the calibration above is for the
+# three -2606 checkpoints only (not -2602). Editing either constant here changes
+# all of them. Overriding them at runtime does not: nlh_reference_distance binds
+# the energy as its default at import, and so3lr.flash copies the width.
 
 _NLH_REFERENCE_DISTANCE = {}
 
@@ -115,6 +171,31 @@ def floor_descriptor_distance(d_ij, atomic_numbers, idx_i, idx_j):
     return jnp.where(d_ij >= d_off, d_ij, d_off - PAIR_FLOOR_WIDTH * jnp.tanh(u))
 
 
+def pair_displacements(inputs: Dict):
+    """(r_ij, r_ij_lr): R_j - R_i for the short-range pairs (idx_i, idx_j) and the long-range ones
+    (idx_i_lr, idx_j_lr; None without them), each plus its periodic image's offset when the
+    inputs carry a cell (long-range: and cell_offset_lr). In the positions' dtype."""
+    positions, cell, batch_segments = inputs['positions'], inputs.get('cell'), inputs.get('batch_segments')
+
+    def displacements(idx_i, idx_j, cell, cell_offsets):
+        r_ij = positions[idx_j] - positions[idx_i]  # (num_pairs, 3)
+        if cell is None:
+            return r_ij
+        return add_cell_offsets_sparse(r_ij=r_ij, cell=cell, cell_offsets=cell_offsets,
+                                       batch_segments=batch_segments, idx_i=idx_i)
+
+    r_ij = displacements(inputs['idx_i'], inputs['idx_j'], cell, inputs.get('cell_offset'))
+    idx_i_lr, idx_j_lr, cell_offsets_lr = inputs.get('idx_i_lr'), inputs.get('idx_j_lr'), inputs.get('cell_offset_lr')
+    if idx_i_lr is None or len(idx_i_lr) == 0:
+        return r_ij, None
+    assert idx_j_lr is not None and len(idx_j_lr) > 0
+    cell_lr = cell if cell_offsets_lr is not None else None  # without offsets: the plain differences
+    if cell_lr is not None:
+        logging.warning(
+            'The use of long range indices with PBCs has not been tested thoroughly yet, so use with care!')
+    return r_ij, displacements(idx_i_lr, idx_j_lr, cell_lr, cell_offsets_lr)
+
+
 class GeometryEmbedSparse(BaseSubModule):
     prop_keys: Dict
     degrees: Sequence[int]
@@ -152,63 +233,12 @@ class GeometryEmbedSparse(BaseSubModule):
         """
         idx_i = inputs['idx_i']  # shape: (num_pairs)
         idx_j = inputs['idx_j']  # shape: (num_pairs)
-        idx_i_lr = inputs.get('idx_i_lr')  # shape: (num_pairs_lr)
-        idx_j_lr = inputs.get('idx_j_lr')  # shape: (num_pairs_lr)
-        cell = inputs.get('cell')  # shape: (n_graphs, 3, 3) or (3, 3)
-        cell_offsets = inputs.get('cell_offset')  # shape: (num_pairs, 3)
-        cell_offsets_lr = inputs.get('cell_offset_lr')  # shape: (num_pairs_lr, 3)
-        batch_segments = inputs.get('batch_segments')  # shape: (N,)
+        positions = inputs['positions']  # (N, 3)
         if self.input_convention == 'positions':
-            positions = inputs['positions']  # (N, 3)
-
-            # Calculate pairwise distance vectors.
-            r_ij = jax.vmap(
-                lambda i, j: positions[j] - positions[i]
-            )(idx_i, idx_j)  # (num_pairs, 3)
-
-            # Apply minimal image convention if needed.
-            if cell is not None:
-                r_ij = add_cell_offsets_sparse(
-                    r_ij=r_ij,
-                    cell=cell,
-                    cell_offsets=cell_offsets,
-                    batch_segments=batch_segments,
-                    idx_i=idx_i,
-                )  # shape: (num_pairs,3)
-
-            r_ij_lr = None
-            long_range_indices_present = False
-
-            # If indices for long range corrections are present they are used.
-            if idx_i_lr is not None:
-                assert idx_j_lr is not None
-                if len(idx_i_lr) > 0:
-                    assert len(idx_j_lr) > 0
-                    long_range_indices_present = True
-
-            # Calculate pairwise distance vectors on long range indices.
-            if long_range_indices_present is True:
-                # Calculate raw distance vectors.
-                r_ij_lr = jax.vmap(
-                    lambda i, j: positions[j] - positions[i]
-                )(idx_i_lr, idx_j_lr)  # (num_pairs_lr, 3)
-
-                # Apply cell offsets for periodic boundary conditions if needed.
-                if cell is not None and cell_offsets_lr is not None:
-                    logging.warning(
-                        'The use of long range indices with PBCs has not been tested thoroughly yet, so use with care!'
-                    )
-                    r_ij_lr = add_cell_offsets_sparse(
-                        r_ij=r_ij_lr,
-                        cell=cell,
-                        cell_offsets=cell_offsets_lr,
-                        batch_segments=batch_segments,
-                        idx_i=idx_i_lr,
-                    )  # shape: (num_pairs_lr, 3)
+            r_ij, r_ij_lr = pair_displacements(inputs)
 
         # Here it is assumed that PBC (if present) have already been respected in displacement calculation.
         elif self.input_convention == 'displacements':
-            positions = inputs['positions']
             r_ij = inputs['displacements']  # shape : (num_pairs, 3)
             r_ij_lr = inputs.get('displacements_lr')  # shape : (num_pairs_lr, 3)
         else:

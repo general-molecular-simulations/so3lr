@@ -33,7 +33,7 @@ from ase.units import Bohr
 
 from so3lr.pbc import lattice_rows, minimum_image_problem
 from so3lr.cli.so3lr_md import load_model, atoms_to_jnp, process_model, dispersion_ratios
-from .so3lr_md import setup_logger
+from .so3lr_md import run_dtypes, setup_logger, setup_run
 
 # Setup logging
 logger = logging.getLogger("SO3LR")
@@ -520,23 +520,15 @@ def tune(
         settings (dict): Dictionary containing the settings for the tuning process.
     """
 
-    # Configure JAX process-globals (x64 + matmul precision). Centralised in
-    # setup_jax_globals so that every entry point sets the same things up
-    # consistently. Previously this only toggled x64 and never set the matmul
-    # precision, so tune-ewald drifted from the MD path on the same hardware.
-    from .so3lr_md import setup_jax_globals
-    setup_jax_globals(
-        precision=settings.get('precision', 'float32'),
-        matmul_precision=settings.get('matmul_precision', 'highest'),
-    )
-
-    # Setup logger
+    # Setup logger (first: setup_run may warn of a deprecated setting)
     log_file = settings.get('log_file')
     setup_logger(log_file)
+    # the run's precision and JAX's globals (x64, matmul precision), as on every entry point
+    settings = setup_run(dict(settings))
 
     # Model parameters
     model_path = settings.get('model_path')
-    precision = settings.get('precision')
+    model_dtype, state_dtype = run_dtypes(settings)
     lr_cutoff = settings.get('lr_cutoff')
     total_charge = settings.get('total_charge')
     dispersion_damping = settings.get('dispersion_damping')
@@ -596,11 +588,11 @@ def tune(
     if problem:
         raise ValueError(f'tune-ewald: {problem}.')
 
-    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
+    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=state_dtype)
 
     # We don't want fractional coordinates here
 
-    box = jnp.array(cell)
+    box = jnp.array(cell, dtype=state_dtype)
     if box.shape == (3, 3) and np.all(box[~np.eye(box.shape[0], dtype=bool)] == 0):
         # orthorhombic boxes are reduced to 3 entries
         box = jnp.diag(box)
@@ -617,7 +609,7 @@ def tune(
     # the solver for the method being timed.
     potential = load_model(
         model_path,
-        precision=jnp.float64 if precision == 'float64' else jnp.float32,
+        precision=model_dtype,
         lr_cutoff=lr_cutoff,
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics if kspace_electrostatics != 'cutoff' else None,
@@ -642,7 +634,7 @@ def tune(
         displacement=displacement,
         box=box,
         total_charge=total_charge,
-        precision=precision,
+        precision=model_dtype,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,

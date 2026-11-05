@@ -4,13 +4,16 @@ __version__ = "0.2.0"
 # must stay cheap and NOT pull in jax/flax/jax-md/glp — otherwise `so3lr --help`
 # pays full JAX initialization. The heavy submodules are imported only when one
 # of these names is actually accessed.
-__all__ = ["So3lrCalculator", "Graph", "to_jax_md", "So3lrPotential", "So3lr"]
+__all__ = ["So3lrCalculator", "FlashCalculator", "Graph", "to_jax_md", "So3lrPotential", "So3lr"]
 
 
 def __getattr__(name):
     if name == "So3lrCalculator":
         from .ase_utils import make_ase_calculator
         return make_ase_calculator
+    if name == "FlashCalculator":
+        from .flash.calculator import FlashCalculator
+        return FlashCalculator
     if name == "Graph":
         from .graph import Graph
         return Graph

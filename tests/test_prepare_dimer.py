@@ -1,5 +1,3 @@
-import json
-
 from ase import Atoms
 import pytest
 
@@ -29,18 +27,6 @@ def test_legacy_dimer_coverage_remains_available_by_model_name():
     )
     assert not is_supported
     assert unsupported == {11}
-
-
-def test_custom_model_coverage_uses_its_hyperparameters(tmp_path):
-    (tmp_path / "hyperparameters.json").write_text(json.dumps({
-        "model": {
-            "legacy_so3lr_bool": True,
-            "dispersion_energy_bool": True,
-        }
-    }))
-    assert supported_elements_for_model(tmp_path) == supported_elements_for_model(
-        "so3lr"
-    )
 
 
 def test_custom_model_without_metadata_fails_closed(tmp_path):

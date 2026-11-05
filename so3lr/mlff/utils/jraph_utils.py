@@ -62,7 +62,7 @@ def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict, kspace_constants
         theory_level=graph.globals.get('theory_level'),
         theory_mask=graph.globals.get('theory_mask'),
         residue_charge=graph.globals.get('residue_charge'),
-        residue_segments=graph.globals.get('residue_segments'),
+        residue_segments=graph.nodes.get('residue_segments'),
     )
     if kspace_constants is not None:
         batch['k_grid'] = kspace_constants['k_grid']

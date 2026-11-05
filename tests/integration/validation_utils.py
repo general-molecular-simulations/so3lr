@@ -4,6 +4,7 @@ import pathlib
 from typing import Dict, List, Optional, Union
 
 import h5py
+import numpy as np
 import yaml
 from ase.io import read
 
@@ -75,6 +76,24 @@ class Validator:
 
     def count_atoms(self, input_file: str) -> int:
         return len(read(self.workdir / input_file))
+
+    def check_box_changed(self, trajectory: str = 'trajectory.hdf5',
+                          tolerance: float = 1e-9) -> bool:
+        """The barostat must actually move the cell between the first and last saved
+        frames. Both are stored at the run's precision, so the comparison does
+        not depend on it (unlike comparing with the input file's cell)."""
+        path = self.workdir / trajectory
+        if not path.exists():
+            return False  # check_file_exists already reported it
+        with h5py.File(path, 'r') as f:
+            if 'box' not in f or len(f['box']) < 2:
+                self.errors.append(f"Need a 'box' dataset with at least 2 frames in {trajectory}")
+                return False
+            first, last = np.asarray(f['box'][0]), np.asarray(f['box'][-1])
+        if np.max(np.abs(last - first)) <= tolerance:
+            self.errors.append(f"Box did not change: first frame {first}, last frame {last}")
+            return False
+        return True
 
     def check_settings_in_logs(self, settings: dict) -> bool:
         """

@@ -4,7 +4,6 @@ import jax.numpy as jnp
 import logging
 import numpy as np
 import pathlib
-import json
 
 from flax import struct
 from typing import Any, Callable, Type, Dict, Sequence, Optional
@@ -21,12 +20,24 @@ from ..config import from_config
 from orbax import checkpoint
 
 
+def cast_float_params(params, dtype):
+    """params with every floating-point array in dtype. A run computes in its own precision
+    only so: what is made of parameters alone (the charge and spin embedding's softplus(q.k),
+    the legacy so3lr's ZBL coefficients) stays in the checkpoint's float32 otherwise."""
+    return jax.tree_util.tree_map(
+        lambda v: jnp.asarray(v, dtype) if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating) else v, params)
+
+
+def require_x64(dtype):
+    """Raise for float64 without x64, which JAX truncates to float32 with a warning only."""
+    if dtype is not None and np.dtype(dtype) == np.float64 and not jax.config.jax_enable_x64:
+        raise ValueError("float64 needs jax.config.update('jax_enable_x64', True) first")
+
+
 def load_hyperparameters(workdir: str):
-    """Load hyperparameters from workdir."""
-    with open(pathlib.Path(workdir) / "hyperparameters.json", "r") as fp:
-        cfg = json.load(fp)
-    cfg = config_dict.ConfigDict(cfg)
-    return cfg
+    """Load hyperparameters from workdir (see ``so3lr.model_config``)."""
+    from ...model_config import load_model_config
+    return config_dict.ConfigDict(load_model_config(workdir))
 
 
 def build_long_range_kwargs(
@@ -201,7 +212,8 @@ class PotentialSparse:
             from_file: Whether to load from pickle file
             add_shift: Whether to add energy shift
             long_range_kwargs: Dictionary with keyword arguments for the long-range modules
-            dtype: Data type for computation
+            dtype: the model's dtype; the graph is cast to it (its edges formed before, in
+                the positions' dtype, as jaxmd_utils.neighbor_list_featurizer does)
             model: Model type ('so3krates')
             output_intermediate_quantities: Optional sequence of intermediate quantities to output
             charge_embed_total_charge: Override the total charge seen by the charge
@@ -213,6 +225,7 @@ class PotentialSparse:
         Returns:
             PotentialSparse instance
         """
+        require_x64(dtype)
 
         if add_shift is True and (dtype == np.float32 or dtype == jnp.float32):
             logging.warning(
@@ -233,6 +246,7 @@ class PotentialSparse:
             charge_embed_total_charge=charge_embed_total_charge,
             charge_equilibration_total_charge=charge_equilibration_total_charge
         )
+        params = cast_float_params(params, dtype)
 
         cfg = load_hyperparameters(workdir=workdir)
 
@@ -290,7 +304,7 @@ class PotentialSparse:
             return x
 
         def potential_fn(graph: Graph, has_aux: bool = False):
-            x = graph_to_mlff_input(graph)
+            x = graph_to_mlff_input(cast_float_params(graph, dtype))
             y = obs_fn(params, **x)
 
             shifted_energy = shift(y['energy'], x['atomic_numbers']).reshape(-1).astype(dtype)
