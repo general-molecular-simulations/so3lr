@@ -159,7 +159,12 @@ def settings_problem(settings, task="md"):
         return "it needs a long-range cutoff"
     kspace = s.get("kspace_electrostatics") or s.get("kspace_dispersion")
     for key, value in s.items():
-        if key in UNSUPPORTED:
+        if key == "do_enhanced_sampling" and task != "md":
+            # enhanced sampling is an MD setting (below): opt, eval and ase decline it as they
+            # did before flash ran PySAGES, so their engine choice does not change
+            if not _off(value):
+                return "it has no enhanced sampling"
+        elif key in UNSUPPORTED:
             # the tail correction and the mesh re-tuning act only in NPT (the re-tuning
             # only with k-space); perform_md re-tunes every 100 cycles when the key is
             # absent, flash whenever the box leaves its margin
@@ -169,9 +174,10 @@ def settings_problem(settings, task="md"):
                 return f"it has no {UNSUPPORTED[key]}"
         elif key not in HANDLED and key not in IRRELEVANT and not _off(value):
             return f"it does not know the setting {key!r}"
-    if not _off(s.get("do_enhanced_sampling")):
+    if task == "md" and not _off(s.get("do_enhanced_sampling")):
         # PySAGES runs the MD step inside its own jitted loop: the jitted fast mode on one
-        # GPU, in nvt or nve (flash's NPT runs each step from Python)
+        # GPU, in nvt or nve (flash's NPT runs each step from Python); and in a periodic box
+        # (vacuum_problem)
         if ens not in ("nvt", "nve"):
             return f"its enhanced sampling runs nvt and nve, not {ens}"
         if (s.get("flash_mode") or "auto") not in ("auto", "fast"):
@@ -294,6 +300,12 @@ def vacuum_fits(size, L, rc, rc_lr, reach):
 
 def vacuum_problem(settings):
     """Why flash cannot run these settings in free space (None if it can)."""
+    if not _off(settings.get("do_enhanced_sampling")):
+        # PySAGES runs a whole cycle inside its own loop, where perform_md_flash widens the
+        # engine's tables but cannot lay out free space's box again when the atoms outgrow
+        # it, and the coordinationnumber CV's neighbour list needs a periodic box: the
+        # neighbour-list engine runs these, as it did before flash took free space
+        return "its enhanced sampling needs a box"
     if settings.get("ensemble") == "npt":
         return "its NPT needs a box"
     for key in ("kspace_electrostatics", "kspace_dispersion"):
