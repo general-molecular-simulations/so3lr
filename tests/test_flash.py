@@ -268,10 +268,15 @@ def test_engine_choice_small_box(monkeypatch):
     ("eval", dict(targets="energy", kspace_electrostatics="ewald"), "PME but not ewald"),
     ("opt", dict(lr_cutoff=None), "long-range cutoff"),
     ("opt", dict(model_path="so3lr"), None),
+    # enhanced sampling is an MD setting: the other tasks decline it whatever the MD rules
+    ("opt", dict(do_enhanced_sampling=True, ensemble="nvt"), "it has no enhanced sampling"),
+    ("opt", dict(do_enhanced_sampling=True, ensemble="npt"), "it has no enhanced sampling"),
+    ("eval", dict(targets="energy", do_enhanced_sampling=True), "it has no enhanced sampling"),
+    ("opt", dict(do_enhanced_sampling=False, pysages_input="p.yaml"), None),
 ])
 def test_engine_choice_other_tasks(monkeypatch, task, change, reason):
     """so3lr opt, so3lr eval and the ASE calculator take what MD takes, with no ensemble;
-    eval only for energies and forces."""
+    eval only for energies and forces; none of them enhanced sampling."""
     monkeypatch.setattr(check, "device_problem", lambda: None)
     problem = check.flash_problem(dict(dict(model_path=None, lr_cutoff=12.0), **change), _water((3, 3, 3)), task=task)
     assert (problem is None) if reason is None else (reason in problem), problem
@@ -387,13 +392,14 @@ def _acetone():
     ("md", dict(ensemble="npt"), "NPT needs a box"),
     ("md", dict(kspace_electrostatics="pme"), "k-space (kspace_electrostatics) needs a box"),
     ("md", dict(kspace_dispersion="pme"), "k-space (kspace_dispersion) needs a box"),
+    ("md", dict(do_enhanced_sampling=True), "its enhanced sampling needs a box"),
     ("opt", dict(lr_cutoff=1000.0), None),
     ("eval", dict(targets="energy,forces", lr_cutoff=1000.0), None),
     ("ase", dict(model_path="so3lr"), None),
 ])
 def test_engine_choice_in_free_space(monkeypatch, task, change, reason):
     """A structure with no box (acetone) runs on flash at any long-range cutoff, but not in
-    NPT or with k-space."""
+    NPT, with k-space or with enhanced sampling."""
     monkeypatch.setattr(check, "device_problem", lambda: None)
     settings = {"model_path": None, "lr_cutoff": 12.0, **({"ensemble": "nvt"} if task == "md" else {}), **change}
     problem = check.flash_problem(settings, _acetone(), task=task)
@@ -539,49 +545,55 @@ def test_flash_refuses_untrained_elements(monkeypatch):
 
 class _StandInEngine:
     """FlashSO3LR as perform_md_flash uses it, around the neighbour-list potential set up as
-    perform_md sets it up for PySAGES (Cartesian positions, dense lists), so the flash MD
-    driver runs without a GPU. The jitted force reports a table overflow (NaN forces) until
-    the engine has been widened ``overflows`` times."""
-    P, device_mesh, K, maxh = 1, None, 0, 0
+    perform_md sets it up for PySAGES (Cartesian positions, dense lists; positions and pair
+    vectors in the MD state's precision, the model in the model's: run_dtypes), so the flash
+    MD driver runs without a GPU. A table overflow, until the engine has been widened
+    ``overflows`` times: the force traced into a jitted loop is NaN, and once a loop has
+    overflowed, the engine's own call (energy_forces, the step-at-a-time path) widens the
+    tables first, as FlashSO3LR rebuilds them after an overflow."""
+    P, device_mesh, K, maxh, vacuum = 1, None, 0, 0, False
 
     def __init__(self, atoms, settings, overflows=0):
         from functools import partial
         from so3lr.cli import so3lr_md as M
-        precision = settings["precision"]
-        dtype = jnp.float64 if precision == "float64" else jnp.float32
-        geo = M.atoms_to_jnp(atoms, precision=precision)
+        model_dtype, dtype = M.run_dtypes(settings)
+        geo = M.atoms_to_jnp(atoms, precision=dtype)
         R, box, disp, _, _ = M.handle_box("periodic_cart", geo["positions"], np.asarray(atoms.cell[:]),
                                           precision=dtype)
-        pot = M.load_model(settings["model_path"], precision=dtype, lr_cutoff=settings["lr_cutoff"])
-        nfn, nfn_lr, efn = M.process_model(pot, geo["species"], disp, box, precision=precision,
+        pot = M.load_model(settings["model_path"], precision=model_dtype, lr_cutoff=settings["lr_cutoff"])
+        nfn, nfn_lr, efn = M.process_model(pot, geo["species"], disp, box, precision=model_dtype,
                                            buffer_size_multiplier_sr=settings["buffer_size_multiplier_sr"],
                                            buffer_size_multiplier_lr=settings["buffer_size_multiplier_lr"])
         nb, nb_lr = nfn.allocate(R, box=box), nfn_lr.allocate(R, box=box)
         energy = partial(efn, k_smearing=None, k_smearing_disp=None, has_aux=False)
 
         def ef(R):
-            R = R.astype(dtype)                 # a float64 state (flash_mixed) around a float32 model
             n = nb.update(R, neighbor=nb.idx, box=box)
             n_lr = nb_lr.update(R, neighbor=nb_lr.idx, box=box)
             e, g = jax.value_and_grad(energy)(R, neighbor=n.idx, neighbor_lr=n_lr.idx, box=box,
                                               k_grid=None, k_grid_disp=None)
             return e, -g
         self._ef, self._jit = ef, jax.jit(ef)
-        self.rc, self.loops, self.overflows = float(pot.cutoff), {}, overflows
+        self.rc, self.loops, self.overflows, self._overflowed = float(pot.cutoff), {}, overflows, False
 
     def _energy_forces(self, R):
         e, f = self._ef(R)
+        # traced when a jitted loop compiles: that loop overflows
+        self._overflowed |= self.overflows > 0
         return e, f, jnp.asarray(self.overflows > 0), jnp.zeros((), R.dtype)
 
     def widen(self):
         self.overflows -= 1
+        self._overflowed = False
         self.loops = {}
 
     def energy_forces_strain(self, R):
+        if self._overflowed and self.overflows > 0:
+            self.widen()
         return (*self._jit(R), jnp.zeros((), R.dtype))
 
     def energy_forces(self, R):
-        return self._jit(R)
+        return self.energy_forces_strain(R)[:2]
 
 
 PYSAGES_ABF = {"method": "abf", "cv": [
@@ -609,7 +621,7 @@ def _pysages_run(tmp_path, name, engine, monkeypatch, overflows=0, pysages=PYSAG
     (d / "pysages.yaml").write_text(yaml.safe_dump(pysages))
     s = dict(YAML_DEFAULTS, input_file=str(input_file), output_file=str(d / "out.hdf5"),
              output_format="hdf5", log_file=str(d / "out.log"), ensemble="nvt", precision="float64",
-             flash_mixed=False, model_path="so3lr-tauri-m-2606", lr_cutoff=12.0, relax_before_run=False,
+             model_path="so3lr-tauri-m-2606", lr_cutoff=12.0, relax_before_run=False,
              md_cycles=2, md_steps=5, save_buffer=1, do_enhanced_sampling=True,
              pysages_input=str(d / "pysages.yaml"), restart_save_path=str(d / "r.npz"),
              restart_pysages_save_path=str(d / "r.pkl"))
@@ -618,11 +630,11 @@ def _pysages_run(tmp_path, name, engine, monkeypatch, overflows=0, pysages=PYSAG
     if engine == "standard":
         so3lr_md.perform_md(s, restart=s.get("restart_load_path") is not None)
         return d
-    monkeypatch.setattr(flash_md, "flash_problem", lambda settings, atoms: None)
+    monkeypatch.setattr(flash_md, "flash_problem", lambda settings, atoms, task="md": None)
     monkeypatch.setattr(flash_md, "build_engine",
-                        lambda atoms, settings, dtype: (_StandInEngine(atoms, settings, overflows), staged))
+                        lambda atoms, settings, dtype, **kw: (_StandInEngine(atoms, settings, overflows), staged))
     if engine == "run":
-        monkeypatch.setattr(check, "flash_problem", lambda settings, atoms: None)
+        monkeypatch.setattr(check, "flash_problem", lambda settings, atoms, task="md": None)
         so3lr_md.run(s)
     else:
         flash_md.perform_md_flash(s, restart=s.get("restart_load_path") is not None)
@@ -705,24 +717,29 @@ def test_flash_runs_pysages_in_nve(tmp_path, monkeypatch):
     _same_run(out, ref, 1e-9)
 
 
-def test_flash_runs_pysages_in_float32(tmp_path, monkeypatch):
-    """float32: flash with a float32 MD state gives perform_md's run; flash's default float64
-    state (flash_mixed) continues a float32 PySAGES restart of perform_md as perform_md does,
-    to float32 accuracy; perform_md continues flash's float64 PySAGES restart."""
+def test_flash_runs_pysages_in_float32_and_mixed(tmp_path, monkeypatch):
+    """float32: flash gives perform_md's run. mixed (a float64 MD state around a float32 model,
+    the default precision): both engines continue a float32 PySAGES restart of perform_md
+    the same way, the restart carried into the float64 state; perform_md continues flash's
+    mixed PySAGES restart in float32."""
     pytest.importorskip("pysages")
     f32 = dict(precision="float32")
     ref = _pysages_outputs(_pysages_run(tmp_path, "standard", "standard", monkeypatch, **f32))
-    out = _pysages_outputs(_pysages_run(tmp_path, "flash", "flash", monkeypatch, flash_mixed=False, **f32))
+    out = _pysages_outputs(_pysages_run(tmp_path, "flash", "flash", monkeypatch, **f32))
+    assert out[1]["momentum"].dtype == ref[1]["momentum"].dtype == np.float32
     _same_run(out, ref, 1e-4)
     first = _pysages_run(tmp_path, "first", "standard", monkeypatch, md_cycles=1, **f32)
-    restart = dict(restart_load_path=str(first / "r.npz"), restart_pysages_load_path=str(first / "r.pkl"), **f32)
-    ref = _pysages_outputs(_pysages_run(tmp_path, "standard2", "standard", monkeypatch, **restart))
-    mixed = _pysages_run(tmp_path, "mixed", "flash", monkeypatch, flash_mixed=True, **restart)
+    restart = dict(restart_load_path=str(first / "r.npz"), restart_pysages_load_path=str(first / "r.pkl"),
+                   precision="mixed")
+    ref = _pysages_outputs(_pysages_run(tmp_path, "standard_mixed", "standard", monkeypatch, **restart))
+    mixed = _pysages_run(tmp_path, "flash_mixed", "flash", monkeypatch, **restart)
     out = _pysages_outputs(mixed)
-    assert out[1]["momentum"].dtype == np.float64 and ref[1]["momentum"].dtype == np.float32
-    _same_run(out, ref, 1e-4)
+    assert out[1]["momentum"].dtype == ref[1]["momentum"].dtype == np.float64
+    assert int(np.asarray(out[2].hist).sum()) == int(np.asarray(ref[2].hist).sum()) == 15
+    _same_run(out, ref, 1e-6)
     back = dict(restart_load_path=str(mixed / "r.npz"), restart_pysages_load_path=str(mixed / "r.pkl"), **f32)
-    _, _, method_state, cv = _pysages_outputs(_pysages_run(tmp_path, "back", "standard", monkeypatch, **back))
+    _, state, method_state, cv = _pysages_outputs(_pysages_run(tmp_path, "back", "standard", monkeypatch, **back))
+    assert state["momentum"].dtype == np.float32
     assert len(cv) == 10 and int(np.asarray(method_state.hist).sum()) == 25
 
 
@@ -791,20 +808,41 @@ def test_flash_saves_pysages_state_without_an_md_checkpoint(tmp_path, monkeypatc
     _same_run(out, ref, 1e-9)
 
 
-def test_flash_widens_and_repeats_a_jitted_cycle(tmp_path, monkeypatch):
-    """A table overflow in the jitted mode, without PySAGES: the cycle is repeated with the
-    widened tables traced again (jax-md's step is jitted, and jit keeps the trace of the
-    old ones) and gives the run without an overflow."""
+def test_flash_repeats_an_overflowed_jitted_cycle_a_step_at_a_time(tmp_path, monkeypatch):
+    """A table overflow in the jitted mode, without PySAGES (on a CPU, around the stand-in;
+    test_md_loop_widens_its_tables does it on a GPU): the first cycle is repeated a step at a
+    time, where the engine widens its tables, the next cycle runs in a jitted loop made
+    again on the wider tables (jax-md's step is jitted, and jit keeps the trace of the old
+    ones), and the run is the run without an overflow."""
     import h5py
     out = []
     for overflows in (0, 1):
-        d = _pysages_run(tmp_path, f"plain{overflows}", "flash", monkeypatch, overflows,
+        d = _pysages_run(tmp_path, f"plain{overflows}", "flash", monkeypatch, overflows, md_cycles=3,
                          do_enhanced_sampling=False, restart_pysages_save_path=None)
-        assert ("cycle repeated" in (d / "out.log").read_text()) == bool(overflows)
+        # once: the loop made after the widening does not overflow again
+        assert (d / "out.log").read_text().count("cycle repeated a step at a time") == overflows
         with h5py.File(d / "out.hdf5") as f:
             out.append({k: f[k][:] for k in ("positions", "momenta")})
     for k in ("positions", "momenta"):
         _check(k, out[1][k], out[0][k], 1e-12)
+
+
+def test_flash_declines_pysages_with_no_box(monkeypatch):
+    """Free space: flash runs MD with no box, but not PySAGES (a cycle runs inside PySAGES'
+    loop, where the box laid out for the atoms cannot be laid out again, and the
+    coordinationnumber CV's list needs a periodic box): auto runs the neighbour-list engine,
+    as before flash took free space."""
+    from so3lr.cli import so3lr_md
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    atoms = _water((1, 1, 1))
+    atoms.pbc = False                                # no box, as _cluster
+    assert check.flash_problem(dict(SETTINGS), atoms) is None
+    s = dict(SETTINGS, do_enhanced_sampling=True)
+    assert check.flash_problem(s, atoms) == "its enhanced sampling needs a box"
+    ran, _ = so3lr_md.run_on_flash(s, atoms, "md", lambda flash_md: pytest.fail("flash ran"))
+    assert not ran
+    with pytest.raises(ValueError, match="--engine flash: its enhanced sampling needs a box"):
+        so3lr_md.run_on_flash(dict(s, engine="flash"), atoms, "md", lambda flash_md: pytest.fail("flash ran"))
 
 
 GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA or AMD Instinct GPU")
@@ -1059,9 +1097,10 @@ def test_auto_falls_back_when_flash_fails_to_start(tmp_path, monkeypatch):
 
 @GPU
 def test_flash_runs_pysages(tmp_path):
-    """ABF (a coordination number and a distance) on 5,184 waters, continued from one float32
-    checkpoint: auto picks flash, which follows --engine standard to float32 accuracy (flash
-    keeps the MD state in float64) in the per-step CVs, the trajectory and the samples."""
+    """ABF (a coordination number and a distance) on 5,184 waters, continued from one
+    checkpoint, both engines in the default precision (mixed: a float64 MD state around a
+    float32 model): auto picks flash, which follows --engine standard to float32 accuracy in
+    the per-step CVs, the trajectory and the samples."""
     import h5py
     import pickle
     import yaml
