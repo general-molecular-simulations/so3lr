@@ -407,6 +407,59 @@ def test_free_space_structures(tmp_path, monkeypatch):
     assert check.flash_problem(dict(SETTINGS, restart_load_path=str(tmp_path / "none.npz")), _acetone()) is None
 
 
+def _dimer(dx=0.0):
+    """Two acetones 7 A apart, the second moved dx A further out (as binding benchmarks move
+    a monomer away for the interaction energy)."""
+    a, b = _acetone(), _acetone()
+    b.translate([7.0 + dx, 0.0, 0.0])
+    return a + b
+
+
+def test_free_space_too_spread_out(monkeypatch):
+    """A monomer moved 1 um away: the box free space lays out around the dimer is too large
+    for the cell grid (MAX_CELLS), so auto runs the neighbour-list potential and names the
+    structure (rather than the engine raising), and engine flash raises."""
+    from so3lr.cli import so3lr_md
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    lines = []
+    monkeypatch.setattr(so3lr_md.logger, "info", lines.append)
+    settings = dict(model_path=None, lr_cutoff=1000.0, targets="energy")
+    near, far = _dimer(), _dimer(1e4)
+    assert check.flash_problem(settings, [near, near.copy()], task="eval") is None
+    problem = check.flash_problem(settings, [near, far, near.copy()], task="eval")
+    assert problem.startswith("structure 1: its atoms span") and "too large for the cell grid" in problem, problem
+
+    def start(flash_md):
+        raise AssertionError("flash started")
+    assert so3lr_md.run_on_flash(dict(settings, engine="auto"), [near, far], "eval", start) == (False, None)
+    assert lines[-1] == f"Engine: neighbour-list potential (flash cannot: {problem})", lines
+    with pytest.raises(ValueError, match="--engine flash: structure 1: .* too large for the cell grid"):
+        so3lr_md.run_on_flash(dict(settings, engine="flash"), [near, far], "eval", start)
+    # a dimer spanning 1501 A still fits (free space's box: 2876 A, 639^3 cells)
+    assert check.flash_problem(settings, _dimer(1490.0), task="eval") is None
+
+
+def test_free_space_not_finite_or_empty(monkeypatch):
+    """A free-space structure with a position not finite, or with no atoms: flash declines it,
+    rather than the check raising when it measures the atoms."""
+    from ase import Atoms
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    bad = _acetone()
+    bad.positions[0, 0] = np.nan
+    assert check.flash_problem(SETTINGS, [_acetone(), bad]) == "structure 1: its positions are not all finite"
+    assert check.flash_problem(SETTINGS, Atoms()) == "it has no atoms"
+
+
+def test_engine_choice_large_box(monkeypatch):
+    """A periodic box wider than the cell grid holds (MAX_CELLS cells at 4.5 A each)."""
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    atoms = _acetone()
+    atoms.pbc, atoms.cell = True, [3000.0] * 3
+    assert "too large for the cell grid (666 x 666 x 666 cells" in check.flash_problem(SETTINGS, atoms)
+    atoms.cell = [2900.0] * 3
+    assert check.flash_problem(SETTINGS, atoms) is None
+
+
 @pytest.mark.parametrize("rc_lr", [3.0, 12.0, 100.0, 1000.0])
 def test_free_space_box_has_no_images_within_reach(rc_lr):
     """The box free space runs in (vacuum_box), for atoms as laid out and grown into all of
@@ -1009,6 +1062,26 @@ def test_eval_in_free_space_matches_neighbour_lists(tmp_path):
         ref.calc = So3lrCalculator(model="so3lr-tauri-m-2606", lr_cutoff=1000.0, dtype=np.float64)
         assert abs(a.info["energy_so3lr"] - ref.get_potential_energy()) / len(a) < 1e-9
         assert np.abs(a.arrays["forces_so3lr"] - b.arrays["forces_so3lr"]).max() < 1e-5
+
+
+@GPU
+def test_eval_falls_back_for_a_monomer_moved_away(tmp_path):
+    """so3lr eval (auto, 1000 A) on a dimer and on the dimer with a monomer moved 1 um away, as
+    binding benchmarks lay them out: free space's box around the second is too large for the
+    cell grid, so auto runs the neighbour-list potential and says why (flash raised here)."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from ase.io import read, write
+    from so3lr.cli.so3lr_eval import evaluate_so3lr_on
+    frames = [_dimer(), _dimer(1e4)]
+    for a in frames:
+        a.calc = SinglePointCalculator(a, energy=0.0, forces=np.zeros((len(a), 3)))
+    write(tmp_path / "data.extxyz", frames)
+    evaluate_so3lr_on(str(tmp_path / "data.extxyz"), targets="energy", lr_cutoff=1000.0,
+                      save_to=str(tmp_path / "out.extxyz"), log_file=str(tmp_path / "o.log"))
+    log = (tmp_path / "o.log").read_text()
+    assert "flash cannot: structure 1: its atoms span" in log, log[-2000:]
+    energies = [a.info["energy_so3lr"] for a in read(tmp_path / "out.extxyz", ":")]
+    assert len(energies) == 2 and np.isfinite(energies).all(), energies
 
 
 GPUS = pytest.mark.skipif(check.device_problem() is not None or len(jax.local_devices()) < 2,

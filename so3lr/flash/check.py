@@ -22,6 +22,10 @@ NPT_BOX_MARGIN = 0.03
 # and long-range reach are laid out again; a quarter of the size where that is more
 # (``vacuum_box``), so atoms that keep growing are laid out again a few times only
 VACUUM_PAD = 10.0
+# cells of the engine's grid, at most (its cell_start: 1 GiB): rc-wide cells fill a box up to
+# 645 rc wide (2900 A at 4.5 A), the box free space lays out around atoms that span about
+# 1500 A (1000 A long range) to 2300 A (12 A)
+MAX_CELLS = 1 << 28
 ENGINES = ("auto", "flash", "standard")
 # the AMD GPUs (gfx targets) flash is tested on: the MI355X
 ROCM_TARGETS = ("gfx950",)
@@ -236,6 +240,17 @@ def cell_grid(L, rc, rc_lr):
     return None
 
 
+def grid_problem(L, rc, rc_lr):
+    """Why the engine cannot hold the cell grid (``cell_grid``) of an orthorhombic box of
+    sides L that ``box_problem`` takes (None if it can): fewer than MAX_CELLS cells. The
+    engine raises it when it lays out a box (``_layout``)."""
+    grid = cell_grid(L, rc, rc_lr)
+    if grid is not None and math.prod(grid[0]) >= MAX_CELLS:
+        return (f"box {[round(v) for v in L]} A too large for the cell grid "
+                f"({' x '.join(map(str, grid[0]))} cells, 2^{MAX_CELLS.bit_length() - 1} or more)")
+    return None
+
+
 def box_problem(L, rc, rc_lr):
     """Why the engine cannot take an orthorhombic box of sides L (None if it can): the
     minimum image needs 2 x the cutoffs, and the cell grid (``cell_grid``) must exist."""
@@ -302,12 +317,30 @@ def _restart_box(settings):
     return box if box is not None and np.any(box) else None
 
 
-def structure_problem(settings, atoms, rc):
+def _span(atoms):
+    """The ``vacuum_size`` of atoms, NaN with none (or with a position not finite)."""
+    R = np.asarray(atoms.get_positions(), np.float64)
+    return float(vacuum_size(R)) if len(R) else math.nan
+
+
+def structure_problem(settings, atoms, rc, span=None):
     """Why flash cannot take this structure, or the restart's box (None if it can); rc: the
-    model's cutoff (``model_cutoff``). A structure in free space (``in_vacuum``) takes any
-    size: the engine lays out a box for it."""
+    model's cutoff (``model_cutoff``). A structure in free space (``in_vacuum``) runs in a
+    box the engine lays out around it (``vacuum_box``), whose cell grid one atom far from
+    the rest (a dimer translated apart) makes too large; span: its ``_span``, if known."""
+    rc_lr = float(settings.get("lr_cutoff") or 12.0)
     if in_vacuum(atoms):
-        return vacuum_problem(settings)
+        problem = vacuum_problem(settings)
+        if problem:
+            return problem
+        if not len(atoms):
+            return "it has no atoms"
+        size = _span(atoms) if span is None else span
+        if not math.isfinite(size):
+            return "its positions are not all finite"
+        L, reach = vacuum_box(size, rc, rc_lr)
+        problem = grid_problem([L] * 3, rc, reach)
+        return problem and f"its atoms span {size:.0f} A (one far from the rest?), a free-space {problem}"
     if not atoms.pbc.all() or atoms.cell.rank < 3:
         return "it needs a box periodic in all three directions, or no box"
     cell = np.asarray(atoms.cell[:])
@@ -318,7 +351,8 @@ def structure_problem(settings, atoms, rc):
     if box is not None:                                  # a restart starts in its own box
         sides = np.diag(box) if box.ndim == 2 else np.broadcast_to(box.reshape(-1), (3,))
     shrink = 1.0 - (NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0)
-    return box_problem([float(v) * shrink for v in sides], rc, float(settings.get("lr_cutoff") or 12.0))
+    L = [float(v) * shrink for v in sides]
+    return box_problem(L, rc, rc_lr) or grid_problem(L, rc, rc_lr)
 
 
 @functools.cache
@@ -366,14 +400,22 @@ def model_cutoff(model_path):
 
 def frames_problem(settings, frames):
     """Why flash cannot take one of these structures (None if it can take them all): each
-    distinct box checked once."""
-    rc, seen = model_cutoff(settings.get("model_path")), set()
+    distinct box checked once, and in free space each structure that spans more than those
+    before it (the box laid out around the atoms grows with their span)."""
+    rc, seen, widest = model_cutoff(settings.get("model_path")), set(), -1.0
     for i, atoms in enumerate(frames):
-        key = (tuple(bool(p) for p in atoms.pbc), np.asarray(atoms.cell[:]).tobytes())
-        if key in seen:
-            continue
-        seen.add(key)
-        problem = structure_problem(settings, atoms, rc)
+        span = None
+        if in_vacuum(atoms):
+            span = _span(atoms)
+            if span <= widest:                           # NaN is checked (and declined)
+                continue
+            widest = span
+        else:
+            key = (tuple(bool(p) for p in atoms.pbc), np.asarray(atoms.cell[:]).tobytes())
+            if key in seen:
+                continue
+            seen.add(key)
+        problem = structure_problem(settings, atoms, rc, span)
         if problem:
             return problem if len(frames) == 1 else f"structure {i}: {problem}"
     return None
