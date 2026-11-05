@@ -650,6 +650,8 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     # K-space dispersion
     'kspace_dispersion', 'kspace_dispersion_smearing',
     'kspace_dispersion_spacing', 'kspace_dispersion_interp_nodes',
+    # K-space forces summing to zero (default true; so3lr_md.remove_kspace_net_force)
+    'kspace_remove_net_force',
     # Numerical / safety knobs
     'matmul_precision', 'minimum_cell_size_multiplier',
     'energy_drift_threshold', 'drift_warmup_ps', 'dispersion_tail_correction',

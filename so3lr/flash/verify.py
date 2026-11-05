@@ -34,7 +34,8 @@ def main(argv=None):
     kdi = "pme" if "dispersion" in pme else None
 
     from so3lr.cli.so3lr_md import (atoms_to_jnp, cell_from_atoms_boundary_conditions, handle_box,
-                                    load_model, process_model, setup_jax_globals, setup_kspace_grid)
+                                    load_model, process_model, remove_kspace_net_force, setup_jax_globals,
+                                    setup_kspace_grid)
     setup_jax_globals(precision=args.precision)
     import jax
     import jax.numpy as jnp
@@ -74,7 +75,8 @@ def main(argv=None):
             potential=potential, species=geo["species"], displacement=displacement, box=box,
             total_charge=0, num_unpaired_electrons=0, precision=args.precision,
             fractional_coordinates=frac, buffer_size_multiplier_lr=1.25, buffer_size_multiplier_sr=1.25,
-            minimum_cell_size_multiplier=1.0, has_aux=False)
+            minimum_cell_size_multiplier=1.0, has_aux=False,
+            remove_net_force=remove_kspace_net_force(settings))
         k_grid, k_smearing = setup_kspace_grid(kel, args.kspace_smearing, args.kspace_spacing, box)
         k_grid_disp, k_smearing_disp = setup_kspace_grid(kdi, args.kspace_smearing, args.kspace_spacing, box)
         if kel or kdi:
