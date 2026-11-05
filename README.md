@@ -1,6 +1,5 @@
 ![workflow-test-ci](https://github.com/general-molecular-simulations/so3lr/actions/workflows/CI.yml/badge.svg)
 [![docs](https://img.shields.io/badge/docs-so3lr.github.io-4a9d4a)](https://so3lr.github.io/)
-[![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb)
 [![cite-link](https://img.shields.io/badge/how_to-cite-000000)](#citation)
 [![preprint-link](https://img.shields.io/badge/preprint-arXiv-B31B1B)](https://doi.org/10.48550/arXiv.2611.06237)
