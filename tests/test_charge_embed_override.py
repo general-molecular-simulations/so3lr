@@ -18,6 +18,7 @@ loads the released checkpoint with the override set, and would raise if the
 parameter tree changed.
 """
 import functools
+import os
 import pathlib
 
 import numpy as np
@@ -32,6 +33,11 @@ MODEL = 'so3lr-tauri-s'
 # Finite cluster: the long-range cutoff must be large or the electrostatics are
 # truncated nonsense (see the lr_cutoff note in the PR description).
 LR_CUTOFF = 1000.0
+
+# float64 throughout (conftest's x64), so "the same" can be 1e-10 eV whatever ran before:
+# in float32 two separately compiled calculators can differ in the last bit (on a GPU the
+# override's graph fuses differently: 3.8e-6 eV at 38 eV).
+pytestmark = pytest.mark.usefixtures('x64')
 
 # Same fragment as _charged_fragment(), for the CLI subprocess runs.
 _CLI_INPUT_XYZ = (
@@ -72,11 +78,10 @@ def _evaluate(total_charge, charge_embed_total_charge, charge_equilibration_tota
 
     atoms = _charged_fragment()
     atoms.info['charge'] = total_charge
-    # Default float32: x64 is not enabled in this module, and the differences
-    # under test are eV-sized, so requesting float64 would only be truncated.
     atoms.calc = So3lrCalculator(
         model=MODEL,
         lr_cutoff=LR_CUTOFF,
+        dtype=np.float64,
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge,
     )
@@ -106,14 +111,14 @@ def energies():
 
 class TestChargeEmbedOverride:
     def test_passthrough_is_exact(self, energies):
-        """override == true charge is a no-op, to the last bit.
+        """override == true charge is a no-op, to float64 rounding.
 
         The override replaces Q with `jnp.full_like(Q, value)`, so passing the
-        value the graph already carries must reproduce the unpatched result
-        exactly -- not merely closely. Any drift here means the plumbing is
-        perturbing the model rather than just relabelling its input.
+        value the graph already carries must reproduce the unpatched result.
+        Any drift beyond rounding means the plumbing is perturbing the model
+        rather than just relabelling its input.
         """
-        assert energies['passthrough'] == energies['baseline'], (
+        assert abs(energies['passthrough'] - energies['baseline']) < 1e-10, (
             f"charge_embed_total_charge=-1.0 gave {energies['passthrough']!r} but the "
             f"unmodified path gave {energies['baseline']!r}; the override is not a "
             f"faithful passthrough."
@@ -151,8 +156,9 @@ class TestChargeEmbedOverride:
         """Forces, not just energy -- the measured effect is a force MAE change."""
         f_default, f_zero = _evaluate(-1, None, None)[1], _evaluate(-1, 0.0, None)[1]
         assert np.all(np.isfinite(f_default)) and np.all(np.isfinite(f_zero))
-        assert not np.array_equal(f_default, f_zero), (
-            "forces are identical with and without the override"
+        # a bound far above run-to-run noise (the order of float64 GPU sums)
+        assert np.abs(np.asarray(f_default) - np.asarray(f_zero)).max() > 1e-6, (
+            "forces are the same with and without the override"
         )
 
 
@@ -202,18 +208,19 @@ class TestChargeEquilibrationOverride:
         }
 
     def test_passthrough_is_exact(self):
-        """equilibration override == true charge is a bitwise no-op."""
-        assert _energy(-1, None, -1.0) == _energy(-1, None, None)
+        """equilibration override == true charge is a no-op, to float64 rounding."""
+        assert abs(_energy(-1, None, -1.0) - _energy(-1, None, None)) < 1e-10
 
     def test_override_changes_the_energy(self, four):
-        assert four['D'] != four['A'], (
+        assert abs(four['D'] - four['A']) > 1e-8, (
             'charge_equilibration_total_charge=0.0 did not change the energy, so it '
             'never reached PartialChargesSparse'
         )
 
     def test_all_four_combinations_are_distinct(self, four):
         """The two knobs are independent, not two names for one switch."""
-        assert len(set(four.values())) == 4, (
+        values = sorted(four.values())
+        assert min(b - a for a, b in zip(values, values[1:])) > 1e-8, (
             f'expected four distinct energies, got {four}. The two overrides are not '
             f'acting independently.'
         )
@@ -249,12 +256,21 @@ class TestChargeEmbedOverrideCLI:
     """
 
     @staticmethod
-    def _run_nvt(tmp_path, tag, extra_yaml='', extra_argv=()):
-        import subprocess
+    def _env():
+        """The CLI runs' environment, with XLA's deterministic GPU ops. The comparisons
+        below are exact, and on a GPU XLA does not sum in the same order every run: two
+        runs of one setting differ by ~1e-16, which fails an equality and passes an
+        inequality by noise alone. No effect on CPU."""
         import sys
 
         sys.path.insert(0, str(pathlib.Path(__file__).parent))
         from subprocess_env import so3lr_subprocess_env
+        flags = (os.environ.get('XLA_FLAGS', '') + ' --xla_gpu_deterministic_ops=true').strip()
+        return so3lr_subprocess_env({'XLA_FLAGS': flags})
+
+    @staticmethod
+    def _run_nvt(tmp_path, tag, extra_yaml='', extra_argv=()):
+        import subprocess
 
         # One directory per run: the CLI deliberately refuses to overwrite an
         # existing trajectory, so runs must not share a working directory.
@@ -276,7 +292,7 @@ class TestChargeEmbedOverrideCLI:
         result = subprocess.run(
             ['so3lr', '--settings', f'{tag}.yaml', *extra_argv],
             cwd=tmp_path, capture_output=True, text=True,
-            env=so3lr_subprocess_env(), timeout=600,
+            env=TestChargeEmbedOverrideCLI._env(), timeout=600,
         )
         assert result.returncode == 0, (
             f"so3lr --settings {tag}.yaml failed ({result.returncode})\n"
@@ -323,10 +339,6 @@ class TestChargeEmbedOverrideCLI:
         other model flag behaves here too.
         """
         import subprocess
-        import sys
-
-        sys.path.insert(0, str(pathlib.Path(__file__).parent))
-        from subprocess_env import so3lr_subprocess_env
         import h5py
 
         tmp_path.mkdir(parents=True, exist_ok=True)
@@ -342,7 +354,7 @@ class TestChargeEmbedOverrideCLI:
                 '--save-buffer', '1', *extra_argv,
             ],
             cwd=tmp_path, capture_output=True, text=True,
-            env=so3lr_subprocess_env(), timeout=600,
+            env=TestChargeEmbedOverrideCLI._env(), timeout=600,
         )
         assert result.returncode == 0, (
             f"so3lr nvt failed ({result.returncode})\n"
@@ -365,10 +377,12 @@ class TestChargeEmbedOverrideCLI:
         for tag, line in (('absent', '# key absent'), ('null', 'charge_embed_total_charge: null')):
             monkeypatch.setattr(so3lr_md, 'perform_md',
                                 lambda settings, *args, tag=tag, **kwargs: captured.setdefault(tag, settings))
+            # engine standard: on a GPU, auto would run this structure (no box) on flash,
+            # not through the stubbed perform_md
             (tmp_path / f'{tag}.yaml').write_text(
                 f"input_file: {tmp_path / 'input.xyz'}\noutput_file: {tmp_path / tag}.hdf5\n"
                 f"log_file: {tmp_path / tag}.log\nmodel: {MODEL}\nlr_cutoff: {LR_CUTOFF}\n"
-                f"total_charge: -1\nensemble: nvt\nrelax_before_run: false\n{line}\n"
+                f"total_charge: -1\nensemble: nvt\nrelax_before_run: false\nengine: standard\n{line}\n"
             )
             result = CliRunner().invoke(so3lr_cli.cli, ['--settings', str(tmp_path / f'{tag}.yaml')])
             assert result.exit_code == 0, result.output
