@@ -14,6 +14,7 @@ from so3lr.mlff.nn.observable.observable_sparse import coulomb_erf_shifted_force
 import numpy as np
 import jax
 import jax.numpy as jnp
+import json
 import math
 import time
 import logging
@@ -31,6 +32,7 @@ from so3lr.mlff.utils.kspace_utils import setup_kspace_grid
 from ase.io import read
 from ase.units import Bohr
 
+from so3lr.model_registry import resolve_model
 from so3lr.pbc import lattice_rows, minimum_image_problem
 from so3lr.cli.so3lr_md import load_model, atoms_to_jnp, process_model, dispersion_ratios
 from .so3lr_md import setup_logger
@@ -498,6 +500,15 @@ class NativeErrorBounds_Dispersion:
                          rspace_lr=_rms_difference(truncated, self.reference))
 
 
+def model_energy_scales(model_path) -> tuple:
+    """(electrostatic_energy_scale, dispersion_energy_scale) of the model (a name, a path,
+    or None for the default): the widths of its own pair functions, which the error
+    estimates evaluate."""
+    with open(resolve_model(model_path).dir / 'hyperparameters.json') as fp:
+        model = json.load(fp)['model']
+    return float(model['electrostatic_energy_scale']), float(model['dispersion_energy_scale'])
+
+
 def cell_is_present(cell) -> bool:
     """True if the geometry carries a usable (not all-zero) cell.
 
@@ -625,14 +636,14 @@ def tune(
         output_intermediate_quantities=['partial_charges'],
     )
 
+    electrostatic_energy_scale, dispersion_energy_scale = model_energy_scales(model_path)
     model_kwargs = dict(
         cutoff_sr=potential.cutoff,
-        # 4.0 is the default value, TODO load from model_config!
-        electrostatic_energy_scale=4.0
+        electrostatic_energy_scale=electrostatic_energy_scale,
     )
 
     dispersion_model_kwargs = dict(
-        dispersion_energy_scale=1.2,  # 1.2 is the default value, TODO load from model_config!
+        dispersion_energy_scale=dispersion_energy_scale,
         atomic_numbers=initial_geometry.get_atomic_numbers()
     )
 
