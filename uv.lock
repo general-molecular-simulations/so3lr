@@ -713,7 +713,7 @@ wheels = [
 [[package]]
 name = "glp"
 version = "0.3.0"
-source = { git = "https://github.com/fbruenig/glp.git?rev=fad98206ace85311faf1a5c3affbaaf1baa629b5#fad98206ace85311faf1a5c3affbaaf1baa629b5" }
+source = { git = "https://github.com/fbruenig/glp.git?rev=2294f4f59e940be64c45bf5e4d1bea5cb90809f8#2294f4f59e940be64c45bf5e4d1bea5cb90809f8" }
 dependencies = [
     { name = "comms" },
     { name = "numpy" },
@@ -3007,7 +3007,7 @@ requires-dist = [
     { name = "ase", specifier = ">=3.26,<4" },
     { name = "click", specifier = ">=8.2,<9" },
     { name = "flax", specifier = "<0.12.9" },
-    { name = "glp", git = "https://github.com/fbruenig/glp.git?rev=fad98206ace85311faf1a5c3affbaaf1baa629b5" },
+    { name = "glp", git = "https://github.com/fbruenig/glp.git?rev=2294f4f59e940be64c45bf5e4d1bea5cb90809f8" },
     { name = "h5py", specifier = ">=3.11,<4" },
     { name = "importlib-resources", marker = "extra == 'tfds'", specifier = ">=6,<8" },
     { name = "jax", specifier = "<0.11" },

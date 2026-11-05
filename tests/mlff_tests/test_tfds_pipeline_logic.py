@@ -107,8 +107,10 @@ def test_epoch_index_selects_train_seed_and_validation_is_fixed():
     assert loader.next_epoch('validation', 'validation', epoch_index=7) == 41
 
 
-@pytest.mark.parametrize('legacy_fingerprint', [False, True])
-@pytest.mark.parametrize('masked_sgd', [False, True])
+# Two of the four combinations: the plain optimizer with a current checkpoint,
+# and the masked optimizer with a legacy fingerprint leaf. The two options act on
+# different parts of the restored state, so the cross product adds nothing.
+@pytest.mark.parametrize('masked_sgd, legacy_fingerprint', [(False, False), (True, True)])
 def test_atomic_training_state_round_trip(tmp_path, masked_sgd, legacy_fingerprint):
     params = {'w': jnp.array([1.0, -2.0])}
     optimizer = optax.adam(1e-3)

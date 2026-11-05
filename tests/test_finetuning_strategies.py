@@ -5,6 +5,7 @@ strategy -> parameter-key mapping against every bundled model in milliseconds,
 so an off-by-one in `layers_{num_layers - 1}` (or a head that was renamed) is
 caught on every PR without paying for a subprocess training run.
 """
+import functools
 import json
 import pathlib
 import pickle
@@ -34,7 +35,9 @@ _OBS_3_STRATEGIES = {'obs_3', 'obs_23', 'obs_023', 'll_obs_023'}
 UNSUPPORTED = {('so3lr', 'obs_3')}
 
 
+@functools.lru_cache(maxsize=None)
 def _load(model_name):
+    """(params, num_layers) of a bundled model, read once per session; callers only read it."""
     model_dir = MODELS_DIR / model_name
     with open(model_dir / 'params.pkl', 'rb') as fp:
         params = pickle.load(fp)

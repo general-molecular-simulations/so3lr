@@ -13,9 +13,11 @@ equilibration on the system's true total charge.
 Note this is deliberately NOT `use_charge_embed`. That flag decides whether the
 module is built at all (`make_embedding_modules`), so flipping it changes the
 parameter tree and a released checkpoint stops loading. Overriding the input keeps
-every trained weight in place -- which `test_released_checkpoint_still_loads`
-pins directly.
+every trained weight in place: the 'embed_zero' case of the `energies` fixture
+loads the released checkpoint with the override set, and would raise if the
+parameter tree changed.
 """
+import functools
 import pathlib
 
 import numpy as np
@@ -56,8 +58,16 @@ def _charged_fragment():
     return atoms
 
 
-def _energy(total_charge, charge_embed_total_charge,
-            charge_equilibration_total_charge=None):
+@functools.lru_cache(maxsize=None)
+def _evaluate(total_charge, charge_embed_total_charge, charge_equilibration_total_charge):
+    """(energy, forces) of the charged fragment under one (charge, embed, equilibrate)
+    condition.
+
+    The fixtures and tests below ask for overlapping conditions (the default one
+    alone four times), and every evaluation builds a model, so each distinct
+    condition is evaluated once per session. Comparisons between two conditions
+    still compare two separately built calculators.
+    """
     from so3lr import So3lrCalculator
 
     atoms = _charged_fragment()
@@ -70,7 +80,13 @@ def _energy(total_charge, charge_embed_total_charge,
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge,
     )
-    return float(atoms.get_potential_energy())
+    return float(atoms.get_potential_energy()), atoms.get_forces()
+
+
+def _energy(total_charge, charge_embed_total_charge, charge_equilibration_total_charge=None):
+    # Fills in the default, so (Q, embed) and (Q, embed, None) share one cache entry.
+    return _evaluate(total_charge, charge_embed_total_charge,
+                     charge_equilibration_total_charge)[0]
 
 
 @pytest.fixture(scope='module')
@@ -89,10 +105,6 @@ def energies():
 
 
 class TestChargeEmbedOverride:
-    def test_default_is_inert(self):
-        """Omitting the argument entirely must not perturb anything."""
-        assert _energy(-1, None) == _energy(-1, None)
-
     def test_passthrough_is_exact(self, energies):
         """override == true charge is a no-op, to the last bit.
 
@@ -127,35 +139,17 @@ class TestChargeEmbedOverride:
             f"charge equilibration, which it must never do."
         )
 
-    def test_released_checkpoint_still_loads(self):
-        """The override must not disturb the parameter tree.
+    def test_accepts_arbitrary_values(self):
+        """Not a boolean: any charge can be embedded, 0.0 is just the useful case.
 
-        This is the property that distinguishes it from `use_charge_embed`: the
-        module and all its trained weights stay in place and simply receive a
-        different input. If this ever regresses, loading raises rather than
-        returning a wrong number.
+        0.0 and -1.0 (the true charge) are already evaluated by the `energies`
+        fixture; a charge of the opposite sign covers the rest.
         """
-        assert np.isfinite(_energy(-1, 0.0))
-
-    @pytest.mark.parametrize('value', [0.0, -1.0, 2.0])
-    def test_accepts_arbitrary_values(self, value):
-        """Not a boolean: any charge can be embedded, 0.0 is just the useful case."""
-        assert np.isfinite(_energy(-1, value))
+        assert np.isfinite(_energy(-1, 2.0))
 
     def test_forces_change_too(self):
         """Forces, not just energy -- the measured effect is a force MAE change."""
-        from so3lr import So3lrCalculator
-
-        def forces(override):
-            atoms = _charged_fragment()
-            atoms.info['charge'] = -1
-            atoms.calc = So3lrCalculator(
-                model=MODEL, lr_cutoff=LR_CUTOFF,
-                charge_embed_total_charge=override,
-            )
-            return atoms.get_forces()
-
-        f_default, f_zero = forces(None), forces(0.0)
+        f_default, f_zero = _evaluate(-1, None, None)[1], _evaluate(-1, 0.0, None)[1]
         assert np.all(np.isfinite(f_default)) and np.all(np.isfinite(f_zero))
         assert not np.array_equal(f_default, f_zero), (
             "forces are identical with and without the override"
@@ -163,23 +157,17 @@ class TestChargeEmbedOverride:
 
 
 class TestChargeEmbedOverrideEntryPoints:
-    """The flag has to be reachable from each documented entry point."""
+    """The flags have to be reachable from each documented entry point."""
 
-    def test_so3lr_potential(self):
-        from so3lr import So3lrPotential
+    def test_python_entry_points_accept_both_overrides(self):
+        """So3lrPotential and So3lr take both overrides (So3lrCalculator is above)."""
+        from so3lr import So3lr, So3lrPotential
 
         # Constructing is the assertion: an unsupported kwarg would land in
         # long_range_kwargs and be silently ignored, or raise.
-        assert So3lrPotential(
-            model=MODEL, lr_cutoff=LR_CUTOFF, charge_embed_total_charge=0.0
-        ) is not None
-
-    def test_make_so3lr(self):
-        from so3lr import So3lr
-
-        assert So3lr(
-            model=MODEL, lr_cutoff=LR_CUTOFF, charge_embed_total_charge=0.0
-        ) is not None
+        overrides = dict(charge_embed_total_charge=0.0, charge_equilibration_total_charge=0.0)
+        assert So3lrPotential(model=MODEL, lr_cutoff=LR_CUTOFF, **overrides) is not None
+        assert So3lr(model=MODEL, lr_cutoff=LR_CUTOFF, **overrides) is not None
 
     def test_yaml_key_is_known(self):
         """The did-you-mean validator must not flag it as a typo."""
@@ -243,16 +231,6 @@ class TestChargeEquilibrationOverride:
             f"setting the total charge."
         )
 
-    def test_reaches_every_entry_point(self):
-        from so3lr import So3lr, So3lrPotential
-
-        assert So3lrPotential(
-            model=MODEL, lr_cutoff=LR_CUTOFF, charge_equilibration_total_charge=0.0
-        ) is not None
-        assert So3lr(
-            model=MODEL, lr_cutoff=LR_CUTOFF, charge_equilibration_total_charge=0.0
-        ) is not None
-
     def test_yaml_key_is_known(self):
         from so3lr.cli.so3lr_cli import KNOWN_YAML_KEYS_EXTRA, YAML_DEFAULTS
 
@@ -298,7 +276,7 @@ class TestChargeEmbedOverrideCLI:
         result = subprocess.run(
             ['so3lr', '--settings', f'{tag}.yaml', *extra_argv],
             cwd=tmp_path, capture_output=True, text=True,
-            env=so3lr_subprocess_env(),
+            env=so3lr_subprocess_env(), timeout=600,
         )
         assert result.returncode == 0, (
             f"so3lr --settings {tag}.yaml failed ({result.returncode})\n"
@@ -313,21 +291,15 @@ class TestChargeEmbedOverrideCLI:
         with h5py.File(tmp_path / f'{tag}.hdf5', 'r') as f:
             return np.array(f['momenta'])
 
-    def test_settings_yaml_route(self, tmp_path):
-        """`charge_embed_total_charge:` in the settings YAML reaches the model."""
-        absent = self._run_nvt(tmp_path / 'a', 'absent', '# key absent')
-        null = self._run_nvt(tmp_path / 'b', 'null', 'charge_embed_total_charge: null')
-        minus = self._run_nvt(tmp_path / 'c', 'minus', 'charge_embed_total_charge: -1.0')
-        zero = self._run_nvt(tmp_path / 'd', 'zero', 'charge_embed_total_charge: 0.0')
-        equil = self._run_nvt(
-            tmp_path / 'e', 'equil', 'charge_equilibration_total_charge: 0.0',
-        )
+    def test_settings_yaml_route(self, momenta):
+        """`charge_embed_total_charge:` in the settings YAML reaches the model.
 
-        # Absent, explicit null, and the true charge all mean the same thing.
-        assert np.array_equal(absent, null), 'null must behave as if the key were absent'
-        assert np.array_equal(absent, minus), (
-            'charge_embed_total_charge equal to total_charge must be a no-op'
-        )
+        That an override equal to the true charge is a no-op is pinned in-process
+        by TestChargeEmbedOverride.test_passthrough_is_exact, and that a YAML null
+        means "absent" by test_yaml_null_is_the_key_absent.
+        """
+        absent, zero, equil = momenta['absent'], momenta['zero'], momenta['equil']
+
         # 0.0 must actually change the dynamics.
         assert not np.array_equal(absent, zero), (
             'charge_embed_total_charge: 0.0 did not change the trajectory, so it '
@@ -370,7 +342,7 @@ class TestChargeEmbedOverrideCLI:
                 '--save-buffer', '1', *extra_argv,
             ],
             cwd=tmp_path, capture_output=True, text=True,
-            env=so3lr_subprocess_env(),
+            env=so3lr_subprocess_env(), timeout=600,
         )
         assert result.returncode == 0, (
             f"so3lr nvt failed ({result.returncode})\n"
@@ -379,27 +351,68 @@ class TestChargeEmbedOverrideCLI:
         with h5py.File(tmp_path / out, 'r') as f:
             return np.array(f['momenta'])
 
-    def test_command_line_flag_matches_settings_yaml(self, tmp_path):
+    def test_yaml_null_is_the_key_absent(self, tmp_path, monkeypatch):
+        """`charge_embed_total_charge: null` must reach perform_md as the key absent
+        (None), not 0.0 or the string 'None'. In-process: perform_md is stubbed, so
+        this compares the settings dicts, not trajectories."""
+        from click.testing import CliRunner
+        from so3lr.cli import so3lr_cli, so3lr_md
+
+        captured = {}
+        monkeypatch.setattr(so3lr_md, 'setup_jax_globals', lambda **kwargs: None)
+        monkeypatch.setattr(so3lr_cli, 'reserve_gpu', lambda *args, **kwargs: None)
+        (tmp_path / 'input.xyz').write_text(_CLI_INPUT_XYZ)
+        for tag, line in (('absent', '# key absent'), ('null', 'charge_embed_total_charge: null')):
+            monkeypatch.setattr(so3lr_md, 'perform_md',
+                                lambda settings, *args, tag=tag, **kwargs: captured.setdefault(tag, settings))
+            (tmp_path / f'{tag}.yaml').write_text(
+                f"input_file: {tmp_path / 'input.xyz'}\noutput_file: {tmp_path / tag}.hdf5\n"
+                f"log_file: {tmp_path / tag}.log\nmodel: {MODEL}\nlr_cutoff: {LR_CUTOFF}\n"
+                f"total_charge: -1\nensemble: nvt\nrelax_before_run: false\n{line}\n"
+            )
+            result = CliRunner().invoke(so3lr_cli.cli, ['--settings', str(tmp_path / f'{tag}.yaml')])
+            assert result.exit_code == 0, result.output
+        # A missing key and None both mean "no override" downstream.
+        assert captured['null'].get('charge_embed_total_charge') is None
+        assert captured['absent'].get('charge_embed_total_charge') is None
+
+    @pytest.fixture(scope='class')
+    def momenta(self, tmp_path_factory):
+        """The four runs the tests in this class compare, each run once.
+
+        Three through `so3lr --settings` (key absent, embedding override 0,
+        equilibration override 0) and the embedding override 0 again through the
+        `so3lr nvt` flag. Every run is a full CLI start-up, model build and JIT.
+        """
+        root = tmp_path_factory.mktemp('charge_embed_cli')
+        return {
+            'absent': self._run_nvt(root / 'a', 'absent', '# key absent'),
+            'zero': self._run_nvt(root / 'z', 'zero', 'charge_embed_total_charge: 0.0'),
+            'equil': self._run_nvt(
+                root / 'e', 'equil', 'charge_equilibration_total_charge: 0.0',
+            ),
+            'flag_zero': self._run_nvt_argv(
+                root / 'f', 'flag.hdf5', ('--charge-embed-total-charge', '0'),
+            ),
+        }
+
+    def test_command_line_flag_matches_settings_yaml(self, momenta):
         """--charge-embed-total-charge and the YAML key must agree exactly.
 
         Two independent routes into the same setting; if they disagree, one of
         them is not reaching the model.
         """
-        via_yaml = self._run_nvt(tmp_path / 'y', 'zero', 'charge_embed_total_charge: 0.0')
-        via_flag = self._run_nvt_argv(
-            tmp_path / 'f', 'flag.hdf5', ('--charge-embed-total-charge', '0'),
-        )
-        assert np.array_equal(via_yaml, via_flag), (
+        assert np.array_equal(momenta['zero'], momenta['flag_zero']), (
             'the CLI flag and the settings-file key produced different trajectories'
         )
 
-    def test_command_line_flag_changes_the_run(self, tmp_path):
-        """Omitting the flag must differ from passing 0."""
-        default = self._run_nvt_argv(tmp_path / 'd', 'def.hdf5', ())
-        zero = self._run_nvt_argv(
-            tmp_path / 'z', 'zero.hdf5', ('--charge-embed-total-charge', '0'),
-        )
-        assert not np.array_equal(default, zero), (
+    def test_command_line_flag_changes_the_run(self, momenta):
+        """Omitting the override must differ from passing 0 on the command line.
+
+        The run without an override goes through the settings file; the test above
+        shows both routes give the same trajectory for the same setting.
+        """
+        assert not np.array_equal(momenta['absent'], momenta['flag_zero']), (
             '--charge-embed-total-charge 0 did not change the trajectory'
         )
 

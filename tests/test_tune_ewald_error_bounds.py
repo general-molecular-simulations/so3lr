@@ -1,6 +1,8 @@
 """tune-ewald's error estimates: the Ewald k-space bound must predict the actual
 reciprocal-space force error, and the estimates keep their values."""
 
+import functools
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -37,20 +39,34 @@ def _bound(positions, charges, box, smearing, spacing):
     return float(bounds.err_kspace(smearing=smearing, spacing=spacing))
 
 
+BOX, SMEARING, N_ATOMS = 15.0, 1.5, 100
+
+
+@functools.lru_cache(maxsize=None)
+def _random_case(charge_scale):
+    """Random neutral charges in a cubic box, with converged reciprocal forces.
+
+    The converged reference (spacing 0.75, ~34k k-vectors) is the expensive part
+    and does not depend on the spacing under test, so it is computed once per
+    charge scale.
+    """
+    rng = np.random.default_rng(0)
+    positions = rng.uniform(0, BOX, (N_ATOMS, 3))
+    charges = rng.uniform(-0.5, 0.5, N_ATOMS)
+    charges = charge_scale * (charges - charges.mean())
+    reference = _reciprocal_forces(positions, charges, BOX, SMEARING, 0.75)
+    return positions, charges, reference
+
+
 @pytest.mark.parametrize("charge_scale", [1.0, 3.0])
 @pytest.mark.parametrize("spacing", [2.2, 3.0])
 def test_ewald_kspace_bound_matches_measured_force_error(charge_scale, spacing):
-    rng = np.random.default_rng(0)
-    box, smearing, n_atoms = 15.0, 1.5, 100
-    positions = rng.uniform(0, box, (n_atoms, 3))
-    charges = rng.uniform(-0.5, 0.5, n_atoms)
-    charges = charge_scale * (charges - charges.mean())
+    positions, charges, reference = _random_case(charge_scale)
 
-    reference = _reciprocal_forces(positions, charges, box, smearing, 0.75)
-    truncated = _reciprocal_forces(positions, charges, box, smearing, spacing)
+    truncated = _reciprocal_forces(positions, charges, BOX, SMEARING, spacing)
     measured = np.sqrt(np.mean(np.sum((truncated - reference) ** 2, axis=1)))
 
-    ratio = measured / _bound(positions, charges, box, smearing, spacing)
+    ratio = measured / _bound(positions, charges, BOX, SMEARING, spacing)
     assert 0.5 < ratio < 2.0, ratio
 
 

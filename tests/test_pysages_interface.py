@@ -6,13 +6,12 @@ Tests cover:
 3. PySAGES interface functions (unit tests)
 4. update_so3lr_after_pysages k_grid passthrough
 5. Settings parsing defaults and auto-configuration
-6. Integration: trajectory comparison between vanilla and unbiased runs
+
+The end-to-end CLI runs (vanilla vs unbiased, ABF, restarts) are in
+tests/test_pysages_cli.py.
 """
 
-import os
-import shutil
 import pathlib
-import subprocess
 
 import pytest
 
@@ -30,84 +29,26 @@ from so3lr.cli.so3lr_md import handle_box, HAS_PYSAGES
 # Paths and shared settings
 # ---------------------------------------------------------------------------
 
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 TEST_DATA_DIR = pathlib.Path(__file__).resolve().parent / "test_data"
 GEOMETRY_FILE = TEST_DATA_DIR / "benzoic_acid_aq_1.xyz"
 
-# Base MD settings shared by all integration runs.  The geometry path is
-# filled in at fixture time so it points to the temp-directory copy.
-_BASE_MD_SETTINGS = {
-    'precision': 'float64',
-    'total_charge': 0.0,
-    'lr_cutoff': 12.0,
-    'relax_before_run': True,
-    'min_cycles': 10,
-    'min_steps': 20,
-    'min_start_dt': 0.05,
-    'min_max_dt': 0.1,
-    'min_n_min': 2,
-    'md_dt': 0.5,
-    'md_T': 300,
-    'md_cycles': 2,
-    'md_steps': 500,
-}
-
-_PYSAGES_INPUT_UNBIASED = {
-    'method': 'unbiased',
-    'cv': [{
-        'type': 'coordinationnumber',
-        'indices': [4, 7],
-        'cn_exps': [6, 30],
-        'species': 1,
-        'grid_min': 0.0,
-        'grid_max': 1.5,
-        'grid_stride': 64,
-        'periodic': False,
-    }],
-}
-
-_PYSAGES_INPUT_ABF = {
-    'method': 'abf',
-    'cv': [{
-        'type': 'coordinationnumber',
-        'indices': [4, 7],
-        'cn_exps': [6, 30],
-        'species': 1,
-        'grid_min': 0.0,
-        'grid_max': 1.5,
-        'grid_stride': 64,
-        'periodic': False,
-    }],
-}
+_CV = [{
+    'type': 'coordinationnumber',
+    'indices': [4, 7],
+    'cn_exps': [6, 30],
+    'species': 1,
+    'grid_min': 0.0,
+    'grid_max': 1.5,
+    'grid_stride': 64,
+    'periodic': False,
+}]
+_PYSAGES_INPUT_UNBIASED = {'method': 'unbiased', 'cv': _CV}
+_PYSAGES_INPUT_ABF = {'method': 'abf', 'cv': _CV}
 
 
 def _write_yaml(path, data):
     with open(path, 'w') as f:
         yaml.dump(data, f)
-
-
-def _prepare_run_dir(tmp_path, name, md_overrides=None, pysages_input=None):
-    """Create a simulation directory with geometry, settings, and optionally pysages input."""
-    run_dir = tmp_path / name
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    # Copy geometry
-    shutil.copy2(GEOMETRY_FILE, run_dir / "benzoic_acid_aq_1.xyz")
-
-    # Build settings
-    settings = dict(_BASE_MD_SETTINGS)
-    settings['input_file'] = 'benzoic_acid_aq_1.xyz'
-    settings['output_file'] = 'traj.xyz'
-    settings['log_file'] = 'out.log'
-    if md_overrides:
-        settings.update(md_overrides)
-    _write_yaml(run_dir / "md_settings.yaml", settings)
-
-    # PySAGES input (if needed)
-    if pysages_input is not None:
-        _write_yaml(run_dir / "pysages_input.yaml", pysages_input)
-
-    return run_dir
 
 
 # ===========================================================================
@@ -117,13 +58,17 @@ def _prepare_run_dir(tmp_path, name, md_overrides=None, pysages_input=None):
 class TestImportGuard:
     """Tests for optional PySAGES import behavior."""
 
-    def test_has_pysages_flag_is_true(self):
-        """PySAGES is installed in this environment, so HAS_PYSAGES should be True."""
-        assert HAS_PYSAGES is True
+    def test_has_pysages_flags_are_true(self):
+        """PySAGES is installed here, so both import guards must report it.
 
-    def test_interface_module_imports(self):
-        """The interface module should import without error."""
+        Each module wraps its PySAGES imports in ``try/except ImportError``, so
+        a broken import (e.g. a renamed symbol after a PySAGES pin bump) would
+        silently turn enhanced sampling into "PySAGES is not installed". The
+        two flags are independent: the interface module can lose a pysages
+        import while so3lr_md still imports the interface successfully.
+        """
         from so3lr.cli.so3lr_pysages_interface import HAS_PYSAGES as iface_flag
+        assert HAS_PYSAGES is True
         assert iface_flag is True
 
     def test_do_enhanced_sampling_requires_pysages(self):
@@ -149,71 +94,6 @@ class TestImportGuard:
                 md_module.perform_md(settings)
         finally:
             md_module.HAS_PYSAGES = original
-
-    def test_default_no_enhanced_sampling(self, tmp_path, capfd):
-        """When ``do_enhanced_sampling`` is absent from settings, perform_md
-        must take no PySAGES code path:
-
-          * ``parse_pysages_input`` must not run (no "Parsed settings for
-            PySAGES" log line), *even when a valid pysages_input.yaml
-            exists in cwd or is passed via settings*;
-          * the periodic-system Cartesian-override warning at perform_md
-            lines 1771-1776 must not fire, even with
-            ``enforce_cartesian_coordinates=False`` on a periodic geometry
-            (those are exactly the inputs that *would* trigger the override
-            if PySAGES were silently enabled).
-
-        Catches a regression where the default for ``do_enhanced_sampling``
-        flips from False to True. The pysages_input is provided as a valid
-        file so the test does not depend on the default-path lookup
-        crashing — the assertion is "PySAGES was not entered", full stop.
-        """
-        import so3lr.cli.so3lr_md as md_module
-        pysages_path = tmp_path / "pysages_input.yaml"
-        _write_yaml(pysages_path, _PYSAGES_INPUT_UNBIASED)
-
-        settings = {
-            # Note: 'do_enhanced_sampling' deliberately omitted.
-            'pysages_input': str(pysages_path),  # valid, but should not be read
-            'input_file': str(GEOMETRY_FILE),
-            'output_file': 'dummy.xyz',
-            'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
-            'ensemble': 'nvt', 'precision': 'float32',
-            'seed': 42, 'save_buffer': 10,
-            'lr_cutoff': 12.0, 'total_charge': 0.0,
-            # On a periodic system, if PySAGES were silently enabled the
-            # gating would auto-flip this to True and emit a warning.
-            'enforce_cartesian_coordinates': False,
-        }
-        try:
-            md_module.perform_md(settings)
-        except Exception:
-            pass
-        captured = capfd.readouterr()
-        output = captured.out + captured.err
-
-        assert "Parsed settings for PySAGES" not in output, (
-            "parse_pysages_input ran even though do_enhanced_sampling "
-            "was not set in settings; the default may have flipped to "
-            f"True.\n--- output ---\n{output}"
-        )
-        assert "cartesian coordinates for periodic systems" not in output, (
-            "The PySAGES periodic-cartesian override warning fired even "
-            "though do_enhanced_sampling was not set; the PySAGES code "
-            f"path was entered.\n--- output ---\n{output}"
-        )
-
-        # Sanity: perform_md ran far enough that the assertions above
-        # are meaningful. Both log lines we checked for fire (when they
-        # do fire) *before* the geometry-read message, so if "Read
-        # ... atoms" appears we know we passed the gating block too.
-        assert "Read" in output and "atoms" in output, (
-            f"perform_md aborted before reading geometry. The two "
-            f"PySAGES-path checks above are still informative (their "
-            f"log lines fire before geometry-read), but this likely "
-            f"means the test environment is missing a setting.\n"
-            f"--- output ---\n{output}"
-        )
 
     @pytest.mark.parametrize("ensemble", ["npt", "nve", "nvt-langevin"])
     def test_nvt_restricted_method_rejects_non_nvt(self, ensemble, tmp_path):
@@ -378,72 +258,6 @@ class TestHandleBox:
 class TestCreatePysagesInterfaceFns:
     """Tests for create_pysages_interface_fns."""
 
-    def test_context_generator_returns_callable(self):
-        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
-        import pysages.backends as pb
-
-        state = "mock_state"
-        box = jnp.array([10.0, 10.0, 10.0])
-        nbrs = "mock_nbrs"
-        k_grid = jnp.ones((3, 3))
-
-        def dummy_step(i, args):
-            return args
-
-        gen = create_pysages_interface_fns(
-            state=state, box=box, step_md_fn=dummy_step,
-            md_dt=0.5, nbrs=nbrs, k_grid=k_grid
-        )
-        assert callable(gen)
-
-    def test_context_has_correct_extras_with_lr(self):
-        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
-        import pysages.backends as pb
-
-        state = "mock_state"
-        box = jnp.array([10.0, 10.0, 10.0])
-        nbrs = "mock_nbrs"
-        nbrs_lr = "mock_nbrs_lr"
-        k_grid = jnp.ones((3, 3))
-
-        def dummy_step(i, args):
-            return args
-
-        gen = create_pysages_interface_fns(
-            state=state, box=box, step_md_fn=dummy_step,
-            md_dt=0.5, nbrs=nbrs, nbrs_lr=nbrs_lr, k_grid=k_grid
-        )
-        ctx = gen()
-        init_state = ctx.init_fn()
-        assert "nbrs_lr" in init_state.extras
-        assert init_state.extras["nbrs_lr"] == "mock_nbrs_lr"
-
-    def test_step_fn_threads_k_grid(self):
-        """Verify step_fn_pysages correctly passes k_grid through."""
-        from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
-        import pysages.backends as pb
-
-        state = jnp.array([1.0])
-        box = jnp.array([10.0, 10.0, 10.0])
-        nbrs = jnp.array([0])
-        k_grid_input = jnp.array([[1.0, 2.0], [3.0, 4.0]])
-
-        def identity_step(i, args):
-            """Step function that returns state unchanged."""
-            return args
-
-        gen = create_pysages_interface_fns(
-            state=state, box=box, step_md_fn=identity_step,
-            md_dt=0.5, nbrs=nbrs, k_grid=k_grid_input
-        )
-        ctx = gen()
-        init_state = ctx.init_fn()
-        stepped_state = ctx.step_fn(init_state)
-
-        np.testing.assert_array_equal(
-            stepped_state.extras["k_grid"], k_grid_input
-        )
-
     def test_zero_box_replaced_with_3d_zeros(self):
         """When box is all zeros, it should be replaced with [0,0,0]."""
         from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
@@ -567,17 +381,18 @@ class TestCreatePysagesInterfaceFns:
             ctx_state_after_step.state.position, cart_initial, atol=1e-10
         )
 
-    def test_step_fn_threads_nbrs_lr(self):
-        """The step_fn packs/unpacks the 6-tuple
-        ``(state, nbrs, nbrs_lr, box, k_grid, k_grid_disp)`` through step_md_fn
-        and propagates ``nbrs_lr`` in the returned extras dict.
+    def test_step_fn_threads_nbrs_lr_and_k_grid(self):
+        """init_fn seeds the extras and step_fn packs/unpacks the 6-tuple
+        ``(state, nbrs, nbrs_lr, box, k_grid, k_grid_disp)`` through
+        step_md_fn, propagating ``nbrs``, ``nbrs_lr`` and ``k_grid`` in the
+        returned extras dict.
         """
         from so3lr.cli.so3lr_pysages_interface import create_pysages_interface_fns
 
         box = jnp.array([10.0, 10.0, 10.0])
         nbrs = "mock_nbrs"
         nbrs_lr_token = "mock_nbrs_lr"
-        k_grid = jnp.ones((2, 2))
+        k_grid = jnp.array([[1.0, 2.0], [3.0, 4.0]])
 
         observed_arity = []
 
@@ -591,6 +406,7 @@ class TestCreatePysagesInterfaceFns:
         )
         ctx = gen()
         ctx_state_after_init = ctx.init_fn()
+        assert ctx_state_after_init.extras["nbrs_lr"] == nbrs_lr_token
         ctx_state_after_step = ctx.step_fn(ctx_state_after_init)
 
         assert observed_arity == [6], (
@@ -600,29 +416,13 @@ class TestCreatePysagesInterfaceFns:
         )
         assert ctx_state_after_step.extras["nbrs_lr"] == nbrs_lr_token
         assert ctx_state_after_step.extras["nbrs"] == nbrs
+        np.testing.assert_array_equal(ctx_state_after_step.extras["k_grid"], k_grid)
 
 
 class TestParsePysagesInput:
     """Tests for parse_pysages_input."""
 
-    def test_parse_unbiased_input(self, tmp_path):
-        from so3lr.cli.so3lr_pysages_interface import parse_pysages_input
-        path = tmp_path / "pysages_input.yaml"
-        _write_yaml(path, _PYSAGES_INPUT_UNBIASED)
-        settings = parse_pysages_input(str(path))
-        assert settings['method'] == 'unbiased'
-        assert 'cv' in settings
-        assert len(settings['cv']) >= 1
-        assert settings['cv'][0]['type'] == 'coordinationnumber'
-
-    def test_parse_abf_input(self, tmp_path):
-        from so3lr.cli.so3lr_pysages_interface import parse_pysages_input
-        path = tmp_path / "pysages_input.yaml"
-        _write_yaml(path, _PYSAGES_INPUT_ABF)
-        settings = parse_pysages_input(str(path))
-        assert settings['method'] == 'abf'
-
-    def test_parse_nonexistent_file_raises(self):
+    def test_parse_nonexistent_file_raises(self, tmp_path):
         """When do_enhanced_sampling=True but pysages_input points to a
         nonexistent file, perform_md must propagate FileNotFoundError to
         the caller rather than catching it or substituting a less
@@ -636,7 +436,7 @@ class TestParsePysagesInput:
             'do_enhanced_sampling': True,
             'pysages_input': '/nonexistent/path/that/cannot/exist.yaml',
             'input_file': str(GEOMETRY_FILE),
-            'output_file': 'dummy.xyz',
+            'output_file': str(tmp_path / 'dummy.xyz'),
             'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
             'ensemble': 'nvt', 'precision': 'float32',
             'seed': 42, 'save_buffer': 10,
@@ -645,114 +445,58 @@ class TestParsePysagesInput:
         with pytest.raises(FileNotFoundError):
             md_module.perform_md(settings)
 
-    def test_parse_returns_dict(self, tmp_path):
-        from so3lr.cli.so3lr_pysages_interface import parse_pysages_input
-        path = tmp_path / "pysages_input.yaml"
-        _write_yaml(path, {'method': 'unbiased', 'cv': []})
-        result = parse_pysages_input(str(path))
-        assert isinstance(result, dict)
-        assert result['method'] == 'unbiased'
+
+# CV dispatch table: settings 'type' -> the pysages.colvars class it must build.
+# The *_pbc entries need the simulation box.
+_CV_DISPATCH_CASES = [
+    ({'type': 'distance', 'grp1': [0, 1], 'grp2': [2, 3]}, 'Distance'),
+    ({'type': 'angle', 'indices': [0, 1, 2]}, 'Angle'),
+    ({'type': 'dihedral', 'indices': [0, 1, 2, 3]}, 'DihedralAngle'),
+    ({'type': 'gyrrad', 'indices': [0, 1, 2]}, 'RadiusOfGyration'),
+    ({'type': 'asphericity', 'indices': [0, 1, 2, 3]}, 'Asphericity'),
+    ({'type': 'acylindricity', 'indices': [0, 1, 2, 3]}, 'Acylindricity'),
+    ({'type': 'shapeanisotropy', 'indices': [0, 1, 2, 3]}, 'ShapeAnisotropy'),
+    ({'type': 'differenceofdistances', 'indices': [0, 1, 2, 3]}, 'DifferenceOfDistances'),
+    ({'type': 'distance_pbc', 'grp1': [0, 1], 'grp2': [2, 3]}, 'DistancePBC'),
+    ({'type': 'differenceofdistances_pbc', 'indices': [0, 1, 2, 3]},
+     'DifferenceOfDistancesPBC'),
+]
+_PBC_CV_CASES = [cv for cv, _ in _CV_DISPATCH_CASES if cv['type'].endswith('_pbc')]
 
 
 class TestProcessCV:
     """Tests for process_cv."""
 
-    def test_distance_cv(self):
+    @pytest.mark.parametrize(
+        "cv_dict,cls_name", _CV_DISPATCH_CASES,
+        ids=[case[0]['type'] for case in _CV_DISPATCH_CASES],
+    )
+    def test_cv_dispatch(self, cv_dict, cls_name):
         from so3lr.cli.so3lr_pysages_interface import process_cv
         import pysages.colvars
-        cv = process_cv({'type': 'distance', 'grp1': [0, 1], 'grp2': [2, 3]})
-        assert isinstance(cv, pysages.colvars.Distance)
-
-    def test_angle_cv(self):
-        from so3lr.cli.so3lr_pysages_interface import process_cv
-        import pysages.colvars
-        cv = process_cv({'type': 'angle', 'indices': [0, 1, 2]})
-        assert isinstance(cv, pysages.colvars.Angle)
-
-    def test_dihedral_cv(self):
-        from so3lr.cli.so3lr_pysages_interface import process_cv
-        import pysages.colvars
-        cv = process_cv({'type': 'dihedral', 'indices': [0, 1, 2, 3]})
-        assert isinstance(cv, pysages.colvars.DihedralAngle)
-
-    def test_gyrrad_cv(self):
-        from so3lr.cli.so3lr_pysages_interface import process_cv
-        import pysages.colvars
-        cv = process_cv({'type': 'gyrrad', 'indices': [0, 1, 2]})
-        assert isinstance(cv, pysages.colvars.RadiusOfGyration)
-
-    def test_asphericity_cv(self):
-        from so3lr.cli.so3lr_pysages_interface import process_cv
-        import pysages.colvars
-        cv = process_cv({'type': 'asphericity', 'indices': [0, 1, 2, 3]})
-        assert isinstance(cv, pysages.colvars.Asphericity)
-
-    def test_acylindricity_cv(self):
-        from so3lr.cli.so3lr_pysages_interface import process_cv
-        import pysages.colvars
-        cv = process_cv({'type': 'acylindricity', 'indices': [0, 1, 2, 3]})
-        assert isinstance(cv, pysages.colvars.Acylindricity)
-
-    def test_shapeanisotropy_cv(self):
-        from so3lr.cli.so3lr_pysages_interface import process_cv
-        import pysages.colvars
-        cv = process_cv({'type': 'shapeanisotropy', 'indices': [0, 1, 2, 3]})
-        assert isinstance(cv, pysages.colvars.ShapeAnisotropy)
+        box = jnp.array([10.0, 10.0, 10.0]) if cv_dict['type'].endswith('_pbc') else None
+        cv = process_cv(cv_dict, box=box)
+        assert isinstance(cv, getattr(pysages.colvars, cls_name))
 
     def test_unknown_cv_raises(self):
         from so3lr.cli.so3lr_pysages_interface import process_cv
         with pytest.raises(ValueError, match="Unknown collective variable type"):
             process_cv({'type': 'nonexistent_cv'})
 
+    @pytest.mark.parametrize("cv_dict", _PBC_CV_CASES, ids=[cv['type'] for cv in _PBC_CV_CASES])
+    def test_pbc_cv_without_box_raises(self, cv_dict):
+        """The *_pbc dispatchers raise if `box` is not given. Without this
+        guard the underlying colvar would fail with an opaque error far from
+        the user-facing settings file."""
+        from so3lr.cli.so3lr_pysages_interface import process_cv
+        with pytest.raises(ValueError, match=f"{cv_dict['type']} requires"):
+            process_cv(cv_dict)
+
     # ------------------------------------------------------------------
-    # Coverage for the five process_cv dispatchers that were untested:
-    # distance_pbc, differenceofdistances, differenceofdistances_pbc,
-    # princmom, coordinationnumber. For two of these (distance_pbc,
-    # differenceofdistances_pbc) we also exercise the box-required raise.
-    # Argument plumbing is asserted where the resulting CV exposes the
+    # Argument plumbing, asserted where the resulting CV exposes the
     # plumbed values (PrincipalMoment.axis, CoordinationNumber.{num_exp,
     # denom_exp, species_nn}, Distance.groups).
     # ------------------------------------------------------------------
-
-    def test_distance_pbc_cv(self):
-        from so3lr.cli.so3lr_pysages_interface import process_cv
-        import pysages.colvars
-        box = jnp.array([10.0, 10.0, 10.0])
-        cv = process_cv(
-            {'type': 'distance_pbc', 'grp1': [0, 1], 'grp2': [2, 3]},
-            box=box,
-        )
-        assert isinstance(cv, pysages.colvars.DistancePBC)
-
-    def test_distance_pbc_without_box_raises(self):
-        """The distance_pbc branch at line 388 raises if `box` is not given.
-        Without this guard the underlying DistancePBC would fail with an
-        opaque error far from the user-facing settings file."""
-        from so3lr.cli.so3lr_pysages_interface import process_cv
-        with pytest.raises(ValueError, match="distance_pbc requires"):
-            process_cv({'type': 'distance_pbc', 'grp1': [0, 1], 'grp2': [2, 3]})
-
-    def test_differenceofdistances_cv(self):
-        from so3lr.cli.so3lr_pysages_interface import process_cv
-        import pysages.colvars
-        cv = process_cv({'type': 'differenceofdistances', 'indices': [0, 1, 2, 3]})
-        assert isinstance(cv, pysages.colvars.DifferenceOfDistances)
-
-    def test_differenceofdistances_pbc_cv(self):
-        from so3lr.cli.so3lr_pysages_interface import process_cv
-        import pysages.colvars
-        box = jnp.array([10.0, 10.0, 10.0])
-        cv = process_cv(
-            {'type': 'differenceofdistances_pbc', 'indices': [0, 1, 2, 3]},
-            box=box,
-        )
-        assert isinstance(cv, pysages.colvars.DifferenceOfDistancesPBC)
-
-    def test_differenceofdistances_pbc_without_box_raises(self):
-        from so3lr.cli.so3lr_pysages_interface import process_cv
-        with pytest.raises(ValueError, match="differenceofdistances_pbc requires"):
-            process_cv({'type': 'differenceofdistances_pbc',
-                        'indices': [0, 1, 2, 3]})
 
     def test_princmom_cv_plumbs_axis(self):
         """PrincipalMoment is the only CV with an `axis` argument; this is the
@@ -803,9 +547,8 @@ class TestProcessCV:
         assert int(cv.species_nn) == 1
 
     def test_distance_cv_indices_plumbed(self):
-        """Beyond isinstance, the existing test_distance_cv does not verify
-        that grp1/grp2 from the settings dict actually reach the resulting
-        Distance colvar. Distance stores its two groups in `cv.groups`,
+        """Beyond isinstance, verify that grp1/grp2 from the settings dict
+        actually reach the resulting Distance colvar. Distance stores its two groups in `cv.groups`,
         each as a sorted index array. Verify both groups arrive unchanged.
         """
         from so3lr.cli.so3lr_pysages_interface import process_cv
@@ -1319,31 +1062,20 @@ class TestGetPysagesMethod:
             }]
         }
 
-    def test_unbiased_method(self):
+    @pytest.mark.parametrize("method_name,method_args,cls_name", [
+        ('unbiased', None, 'Unbiased'),
+        ('abf', None, 'ABF'),
+        ('spectralabf', None, 'SpectralABF'),
+        ('harmonic', {'kspring': 10.0, 'center': [1.0]}, 'HarmonicBias'),
+    ], ids=['unbiased', 'abf', 'spectralabf', 'harmonic'])
+    def test_method_dispatch(self, method_name, method_args, cls_name):
         from so3lr.cli.so3lr_pysages_interface import get_pysages_method
         import pysages.methods
-        method = get_pysages_method(self._make_settings('unbiased'))
-        assert isinstance(method, pysages.methods.Unbiased)
-
-    def test_abf_method(self):
-        from so3lr.cli.so3lr_pysages_interface import get_pysages_method
-        import pysages.methods
-        method = get_pysages_method(self._make_settings('abf'))
-        assert isinstance(method, pysages.methods.ABF)
-
-    def test_spectralabf_method(self):
-        from so3lr.cli.so3lr_pysages_interface import get_pysages_method
-        import pysages.methods
-        method = get_pysages_method(self._make_settings('spectralabf'))
-        assert isinstance(method, pysages.methods.SpectralABF)
-
-    def test_harmonic_method(self):
-        from so3lr.cli.so3lr_pysages_interface import get_pysages_method
-        import pysages.methods
-        settings = self._make_settings('harmonic')
-        settings['method_args'] = {'kspring': 10.0, 'center': [1.0]}
+        settings = self._make_settings(method_name)
+        if method_args is not None:
+            settings['method_args'] = method_args
         method = get_pysages_method(settings)
-        assert isinstance(method, pysages.methods.HarmonicBias)
+        assert isinstance(method, getattr(pysages.methods, cls_name))
 
     def test_unknown_method_raises(self):
         from so3lr.cli.so3lr_pysages_interface import get_pysages_method
@@ -1432,13 +1164,6 @@ class TestGetPysagesMethod:
 class TestProcessGrid:
     """Tests for process_grid."""
 
-    def test_single_cv_grid(self):
-        from so3lr.cli.so3lr_pysages_interface import process_grid
-        import pysages
-        cv_settings = [{'grid_min': 0.0, 'grid_max': 10.0, 'grid_stride': 32, 'periodic': False}]
-        grid = process_grid(cv_settings)
-        assert isinstance(grid, pysages.Grid)
-
     def test_multi_cv_grid(self):
         from so3lr.cli.so3lr_pysages_interface import process_grid
         cv_settings = [
@@ -1449,13 +1174,11 @@ class TestProcessGrid:
         np.testing.assert_array_equal(np.array(grid.shape), np.array([32, 64]))
 
     # ------------------------------------------------------------------
-    # process_grid coverage extensions: shape was the only attribute asserted
-    # by the existing two tests. We additionally verify that the three other
-    # fields the function constructs from the settings actually arrive on the
-    # Grid object: lower (from grid_min), upper (from grid_max), and the
-    # periodic flag (computed as `all(periodic)`). A regression that uses
-    # `any(periodic)` instead of `all(periodic)` is invisible to the existing
-    # shape-only checks.
+    # Beyond the shape, the three other fields the function constructs from
+    # the settings must arrive on the Grid object: lower (from grid_min),
+    # upper (from grid_max), and the periodic flag (computed as
+    # `all(periodic)`). A regression that uses `any(periodic)` instead of
+    # `all(periodic)` is invisible to a shape-only check.
     # ------------------------------------------------------------------
 
     def test_grid_lower_and_upper_propagate(self):
@@ -1594,30 +1317,19 @@ class TestUpdateAfterPysages:
 
     # ---- k_grid passthrough (real, not signature-only) -------------------
 
-    def test_k_grid_returned_unchanged(self):
+    @pytest.mark.parametrize("k_grid_in", [np.array([[1.0, 2.0], [3.0, 4.0]]), None],
+                             ids=['array', 'none'])
+    def test_k_grid_passed_through(self, k_grid_in):
         from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
         result, *_ = self._make_nvt_inputs()
-        k_grid_in = jnp.array([[1.0, 2.0], [3.0, 4.0]])
-        nbrs = _RecordingNeighbors()
 
-        _, _, _, _, k_grid_out, _ = update_so3lr_after_pysages(
-            result, init_fn=None, rng_key=None,
-            md_T=self.MD_T, dt=self.DT, nbrs=nbrs, nbrs_lr=_RecordingNeighbors(), ensemble='nvt',
-            k_grid=k_grid_in,
-        )
-        # Same object identity, same values.
-        assert k_grid_out is k_grid_in
-        np.testing.assert_array_equal(k_grid_out, k_grid_in)
-
-    def test_k_grid_none_is_passed_through(self):
-        from so3lr.cli.so3lr_pysages_interface import update_so3lr_after_pysages
-        result, *_ = self._make_nvt_inputs()
         _, _, _, _, k_grid_out, _ = update_so3lr_after_pysages(
             result, init_fn=None, rng_key=None,
             md_T=self.MD_T, dt=self.DT, nbrs=_RecordingNeighbors(), nbrs_lr=_RecordingNeighbors(),
-            ensemble='nvt', k_grid=None,
+            ensemble='nvt', k_grid=k_grid_in,
         )
-        assert k_grid_out is None
+        # Same object identity (so also the same values, or None).
+        assert k_grid_out is k_grid_in
 
     # ---- NVT reconstruction ---------------------------------------------
 
@@ -1637,6 +1349,10 @@ class TestUpdateAfterPysages:
         np.testing.assert_allclose(state.force, forces)
         # momentum = canonicalized_mass * velocity
         np.testing.assert_allclose(state.momentum, state.mass * velocities, atol=1e-10)
+        # The thermostat chain is rebuilt from the snapshot's chain_data.
+        chain_data = result.snapshots[-1].chain_data
+        np.testing.assert_allclose(state.chain.position, chain_data['position'])
+        np.testing.assert_allclose(state.chain.tau, chain_data['tau'])
         # Box came from snapshot.box.H
         np.testing.assert_allclose(new_box, jnp.eye(3) * 10.0)
         assert nbrs_lr_out.last_update is not None
@@ -1895,38 +1611,10 @@ class TestUpdateAfterPysages:
 # ===========================================================================
 
 class TestStateReconstruction:
-    """Tests for NVE and NPT state reconstruction from PySAGES snapshot data."""
+    """Tests for NPT state reconstruction from PySAGES snapshot data.
 
-    def test_nve_state_reconstruction(self):
-        """re_init_so3lr_state_nve should produce a valid NVEState."""
-        from so3lr.cli.so3lr_pysages_interface import re_init_so3lr_state_nve
-
-        n_atoms = 4
-        pos = jnp.ones((n_atoms, 3))
-        vel = jnp.ones((n_atoms, 3)) * 0.5
-        forces = jnp.zeros((n_atoms, 3))
-        mass = jnp.ones(n_atoms) * 12.0
-
-        state = re_init_so3lr_state_nve(pos, vel, forces, mass)
-
-        assert isinstance(state, jax_md.simulate.NVEState)
-        np.testing.assert_allclose(state.position, pos)
-        np.testing.assert_allclose(state.force, forces)
-        # momentum = mass * velocity
-        expected_mom = state.mass * vel
-        np.testing.assert_allclose(state.momentum, expected_mom, atol=1e-10)
-
-    def test_nve_state_has_no_chain(self):
-        """NVEState should not have a chain attribute."""
-        from so3lr.cli.so3lr_pysages_interface import re_init_so3lr_state_nve
-
-        pos = jnp.ones((2, 3))
-        vel = jnp.ones((2, 3))
-        forces = jnp.zeros((2, 3))
-        mass = jnp.ones(2) * 12.0
-
-        state = re_init_so3lr_state_nve(pos, vel, forces, mass)
-        assert not hasattr(state, 'chain')
+    The NVE and NVT rebuilds are covered through update_so3lr_after_pysages
+    in TestUpdateAfterPysages (it calls the same re_init_* helpers)."""
 
     def test_npt_state_reconstruction(self):
         """re_init_so3lr_state_npt should produce a valid NPTNoseHooverState."""
@@ -2057,32 +1745,6 @@ class TestStateReconstruction:
         assert bool(jnp.isfinite(jnp.asarray(s.box_momentum)))
         assert bool(jnp.isfinite(jnp.asarray(s.box_position)))
 
-    def test_nvt_state_reconstruction_unchanged(self):
-        """re_init_so3lr_state (NVT) should still work as before."""
-        from so3lr.cli.so3lr_pysages_interface import re_init_so3lr_state
-
-        n_atoms = 4
-        chain_len = 3
-        pos = jnp.ones((n_atoms, 3))
-        vel = jnp.ones((n_atoms, 3)) * 0.5
-        forces = jnp.zeros((n_atoms, 3))
-        mass = jnp.ones(n_atoms) * 12.0
-        chain_pos = jnp.zeros(chain_len)
-        chain_mom = jnp.zeros(chain_len)
-        chain_mass = jnp.ones(chain_len)
-        chain_tau = jnp.array(100.0)
-        chain_ekin = jnp.array(0.0)
-        chain_dof = jnp.array(float(3 * n_atoms))
-
-        state = re_init_so3lr_state(
-            chain_pos, chain_mom, chain_mass, chain_tau, chain_ekin, chain_dof,
-            pos, vel, forces, mass,
-        )
-
-        assert isinstance(state, jax_md.simulate.NVTNoseHooverState)
-        np.testing.assert_allclose(state.position, pos)
-        np.testing.assert_allclose(state.chain.position, chain_pos)
-
 
 # ===========================================================================
 # 5. Settings parsing defaults and auto-configuration
@@ -2105,11 +1767,15 @@ class TestPerformMdEnforceCartesianGating:
         converts per step);
       * leave the flag untouched in every other case, with no log line.
 
-    These tests drive perform_md directly with the right settings and
-    inspect stderr for the warning/info lines. perform_md will fail
-    later in the function (model setup is not available in this test
-    environment) — we let it raise and then assert on what was logged
-    before the failure.
+    With do_enhanced_sampling False *or absent*, no PySAGES code path may run:
+    no "Parsed settings for PySAGES" line even though a valid
+    pysages_input.yaml is passed. The absent row catches the default for
+    ``do_enhanced_sampling`` flipping from False to True.
+
+    These tests drive perform_md directly and inspect stderr for the
+    warning/info lines. The settings name a model path that does not exist,
+    so perform_md stops with FileNotFoundError at the model load, the first
+    step after the gating block -- no model is loaded and no MD runs.
     """
 
     @pytest.fixture
@@ -2120,27 +1786,18 @@ class TestPerformMdEnforceCartesianGating:
         return {
             'pysages_input': str(pysages_path),
             'input_file': str(GEOMETRY_FILE),
-            'output_file': 'dummy.xyz',
+            'output_file': str(tmp_path / 'dummy.xyz'),
+            # Not a registered name and not a path: load_model raises right
+            # after the gate, before anything is loaded.
+            'model_path': str(tmp_path / 'no_such_model'),
             'md_dt': 0.5, 'md_T': 300, 'md_cycles': 1, 'md_steps': 1,
             'precision': 'float32',
             'seed': 42, 'save_buffer': 10,
             'lr_cutoff': 12.0, 'total_charge': 0.0,
         }
 
-    @staticmethod
-    def _run_and_capture(settings, capfd):
-        """Run perform_md, swallow its (expected) downstream failure, and
-        return the combined stdout+stderr produced before the failure."""
-        import so3lr.cli.so3lr_md as md_module
-        try:
-            md_module.perform_md(settings)
-        except Exception:
-            pass
-        captured = capfd.readouterr()
-        return captured.out + captured.err
-
     # The matrix of inputs that decides the gating outcome.
-    #   do_es, ensemble, init_flag, expect_warn, expect_info
+    #   do_es (None = key absent), ensemble, init_flag, expect_warn, expect_info
     # All cases assume a periodic cell (which the test geometry provides).
     @pytest.mark.parametrize("do_es,ensemble,init_flag,expect_warn,expect_info", [
         # PySAGES on, non-NPT: must force cartesian True (warning on F->T)
@@ -2153,29 +1810,37 @@ class TestPerformMdEnforceCartesianGating:
         (False, 'nvt', False, False, False),
         (False, 'nvt', True,  False, False),
         (False, 'npt', False, False, False),
+        # Key absent: exactly the inputs that would trigger the override
+        # (periodic, enforce_cartesian_coordinates=False) if the default flipped.
+        (None,  'nvt', False, False, False),
     ])
     def test_enforce_cartesian_logging(self, base_settings, capfd,
                                        do_es, ensemble, init_flag,
                                        expect_warn, expect_info):
+        import so3lr.cli.so3lr_md as md_module
         settings = dict(base_settings)
         settings.update({
-            'do_enhanced_sampling': do_es,
             'ensemble': ensemble,
             'enforce_cartesian_coordinates': init_flag,
         })
+        if do_es is not None:
+            settings['do_enhanced_sampling'] = do_es
 
-        output = self._run_and_capture(settings, capfd)
+        # Reaching the model load proves the geometry was read and the gating
+        # block ran; any earlier failure raises something else.
+        with pytest.raises(FileNotFoundError, match="not a known name"):
+            md_module.perform_md(settings)
+        captured = capfd.readouterr()
+        output = captured.out + captured.err
 
-        # Sanity: perform_md ran far enough to read the geometry. If this
-        # fails, the settings dict is incomplete and the gating block was
-        # never reached, so the rest of the assertions are meaningless.
-        assert "Read" in output and "atoms" in output, (
-            f"perform_md aborted before reading the geometry; gating "
-            f"block was never reached. Output:\n{output}"
-        )
-
+        parsed_seen = "Parsed settings for PySAGES" in output
         warn_seen = _WARN_SUBSTR in output
         info_seen = _NPT_INFO_SUBSTR in output
+        assert parsed_seen == bool(do_es), (
+            f"parse_pysages_input ran={parsed_seen} for do_es={do_es}; "
+            f"PySAGES must be entered only when do_enhanced_sampling is True.\n"
+            f"--- output ---\n{output}"
+        )
         assert warn_seen == expect_warn, (
             f"warning expectation mismatch for "
             f"(do_es={do_es}, ensemble={ensemble!r}, init_flag={init_flag}): "
@@ -2188,231 +1853,3 @@ class TestPerformMdEnforceCartesianGating:
             f"expected_info={expect_info}, saw info={info_seen}.\n"
             f"--- output ---\n{output}"
         )
-
-
-# ===========================================================================
-# 6. Integration: run simulations and compare trajectories
-# ===========================================================================
-
-def _parse_md_observables(log_path):
-    """Parse MD observables from an out.log file.
-
-    The log format is:
-      TIMESTAMP - SO3LR - INFO - STEP\tE\tKE\tPE\tH\tTemp\ttime/step
-
-    Returns a list of dicts with keys: step, E, KE, PE, H, T
-    """
-    results = []
-    with open(log_path) as f:
-        for line in f:
-            # Strip the logger prefix (everything up to and including "INFO - ")
-            if "INFO - " in line:
-                content = line.split("INFO - ", 1)[1]
-            else:
-                content = line
-            parts = content.strip().split('\t')
-            # MD output lines have 7 tab-separated fields: step, E, KE, PE, H, T, time/step
-            if len(parts) == 7:
-                try:
-                    step = int(parts[0])
-                    E = float(parts[1])
-                    KE = float(parts[2])
-                    PE = float(parts[3])
-                    H = float(parts[4])
-                    T = float(parts[5])
-                    results.append({
-                        'step': step, 'E': E, 'KE': KE,
-                        'PE': PE, 'H': H, 'T': T
-                    })
-                except (ValueError, IndexError):
-                    continue
-    return results
-
-
-def _run_so3lr_simulation(workdir, settings_file='md_settings.yaml'):
-    """Run an SO3LR simulation in the given directory.
-
-    Returns the subprocess result. Raises AssertionError if the run fails.
-    """
-    result = subprocess.run(
-        ['so3lr', '--settings', settings_file],
-        cwd=workdir,
-        capture_output=True,
-        text=True,
-        env={**os.environ, 'JAX_TRACEBACK_FILTERING': 'off'},
-    )
-    assert result.returncode == 0, (
-        f"SO3LR simulation failed in {workdir} with return code {result.returncode}\n"
-        f"STDERR:\n{result.stderr}"
-    )
-    return result
-
-
-@pytest.mark.slow
-class TestTrajectoryComparison:
-    """Integration tests: run simulations and compare MD observables."""
-
-    @pytest.fixture(scope="class")
-    def simulation_results(self, tmp_path_factory):
-        """Run vanilla and unbiased simulations in temp directories."""
-        tmp_path = tmp_path_factory.mktemp("pysages_integration")
-
-        if not GEOMETRY_FILE.exists():
-            pytest.skip(f"Test geometry not found: {GEOMETRY_FILE}")
-
-        # Vanilla NVT (no PySAGES)
-        vanilla_dir = _prepare_run_dir(tmp_path, "vanilla", md_overrides={
-            'restart_save_path': './restart2.npz',
-        })
-
-        # Unbiased PySAGES
-        unbiased_dir = _prepare_run_dir(tmp_path, "unbiased", md_overrides={
-            'do_enhanced_sampling': True,
-            'enforce_cartesian_coordinates': True,
-            'restart_save_path': './restart2.npz',
-        }, pysages_input=_PYSAGES_INPUT_UNBIASED)
-
-        # ABF PySAGES
-        abf_dir = _prepare_run_dir(tmp_path, "abf", md_overrides={
-            'do_enhanced_sampling': True,
-            'enforce_cartesian_coordinates': True,
-            'restart_save_path': './restart2.npz',
-        }, pysages_input=_PYSAGES_INPUT_ABF)
-
-        _run_so3lr_simulation(vanilla_dir)
-        _run_so3lr_simulation(unbiased_dir)
-        _run_so3lr_simulation(abf_dir)
-
-        return {
-            'vanilla_log': vanilla_dir / "out.log",
-            'unbiased_log': unbiased_dir / "out.log",
-            'abf_log': abf_dir / "out.log",
-        }
-
-    def test_vanilla_and_unbiased_match(self, simulation_results):
-        """All MD observables should be identical between vanilla and unbiased."""
-        vanilla = _parse_md_observables(simulation_results['vanilla_log'])
-        unbiased = _parse_md_observables(simulation_results['unbiased_log'])
-
-        assert len(vanilla) > 0, "No MD data found in vanilla log"
-        assert len(unbiased) > 0, "No MD data found in unbiased log"
-        assert len(vanilla) == len(unbiased), (
-            f"Different number of MD output lines: vanilla={len(vanilla)}, unbiased={len(unbiased)}"
-        )
-
-        for v, u in zip(vanilla, unbiased):
-            assert v['step'] == u['step'], f"Step mismatch: {v['step']} vs {u['step']}"
-            np.testing.assert_allclose(v['E'], u['E'], atol=1e-6,
-                err_msg=f"Total energy mismatch at step {v['step']}")
-            np.testing.assert_allclose(v['KE'], u['KE'], atol=1e-6,
-                err_msg=f"Kinetic energy mismatch at step {v['step']}")
-            np.testing.assert_allclose(v['PE'], u['PE'], atol=1e-6,
-                err_msg=f"Potential energy mismatch at step {v['step']}")
-            np.testing.assert_allclose(v['H'], u['H'], atol=1e-6,
-                err_msg=f"Hamiltonian mismatch at step {v['step']}")
-            np.testing.assert_allclose(v['T'], u['T'], atol=0.1,
-                err_msg=f"Temperature mismatch at step {v['step']}")
-
-    def test_abf_diverges_from_vanilla(self, simulation_results):
-        """ABF should produce different observables than vanilla (bias is applied)."""
-        vanilla = _parse_md_observables(simulation_results['vanilla_log'])
-        abf = _parse_md_observables(simulation_results['abf_log'])
-
-        assert len(vanilla) > 0 and len(abf) > 0
-
-        # At least the last step should differ (ABF applies bias forces)
-        last_v = vanilla[-1]
-        last_a = abf[-1]
-        # Check that at least one observable differs by more than numerical noise
-        diffs = [
-            abs(last_v['E'] - last_a['E']),
-            abs(last_v['KE'] - last_a['KE']),
-            abs(last_v['H'] - last_a['H']),
-            abs(last_v['T'] - last_a['T']),
-        ]
-        assert any(d > 0.01 for d in diffs), (
-            "ABF and vanilla trajectories are unexpectedly identical. "
-            "The bias force should cause observable differences."
-        )
-
-
-@pytest.mark.slow
-class TestRestart:
-    """Integration test: verify restart produces identical results to continuous run."""
-
-    @pytest.fixture(scope="class")
-    def restart_results(self, tmp_path_factory):
-        """Run continuous 4-cycle and 2+2 restart simulations, return parsed logs."""
-        tmp_path = tmp_path_factory.mktemp("pysages_restart")
-
-        if not GEOMETRY_FILE.exists():
-            pytest.skip(f"Test geometry not found: {GEOMETRY_FILE}")
-
-        # --- Continuous 4-cycle run ---
-        continuous_dir = _prepare_run_dir(tmp_path, "continuous", md_overrides={
-            'md_cycles': 4,
-            'do_enhanced_sampling': True,
-            'enforce_cartesian_coordinates': True,
-        })
-
-        # --- First 2 cycles with restart save ---
-        first_dir = _prepare_run_dir(tmp_path, "first", md_overrides={
-            'md_cycles': 2,
-            'do_enhanced_sampling': True,
-            'enforce_cartesian_coordinates': True,
-            'restart_save_path': './restart_so3lr.npz',
-            'restart_pysages_save_path': './restart_pysages.pkl',
-        }, pysages_input=_PYSAGES_INPUT_UNBIASED)
-
-        # Write pysages_input.yaml for continuous run too
-        _write_yaml(continuous_dir / "pysages_input.yaml", _PYSAGES_INPUT_UNBIASED)
-
-        _run_so3lr_simulation(continuous_dir)
-        _run_so3lr_simulation(first_dir)
-
-        # --- Restart for 2 more cycles ---
-        restart_dir = _prepare_run_dir(tmp_path, "restart", md_overrides={
-            'md_cycles': 2,
-            'do_enhanced_sampling': True,
-            'enforce_cartesian_coordinates': True,
-            'restart_load_path': './restart_so3lr.npz',
-            'restart_save_path': './restart_so3lr_2.npz',
-            'restart_pysages_load_path': './restart_pysages.pkl',
-            'restart_pysages_save_path': './restart_pysages_2.pkl',
-        }, pysages_input=_PYSAGES_INPUT_UNBIASED)
-
-        # Copy restart files from first run
-        shutil.copy2(first_dir / "restart_so3lr.npz", restart_dir)
-        shutil.copy2(first_dir / "restart_pysages.pkl", restart_dir)
-
-        _run_so3lr_simulation(restart_dir)
-
-        return {
-            'continuous_log': continuous_dir / "out.log",
-            'restart_log': restart_dir / "out.log",
-        }
-
-    def test_restart_matches_continuous(self, restart_results):
-        """The last 2 cycles from restart should match cycles 3-4 of the continuous run."""
-        continuous = _parse_md_observables(restart_results['continuous_log'])
-        restarted = _parse_md_observables(restart_results['restart_log'])
-
-        assert len(continuous) >= 4, f"Expected >= 4 data points in continuous, got {len(continuous)}"
-        # Restarted run has: initial line (from restart) + 2 cycle outputs
-        assert len(restarted) >= 2, f"Expected >= 2 data points in restart, got {len(restarted)}"
-
-        # Compare the last 2 cycles: continuous[-2:] vs restarted[-2:]
-        cont_last2 = continuous[-2:]
-        rest_last2 = restarted[-2:]
-
-        for c, r in zip(cont_last2, rest_last2):
-            np.testing.assert_allclose(c['E'], r['E'], atol=1e-6,
-                err_msg=f"Total energy mismatch at continuous step {c['step']}")
-            np.testing.assert_allclose(c['KE'], r['KE'], atol=1e-6,
-                err_msg=f"Kinetic energy mismatch at continuous step {c['step']}")
-            np.testing.assert_allclose(c['PE'], r['PE'], atol=1e-6,
-                err_msg=f"Potential energy mismatch at continuous step {c['step']}")
-            np.testing.assert_allclose(c['H'], r['H'], atol=1e-6,
-                err_msg=f"Hamiltonian mismatch at continuous step {c['step']}")
-            np.testing.assert_allclose(c['T'], r['T'], atol=0.1,
-                err_msg=f"Temperature mismatch at continuous step {c['step']}")

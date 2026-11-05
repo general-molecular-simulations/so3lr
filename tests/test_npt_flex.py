@@ -1,4 +1,9 @@
-"""Test flexible cell NPT (anisotropic/semi-isotropic/isotropic coupling)."""
+"""Test flexible cell NPT (anisotropic/semi-isotropic/isotropic coupling).
+
+The anisotropic mode is rejected by the CLI and by create_npt_nhc_fn
+(tests/test_npt_coupling_safety.py), so its case here only checks the jax-md
+integrator and runs with --full.
+"""
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -74,10 +79,27 @@ def _setup_system():
     return energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr
 
 
-@pytest.mark.parametrize('coupling', ['isotropic', 'semi-isotropic', 'anisotropic'])
-def test_npt_flex_coupling_modes(coupling):
+@pytest.fixture(scope='module')
+def water_system():
+    """The water_64 system, built (model loaded) once for every coupling mode.
+
+    The energy function is jitted here, not each integrator step: every
+    coupling mode builds a different step, so a jitted step would compile
+    three times to run two steps each, while the shared jitted energy (and its
+    gradient) compiles once and serves all modes.
+    """
+    energy_fn, *rest = _setup_system()
+    return (jax.jit(energy_fn), *rest)
+
+
+@pytest.mark.parametrize('coupling', [
+    'isotropic',
+    'semi-isotropic',
+    pytest.param('anisotropic', marks=pytest.mark.slow),
+])
+def test_npt_flex_coupling_modes(coupling, water_system):
     """Test that NPT flex runs without error for each coupling mode."""
-    energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr = _setup_system()
+    energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr = water_system
 
     # Unit conversion (jax-md metal units)
     unit_system = units.metal_unit_system()
@@ -154,9 +176,11 @@ def test_npt_flex_coupling_modes(coupling):
         assert not np.allclose(diag[0], diag[2], atol=1e-10)
 
 
-def test_npt_flex_energy_conservation():
-    """Test that the extended Hamiltonian is approximately conserved."""
-    energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr = _setup_system()
+def test_npt_flex_energy_conservation(water_system):
+    """The extended Hamiltonian is conserved over a few steps: the one check of
+    npt_nose_hoover_flex_invariant (the conserved quantity the MD log reports) in
+    the short suite. The drift suite (--full) measures longer runs."""
+    energy_fn, shift, positions, cell, masses, species, nbrs, nbrs_lr = water_system
 
     unit_system = units.metal_unit_system()
     dt = 0.5e-3 * unit_system['time']
@@ -201,10 +225,10 @@ def test_npt_flex_energy_conservation():
         neighbor=nbrs.idx, neighbor_lr=nbrs_lr.idx,
     )
 
-    # Extended Hamiltonian should be approximately conserved
-    # (not exactly, due to finite dt and NHC thermostat)
+    # The drift suite holds 100 float64 steps of every flex mode under 1e-3 x |H0|
+    # (tests/test_integrator_drift.py); 5 steps must stay well inside that.
     rel_drift = abs(float(H1 - H0)) / abs(float(H0))
-    assert rel_drift < 0.05, (
+    assert np.isfinite(rel_drift) and rel_drift < 1e-3, (
         f"Extended Hamiltonian drifted by {rel_drift*100:.2f}%: "
         f"H0={float(H0):.6f}, H1={float(H1):.6f}"
     )

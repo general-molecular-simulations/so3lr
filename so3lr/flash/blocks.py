@@ -9,6 +9,13 @@ def functional_rms_norm(x, *, eps: float = 1.0e-6):
     return x * jax.lax.rsqrt(jnp.mean(jnp.square(x), axis=-1, keepdims=True) + jnp.asarray(eps, dtype=x.dtype))
 
 
+def layer_norm(p, x, *, eps: float = 1.0e-6):
+    """flax's nn.LayerNorm (scale and bias; its fast variance, mean(x^2) - mean(x)^2)."""
+    mean = jnp.mean(x, axis=-1, keepdims=True)
+    var = jnp.maximum(jnp.mean(jnp.square(x), axis=-1, keepdims=True) - jnp.square(mean), 0.0)
+    return (x - mean) * (jax.lax.rsqrt(var + jnp.asarray(eps, dtype=x.dtype)) * p["scale"]) + p["bias"]
+
+
 def degree_repeats(degrees):
     sizes = [2 * int(d) + 1 for d in degrees]
     return jnp.asarray(sizes), int(sum(sizes))
@@ -53,7 +60,8 @@ def scalar_equivariant_exchange(p, scalar_features, equivariant_features, *, deg
 
 
 def local_node_energy(p, x, atomic_numbers, *, head_index):
-    atomic_energy = mlp(p, ("energy_dense_regression", "energy_dense_final"), x, final_use_bias=False)
+    # a bias on the final layer where the model has one (the legacy so3lr; loader.load_params)
+    atomic_energy = mlp(p, ("energy_dense_regression", "energy_dense_final"), x)
     atomic_energy = atomic_energy * p["atomic_scales"][atomic_numbers] + p["energy_offset"][atomic_numbers]
     return atomic_energy[:, head_index]
 
@@ -61,3 +69,11 @@ def local_node_energy(p, x, atomic_numbers, *, head_index):
 def ratio_head(p, names, x, atomic_numbers):
     shift = p["Embed_0"]["embedding"][atomic_numbers].squeeze(axis=-1)
     return jnp.abs(mlp(p, names, x).squeeze(axis=-1) + shift)
+
+
+def legacy_hirshfeld_head(p, x, atomic_numbers):
+    """The legacy so3lr's Hirshfeld ratios: |shift(Z) + q(Z) . k(x) / sqrt(F/2)|."""
+    k = mlp(p, ("hirshfeld_ratios_dense_regression", "hirshfeld_ratios_dense_final"), x)
+    q = p["Embed_1"]["embedding"][atomic_numbers]
+    shift = p["Embed_0"]["embedding"][atomic_numbers].squeeze(axis=-1)
+    return jnp.abs(shift + (q * k / jnp.sqrt(k.shape[-1])).sum(axis=-1))

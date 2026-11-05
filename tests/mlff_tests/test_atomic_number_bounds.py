@@ -27,11 +27,12 @@ from so3lr.mlff.nn.observable.dispersion_ref_data import (
 )
 
 
-def test_bounds_match_the_tables():
-    # Derived from the arrays, so a refit at a different length cannot desync them.
-    assert MAX_Z_NLH == NLH_AA.shape[0] == NLH_BB.shape[0] == 92
-    assert MAX_Z_DISPERSION == len(alphas) == len(C6_coef) == 86
-    assert MAX_Z_DISPERSION_LEGACY == len(alphas_legacy) == len(C6_coef_legacy) == 102
+def test_paired_tables_have_the_same_length():
+    # The MAX_Z_* bounds are derived from the first table of each pair, so what
+    # can still go wrong is a refit of one table without its partner.
+    assert NLH_AA.shape[0] == NLH_BB.shape[0] == 92
+    assert len(alphas) == len(C6_coef) == 86
+    assert len(alphas_legacy) == len(C6_coef_legacy) == 102
 
 
 def test_nlh_table_is_square_in_z():
@@ -155,10 +156,10 @@ def test_md_cli_rejects_before_building_neighbor_lists():
 
 
 @pytest.mark.parametrize('model_name, bad_z, bad_match', [
-    # Rn (86) has refitted reference data and Ra (88) has legacy data, but the
-    # training set stops at At (85), so both must be refused by both families.
+    # Rn (86) has refitted reference data but lies past the v2 training set,
+    # which stops at At (85). Elements outside every table (Pu, 94) take the same
+    # set-membership path and are covered by test_rejects_heavy_element_by_name.
     ('so3lr-tauri-m-2606', 86, r'Rn \(Z=86\)'),
-    ('so3lr-tauri-m-2606', 94, r'Pu \(Z=94\)'),
     ('so3lr', 11, r'Na \(Z=11\)'),
 ])
 def test_end_to_end_wiring_rejects_unsupported_elements(

@@ -13,6 +13,8 @@ from so3lr.graph import Graph as So3lrGraph
 from so3lr.mlff.calculators import exact_neighbors
 from so3lr.mlff.geometric.cutoff import add_cell_offsets_sparse
 from so3lr.mlff.calculators.potential import PotentialSparse
+from so3lr.md_settings_validation import (
+    available_precision, canonical_precision, model_precision, state_precision)
 from so3lr.mlff.nn.observable.dispersion_ref_data import check_atomic_numbers_supported
 from so3lr.pbc import is_fully_periodic, lattice_rows
 
@@ -66,6 +68,21 @@ def matrix_to_voigt(matrix):
     return voigt_vector
 
 
+def calculator_precision(precision, dtype=None):
+    """A calculator's run precision (so3lr.md_settings_validation) from ``precision`` and/or
+    ``dtype``, the older spelling of the model's (float64: precision float64). Unset: mixed, or
+    float32 without x64; a dtype that contradicts precision raises, as do mixed and float64
+    without x64."""
+    if dtype is not None:
+        name = np.dtype(dtype).name
+        if precision is None and name == 'float64':
+            precision = 'float64'
+        if name != model_precision(precision):
+            raise ValueError(f"dtype {name} contradicts precision {canonical_precision(precision)}; "
+                             "pass precision alone")
+    return available_precision({'precision': precision})
+
+
 class AseCalculatorSparse(Calculator):
     implemented_properties = ['energy', 'forces', 'stress', 'free_energy', 'hessian']
 
@@ -82,7 +99,7 @@ class AseCalculatorSparse(Calculator):
             buffer_size_multiplier: float = 1.25,
             skin: float = 0.,
             add_energy_shift: bool = False,
-            dtype: np.dtype = np.float64,
+            dtype: Optional[np.dtype] = None,
             model: str = 'so3krates',
             head_index: int = 5,
             has_aux: bool = False,
@@ -95,8 +112,12 @@ class AseCalculatorSparse(Calculator):
             charge_embed_total_charge: Optional[float] = None,
             charge_equilibration_total_charge: Optional[float] = None,
             neighbor_backend: str = 'auto',
+            precision: Optional[str] = None,
             **kwargs
     ):
+        # before the model loads; the older default: a float64 model
+        precision = calculator_precision(precision, np.float64 if dtype is None and precision is None else dtype)
+        dtype = np.dtype(model_precision(precision))
         if observables is not None and len(observables) > 0:
             output_intermediate_quantities = [o.replace('_grad','').replace('_jac','') for o in (observables)]
         else:
@@ -154,6 +175,7 @@ class AseCalculatorSparse(Calculator):
                    kspace_smearing=kspace_smearing,
                    kspace_spacing=kspace_spacing,
                    neighbor_backend=neighbor_backend,
+                   precision=precision,
                    )
 
     def __init__(
@@ -173,6 +195,7 @@ class AseCalculatorSparse(Calculator):
             kspace_smearing: Optional[float] = None,
             kspace_spacing: Optional[float] = None,
             neighbor_backend: str = 'auto',
+            precision: Optional[str] = None,
             *args,
             **kwargs
     ):
@@ -187,6 +210,10 @@ class AseCalculatorSparse(Calculator):
             'auto'  (default) 'exact' whenever the minimum image would be wrong
                     (non-orthorhombic cell, or any height <= 2 * cutoff), else 'glp'.
                     Finite systems always use 'glp'.
+
+        precision: the run's, as in so3lr's MD: float32 or float64 throughout, or mixed, a float32
+        model whose positions, displacements, energy sum and results are float64
+        (calculator_precision, which also reads dtype, the model's).
         """
         if neighbor_backend not in ('auto', 'glp', 'exact'):
             raise ValueError(f"neighbor_backend must be 'auto', 'glp' or 'exact', got {neighbor_backend!r}.")
@@ -211,7 +238,8 @@ class AseCalculatorSparse(Calculator):
         def total_energy(graph, aux=has_aux):
             """Total energy of the graph, with the model's aux output when aux is set."""
             out = potential(graph, has_aux=aux)
-            return (out[0].sum(), out[1]) if aux else out.sum()
+            energy = (out[0] if aux else out).astype(graph.positions.dtype).sum()
+            return (energy, out[1]) if aux else energy
 
         def energy_at(R, system, neighbors, aux=has_aux):
             return total_energy(_system_to_graph(system._replace(R=R), neighbors), aux)
@@ -359,7 +387,9 @@ class AseCalculatorSparse(Calculator):
                 # Common setting for simulations in a box of water.
                 self.lr_cutoff = potential.long_range_cutoff
 
-        self.dtype = dtype
+        # the geometry's dtype (the model's is the potential's)
+        self.precision = calculator_precision(precision, dtype)
+        self.dtype = np.dtype(state_precision(self.precision))
         self.head_index = head_index
         self.kspace_electrostatics = kspace_electrostatics
         self.kspace_smearing = kspace_smearing
@@ -466,49 +496,30 @@ class AseCalculatorSparse(Calculator):
 
 
     def _glp_neighbors(self, system, cell):
-        """glp's minimum-image neighbour list, (re)allocated on overflow."""
-        if self.spatial_partitioning is None:
-            self.neighbors, self.spatial_partitioning = neighbor_list(
-                positions=system.R,
-                cell=cell,
-                cutoff=self.cutoff,
-                skin=self.skin,
-                capacity_multiplier=self.capacity_multiplier,
-                buffer_size_multiplier=self.buffer_size_multiplier,
-                lr_cutoff=self.lr_cutoff,
-            )
-
-        neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
-        if neighbors.overflow:
-            logger.info('Re-allocating neighbours. ') 
-            self.neighbors, self.spatial_partitioning = neighbor_list(
-                        positions=system.R,
-                        cell=cell,
-                        cutoff=self.cutoff,
-                        skin=self.skin,
-                        capacity_multiplier=self.capacity_multiplier,
-                        buffer_size_multiplier=self.buffer_size_multiplier,
-                        lr_cutoff=self.lr_cutoff,
-            )
+        """glp's minimum-image neighbour list, (re)allocated when it is incomplete."""
+        if self.spatial_partitioning is not None:
             neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
-            assert not neighbors.overflow
-            self.neighbors = neighbors
-        else:
-            self.neighbors = neighbors
-        if neighbors.cell_list is not None:
-            # If cell list needs to be reallocated, then reallocate neighbors
-            if neighbors.cell_list.reallocate:
-                # self.neighbors now contains Neighbors namedtuple with idx_i_lr etc.
-                self.neighbors, self.spatial_partitioning = neighbor_list(
-                    positions=system.R,
-                    cell=cell,
-                    cutoff=self.cutoff,
-                    skin=self.skin,
-                    capacity_multiplier=self.capacity_multiplier,
-                    buffer_size_multiplier=self.buffer_size_multiplier,
-                    lr_cutoff=self.lr_cutoff
-                )
-        return neighbors
+            # On update glp folds an over-full or too-small cell list into overflow.
+            if not neighbors.overflow:
+                self.neighbors = neighbors
+                return neighbors
+            logger.info('Re-allocating neighbours.')
+        self.neighbors, self.spatial_partitioning = neighbor_list(
+            positions=system.R,
+            cell=cell,
+            cutoff=self.cutoff,
+            skin=self.skin,
+            capacity_multiplier=self.capacity_multiplier,
+            buffer_size_multiplier=self.buffer_size_multiplier,
+            lr_cutoff=self.lr_cutoff,
+        )
+        # On allocation it does not, so check the cell list here as well.
+        cell_list = self.neighbors.cell_list
+        if self.neighbors.overflow or (cell_list is not None and cell_list.reallocate):
+            raise RuntimeError(
+                'glp could not allocate a complete neighbour list (cell too small for the cutoffs, or a '
+                "cell over-full at allocation). Use neighbor_backend='exact'.")
+        return self.neighbors
 
     # ------------------------------------------------------------------ exact PBC
     def _long_range_cutoff(self):

@@ -34,16 +34,12 @@ def compute_senders_and_receivers_np(
 
 
 # Calculate residue information for dimer calculations
-def parse_selection_range(selection_str):
-    """Parse selection string like '1-4' into number of atoms."""
-    if not selection_str or selection_str == "":
-        return 0
-    if '-' in selection_str:
-        start, end = selection_str.split('-')
-        return int(end) - int(start) + 1
-    else:
-        # Single atom selection
-        return 1
+def selection_indices(selection):
+    """0-based atom indices of a 1-based selection like '1-4' or '5' (empty if blank)."""
+    start, _, end = str(selection).partition('-')
+    if not start:
+        return np.array([], dtype=int)
+    return np.arange(int(start) - 1, int(end or start))
     
 
 @dataclass
@@ -159,6 +155,20 @@ class AseDataLoaderSparse:
         return loaded_data, {'max_num_of_nodes': max_num_of_nodes, 'max_num_of_edges': max_num_of_edges, 'max_num_of_pairs': max_num_of_pairs}
 
 
+def charge_and_multiplicity(mol: Atoms):
+    """The total charge and spin multiplicity in ``mol.info``, None where absent.
+
+    Spin multiplicity (2S+1): OMol25/OPoly26 extxyz store it under `spin=`, other
+    datasets use `multiplicity=`. Prefer the canonical `multiplicity`, falling back
+    to `spin` so open-shell structures are not silently read as closed-shell
+    singlets (num_unpaired_electrons = multiplicity - 1).
+    """
+    multiplicity = mol.info.get('multiplicity')
+    if multiplicity is None:
+        multiplicity = mol.info.get('spin')
+    return mol.info.get('charge'), multiplicity
+
+
 def ASE_to_jraph(
         mol: Atoms,
         cutoff: float,
@@ -231,14 +241,7 @@ def ASE_to_jraph(
         stress[:] = np.nan
 
     # Read additional properties from .info and .arrays in Atoms object.
-    total_charge = mol.info.get('charge')
-    # Spin multiplicity (2S+1). OMol25/OPoly26 extxyz store it under `spin=`,
-    # other datasets use `multiplicity=`. Prefer the canonical `multiplicity`,
-    # falling back to `spin` so open-shell structures are not silently read as
-    # closed-shell singlets (num_unpaired_electrons = multiplicity - 1).
-    multiplicity = mol.info.get('multiplicity')
-    if multiplicity is None:
-        multiplicity = mol.info.get('spin')
+    total_charge, multiplicity = charge_and_multiplicity(mol)
     # The polarizability/volume-ratio label has been stored under several keys
     # over time. Accept any of them and pick the first that exists, so users
     # don't silently get NaN labels when their extxyz uses the canonical
@@ -285,21 +288,25 @@ def ASE_to_jraph(
     residue_segments = None
     # Read dimer-specific properties for dimer calculations
     structure_type = mol.info.get('structure_type', None)
-    if structure_type == 'dimer_translated':
-        charge_a = mol.info.get('charge_a', None)
-        charge_b = mol.info.get('charge_b', None)
-        selection_a = mol.info.get('selection_a', None)
-        selection_b = mol.info.get('selection_b', None)
-    
-	    # Only create residue info if all dimer properties are present
-        if all(x is not None for x in [charge_a, charge_b, selection_a, selection_b]):
-            # Parse monomer sizes
-            n_monomer_a = parse_selection_range(selection_a)
-            n_monomer_b = parse_selection_range(selection_b)
-            # Validate that selections cover all atoms
-            if n_monomer_a > 0 and n_monomer_b > 0 and (n_monomer_a + n_monomer_b) == num_atoms:
-                residue_charge = np.array([int(charge_a), int(charge_b)])
-                residue_segments = np.concatenate([np.repeat(0, n_monomer_a), np.repeat(1, n_monomer_b)])
+    charge_a = mol.info.get('charge_a', None)
+    charge_b = mol.info.get('charge_b', None)
+    selection_a = mol.info.get('selection_a', None)
+    selection_b = mol.info.get('selection_b', None)
+    # Only create residue info if all dimer properties are present
+    if all(x is not None for x in [charge_a, charge_b, selection_a, selection_b]):
+        idx_a, idx_b = selection_indices(selection_a), selection_indices(selection_b)
+        # Validate that the selections split all atoms into two non-empty monomers
+        both = np.sort(np.concatenate([idx_a, idx_b]))
+        if len(idx_a) and len(idx_b) and np.array_equal(both, np.arange(num_atoms)):
+            residue_segments = np.zeros(num_atoms, np.int32)
+            if structure_type == 'dimer_translated':
+                # Separated monomers: each keeps its own charge.
+                residue_segments[idx_b] = 1
+                residue_charge = np.array([[int(charge_a), int(charge_b)]])
+            else:
+                # The dimer itself (prepare_dimer_xyz writes both into one file): one residue with
+                # the total charge, so both kinds batch together with the same fields.
+                residue_charge = np.array([[int(total_charge[0]), 0]])
 
     if mol.get_pbc().any():
         i, j, S = neighbor_list('ijS', mol, cutoff, self_interaction=self_interaction)
@@ -368,10 +375,7 @@ def ASE_to_jraph(
         global_context["cell"] = np.array(cell).reshape(1, 3, 3)
 
     if residue_charge is not None:
-        global_context.update({
-            "residue_charge": residue_charge,
-            "residue_segments": residue_segments,
-        })
+        global_context["residue_charge"] = residue_charge
 
     # Edges follow a similar convention where e.g. for positions and forces one has (num_nodes, 3) and for scalars
     # like hirshfeld volumes (num_nodes, ).
@@ -382,6 +386,8 @@ def ASE_to_jraph(
             "hirshfeld_ratios": hirshfeld_ratios.reshape(num_atoms),
             "c6_ratios": c6_ratios.reshape(num_atoms)
             }
+    if residue_segments is not None:
+        node_features["residue_segments"] = residue_segments
 
     graph = jraph.GraphsTuple(
         nodes=node_features,

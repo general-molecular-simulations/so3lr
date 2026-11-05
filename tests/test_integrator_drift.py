@@ -1,14 +1,25 @@
-"""Test integrator drift across all ensembles (NVT, NPT iso, NPT flex).
+"""Test integrator drift across ensembles (NVE, NVT, NPT iso, NPT flex).
 
-Asserts that max_rel_drift stays below thresholds established from
-measurement runs (scripts/measure_drift.py). The NPT flex thresholds
-verify the integrator bug fix (fractional coordinate conversion) holds.
+Asserts that the drift of each integrator's conserved quantity stays below
+thresholds established from measurement runs. The NPT flex thresholds verify the integrator bug fix (fractional coordinate
+conversion) holds.
 
-Thresholds have ~3x safety margin over measured values on water_64:
+Thresholds are relative to |H0| and have ~3x safety margin over measured
+values on water_64:
 - f64: all ensembles ~3.0e-4 → threshold 1.0e-3
 - f32: NVT/NPT iso ~3.0e-4 → threshold 1.0e-3
 - f32: NPT flex ~5-8e-3 → threshold 2.5e-2
+Failure messages also give the drift in meV/atom.
+
+The anisotropic flex mode is covered although the CLI and create_npt_nhc_fn
+reject it today (tests/test_npt_coupling_safety.py): its integrator must stay
+conservative for when it is re-enabled.
+
+The step and the invariant are jitted (nothing inside the potential is); the
+invariant is evaluated after every step, as when the thresholds were set.
 """
+import functools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -34,8 +45,9 @@ N_STEPS = 100
 DT_FS = 0.5e-3  # 0.5 fs in ps (metal units)
 
 
+@functools.lru_cache(maxsize=None)
 def _setup_system(dtype):
-    """Load water_64 system and create energy function."""
+    """Load water_64 system and create energy function (built once per dtype)."""
     mol = read(PACKAGE_DIR / 'tests' / 'test_data' / 'water_64.xyz')
     cell = jnp.array(np.diag(mol.get_cell()), dtype=dtype)
     species = jnp.array(mol.get_atomic_numbers())
@@ -87,26 +99,24 @@ def _setup_system(dtype):
 
 def _measure_drift(init_fn, apply_fn, invariant_fn, init_args, init_kwargs,
                    step_kwargs, invariant_kwargs, n_steps):
-    """Run simulation and return max_rel_drift."""
+    """Run simulation and return (max |H - H0|, H0)."""
     key = jax.random.PRNGKey(42)
     state = init_fn(key, *init_args, **init_kwargs)
+    step = jax.jit(apply_fn)
+    invariant = jax.jit(invariant_fn)
 
-    H0 = float(invariant_fn(state, **invariant_kwargs))
+    H0 = float(invariant(state, **invariant_kwargs))
     H_max_dev = 0.0
 
     for _ in range(n_steps):
-        state = apply_fn(state, **step_kwargs)
-        H_i = float(invariant_fn(state, **invariant_kwargs))
-        dev = abs(H_i - H0)
-        if dev > H_max_dev:
-            H_max_dev = dev
+        state = step(state, **step_kwargs)
+        H_max_dev = max(H_max_dev, abs(float(invariant(state, **invariant_kwargs)) - H0))
 
-    max_rel_drift = H_max_dev / abs(H0) if H0 != 0 else float('inf')
-    return max_rel_drift
+    return H_max_dev, H0
 
 
 def _run_ensemble(ensemble, dtype):
-    """Run a single ensemble and return max_rel_drift."""
+    """Run a single ensemble and return (max |H - H0|, H0)."""
     energy_fn, shift, positions, cell, masses, _, nbrs, nbrs_lr = _setup_system(dtype)
 
     # x64 is enabled globally (see top of file), so metal_unit_system() returns
@@ -224,20 +234,32 @@ def _run_ensemble(ensemble, dtype):
 ALL_ENSEMBLES = ['NVE', 'NVT', 'NPT_iso', 'NPT_flex_iso', 'NPT_flex_semi_iso', 'NPT_flex_aniso']
 
 
-@pytest.mark.parametrize('ensemble', ALL_ENSEMBLES)
-def test_integrator_drift_f64(ensemble):
-    """All ensembles should have max_rel_drift < 1e-3 in f64."""
-    max_rel_drift = _run_ensemble(ensemble, jnp.float64)
-    assert max_rel_drift < 1.0e-3, (
-        f"{ensemble} f64: max_rel_drift={max_rel_drift:.2e} exceeds 1.0e-3"
+def _assert_drift_below(ensemble, dtype, precision, threshold):
+    """max|H - H0| < threshold * |H0|; the failure message also gives meV/atom."""
+    max_dev, H0 = _run_ensemble(ensemble, dtype)
+    n_atoms = _setup_system(dtype)[2].shape[0]
+    assert max_dev < threshold * abs(H0), (
+        f"{ensemble} {precision}: max |H - H0| = {max_dev:.4e} eV "
+        f"({max_dev / n_atoms * 1e3:.4f} meV/atom) exceeds {threshold:.1e} x |H0| "
+        f"= {threshold * abs(H0):.4e} eV"
     )
 
 
-@pytest.mark.parametrize('ensemble', ALL_ENSEMBLES)
+# Every case runs with --full (tools/run_integrator_drift_tests.sh, one process
+# each). The short suite runs only float32 NVE (float32 throughout; the CLI default is
+# mixed): the plain integrator, about half a minute.
+SLOW = pytest.mark.slow
+
+
+@pytest.mark.parametrize('ensemble', [pytest.param(e, marks=SLOW) for e in ALL_ENSEMBLES])
+def test_integrator_drift_f64(ensemble):
+    """All ensembles should have a drift below 1e-3 x |H0| in f64."""
+    _assert_drift_below(ensemble, jnp.float64, 'f64', 1.0e-3)
+
+
+@pytest.mark.parametrize('ensemble', [e if e == 'NVE' else pytest.param(e, marks=SLOW)
+                                      for e in ALL_ENSEMBLES])
 def test_integrator_drift_f32(ensemble):
     """NPT flex has looser threshold in f32 due to matrix precision loss."""
-    max_rel_drift = _run_ensemble(ensemble, jnp.float32)
     threshold = 2.5e-2 if 'flex' in ensemble else 1.0e-3
-    assert max_rel_drift < threshold, (
-        f"{ensemble} f32: max_rel_drift={max_rel_drift:.2e} exceeds {threshold:.1e}"
-    )
+    _assert_drift_below(ensemble, jnp.float32, 'f32', threshold)
