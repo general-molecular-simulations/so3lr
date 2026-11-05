@@ -2572,8 +2572,15 @@ def perform_md(
             pert = kwargs.get('perturbation', None)
             if box_kw is not None and pert is not None:  # NPT box scaling (mirror tail corr)
                 box_kw = box_kw * pert
-            # Convert to Cartesian if the integrator carries fractional coordinates.
-            R_cart = positions_to_cartesian(R, box_kw, fractional_coordinates)
+            # Convert to Cartesian if the integrator carries fractional coordinates, with
+            # jax-md's `transform`: its derivative passes the gradient through unchanged (as
+            # the model's displacements do), so the restraint's force on fractional positions
+            # stays in real space. The plain product of positions_to_cartesian would scale it
+            # by the box (a restraint box-length times too strong).
+            if fractional_coordinates and box_kw is not None:
+                R_cart = jax_md.space.transform(box_kw, R)
+            else:
+                R_cart = R
             E_cyl = cylindrical_restraint_energy(
                 R_cart, cyl_idx_j, cyl_w, cyl_axis_hat, cyl_o, cyl_radius, cyl_kr,
                 axial_min=cyl_zmin, axial_max=cyl_zmax, k_z=cyl_kz,

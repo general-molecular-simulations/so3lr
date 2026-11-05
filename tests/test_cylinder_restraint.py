@@ -473,3 +473,121 @@ def test_axial_boltzmann_distribution():
 
     npt.assert_allclose(s.mean(), 0.0, atol=0.1)                        # symmetric band
     npt.assert_allclose((np.abs(s) <= zmax).mean(), frac_inside_analytic, atol=0.02)
+
+
+# --------------------------------------------------------------------------- #
+# Tier 4 - the restraint inside an MD run (perform_md)
+# --------------------------------------------------------------------------- #
+# Everything above tests the energy term on its own. These runs check what perform_md
+# builds around it: the guest's mass weights from the input structure, the default origin
+# (box centre), the normalised axis, the minimum image in the current box, and the
+# conversion of the integrator's positions to Cartesian ones, whose force must stay in real
+# space (jax-md's convention for the model's force too) with fractional positions (periodic
+# MD without PySAGES, and NPT) as with Cartesian ones (PySAGES in NVT).
+#
+# Benzoic acid in a 25 A box: its centre of mass starts 0.435 A from the z axis through the
+# box centre and 0.005 A below the centre along it, so with R_cyl = 0.2 A and an upper axial
+# bound at -0.3 A both walls push from the first step on (about 0.15 eV/A on an atom). The
+# force perform_md stores with its checkpoint must equal the model's force (the
+# neighbour-list potential in Cartesian coordinates, built here on its own) plus the
+# restraint's, written out below by hand.
+
+MD_XYZ = __import__("pathlib").Path(__file__).parent / "test_data" / "benzoic_acid_aq_1.xyz"
+MD_RESTRAINT = dict(radius=0.2, k_r=5.0, axial_max=-0.3, k_z=3.0)
+
+
+def _restraint_force_by_hand(atoms, R, L, axis, origin, radius, k_r, axial_max=None, k_z=None):
+    """-dE/dR of the flat-bottom cylinder (radial term, upper axial wall) on all atoms, the
+    centre of mass taken over all of them, minimum image in the orthorhombic box L."""
+    w = atoms.get_masses() / atoms.get_masses().sum()
+    a = np.asarray(axis, float) / np.linalg.norm(axis)
+    p = (w[:, None] * R).sum(0) - np.asarray(origin, float)
+    p -= L * np.round(p / L)
+    s = p @ a
+    perp = p - s * a
+    r = np.linalg.norm(perp)
+    dE_dcom = np.zeros(3)
+    if r > radius:
+        dE_dcom += k_r * (r - radius) * perp / r
+    if axial_max is not None and s > axial_max:
+        dE_dcom += k_z * (s - axial_max) * a
+    return -w[:, None] * dE_dcom[None, :]
+
+
+def _model_force(atoms, R, L):
+    """The model's force at Cartesian positions R in the box L, float64, without the restraint."""
+    from functools import partial
+    from so3lr.cli import so3lr_md as M
+    geo = M.atoms_to_jnp(atoms, precision=jnp.float64)
+    R, box, disp, _, _ = M.handle_box("periodic_cart", jnp.asarray(R), np.diag(L), precision=jnp.float64)
+    pot = M.load_model("so3lr-tauri-m-2606", precision=jnp.float64, lr_cutoff=12.0)
+    nfn, nfn_lr, efn = M.process_model(pot, geo["species"], disp, box, precision=jnp.float64)
+    nb, nb_lr = nfn.allocate(R, box=box), nfn_lr.allocate(R, box=box)
+    energy = partial(efn, k_smearing=None, k_smearing_disp=None, has_aux=False)
+    return -np.asarray(jax.grad(energy)(R, neighbor=nb.idx, neighbor_lr=nb_lr.idx, box=box,
+                                        k_grid=None, k_grid_disp=None))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("ensemble,cartesian,tilted", [
+    ("nvt", False, False),   # fractional positions: periodic MD without PySAGES
+    ("nvt", True, False),    # Cartesian positions: as PySAGES runs NVT
+    ("npt", False, False),   # fractional positions in a box the barostat moves
+    ("nvt", False, True),    # a general axis through an origin one lattice vector away
+])
+def test_restraint_force_in_md(tmp_path, ensemble, cartesian, tilted):
+    """``so3lr --settings`` (perform_md) adds exactly the restraint's force to the model's
+    (float64, 3 steps). Each run is its own process, as a CLI run is (an NVT run after an
+    NPT run in one Python process fails in jax-md's pytree checks, with or without the
+    restraint)."""
+    import subprocess
+    import yaml
+    from ase.io import read
+    from subprocess_env import so3lr_subprocess_env
+
+    atoms = read(MD_XYZ)
+    L0 = np.diag(atoms.cell[:])
+    if tilted:
+        # an axis through a point 1 A from the centre of mass (perpendicular to the axis),
+        # given one lattice vector away along x and z
+        w = atoms.get_masses() / atoms.get_masses().sum()
+        com = (w[:, None] * atoms.positions).sum(0)
+        axis = np.array([1.0, 2.0, 0.5])
+        a = axis / np.linalg.norm(axis)
+        side = np.cross(a, [0.0, 0.0, 1.0])
+        origin = com + side / np.linalg.norm(side) + np.array([L0[0], 0.0, -L0[2]])
+        restraint = dict(radius=0.2, k_r=5.0)              # radial wall only
+        settings = dict(cylinder_restraint_axis=axis.tolist(), cylinder_restraint_axis_origin=origin.tolist())
+    else:
+        axis, origin = [0.0, 0.0, 1.0], L0 / 2               # the defaults: z through the box centre
+        restraint = MD_RESTRAINT
+        settings = dict(cylinder_restraint_axial_max=restraint["axial_max"],
+                        cylinder_restraint_axial_force_constant=restraint["k_z"])
+    settings.update(
+        input_file=str(MD_XYZ), output_file="out.hdf5", log_file="out.log", ensemble=ensemble,
+        precision="float64", model_path="so3lr-tauri-m-2606", lr_cutoff=12.0, engine="standard",
+        relax_before_run=False, md_cycles=1, md_steps=3, save_buffer=1, seed=7, restart_save_path="r.npz",
+        enforce_cartesian_coordinates=cartesian, cylinder_restraint_enabled=True,
+        cylinder_restraint_atom_indices=list(range(len(atoms))),
+        cylinder_restraint_radius=restraint["radius"], cylinder_restraint_force_constant=restraint["k_r"])
+    if ensemble == "npt":
+        settings["md_P"] = 1.0
+    (tmp_path / "md.yaml").write_text(yaml.safe_dump(settings))
+    result = subprocess.run(["so3lr", "--settings", "md.yaml"], cwd=tmp_path, capture_output=True, text=True,
+                            env=so3lr_subprocess_env(), timeout=1500)
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert "Cylindrical / funnel restraint enabled" in (tmp_path / "out.log").read_text()
+
+    with np.load(tmp_path / "r.npz") as saved:
+        assert bool(saved["fractional_coordinates"]) == (not cartesian)
+        L = np.asarray(saved["box"], float).reshape(-1)
+        L = np.diag(np.asarray(saved["box"], float)) if L.size == 9 else L
+        R = np.asarray(saved["position"]) * (1.0 if cartesian else L)
+        stored = np.asarray(saved["force"])
+    if ensemble == "npt":
+        assert np.abs(L - L0).max() > 1e-6               # the box moved: the restraint sees the new one
+    by_hand = _restraint_force_by_hand(atoms, R, L, axis, origin, **restraint)
+    # the walls push (so a missing restraint, or one off by a factor, cannot pass) ...
+    assert np.abs(by_hand).max() > 0.05
+    # ... and the stored force is the model's plus exactly the restraint's
+    npt.assert_allclose(stored, _model_force(atoms, R, L) + by_hand, rtol=0, atol=1e-8)
