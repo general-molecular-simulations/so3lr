@@ -98,13 +98,8 @@ def run_pysages_cycle(method, pysages_result, generate_context, md_steps):
     ``method``. Returns the new PySAGES result."""
     # A fresh dict each call: pysages.run stores its context in context_args, and its
     # default dict would carry that into the next run started in the same process.
-    if pysages_result:
-        return jax.block_until_ready(
-            pysages.run(pysages_result, generate_context, md_steps,
-                        context_args={})
-        )
     return jax.block_until_ready(
-        pysages.run(method, generate_context, md_steps, context_args={})
+        pysages.run(pysages_result or method, generate_context, md_steps, context_args={})
     )
 
 
@@ -411,6 +406,8 @@ def _water_oxygens(arguments, nbrs, species, box):
     """
     if arguments.get('water_indices') is not None:
         return np.asarray(_expand_indices(arguments['water_indices']), dtype=int)
+    from ase import Atoms
+    from ase.neighborlist import neighbor_list
     species = np.asarray(species)
     box = np.asarray(box, dtype=float)
     if box.ndim == 2:
@@ -418,13 +415,13 @@ def _water_oxygens(arguments, nbrs, species, box):
     pos = np.asarray(nbrs.reference_position, dtype=float)
     if np.abs(pos).max() <= 1.0 + 1e-6:      # fractional coordinates
         pos = pos * box
+    # O(N) pair search instead of a dense (n_O, n_heavy, 3) array (GBs at 10k waters)
+    i, j = neighbor_list('ij', Atoms(numbers=species, positions=pos, cell=box, pbc=True), 1.7)
+    heavy = species != 1
+    bonded = np.zeros(len(species), dtype=bool)
+    bonded[i[heavy[i] & heavy[j]]] = True    # has another heavy atom within 1.7 A
     o_idx = np.flatnonzero(species == 8)
-    heavy = np.flatnonzero(species != 1)
-    d = pos[o_idx][:, None, :] - pos[heavy][None, :, :]
-    d -= box * np.round(d / box)
-    d = np.linalg.norm(d, axis=-1)
-    d[d < 1e-8] = np.inf
-    return o_idx[d.min(axis=1) > 1.7]
+    return o_idx[~bonded[o_idx]]
 
 
 def _neutral_h_counts(arguments, input_atoms, species, h_idx, owner_idx, ref_idx,
@@ -453,9 +450,11 @@ def _neutral_h_counts(arguments, input_atoms, species, h_idx, owner_idx, ref_idx
         raise ValueError(f"chargeseparation: {source} needs an orthorhombic periodic cell.")
     pos = np.asarray(atoms.positions, dtype=float)
     water_sites = np.searchsorted(owner_idx, ow_idx)
-    _, n_owned = charge_separation(
-        jnp.asarray(pos[h_idx]), jnp.asarray(pos[owner_idx]), jnp.asarray(pos[ref_idx]),
-        jnp.asarray(L), water_sites, sigma, 2.0)
+    # jitted, so XLA fuses the (n_H, n_owner, 3) temporaries instead of materialising
+    # each one on the device
+    _, n_owned = jax.jit(lambda h, o, r: charge_separation(
+        h, o, r, jnp.asarray(L), water_sites, sigma, 2.0))(
+        jnp.asarray(pos[h_idx]), jnp.asarray(pos[owner_idx]), jnp.asarray(pos[ref_idx]))
     n = np.asarray(n_owned, dtype=float)[np.searchsorted(owner_idx, site_idx)]
     n0 = np.round(n)
     off = np.abs(n - n0) > 0.1

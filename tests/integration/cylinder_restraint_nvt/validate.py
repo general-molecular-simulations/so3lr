@@ -34,7 +34,6 @@ def validate():
     )
 
     # Physics check: mass-weighted COM stays within the cylinder (+margin), and no NaNs.
-    ok = True
     masses = read(settings['input_file']).get_masses()
     idx = np.asarray(settings['cylinder_restraint_atom_indices'], dtype=int)
     w = (masses[idx] / masses[idx].sum())[:, None]
@@ -44,9 +43,7 @@ def validate():
         pos = np.asarray(f['positions'])  # (n_cycles, n_atoms, 3)
     if not np.all(np.isfinite(pos)):
         v.errors.append('trajectory positions contain non-finite values (NaN/Inf)')
-        ok = False
-    frames = pos.reshape(-1, n_atoms, 3)
-    com = np.einsum('ij,fjk->fik', w.T, frames[:, idx, :]).reshape(-1, 3)
+    com = (w * pos[:, idx]).sum(axis=1)                      # (n_cycles, 3)
     r_perp = np.hypot(com[:, 0] - origin[0], com[:, 1] - origin[1])
     margin = 0.5
     if r_perp.max() > radius + margin:
@@ -54,11 +51,10 @@ def validate():
             f'COM perpendicular distance {r_perp.max():.3f} Å exceeded '
             f'radius+margin ({radius + margin:.3f} Å)'
         )
-        ok = False
     else:
         print(f'COM r_perp max = {r_perp.max():.4f} Å (radius={radius} Å) OK')
 
-    return v.report() and ok
+    return v.report()
 
 
 if __name__ == '__main__':

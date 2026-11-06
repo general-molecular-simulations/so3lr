@@ -659,6 +659,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     positions, momenta, boxes, obs = [], [], [], {}
     total_time, timed = 0.0, 0
     last_checkpoint = None
+    checkpointing = restart_save_path is not None or pysages_save_path is not None
     for cycle in range(md_cycles):
         t0 = time.time()
         state, pe = advance(state, md_steps)
@@ -700,12 +701,12 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                     output_file, atoms, boxes, momenta, positions, obs, out_idx,
                     fractional_coordinates=frac_out, append=append_extxyz, overwrite=overwrite)
                 append_extxyz = True
-            if restart_save_path is not None or pysages_save_path is not None:
+            if checkpointing:
                 save_restart_checkpoints(state, L1, current_cycle, ensemble=ensemble,
                                          fractional_coordinates=npt, restart_save_path=restart_save_path,
                                          pysages_result=pysages_result, restart_pysages_save_path=pysages_save_path)
                 last_checkpoint = current_cycle
-    if (restart_save_path is not None or pysages_save_path is not None) and last_checkpoint != current_cycle:
+    if checkpointing and last_checkpoint != current_cycle:
         save_restart_checkpoints(state, cartesian(state)[1], current_cycle, ensemble=ensemble,
                                  fractional_coordinates=npt, restart_save_path=restart_save_path,
                                  pysages_result=pysages_result, restart_pysages_save_path=pysages_save_path)

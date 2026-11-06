@@ -15,7 +15,6 @@ same accuracy as the plain run. This simultaneously exercises:
 Marked ``slow``; run with ``pytest --full``.
 """
 
-import importlib
 import pytest
 
 pytest.importorskip("pysages", reason="PySAGES is an optional dependency")
@@ -112,9 +111,8 @@ def test_cylinder_restraint_composes_with_abf(tmp_path, monkeypatch):
     from pysages.colvars import Component
     from pysages.methods import ABF
 
-    jaxmd_backend = importlib.import_module("pysages.backends.jax-md")
-    jaxmd_backend.jax_fn_container["is_defined"] = False
-    jaxmd_backend.jax_fn_container["run_fn"] = None
+    from so3lr.cli.so3lr_pysages_interface import reset_pysages_runner
+    reset_pysages_runner()
 
     cv = Component([0], 0)
     grid = pysages.Grid(lower=(GRID_LO,), upper=(GRID_HI,), shape=(NBINS,))

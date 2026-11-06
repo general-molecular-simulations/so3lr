@@ -70,19 +70,16 @@ jobs:
             # Both run_short and run_full therefore pass --full.
             #
             # test_pysages_doublewell.py validates PySAGES' own jax-md backend
-            # rather than the SO3LR interface, so keep it in full mode only.
+            # rather than the SO3LR interface, so keep it in full mode only;
+            # test_pysages_cylinder.py is the same 5M-step ABF double well with
+            # the transverse term supplied by the cylinder (radius 0), so it
+            # goes with it.
             #
-            # The two cylindrical-restraint files live here rather than in
-            # "so3lr-other" because both need --full, which only this group
-            # passes in short mode:
-            #   * test_pysages_cylinder.py drives the restraint through a live
-            #     PySAGES ABF run, so it guards the same interface as the rest
-            #     of this group; it is @slow and would otherwise never run.
-            #   * test_cylinder_restraint.py is the unit-level companion. Its
-            #     Boltzmann tests are @slow, and they are the only tests that
-            #     validate the restraint thermodynamically.
-            # Together they add ~1 min, negligible against this job's timeout.
-            run_short: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py tests/test_cylinder_restraint.py tests/test_pysages_cylinder.py -v --tb=short --full"
+            # test_cylinder_restraint.py lives here rather than in "so3lr-other"
+            # because it needs --full, which only this group passes in short
+            # mode: its Boltzmann tests are @slow, and they are the only tests
+            # that validate the restraint thermodynamically.
+            run_short: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py tests/test_cylinder_restraint.py -v --tb=short --full"
             run_full: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py tests/test_cylinder_restraint.py tests/test_pysages_cylinder.py tests/test_pysages_doublewell.py -v --tb=short --full"
           - group: 8
             name: "md-regressions"

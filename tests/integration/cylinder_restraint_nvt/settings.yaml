@@ -3,7 +3,7 @@
 # (r_perp -> 0) safe-norm path of the restraint inside a real MD run.
 # Minimal settings for fast testing.
 
-input_file: input.gro
+input_file: acetone.gro  # from tests/test_data
 output_file: trajectory.hdf5
 log_file: so3lr.log
 

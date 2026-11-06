@@ -1800,7 +1800,7 @@ def cylindrical_restraint_energy(
     com = jnp.sum(weights * cartesian_position[idx], axis=0)
     p = com - origin
     if periodic and box is not None:
-        diag = jnp.diag(box) if jnp.ndim(box) == 2 else box
+        diag = box_to_diag(jnp.asarray(box))
         p = p - diag * jnp.round(p / diag)
     s = jnp.dot(p, axis_hat)
     perp = p - s * axis_hat
@@ -1816,6 +1816,55 @@ def cylindrical_restraint_energy(
     if axial_max is not None:
         E = E + 0.5 * kz * jnp.maximum(s - axial_max, 0.0) ** 2
     return E
+
+
+def build_cylinder_restraint(cyl_settings, masses, box, dtype):
+    """The constant arguments of ``cylindrical_restraint_energy`` for a run, from the
+    validated ``parse_cylinder_settings`` dict, the per-atom ``masses`` and the run's
+    ``box``. Kept as jnp constants / Python floats so the energy-fn wrapper closure
+    stays pure and JIT-friendly."""
+    masses = np.asarray(masses)
+    idx = np.asarray(cyl_settings['atom_indices'], dtype=int)
+    if np.any(idx < 0) or np.any(idx >= masses.shape[0]):
+        raise ValueError('cylinder_restraint_atom_indices contains out-of-range indices')
+    m = masses[idx]
+    if not np.all(m > 0):
+        raise ValueError('cylinder_restraint_atom_indices includes atoms with non-positive mass')
+    axis_hat = cyl_settings['axis'] / np.linalg.norm(cyl_settings['axis'])
+    # Static periodicity flag: a real periodic box is a vector/matrix with non-zero
+    # entries (free BC passes a scalar/zero box).
+    b = np.asarray(box)
+    periodic = b.ndim >= 1 and bool(np.any(b))
+    origin = cyl_settings['origin']        # validated (3,) or None -> box centre
+    if origin is None:
+        if b.shape not in ((3,), (3, 3)):
+            # free BC or a scalar/degenerate box: no meaningful center. Require an
+            # explicit origin rather than guessing a wrong-shaped default.
+            raise ValueError(
+                'cylinder_restraint_axis_origin must be given explicitly for this '
+                'boundary condition (no periodic box to derive a center from).'
+            )
+        origin = 0.5 * (b.sum(axis=0) if b.ndim == 2 else b)  # half the sum of lattice vectors
+    zmin, zmax = cyl_settings['axial_min'], cyl_settings['axial_max']
+    logger.info(
+        f'Cylindrical restraint: {len(idx)} guest atoms, '
+        f'R_cyl={cyl_settings["radius"]} Å, k_r={cyl_settings["k_r"]} eV/Å²'
+        + ('' if (zmin is None and zmax is None)
+           else f', axial=[{zmin}, {zmax}] Å, k_z={cyl_settings["k_z"]} eV/Å²')
+        + f', axis={axis_hat.tolist()}, origin={np.asarray(origin).tolist()}'
+    )
+    return dict(
+        idx=jnp.asarray(idx),
+        weights=jnp.asarray((m / m.sum())[:, None], dtype=dtype),
+        axis_hat=jnp.asarray(axis_hat, dtype=dtype),
+        origin=jnp.asarray(origin, dtype=dtype),
+        radius=cyl_settings['radius'],
+        k_r=cyl_settings['k_r'],
+        axial_min=zmin,
+        axial_max=zmax,
+        k_z=cyl_settings['k_z'],
+        periodic=periodic,
+    )
 
 
 def apply_atom_constraints_to_state(
@@ -2208,18 +2257,8 @@ def perform_md(
     # the listed atoms to a flat-bottom cylinder (radius) with optional axial bounds.
     # Scalar settings are validated here; baked constants (mass weights, normalized
     # axis, origin) are built later, once the box/coordinate system and atom count are
-    # known (see load_atom_masks below).
+    # known (build_cylinder_restraint, after load_atom_masks below).
     cyl_settings = parse_cylinder_settings(all_settings)
-    cyl_enabled = cyl_settings is not None
-    if cyl_enabled:
-        cyl_indices_setting = cyl_settings['atom_indices']
-        cyl_axis_np = cyl_settings['axis']
-        cyl_origin_setting = cyl_settings['origin']
-        cyl_radius = cyl_settings['radius']
-        cyl_kr = cyl_settings['k_r']
-        cyl_zmin = cyl_settings['axial_min']
-        cyl_zmax = cyl_settings['axial_max']
-        cyl_kz = cyl_settings['k_z']
 
     # Enhanced sampling (PySAGES)
     do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
@@ -2323,50 +2362,10 @@ def perform_md(
             f'constraint={fixed_atom_constraint}'
         )
 
-    # Build baked constants for the cylindrical / funnel restraint now that the box,
-    # coordinate system, and atom count are known. Kept as jnp constants / Python
-    # floats so the energy-fn wrapper closure stays pure and JIT-friendly.
-    if cyl_enabled:
-        cyl_idx_np = np.asarray(cyl_indices_setting, dtype=int)
-        if np.any(cyl_idx_np < 0) or np.any(cyl_idx_np >= position.shape[0]):
-            raise ValueError('cylinder_restraint_atom_indices contains out-of-range indices')
-        _cyl_masses = np.asarray(initial_geometry_dict['masses'])[cyl_idx_np]
-        if not np.all(_cyl_masses > 0):
-            raise ValueError('cylinder_restraint_atom_indices includes atoms with non-positive mass')
-        cyl_w = jnp.asarray((_cyl_masses / _cyl_masses.sum())[:, None], dtype=dtype)
-        cyl_idx_j = jnp.asarray(cyl_idx_np)
-        _cyl_ax = cyl_axis_np / np.linalg.norm(cyl_axis_np)
-        cyl_axis_hat = jnp.asarray(_cyl_ax, dtype=dtype)
-        # Static periodicity flag: a real periodic box is a vector/matrix with
-        # non-zero entries (free BC passes a scalar/zero box).
-        _cyl_box_np = np.asarray(box)
-        cyl_periodic = _cyl_box_np.ndim >= 1 and bool(np.any(_cyl_box_np))
-        if cyl_origin_setting is not None:
-            _cyl_origin = np.asarray(cyl_origin_setting, dtype=float).reshape(-1)
-            if _cyl_origin.shape != (3,):
-                raise ValueError(
-                    f'cylinder_restraint_axis_origin must be a length-3 vector, '
-                    f'got {cyl_origin_setting!r}.'
-                )
-        elif _cyl_box_np.shape == (3, 3):
-            _cyl_origin = 0.5 * _cyl_box_np.sum(axis=0)  # half the sum of lattice vectors
-        elif _cyl_box_np.shape == (3,):
-            _cyl_origin = 0.5 * _cyl_box_np
-        else:
-            # free BC or a scalar/degenerate box: no meaningful center. Require an
-            # explicit origin rather than guessing a wrong-shaped default.
-            raise ValueError(
-                'cylinder_restraint_axis_origin must be given explicitly for this '
-                'boundary condition (no periodic box to derive a center from).'
-            )
-        cyl_o = jnp.asarray(_cyl_origin, dtype=dtype)
-        logger.info(
-            f'Cylindrical restraint: {len(cyl_idx_np)} guest atoms, '
-            f'R_cyl={cyl_radius} Å, k_r={cyl_kr} eV/Å²'
-            + ('' if (cyl_zmin is None and cyl_zmax is None)
-               else f', axial=[{cyl_zmin}, {cyl_zmax}] Å, k_z={cyl_kz} eV/Å²')
-            + f', axis={_cyl_ax.tolist()}, origin={_cyl_origin.tolist()}'
-        )
+    # Baked constants for the cylindrical / funnel restraint, now that the box,
+    # coordinate system, and atom count are known.
+    cyl_restraint = (None if cyl_settings is None else build_cylinder_restraint(
+        cyl_settings, initial_geometry_dict['masses'], box, dtype))
 
     save_buffer = min(md_cycles, save_buffer)
     hdf5_store = None
@@ -2563,7 +2562,7 @@ def perform_md(
     # virial, and NPT box-derivative all come from autodiff. Composes with every
     # ensemble and every PySAGES method (the restraint lives in the potential; a
     # method only ever adds its own bias force on top).
-    if cyl_enabled:
+    if cyl_restraint is not None:
         _cyl_base_energy_fn = energy_fn
 
         def energy_fn_with_cylinder(R, **kwargs):
@@ -2581,12 +2580,7 @@ def perform_md(
                 R_cart = jax_md.space.transform(box_kw, R)
             else:
                 R_cart = R
-            E_cyl = cylindrical_restraint_energy(
-                R_cart, cyl_idx_j, cyl_w, cyl_axis_hat, cyl_o, cyl_radius, cyl_kr,
-                axial_min=cyl_zmin, axial_max=cyl_zmax, k_z=cyl_kz,
-                box=box_kw, periodic=cyl_periodic,
-            )
-            return E + E_cyl
+            return E + cylindrical_restraint_energy(R_cart, box=box_kw, **cyl_restraint)
 
         energy_fn = jax.jit(energy_fn_with_cylinder)
         logger.info('Cylindrical / funnel restraint enabled.')
