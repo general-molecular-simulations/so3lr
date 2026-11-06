@@ -30,6 +30,7 @@ import gc
 import logging
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -39,14 +40,18 @@ from ase.io import read
 from jax_md import units
 
 from so3lr.cli.so3lr_md import (
+    MAX_OVERFLOW_RETRIES,
     RestartInNewEnsembleError,
     _existing_regular_output_mode,
     _validate_md_output_write_policy,
     atoms_to_jnp,
     box_to_diag,
     cell_from_atoms_boundary_conditions,
+    check_enhanced_sampling,
+    check_pysages_restart_ensemble,
     handle_units,
     init_hdf5_store,
+    load_pysages_restart,
     load_state,
     run_dtypes,
     save_restart_checkpoints,
@@ -196,6 +201,13 @@ def _surrogate(R, box=None, perturbation=1.0, F=None, W=None, E=None, **kwargs):
     if W is not None:
         e = e + jnp.asarray(W, R.dtype) * (jnp.asarray(perturbation, R.dtype) - 1.0)
     return e
+
+
+def _traced(step):
+    """``step`` without jax-md's @jit, for PySAGES' loop on the engine's force (``perform_md_flash``):
+    jit caches the trace by function, so the jitted step would keep the force of the tables
+    before a widen(); unwrapped, each new PySAGES loop traces the force again."""
+    return getattr(step, "__wrapped__", step)
 
 
 def _finite(state):
@@ -380,6 +392,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     s = setup_run(dict(all_settings))
     validate_md_counts(s)
     atoms = read(s["input_file"]) if atoms is None else atoms
+    input_atoms = atoms     # the input structure (atoms is replaced by a copy in the run's box)
     # process_model's element check: past the trained elements the tables are gathered
     # out of bounds under jit
     check_atomic_numbers_supported(atoms.numbers, supported_atomic_numbers_for_model(s.get("model_path")))
@@ -388,6 +401,12 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         raise ValueError(f"flash: {problem}")
     ensemble = s.get("ensemble")
     npt = ensemble == "npt"
+    # PySAGES: perform_md's checks, and its interface around the jitted step (check.py
+    # admits nvt and nve in the fast mode)
+    pysages_set_dict = check_enhanced_sampling(s, ensemble, restart)
+    restart_pysages = pysages_set_dict is not None and s.get("restart_pysages_load_path") is not None
+    pysages_save_path = s.get("restart_pysages_save_path") if pysages_set_dict is not None else None
+    pysages_result = None
 
     output_file, output_format = s.get("output_file"), s.get("output_format")
     overwrite = bool(s.get("overwrite", False))
@@ -418,6 +437,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
             if not vacuum:                   # (structure_problem: a restart in free space has no box)
                 box = jnp.asarray(box_to_diag(rbox), sdt)
         except RestartInNewEnsembleError as e:
+            check_pysages_restart_ensemble(e, restart_pysages, ensemble)
             logger.warning(e)
             loaded = e.loaded_state
             if loaded.get("box") is not None and np.any(np.asarray(loaded["box"]) != 0):
@@ -431,12 +451,17 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         if not vacuum:
             atoms = atoms.copy()
             atoms.set_cell(np.diag(np.asarray(box, np.float64)))      # the engine starts in this box
+        if restart_pysages:
+            logger.info("Restarting from previous PySAGES run.")
+            pysages_result = load_pysages_restart(s["restart_pysages_load_path"], sdt)
 
     # the engine and its first evaluation, where the run starts: a failure up to here (a
     # kernel that does not compile on this GPU, too little memory) has written nothing
     start = position if state is None else (state.position * box if npt else state.position)
     try:
         eng, staged = build_engine(atoms, s, dtype, positions=np.asarray(start))
+        if pysages_set_dict is not None and staged:
+            raise ValueError("enhanced sampling runs the jitted fast mode, and this system needs a staged one")
         # several GPUs: the MD state on all of them
         position, box, geo, state, start = replicated(eng, (position, box, geo, state, start))
         strain = eng.energy_forces_strain_staged if staged else eng.energy_forces_strain
@@ -532,6 +557,52 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         if state is None:
             state = jax.jit(lambda R, F, m, p: init_fn(key, R, kT=kT, mass=m, momenta=p, F=F))(
                 position, F0, geo["masses"], geo.get("momenta"))
+    if pysages_set_dict is not None:
+        from so3lr.cli.so3lr_pysages_interface import (
+            create_pysages_interface_fns, get_pysages_method, reset_pysages_runner, run_pysages_cycle,
+            update_so3lr_after_pysages, warn_restart_method_mismatch)
+        # the CVs as perform_md builds them: coordinationnumber counts the edges of a
+        # short-range list like perform_md's, the others read only its starting positions
+        if any(cv["type"].lower() == "coordinationnumber" for cv in pysages_set_dict["cv"]):
+            displacement, _ = jax_md.space.periodic_general(box=box, fractional_coordinates=False)
+            cv_nbrs = jax_md.partition.neighbor_list(
+                displacement, box, r_cutoff=eng.rc, dr_threshold=0.,
+                capacity_multiplier=s.get("buffer_size_multiplier_sr", 1.25),
+                minimum_cell_size_multiplier=s.get("minimum_cell_size_multiplier", 1.0),
+                fractional_coordinates=False, format=jax_md.partition.NeighborListFormat.Sparse,
+                disable_cell_list=True).allocate(state.position, box=box)
+        else:
+            cv_nbrs = SimpleNamespace(reference_position=state.position)
+        method = get_pysages_method(pysages_set_dict, nbrs=cv_nbrs, species=geo["species"], box=box,
+                                    input_atoms=input_atoms)
+        if pysages_result is not None:
+            warn_restart_method_mismatch(method, pysages_result.method)
+
+        def step_md_fn(i, carry):
+            """perform_md's step over its carry; flash keeps no neighbour lists or k-grids."""
+            return (_traced(apply_fn)(carry[0]),) + tuple(carry[1:])
+
+        def advance(st, k):
+            """k steps under PySAGES, repeated from the last accepted result with wider tables
+            if a step overflowed; the energy at the last positions too."""
+            nonlocal pysages_result
+            for _ in range(MAX_OVERFLOW_RETRIES + 1):
+                if "pysages" not in eng.loops:          # widen() dropped PySAGES' compiled loop
+                    reset_pysages_runner()
+                    eng.loops["pysages"] = True
+                context = create_pysages_interface_fns(st, box, step_md_fn, md_dt, None, ensemble=ensemble)
+                result = run_pysages_cycle(method, pysages_result, context, k)
+                last = result.snapshots[-1]
+                if bool(jnp.isfinite(last.forces).all() & jnp.isfinite(last.positions).all()):
+                    break
+                eng.widen()
+                logger.info(f"Flash: tables widened (row {eng.K}, scratch {eng.maxh}); cycle repeated")
+            else:
+                raise RuntimeError(f"Flash: non-finite forces after {MAX_OVERFLOW_RETRIES} widenings of the "
+                                   f"tables: the dynamics diverged. Check the timestep, temperature and structure.")
+            pysages_result = result
+            st = update_so3lr_after_pysages(result, init_fn, key, kT, md_dt, None, None, ensemble=ensemble)[0]
+            return st, ef(st.position)[0]
     del position, F0, W0
 
     unit_sys = units.metal_unit_system()
@@ -557,8 +628,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         return f"{step}\t{ke + pe:.3f}\t{ke:.3f}\t{pe:.3f}\t{h:.3f}\t{temp:.1f}{b}\t{per_step:.2e}"
 
     # trajectory positions as perform_md writes them: fractional unless asked otherwise (or
-    # with no box)
-    frac_out = not (vacuum or s.get("output_cartesian_positions") or s.get("enforce_cartesian_coordinates"))
+    # with no box, or with PySAGES, which perform_md integrates in Cartesian coordinates)
+    frac_out = not (vacuum or s.get("output_cartesian_positions") or s.get("enforce_cartesian_coordinates")
+                    or pysages_set_dict is not None)
     odt = np.dtype(dtype)                       # in the model's precision, as perform_md writes them
     out_idx = s.get("output_atom_indices")
     hdf5_store = None
@@ -628,13 +700,15 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                     output_file, atoms, boxes, momenta, positions, obs, out_idx,
                     fractional_coordinates=frac_out, append=append_extxyz, overwrite=overwrite)
                 append_extxyz = True
-            if restart_save_path is not None:
+            if restart_save_path is not None or pysages_save_path is not None:
                 save_restart_checkpoints(state, L1, current_cycle, ensemble=ensemble,
-                                         fractional_coordinates=npt, restart_save_path=restart_save_path)
+                                         fractional_coordinates=npt, restart_save_path=restart_save_path,
+                                         pysages_result=pysages_result, restart_pysages_save_path=pysages_save_path)
                 last_checkpoint = current_cycle
-    if restart_save_path is not None and last_checkpoint != current_cycle:
+    if (restart_save_path is not None or pysages_save_path is not None) and last_checkpoint != current_cycle:
         save_restart_checkpoints(state, cartesian(state)[1], current_cycle, ensemble=ensemble,
-                                 fractional_coordinates=npt, restart_save_path=restart_save_path)
+                                 fractional_coordinates=npt, restart_save_path=restart_save_path,
+                                 pysages_result=pysages_result, restart_pysages_save_path=pysages_save_path)
     logger.info("Results saved to: " + str(Path(output_file)))
     if timed:
         logger.info(f"Average time per step: {total_time / timed:.2e} seconds")

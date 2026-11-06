@@ -93,6 +93,22 @@ atom_mask_path: null                       # Alternative: .npz file with 'mobile
 fixed_atom_constraint: cartesian_anchor    # How frozen atoms are anchored: "cartesian_anchor" pins them in real (Cartesian) space, robust to NPT box changes. [Default: cartesian_anchor]
 output_cartesian_positions: false          # Trajectory output format: for periodic runs, write saved positions in Cartesian coordinates. (NOT the integrator coord system — see enforce_cartesian_coordinates above.) [Default: false]
 
+## Cylindrical / funnel restraint (optional — confine the guest center of mass near a host axis)
+# Flat-bottom potential on the mass-weighted COM of the listed atoms: zero force inside the
+# cylinder (radius) and within the optional axial band, harmonic (inward) outside. Composes with
+# all ensembles and any PySAGES method (added to the energy function; forces come from autodiff).
+# Intended for host-guest binding free-energy runs where the host is held fixed via the atom
+# constraints above, so a static lab-frame axis is well defined.
+cylinder_restraint_enabled: false          # Master switch. [Default: false]
+cylinder_restraint_atom_indices: null      # 0-based indices of guest atoms defining the COM, e.g. [120, 121, 122]. Required when enabled. [Default: null]
+cylinder_restraint_axis: [0.0, 0.0, 1.0]   # Axis direction (auto-normalized). [Default: [0,0,1] (z)]
+cylinder_restraint_axis_origin: null       # Point on the axis, Cartesian Å [x, y, z]. [Default: null -> box center]
+cylinder_restraint_radius: null            # R_cyl in Å; flat-bottom inside, harmonic outside. Required when enabled. [Default: null]
+cylinder_restraint_force_constant: 5.0     # Radial force constant k_r in eV/Å². [Default: 5.0]
+cylinder_restraint_axial_min: null         # Optional lower axial bound (Å along axis, measured from origin). [Default: null]
+cylinder_restraint_axial_max: null         # Optional upper axial bound (Å along axis, measured from origin). [Default: null]
+cylinder_restraint_axial_force_constant: null  # Axial force constant k_z in eV/Å²; falls back to k_r if null. [Default: null]
+
 ## Minimization Settings (used before MD if relax_before_run: true, or with so3lr opt)
 relax_before_run: true                     # Perform geometry relaxation before MD run [Default: true]
 force_convergence: null                    # Force convergence criterion in eV/Å: stop early once max |F| falls below it; min_cycles stays the upper bound. [Default: null]  (CLI: --force-conv)
