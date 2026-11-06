@@ -476,6 +476,11 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         position = relax_flash(eng, staged, position, shift, box, s, atoms, start=(e0, F0),
                                opt_file=out.with_name(f"{out.stem}_opt.xyz"))
         e0, F0, W0 = strain(position)
+        if pysages_set_dict is not None:
+            # the CVs' reference structure (neutral H counts) is the relaxed one, as in
+            # perform_md (its initial_geometry takes the relaxed positions)
+            input_atoms = input_atoms.copy()
+            input_atoms.set_positions(np.asarray(position, np.float64))
 
     md_dt_ps = s.get("md_dt")
     md_T = s.get("md_T")
@@ -581,12 +586,15 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
             """perform_md's step over its carry; flash keeps no neighbour lists or k-grids."""
             return (_traced(apply_fn)(carry[0]),) + tuple(carry[1:])
 
+        diverged = ("the dynamics diverged. Check the timestep, temperature, structure and the "
+                    "bias (CV gradients).")
+
         def advance(st, k):
             """k steps under PySAGES, repeated from the last accepted result with wider tables
             if a step overflowed; the energy at the last positions too."""
             nonlocal pysages_result
-            for _ in range(MAX_OVERFLOW_RETRIES + 1):
-                if "pysages" not in eng.loops:          # widen() dropped PySAGES' compiled loop
+            for attempt in range(MAX_OVERFLOW_RETRIES + 1):
+                if "pysages" not in eng.loops:          # a rebuild dropped PySAGES' compiled loop
                     reset_pysages_runner()
                     eng.loops["pysages"] = True
                 context = create_pysages_interface_fns(st, box, step_md_fn, md_dt, None, ensemble=ensemble)
@@ -594,11 +602,20 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                 last = result.snapshots[-1]
                 if bool(jnp.isfinite(last.forces).all() & jnp.isfinite(last.positions).all()):
                     break
-                eng.widen()
+                if attempt == MAX_OVERFLOW_RETRIES:
+                    raise RuntimeError(f"Flash: non-finite forces after {MAX_OVERFLOW_RETRIES} repeats of "
+                                       f"the cycle with wider tables: {diverged}")
+                if bool(jnp.isfinite(last.positions).all()):
+                    # finite positions with non-finite forces: the engine's own call there
+                    # widens its tables if they overflowed (and drops PySAGES' loop); still
+                    # non-finite with wide enough tables, the dynamics diverged
+                    if not bool(jnp.isfinite(ef(last.positions)[1]).all()):
+                        raise RuntimeError(f"Flash: non-finite forces where the tables hold: {diverged}")
+                    if "pysages" in eng.loops:      # the engine did not rebuild there
+                        eng.widen()
+                else:
+                    eng.widen()                     # an earlier step overflowed (or diverged)
                 logger.info(f"Flash: tables widened (row {eng.K}, scratch {eng.maxh}); cycle repeated")
-            else:
-                raise RuntimeError(f"Flash: non-finite forces after {MAX_OVERFLOW_RETRIES} widenings of the "
-                                   f"tables: the dynamics diverged. Check the timestep, temperature and structure.")
             pysages_result = result
             st = update_so3lr_after_pysages(result, init_fn, key, kT, md_dt, None, None, ensemble=ensemble)[0]
             return st, ef(st.position)[0]
