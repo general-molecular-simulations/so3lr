@@ -635,6 +635,12 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     # Atom constraints
     'atom_mask_path', 'fixed_atom_indices', 'mobile_atom_indices',
     'fixed_atom_constraint', 'output_cartesian_positions',
+    # Cylindrical / funnel restraint
+    'cylinder_restraint_enabled', 'cylinder_restraint_atom_indices',
+    'cylinder_restraint_axis', 'cylinder_restraint_axis_origin',
+    'cylinder_restraint_radius', 'cylinder_restraint_force_constant',
+    'cylinder_restraint_axial_min', 'cylinder_restraint_axial_max',
+    'cylinder_restraint_axial_force_constant',
     # K-space electrostatics
     'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing',
     'kspace_interp_nodes', 'kspace_npt_cycles',

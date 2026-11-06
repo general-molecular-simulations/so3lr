@@ -53,7 +53,8 @@ try:
     from .so3lr_pysages_interface import (
         create_pysages_interface_fns, update_so3lr_after_pysages,
         save_pysages_state, parse_pysages_input, get_pysages_method,
-        load_pysages_state
+        warn_restart_method_mismatch,
+        load_pysages_state, run_pysages_cycle, reset_pysages_runner
     )
     HAS_PYSAGES = True
 except ImportError:
@@ -64,8 +65,8 @@ from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
 from ..md_settings_validation import (
-    DEFAULT_PRECISION, model_precision, resolve_ensemble, resolve_precision, state_precision,
-    validate_md_counts)
+    DEFAULT_PRECISION, expand_indices, model_precision, resolve_ensemble, resolve_precision,
+    state_precision, validate_md_counts)
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -1678,6 +1679,213 @@ def cartesian_to_positions(cartesian_position, box, fractional_coordinates: bool
     raise ValueError(f'Box must be scalar, vector, or matrix. Found {box}.')
 
 
+def parse_cylinder_settings(all_settings):
+    """Extract and validate the scalar cylindrical-restraint settings.
+
+    Returns ``None`` when the restraint is disabled, otherwise a dict of validated
+    parameters: ``atom_indices`` (a list of distinct ints from an index, a list or a
+    range string such as "0-19"; range-checked later against n_atoms),
+    ``axis`` (np.ndarray shape (3,), non-zero, un-normalized), ``origin`` (np.ndarray
+    (3,) or None -> box center), ``radius`` (float>0), ``k_r`` (float>=0),
+    ``axial_min``/``axial_max`` (float or None), ``k_z`` (float>=0, defaults to k_r).
+
+    Raises ``ValueError`` on any invalid combination so mistakes fail fast at setup
+    rather than producing a silently wrong ensemble.
+    """
+    if not bool(all_settings.get('cylinder_restraint_enabled', False)):
+        return None
+
+    spec = all_settings.get('cylinder_restraint_atom_indices')
+    try:
+        indices = [] if spec is None else expand_indices(spec)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f'cylinder_restraint_atom_indices: {e} (got {spec!r}).') from e
+    if not indices:
+        raise ValueError(
+            'cylinder_restraint_enabled=true requires cylinder_restraint_atom_indices '
+            '(0-based indices of the guest atoms defining the COM).'
+        )
+    if len(set(indices)) != len(indices):
+        dup = sorted({i for i in indices if indices.count(i) > 1})
+        raise ValueError(f'cylinder_restraint_atom_indices repeats atoms {dup}: each atom '
+                         f'enters the centre of mass once.')
+    radius = all_settings.get('cylinder_restraint_radius')
+    if radius is None:
+        raise ValueError('cylinder_restraint_enabled=true requires cylinder_restraint_radius (Å).')
+    radius = float(radius)
+    if radius <= 0.0:
+        raise ValueError(f'cylinder_restraint_radius must be > 0, got {radius}.')
+
+    k_r = all_settings.get('cylinder_restraint_force_constant')
+    k_r = 5.0 if k_r is None else float(k_r)          # null: the default
+    if k_r < 0.0:
+        raise ValueError(f'cylinder_restraint_force_constant must be >= 0, got {k_r}.')
+
+    axis = all_settings.get('cylinder_restraint_axis')
+    axis = np.asarray([0.0, 0.0, 1.0] if axis is None else axis, dtype=float).reshape(-1)
+    if axis.shape != (3,) or not np.any(axis):
+        raise ValueError(
+            f"cylinder_restraint_axis must be a non-zero length-3 vector, "
+            f"got {all_settings.get('cylinder_restraint_axis')!r}."
+        )
+
+    origin_setting = all_settings.get('cylinder_restraint_axis_origin')
+    if origin_setting is not None:
+        origin = np.asarray(origin_setting, dtype=float).reshape(-1)
+        if origin.shape != (3,):
+            raise ValueError(
+                f'cylinder_restraint_axis_origin must be a length-3 vector, got {origin_setting!r}.'
+            )
+    else:
+        origin = None
+
+    zmin = all_settings.get('cylinder_restraint_axial_min')
+    zmax = all_settings.get('cylinder_restraint_axial_max')
+    zmin = None if zmin is None else float(zmin)
+    zmax = None if zmax is None else float(zmax)
+    if zmin is not None and zmax is not None and zmin > zmax:
+        raise ValueError(
+            f'cylinder_restraint_axial_min ({zmin}) must not exceed '
+            f'cylinder_restraint_axial_max ({zmax}).'
+        )
+
+    kz_setting = all_settings.get('cylinder_restraint_axial_force_constant')
+    k_z = k_r if kz_setting is None else float(kz_setting)
+    if k_z < 0.0:
+        raise ValueError(f'cylinder_restraint_axial_force_constant must be >= 0, got {k_z}.')
+
+    return {
+        'atom_indices': indices,
+        'axis': axis,
+        'origin': origin,
+        'radius': radius,
+        'k_r': k_r,
+        'axial_min': zmin,
+        'axial_max': zmax,
+        'k_z': k_z,
+    }
+
+
+def cylindrical_restraint_energy(
+    cartesian_position,
+    idx,
+    weights,
+    axis_hat,
+    origin,
+    radius,
+    k_r,
+    axial_min=None,
+    axial_max=None,
+    k_z=None,
+    box=None,
+    periodic: bool = False,
+):
+    """Flat-bottom cylindrical (funnel) restraint on a mass-weighted center of mass.
+
+    Confines the COM of the atoms ``idx`` to a cylinder of ``radius`` about the line
+    through ``origin`` with direction ``axis_hat`` (assumed unit-length), with optional
+    flat-bottom axial bounds turning it into a one-sided funnel:
+
+        E = 0.5*k_r*relu(r_perp - radius)^2
+          + 0.5*k_z*relu(axial_min - s)^2  (if axial_min given)
+          + 0.5*k_z*relu(s - axial_max)^2  (if axial_max given)
+
+    where ``s`` is the signed coordinate along the axis and ``r_perp`` the perpendicular
+    distance to it. Zero energy/force inside the cylinder and within the axial band.
+
+    Parameters
+    ----------
+    cartesian_position : (n_atoms, 3) array in Cartesian Å.
+    idx : integer index array selecting the restrained atoms.
+    weights : (len(idx), 1) array; mass fractions summing to 1 (mass-weighted COM).
+    axis_hat : (3,) unit vector along the cylinder axis.
+    origin : (3,) point on the axis, Cartesian Å.
+    radius : scalar R_cyl in Å.
+    k_r : radial force constant (eV/Å²).
+    axial_min, axial_max : optional flat-bottom axial bounds (Å along the axis from origin).
+    k_z : axial force constant; falls back to ``k_r`` if None.
+    box : current (possibly NPT-scaled) box for the minimum-image convention.
+    periodic : if True and ``box`` given, make the guest whole around its first atom
+        before taking the COM (the integrator wraps atoms one at a time, so a guest
+        that crosses a box face would otherwise get a COM between its two halves), and
+        apply an orthorhombic minimum image to the origin->COM displacement, so the
+        result is independent of the periodic images. The guest must span less than
+        half the box along each axis.
+    """
+    x = cartesian_position[idx]
+    if periodic and box is not None:
+        diag = box_to_diag(jnp.asarray(box))
+        d = x - x[0]
+        com = x[0] + jnp.sum(weights * (d - diag * jnp.round(d / diag)), axis=0)
+        p = com - origin
+        p = p - diag * jnp.round(p / diag)
+    else:
+        p = jnp.sum(weights * x, axis=0) - origin
+    s = jnp.dot(p, axis_hat)
+    perp = p - s * axis_hat
+    # Safe norm: jnp.linalg.norm has a NaN gradient at the axis (perp == 0), which is
+    # exactly where a confined guest sits most of the time. The double-`where` gives
+    # r_perp == 0 there with a well-defined zero gradient.
+    sq = jnp.sum(perp ** 2)
+    r_perp = jnp.where(sq > 0.0, jnp.sqrt(jnp.where(sq > 0.0, sq, 1.0)), 0.0)
+    kz = k_r if k_z is None else k_z
+    E = 0.5 * k_r * jnp.maximum(r_perp - radius, 0.0) ** 2
+    if axial_min is not None:
+        E = E + 0.5 * kz * jnp.maximum(axial_min - s, 0.0) ** 2
+    if axial_max is not None:
+        E = E + 0.5 * kz * jnp.maximum(s - axial_max, 0.0) ** 2
+    return E
+
+
+def build_cylinder_restraint(cyl_settings, masses, box, dtype):
+    """The constant arguments of ``cylindrical_restraint_energy`` for a run, from the
+    validated ``parse_cylinder_settings`` dict, the per-atom ``masses`` and the run's
+    ``box``. Kept as jnp constants / Python floats so the energy-fn wrapper closure
+    stays pure and JIT-friendly."""
+    masses = np.asarray(masses)
+    idx = np.asarray(cyl_settings['atom_indices'], dtype=int)
+    if np.any(idx < 0) or np.any(idx >= masses.shape[0]):
+        raise ValueError('cylinder_restraint_atom_indices contains out-of-range indices')
+    m = masses[idx]
+    if not np.all(m > 0):
+        raise ValueError('cylinder_restraint_atom_indices includes atoms with non-positive mass')
+    axis_hat = cyl_settings['axis'] / np.linalg.norm(cyl_settings['axis'])
+    # Static periodicity flag: a real periodic box is a vector/matrix with non-zero
+    # entries (free BC passes a scalar/zero box).
+    b = np.asarray(box)
+    periodic = b.ndim >= 1 and bool(np.any(b))
+    origin = cyl_settings['origin']        # validated (3,) or None -> box centre
+    if origin is None:
+        if b.shape not in ((3,), (3, 3)):
+            # free BC or a scalar/degenerate box: no meaningful center. Require an
+            # explicit origin rather than guessing a wrong-shaped default.
+            raise ValueError(
+                'cylinder_restraint_axis_origin must be given explicitly for this '
+                'boundary condition (no periodic box to derive a center from).'
+            )
+        origin = 0.5 * (b.sum(axis=0) if b.ndim == 2 else b)  # half the sum of lattice vectors
+    zmin, zmax = cyl_settings['axial_min'], cyl_settings['axial_max']
+    logger.info(
+        f'Cylindrical restraint: {len(idx)} guest atoms, '
+        f'R_cyl={cyl_settings["radius"]} Å, k_r={cyl_settings["k_r"]} eV/Å²'
+        + ('' if (zmin is None and zmax is None)
+           else f', axial=[{zmin}, {zmax}] Å, k_z={cyl_settings["k_z"]} eV/Å²')
+        + f', axis={axis_hat.tolist()}, origin={np.asarray(origin).tolist()}'
+    )
+    return dict(
+        idx=jnp.asarray(idx),
+        weights=jnp.asarray((m / m.sum())[:, None], dtype=dtype),
+        axis_hat=jnp.asarray(axis_hat, dtype=dtype),
+        origin=jnp.asarray(origin, dtype=dtype),
+        radius=cyl_settings['radius'],
+        k_r=cyl_settings['k_r'],
+        axial_min=zmin,
+        axial_max=zmax,
+        k_z=cyl_settings['k_z'],
+        periodic=periodic,
+    )
+
+
 def apply_atom_constraints_to_state(
     state,
     mobile_mask: Optional[jnp.ndarray],
@@ -1773,6 +1981,126 @@ def save_restart_checkpoints(
         )
     if restart_pysages_save_path is not None:
         save_pysages_state(pysages_result, restart_pysages_save_path)
+
+
+# Methods that only add a fixed bias potential (no histogram accumulation
+# or adaptive forces) work correctly with any ensemble.
+PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS = {'harmonic', 'unbiased'}
+# CVs that keep the starting box for their minimum image: in NPT their value and bias
+# force would be computed in a box the barostat has left.
+PYSAGES_FIXED_BOX_CVS = {'chargeseparation', 'ionsitedistance'}
+
+
+def check_enhanced_sampling(all_settings: Dict, ensemble: str,
+                            restart: bool) -> Tuple[Optional[Dict], bool]:
+    """Validate the PySAGES settings before anything runs (both MD engines).
+
+    Returns the parsed PySAGES input (None when enhanced sampling is off) and whether
+    the run continues a PySAGES restart.
+    """
+    do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
+    restart_pysages_load_path = all_settings.get('restart_pysages_load_path')
+
+    restart_pysages = do_enhanced_sampling and restart_pysages_load_path is not None
+    if restart_pysages and not restart:
+        raise ValueError(
+            "restart_pysages_load_path needs an SO3LR restart (restart_load_path; "
+            "restart=True when calling perform_md directly): the PySAGES state "
+            "continues the dynamics it was saved with."
+        )
+    if restart_pysages_load_path is not None and not do_enhanced_sampling:
+        logger.warning("restart_pysages_load_path is ignored: do_enhanced_sampling is off.")
+
+    if not do_enhanced_sampling:
+        return None, False
+    if not HAS_PYSAGES:
+        raise ImportError(
+            "PySAGES is required for enhanced sampling but is not installed. "
+            "Install it with: pip install so3lr[pysages]"
+        )
+
+    pysages_set_dict = parse_pysages_input(all_settings.get('pysages_input', './pysages_input.yaml'))
+    pysages_method_name = pysages_set_dict['method'].lower()
+    if (pysages_method_name not in PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS
+            and ensemble not in ('nvt',)):
+        raise ValueError(
+            f"Enhanced sampling method '{pysages_method_name}' currently only "
+            f"supports the NVT ensemble (Nose-Hoover thermostat), but "
+            f"'{ensemble}' was selected. Methods that support all ensembles: "
+            f"{', '.join(sorted(PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS))}."
+        )
+    fixed_box = sorted({cv['type'].lower() for cv in pysages_set_dict['cv']}
+                       & PYSAGES_FIXED_BOX_CVS)
+    if fixed_box and ensemble == 'npt':
+        raise ValueError(
+            f"The collective variable(s) {', '.join(fixed_box)} keep the starting box "
+            f"for their minimum image, so they cannot run in NPT (the barostat changes "
+            f"the box). Use nvt, nve or nvt-langevin."
+        )
+    return pysages_set_dict, bool(restart_pysages)
+
+
+def check_pysages_restart_ensemble(error, restart_pysages: bool, ensemble: str) -> None:
+    """Refuse a PySAGES restart into another ensemble (``error``: the
+    RestartInNewEnsembleError of the SO3LR restart)."""
+    if restart_pysages and not error.reset_only:
+        raise ValueError(
+            f"restart_pysages_load_path cannot continue in another ensemble "
+            f"({error.loaded_state.get('ensemble')} -> {ensemble}): the PySAGES state "
+            f"continues the dynamics it was saved with."
+        ) from error
+
+
+def load_pysages_restart(path, dtype):
+    """The pickled PySAGES result at ``path``, its snapshots in the run's ``dtype``."""
+    restart_data_pysages = load_pysages_state(path)
+    # Match the dtypes of the pickled PySAGES result to the run precision,
+    # exactly as load_state() does for the .npz state. The PySAGES
+    # snapshot is pickled at whatever dtype the *originating* run carried
+    # (a fresh run keeps e.g. the Nose-Hoover chain `tau` at float32 even
+    # under x64, because jax-md hardcodes `tau = f32(tau)` in its
+    # integrator factories). On restart that pickled snapshot seeds the
+    # fori_loop carry's snapshot slot, while the jax-md state comes from
+    # load_state() normalized to `dtype`. If the two disagree, the loop
+    # carry input (snapshot float32) != output (re-snapshot of the
+    # float64 state) and jax.lax.scan rejects it:
+    #   loop_carry[...].chain_data['tau']: float32 vs float64
+    #
+    # The PySAGES Result is a plain class (not a registered pytree), so
+    # we normalize its pytree-valued `snapshots` attribute (a list of
+    # registered NamedTuples) rather than the Result itself -- a
+    # tree_map over the Result would treat it as a single opaque leaf
+    # and do nothing.
+    #
+    # IMPORTANT: only `snapshots` is normalized, NOT `states`. The
+    # method `states` (e.g. ABFState: Fsum/Wp/force/bias) are the
+    # sampler's internal accumulators, which are *not* part of the
+    # integrator carry that `_match_float_dtypes` pins to the run
+    # precision. PySAGES always computes them at its float64 working
+    # precision (the method view promotes the snapshot to float64 via
+    # `_as_default_float`), and a fresh run carries them at float64
+    # regardless of the integrator dtype. Casting them down to float32
+    # here both (a) silently degrades the accumulated mean force to
+    # float32 for the continued run, and (b) breaks ABF's out-of-bounds
+    # `cond` in `estimate_force`: the `average_force` branch derives its
+    # dtype from `Fsum` (now float32) while the `restraints_force`
+    # branch stays at the float64 of the restraint bounds baked into
+    # `method`, so `lax.cond` rejects the mismatched branches with
+    #   "true_fun output float64[1] vs false_fun output float32[1]".
+    # Leaving `states` at their pickled (float64) dtype matches exactly
+    # what a fresh run produces.
+    def _to_run_precision(x):
+        if hasattr(x, 'dtype') and jnp.issubdtype(
+            jnp.asarray(x).dtype, jnp.floating
+        ):
+            return jnp.asarray(x).astype(dtype)
+        return x
+
+    if restart_data_pysages.snapshots is not None:
+        restart_data_pysages.snapshots = jax.tree_util.tree_map(
+            _to_run_precision, restart_data_pysages.snapshots
+        )
+    return restart_data_pysages
 
 
 def _validate_md_output_write_policy(
@@ -1957,46 +2285,22 @@ def perform_md(
             f"are the only supported modes."
         )
 
+    # Cylindrical / funnel restraint (optional). Confines the mass-weighted COM of
+    # the listed atoms to a flat-bottom cylinder (radius) with optional axial bounds.
+    # Scalar settings are validated here; baked constants (mass weights, normalized
+    # axis, origin) are built later, once the box/coordinate system and atom count are
+    # known (build_cylinder_restraint, after load_atom_masks below).
+    cyl_settings = parse_cylinder_settings(all_settings)
+
     # Enhanced sampling (PySAGES)
     do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
-    pysages_input_path = all_settings.get('pysages_input', './pysages_input.yaml')
     restart_pysages_save_path = all_settings.get('restart_pysages_save_path')
     restart_pysages_load_path = all_settings.get('restart_pysages_load_path')
     enforce_cartesian_coordinates = all_settings.get('enforce_cartesian_coordinates', False)
 
     validate_md_counts(all_settings)
 
-    restart_pysages = do_enhanced_sampling and restart_pysages_load_path is not None
-    if restart_pysages and not restart:
-        raise ValueError(
-            "restart_pysages_load_path needs an SO3LR restart (restart_load_path; "
-            "restart=True when calling perform_md directly): the PySAGES state "
-            "continues the dynamics it was saved with."
-        )
-    if restart_pysages_load_path is not None and not do_enhanced_sampling:
-        logger.warning("restart_pysages_load_path is ignored: do_enhanced_sampling is off.")
-
-    if do_enhanced_sampling and not HAS_PYSAGES:
-        raise ImportError(
-            "PySAGES is required for enhanced sampling but is not installed. "
-            "Install it with: pip install so3lr[pysages]"
-        )
-
-    # Methods that only add a fixed bias potential (no histogram accumulation
-    # or adaptive forces) work correctly with any ensemble.
-    PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS = {'harmonic', 'unbiased'}
-
-    if do_enhanced_sampling:
-        pysages_set_dict = parse_pysages_input(pysages_input_path)
-        pysages_method_name = pysages_set_dict['method'].lower()
-        if (pysages_method_name not in PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS
-                and ensemble not in ('nvt',)):
-            raise ValueError(
-                f"Enhanced sampling method '{pysages_method_name}' currently only "
-                f"supports the NVT ensemble (Nose-Hoover thermostat), but "
-                f"'{ensemble}' was selected. Methods that support all ensembles: "
-                f"{', '.join(sorted(PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS))}."
-            )
+    pysages_set_dict, restart_pysages = check_enhanced_sampling(all_settings, ensemble, restart)
 
     # Handling of restart
     if restart_save_path is not None:
@@ -2089,6 +2393,11 @@ def perform_md(
             f'constraint={fixed_atom_constraint}'
         )
 
+    # Baked constants for the cylindrical / funnel restraint, now that the box,
+    # coordinate system, and atom count are known.
+    cyl_restraint = (None if cyl_settings is None else build_cylinder_restraint(
+        cyl_settings, initial_geometry_dict['masses'], box, dtype))
+
     save_buffer = min(md_cycles, save_buffer)
     hdf5_store = None
 
@@ -2108,12 +2417,7 @@ def perform_md(
                 validate_npt_restart_coupling(state, box, npt_coupling)
             position = state.position
         except RestartInNewEnsembleError as e:
-            if restart_pysages and not e.reset_only:
-                raise ValueError(
-                    f"restart_pysages_load_path cannot continue in another ensemble "
-                    f"({e.loaded_state.get('ensemble')} -> {ensemble}): the PySAGES state "
-                    f"continues the dynamics it was saved with."
-                ) from e
+            check_pysages_restart_ensemble(e, restart_pysages, ensemble)
             logger.warning(e)
             position = e.loaded_state['position']
             initial_geometry_dict['masses'] = e.loaded_state['mass']
@@ -2143,53 +2447,7 @@ def perform_md(
             raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
 
         if restart_pysages:
-            restart_data_pysages = load_pysages_state(restart_pysages_load_path)
-            # Match the dtypes of the pickled PySAGES result to the run precision,
-            # exactly as load_state() does for the .npz state above. The PySAGES
-            # snapshot is pickled at whatever dtype the *originating* run carried
-            # (a fresh run keeps e.g. the Nose-Hoover chain `tau` at float32 even
-            # under x64, because jax-md hardcodes `tau = f32(tau)` in its
-            # integrator factories). On restart that pickled snapshot seeds the
-            # fori_loop carry's snapshot slot, while the jax-md state comes from
-            # load_state() normalized to `dtype`. If the two disagree, the loop
-            # carry input (snapshot float32) != output (re-snapshot of the
-            # float64 state) and jax.lax.scan rejects it:
-            #   loop_carry[...].chain_data['tau']: float32 vs float64
-            #
-            # The PySAGES Result is a plain class (not a registered pytree), so
-            # we normalize its pytree-valued `snapshots` attribute (a list of
-            # registered NamedTuples) rather than the Result itself -- a
-            # tree_map over the Result would treat it as a single opaque leaf
-            # and do nothing.
-            #
-            # IMPORTANT: only `snapshots` is normalized, NOT `states`. The
-            # method `states` (e.g. ABFState: Fsum/Wp/force/bias) are the
-            # sampler's internal accumulators, which are *not* part of the
-            # integrator carry that `_match_float_dtypes` pins to the run
-            # precision. PySAGES always computes them at its float64 working
-            # precision (the method view promotes the snapshot to float64 via
-            # `_as_default_float`), and a fresh run carries them at float64
-            # regardless of the integrator dtype. Casting them down to float32
-            # here both (a) silently degrades the accumulated mean force to
-            # float32 for the continued run, and (b) breaks ABF's out-of-bounds
-            # `cond` in `estimate_force`: the `average_force` branch derives its
-            # dtype from `Fsum` (now float32) while the `restraints_force`
-            # branch stays at the float64 of the restraint bounds baked into
-            # `method`, so `lax.cond` rejects the mismatched branches with
-            #   "true_fun output float64[1] vs false_fun output float32[1]".
-            # Leaving `states` at their pickled (float64) dtype matches exactly
-            # what a fresh run produces.
-            def _to_run_precision(x):
-                if hasattr(x, 'dtype') and jnp.issubdtype(
-                    jnp.asarray(x).dtype, jnp.floating
-                ):
-                    return jnp.asarray(x).astype(dtype)
-                return x
-
-            if restart_data_pysages.snapshots is not None:
-                restart_data_pysages.snapshots = jax.tree_util.tree_map(
-                    _to_run_precision, restart_data_pysages.snapshots
-                )
+            restart_data_pysages = load_pysages_restart(restart_pysages_load_path, dtype)
 
     patched_potential_kwargs = intermediate_quantity_kwargs(observables)
 
@@ -2327,6 +2585,36 @@ def perform_md(
             return E
         energy_fn = jax.jit(energy_fn_with_tail)
         logger.info('Dispersion tail correction enabled for NPT.')
+
+    # --- Cylindrical / funnel restraint ---
+    # Flat-bottom potential on the mass-weighted COM of the restrained atoms:
+    #   E_cyl = 0.5*k_r*relu(r_perp - R_cyl)^2  (+ optional axial-band terms)
+    # Wraps energy_fn exactly like the dispersion tail correction above so the force,
+    # virial, and NPT box-derivative all come from autodiff. Composes with every
+    # ensemble and every PySAGES method (the restraint lives in the potential; a
+    # method only ever adds its own bias force on top).
+    if cyl_restraint is not None:
+        _cyl_base_energy_fn = energy_fn
+
+        def energy_fn_with_cylinder(R, **kwargs):
+            E = _cyl_base_energy_fn(R, **kwargs)
+            box_kw = kwargs.get('box', None)
+            pert = kwargs.get('perturbation', None)
+            if box_kw is not None and pert is not None:  # NPT box scaling (mirror tail corr)
+                box_kw = box_kw * pert
+            # Convert to Cartesian if the integrator carries fractional coordinates, with
+            # jax-md's `transform`: its derivative passes the gradient through unchanged (as
+            # the model's displacements do), so the restraint's force on fractional positions
+            # stays in real space. The plain product of positions_to_cartesian would scale it
+            # by the box (a restraint box-length times too strong).
+            if fractional_coordinates and box_kw is not None:
+                R_cart = jax_md.space.transform(box_kw, R)
+            else:
+                R_cart = R
+            return E + cylindrical_restraint_energy(R_cart, box=box_kw, **cyl_restraint)
+
+        energy_fn = jax.jit(energy_fn_with_cylinder)
+        logger.info('Cylindrical / funnel restraint enabled.')
 
     # Apply units
     # Unit boundary: handle_units takes (dt in ps, T in K, P in bar) and returns
@@ -2488,15 +2776,20 @@ def perform_md(
 
     # PySAGES setup (pysages_set_dict was already parsed during validation)
     if do_enhanced_sampling:
+        # PySAGES caches its compiled run loop, with the step of the run that built it,
+        # for the process: a second run in one process must not step with the first's
+        reset_pysages_runner()
         method = get_pysages_method(
             pysages_set_dict,
             nbrs=nbrs,
             species=initial_geometry_dict['species'],
-            box=box
+            box=box,
+            input_atoms=initial_geometry
         )
         if restart_pysages:
             logger.info('Restarting from previous PySAGES run.')
             pysages_result = restart_data_pysages
+            warn_restart_method_mismatch(method, pysages_result.method)
         else:
             pysages_result = None
 
@@ -2595,15 +2888,9 @@ def perform_md(
                 k_grid=k_grid, k_grid_disp=k_grid_disp
             )
 
-            if pysages_result:
-                candidate_result = jax.block_until_ready(
-                    pysages.run(pysages_result, generate_context, md_steps,
-                                context_args={})
-                )
-            else:
-                candidate_result = jax.block_until_ready(
-                    pysages.run(method, generate_context, md_steps)
-                )
+            candidate_result = run_pysages_cycle(
+                method, pysages_result, generate_context, md_steps
+            )
 
             new_state, nbrs, nbrs_lr, new_box, k_grid, k_grid_disp = jax.block_until_ready(
                 update_so3lr_after_pysages(
