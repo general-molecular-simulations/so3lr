@@ -201,6 +201,23 @@ class TestImportGuard:
 # 2. handle_box with periodic_cart
 # ===========================================================================
 
+    @pytest.mark.parametrize("cv_type", ["chargeseparation", "ionsitedistance"])
+    def test_fixed_box_cvs_reject_npt(self, cv_type, tmp_path):
+        """The proton-transfer CVs keep the starting box for their minimum image: a
+        harmonic or unbiased run (which pass the method/ensemble gate) cannot take
+        them into NPT, and NVT is unaffected."""
+        from so3lr.cli.so3lr_md import check_enhanced_sampling
+        pysages_path = tmp_path / "pysages_input.yaml"
+        _write_yaml(pysages_path, {"method": "unbiased", "cv": [
+            {"type": cv_type, "reference": [0], "indices": [0], "grid_min": -5.0,
+             "grid_max": 5.0, "grid_stride": 32, "periodic": False}]})
+        settings = {'do_enhanced_sampling': True, 'pysages_input': str(pysages_path)}
+        with pytest.raises(ValueError, match="cannot run in NPT"):
+            check_enhanced_sampling(settings, 'npt', restart=False)
+        parsed, restart_pysages = check_enhanced_sampling(settings, 'nvt', restart=False)
+        assert parsed['cv'][0]['type'] == cv_type and restart_pysages is False
+
+
 class TestHandleBox:
     """Tests for handle_box including the periodic_cart mode."""
 
@@ -755,6 +772,22 @@ class TestProcessCV:
                           nbrs=types.SimpleNamespace(reference_position=jnp.asarray(pos)),
                           species=species, box=jnp.asarray(box))
 
+    def test_chargeseparation_needs_water(self):
+        """Without water oxygens the CV would be identically zero: rejected, as
+        ionsitedistance rejects it."""
+        pos, species, box = self._proton_transfer_system()
+        with pytest.raises(ValueError, match="no water oxygens"):
+            self._chargesep(pos, species, box, water_indices=[])
+
+    def test_proton_transfer_cvs_take_a_box_matrix(self):
+        """A (3, 3) box (a restart of a semi-isotropic NPT run) reaches the CVs as its
+        sides, the same CV as from the side vector."""
+        pos, species, box = self._proton_transfer_system()
+        for build in (self._chargesep, self._isd):
+            cv, cv_m = build(pos, species, box), build(pos, species, np.diag(box))
+            np.testing.assert_array_equal(np.asarray(cv_m.box), np.asarray(cv.box))
+            np.testing.assert_allclose(self._evaluate(cv_m, pos)[0], self._evaluate(cv, pos)[0])
+
     def test_chargeseparation_pair_guard_plumbing(self):
         """The guard is off by default; the yaml options reach the CV."""
         pos, species, box = self._proton_transfer_system()
@@ -1046,6 +1079,25 @@ class TestRestartMethodMismatch:
         assert warn_restart_method_mismatch(build(charge_sites='all'), old) == [
             'cv[0].charge_sites', 'cv[0].n_ref_sites']
         assert warn_restart_method_mismatch(build(sigma=0.25), old) == ['cv[0].sigma']
+
+
+    def test_ionsitedistance_options(self):
+        """Edited IonSiteDistance options are reported on a restart (the run keeps the
+        restart file's CV)."""
+        from so3lr.cli.so3lr_pysages_interface import get_pysages_method, warn_restart_method_mismatch
+        import types
+        pos, species, box = TestProcessCV._proton_transfer_system(ion=True)
+
+        def build(**kw):
+            s = {'method': 'abf', 'method_args': {'N': 150},
+                 'cv': [{'type': 'ionsitedistance', 'indices': [0], 'grid_min': 1.0,
+                         'grid_max': 7.0, 'grid_stride': 32, 'periodic': False, **kw}]}
+            return get_pysages_method(s, nbrs=types.SimpleNamespace(reference_position=jnp.asarray(pos)),
+                                      species=species, box=jnp.asarray(box))
+        old = build()
+        assert warn_restart_method_mismatch(build(), old) == []
+        assert warn_restart_method_mismatch(build(tau=0.3), old) == ['cv[0].tau']
+        assert warn_restart_method_mismatch(build(mode='base'), old) == ['cv[0].mode', 'cv[0].n0']
 
 
 class TestGetPysagesMethod:

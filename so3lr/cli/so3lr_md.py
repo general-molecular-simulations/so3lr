@@ -65,8 +65,8 @@ from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
 from ..md_settings_validation import (
-    DEFAULT_PRECISION, model_precision, resolve_ensemble, resolve_precision, state_precision,
-    validate_md_counts)
+    DEFAULT_PRECISION, expand_indices, model_precision, resolve_ensemble, resolve_precision,
+    state_precision, validate_md_counts)
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -1683,7 +1683,8 @@ def parse_cylinder_settings(all_settings):
     """Extract and validate the scalar cylindrical-restraint settings.
 
     Returns ``None`` when the restraint is disabled, otherwise a dict of validated
-    parameters: ``atom_indices`` (raw, range-checked later against n_atoms),
+    parameters: ``atom_indices`` (a list of distinct ints from an index, a list or a
+    range string such as "0-19"; range-checked later against n_atoms),
     ``axis`` (np.ndarray shape (3,), non-zero, un-normalized), ``origin`` (np.ndarray
     (3,) or None -> box center), ``radius`` (float>0), ``k_r`` (float>=0),
     ``axial_min``/``axial_max`` (float or None), ``k_z`` (float>=0, defaults to k_r).
@@ -1694,12 +1695,20 @@ def parse_cylinder_settings(all_settings):
     if not bool(all_settings.get('cylinder_restraint_enabled', False)):
         return None
 
-    indices = all_settings.get('cylinder_restraint_atom_indices')
+    spec = all_settings.get('cylinder_restraint_atom_indices')
+    try:
+        indices = [] if spec is None else expand_indices(spec)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f'cylinder_restraint_atom_indices: {e} (got {spec!r}).') from e
     if not indices:
         raise ValueError(
             'cylinder_restraint_enabled=true requires cylinder_restraint_atom_indices '
             '(0-based indices of the guest atoms defining the COM).'
         )
+    if len(set(indices)) != len(indices):
+        dup = sorted({i for i in indices if indices.count(i) > 1})
+        raise ValueError(f'cylinder_restraint_atom_indices repeats atoms {dup}: each atom '
+                         f'enters the centre of mass once.')
     radius = all_settings.get('cylinder_restraint_radius')
     if radius is None:
         raise ValueError('cylinder_restraint_enabled=true requires cylinder_restraint_radius (Å).')
@@ -1707,11 +1716,13 @@ def parse_cylinder_settings(all_settings):
     if radius <= 0.0:
         raise ValueError(f'cylinder_restraint_radius must be > 0, got {radius}.')
 
-    k_r = float(all_settings.get('cylinder_restraint_force_constant', 5.0))
+    k_r = all_settings.get('cylinder_restraint_force_constant')
+    k_r = 5.0 if k_r is None else float(k_r)          # null: the default
     if k_r < 0.0:
         raise ValueError(f'cylinder_restraint_force_constant must be >= 0, got {k_r}.')
 
-    axis = np.asarray(all_settings.get('cylinder_restraint_axis', [0.0, 0.0, 1.0]), dtype=float).reshape(-1)
+    axis = all_settings.get('cylinder_restraint_axis')
+    axis = np.asarray([0.0, 0.0, 1.0] if axis is None else axis, dtype=float).reshape(-1)
     if axis.shape != (3,) or not np.any(axis):
         raise ValueError(
             f"cylinder_restraint_axis must be a non-zero length-3 vector, "
@@ -1967,12 +1978,17 @@ def save_restart_checkpoints(
 # Methods that only add a fixed bias potential (no histogram accumulation
 # or adaptive forces) work correctly with any ensemble.
 PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS = {'harmonic', 'unbiased'}
+# CVs that keep the starting box for their minimum image: in NPT their value and bias
+# force would be computed in a box the barostat has left.
+PYSAGES_FIXED_BOX_CVS = {'chargeseparation', 'ionsitedistance'}
 
 
-def check_enhanced_sampling(all_settings: Dict, ensemble: str, restart: bool) -> Optional[Dict]:
+def check_enhanced_sampling(all_settings: Dict, ensemble: str,
+                            restart: bool) -> Tuple[Optional[Dict], bool]:
     """Validate the PySAGES settings before anything runs (both MD engines).
 
-    Returns the parsed PySAGES input, or None when enhanced sampling is off.
+    Returns the parsed PySAGES input (None when enhanced sampling is off) and whether
+    the run continues a PySAGES restart.
     """
     do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
     restart_pysages_load_path = all_settings.get('restart_pysages_load_path')
@@ -1988,7 +2004,7 @@ def check_enhanced_sampling(all_settings: Dict, ensemble: str, restart: bool) ->
         logger.warning("restart_pysages_load_path is ignored: do_enhanced_sampling is off.")
 
     if not do_enhanced_sampling:
-        return None
+        return None, False
     if not HAS_PYSAGES:
         raise ImportError(
             "PySAGES is required for enhanced sampling but is not installed. "
@@ -2005,7 +2021,15 @@ def check_enhanced_sampling(all_settings: Dict, ensemble: str, restart: bool) ->
             f"'{ensemble}' was selected. Methods that support all ensembles: "
             f"{', '.join(sorted(PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS))}."
         )
-    return pysages_set_dict
+    fixed_box = sorted({cv['type'].lower() for cv in pysages_set_dict['cv']}
+                       & PYSAGES_FIXED_BOX_CVS)
+    if fixed_box and ensemble == 'npt':
+        raise ValueError(
+            f"The collective variable(s) {', '.join(fixed_box)} keep the starting box "
+            f"for their minimum image, so they cannot run in NPT (the barostat changes "
+            f"the box). Use nvt, nve or nvt-langevin."
+        )
+    return pysages_set_dict, bool(restart_pysages)
 
 
 def check_pysages_restart_ensemble(error, restart_pysages: bool, ensemble: str) -> None:
@@ -2268,8 +2292,7 @@ def perform_md(
 
     validate_md_counts(all_settings)
 
-    restart_pysages = do_enhanced_sampling and restart_pysages_load_path is not None
-    pysages_set_dict = check_enhanced_sampling(all_settings, ensemble, restart)
+    pysages_set_dict, restart_pysages = check_enhanced_sampling(all_settings, ensemble, restart)
 
     # Handling of restart
     if restart_save_path is not None:

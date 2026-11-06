@@ -403,8 +403,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     npt = ensemble == "npt"
     # PySAGES: perform_md's checks, and its interface around the jitted step (check.py
     # admits nvt and nve in the fast mode)
-    pysages_set_dict = check_enhanced_sampling(s, ensemble, restart)
-    restart_pysages = pysages_set_dict is not None and s.get("restart_pysages_load_path") is not None
+    pysages_set_dict, restart_pysages = check_enhanced_sampling(s, ensemble, restart)
     pysages_save_path = s.get("restart_pysages_save_path") if pysages_set_dict is not None else None
     pysages_result = None
 

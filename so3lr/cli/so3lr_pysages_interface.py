@@ -16,6 +16,7 @@ import jax_md.quantity
 import jax_md.units
 from jax_md.space import transform
 from so3lr.md_settings_validation import load_settings_yaml
+from so3lr.md_settings_validation import expand_indices as _expand_indices
 from jax import jit
 
 try:
@@ -356,49 +357,6 @@ def parse_pysages_input(input_path):
     return settings_dict
 
 
-def _expand_indices(spec):
-    """Expand a YAML index specification into a flat list of ints.
-
-    Supported forms:
-      - int:                       5             -> [5]
-      - list / tuple (any mix):    [0, 1, 2]     -> [0, 1, 2]
-                                   [0, "3-5"]    -> [0, 3, 4, 5]
-      - inclusive range string:    "0-19"        -> [0, 1, ..., 19]
-      - multi-token string:        "0-2, 5, 8-9" -> [0, 1, 2, 5, 8, 9]
-        (tokens separated by commas and/or whitespace; each token is a single
-        index or an inclusive "a-b" range with a <= b)
-
-    Ranges "a-b" include BOTH endpoints. Negative indices are not supported.
-    """
-    def expand_token(tok):
-        if isinstance(tok, bool):
-            raise ValueError(f"Invalid index: {tok!r}")
-        if isinstance(tok, int):
-            return [int(tok)]
-        if isinstance(tok, str):
-            out = []
-            for piece in tok.replace(',', ' ').split():
-                if '-' in piece:
-                    a, b = piece.split('-')
-                    a, b = int(a), int(b)
-                    if b < a:
-                        raise ValueError(
-                            f"Invalid index range '{piece}': end < start."
-                        )
-                    out.extend(range(a, b + 1))
-                else:
-                    out.append(int(piece))
-            return out
-        raise ValueError(f"Unsupported index token: {tok!r}")
-
-    if isinstance(spec, (list, tuple)):
-        result = []
-        for item in spec:
-            result.extend(expand_token(item))
-        return result
-    return expand_token(spec)
-
-
 def _water_oxygens(arguments, nbrs, species, box):
     """Water oxygen indices for the proton-transfer CVs (chargeseparation,
     ionsitedistance): 'water_indices' if given, otherwise all O atoms without another
@@ -594,6 +552,8 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None, input_atoms=None):
             raise ValueError("chargeseparation requires a periodic box.")
         species_arr = np.asarray(species)
         box_arr = np.asarray(box, dtype=float)
+        if box_arr.ndim == 2:                   # the CV's minimum image takes the sides
+            box_arr = np.diag(box_arr)
         ref_spec = arguments.get('reference', arguments.get('indices'))
         if ref_spec is None:
             raise ValueError("chargeseparation requires 'reference' (atom indices "
@@ -604,6 +564,10 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None, input_atoms=None):
         owner_idx = np.flatnonzero(np.isin(species_arr, owner_species))
         ow_idx = np.setdiff1d(_water_oxygens(arguments, nbrs, species_arr, box_arr),
                               ref_idx)
+        if len(ow_idx) == 0:
+            raise ValueError("chargeseparation: no water oxygens (O atoms without another "
+                             "heavy atom within 1.7 A, or 'water_indices'), so the CV would "
+                             "be identically zero.")
         if not np.all(np.isin(ow_idx, owner_idx)):
             raise ValueError("chargeseparation: water oxygens must be owner sites "
                              "(check owner_species).")
@@ -687,6 +651,8 @@ def process_cv(cv_dict, nbrs=None, species=None, box=None, input_atoms=None):
                              "ionizable site).")
         species_arr = np.asarray(species)
         box_arr = np.asarray(box, dtype=float)
+        if box_arr.ndim == 2:
+            box_arr = np.diag(box_arr)
         site_idx = np.asarray(_expand_indices(site_spec), dtype=int)
         if np.any(species_arr[site_idx] == 1):
             raise ValueError("ionsitedistance: the site atoms must be heavy atoms.")
@@ -797,12 +763,17 @@ def get_pysages_method(settings_dict, nbrs=None, species=None, box=None, input_a
         )
 
 
-# CV options compared on a PySAGES restart; other CVs: type and atom indices only (some
-# keep values derived from the starting positions, e.g. CoordinationNumber.number_nn_max)
+# CV options compared on a PySAGES restart; other CVs: type and atom indices only. Values
+# derived from the starting positions are left out (CoordinationNumber.number_nn_max).
 _RESTART_CV_OPTIONS = {
     'ChargeSeparation': ('water_sites', 'sigma', 'n_ref_water', 'pair_guard', 'n_hydronium',
                          'n_hydroxide', 'guard_width', 'guard_x0', 'charge_sites',
                          'n_ref_sites'),
+    'IonSiteDistance': ('water_sites', 'mode', 'n0', 'a', 'sigma', 'tau'),
+    # r0_lookup_table carries r0_multiplier; species_nn, nn_mask and the exponents come
+    # from species, indices_nn and cn_exps
+    'CoordinationNumber': ('r0_lookup_table', 'species_nn', 'nn_mask', 'num_exp',
+                           'denom_exp'),
 }
 
 

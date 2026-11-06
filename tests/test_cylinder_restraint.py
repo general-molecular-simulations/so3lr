@@ -350,6 +350,41 @@ class TestParseSettings:
         with pytest.raises(ValueError):
             parse_cylinder_settings(settings)
 
+    @pytest.mark.parametrize("spec,expected", [
+        (0, [0]),                                  # a single index, atom 0 included
+        ([0], [0]),
+        ("3-5", [3, 4, 5]),                        # the range strings PySAGES groups take
+        ([0, "3-5", 8], [0, 3, 4, 5, 8]),
+        (np.array([2, 7]), [2, 7]),
+    ])
+    def test_index_forms(self, spec, expected):
+        s = parse_cylinder_settings({'cylinder_restraint_enabled': True,
+                                     'cylinder_restraint_atom_indices': spec,
+                                     'cylinder_restraint_radius': 5.0})
+        assert s['atom_indices'] == expected
+
+    @pytest.mark.parametrize("spec,match", [
+        ([3, 3, 4], "repeats atoms \\[3\\]"),    # would double atom 3's weight
+        ("4-2", "end < start"),
+        ([], "requires cylinder_restraint_atom_indices"),
+        ("x", "cylinder_restraint_atom_indices"),
+    ])
+    def test_bad_indices_raise(self, spec, match):
+        with pytest.raises(ValueError, match=match):
+            parse_cylinder_settings({'cylinder_restraint_enabled': True,
+                                     'cylinder_restraint_atom_indices': spec,
+                                     'cylinder_restraint_radius': 5.0})
+
+    def test_null_means_default(self):
+        """A settings file's null takes the documented default."""
+        s = parse_cylinder_settings({'cylinder_restraint_enabled': True,
+                                     'cylinder_restraint_atom_indices': [1],
+                                     'cylinder_restraint_radius': 5.0,
+                                     'cylinder_restraint_force_constant': None,
+                                     'cylinder_restraint_axis': None})
+        assert s['k_r'] == 5.0 and s['k_z'] == 5.0
+        npt.assert_array_equal(s['axis'], [0.0, 0.0, 1.0])
+
 
 class TestRegression:
     def test_fixed_config_energy_and_force(self):

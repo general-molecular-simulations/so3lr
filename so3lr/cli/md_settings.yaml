@@ -100,7 +100,7 @@ output_cartesian_positions: false          # Trajectory output format: for perio
 # Intended for host-guest binding free-energy runs where the host is held fixed via the atom
 # constraints above, so a static lab-frame axis is well defined.
 cylinder_restraint_enabled: false          # Master switch. [Default: false]
-cylinder_restraint_atom_indices: null      # 0-based indices of guest atoms defining the COM, e.g. [120, 121, 122]. Required when enabled. [Default: null]
+cylinder_restraint_atom_indices: null      # 0-based indices of guest atoms defining the COM, e.g. [120, 121, 122] or "120-122". Required when enabled. [Default: null]
 cylinder_restraint_axis: [0.0, 0.0, 1.0]   # Axis direction (auto-normalized). [Default: [0,0,1] (z)]
 cylinder_restraint_axis_origin: null       # Point on the axis, Cartesian Å [x, y, z]. [Default: null -> box center]
 cylinder_restraint_radius: null            # R_cyl in Å; flat-bottom inside, harmonic outside. Required when enabled. [Default: null]
