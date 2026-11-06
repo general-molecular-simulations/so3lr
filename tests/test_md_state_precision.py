@@ -1,7 +1,10 @@
-"""The MD state's precision (md_precision, float64 by default) around a float32 model, on the
-neighbour-list engine as on flash, in so3lr eval and the jax-md potential; float64 needs x64."""
+"""A run's precision: float32 or float64 throughout, or mixed (the default), a float32 model
+around a float64 MD state, on the neighbour-list engine as on flash, in so3lr eval, the ASE
+calculator and the jax-md potential; float64 needs x64."""
+import logging
 import pathlib
 import subprocess
+from unittest import mock
 
 import h5py
 import jax
@@ -12,7 +15,8 @@ from jax_md import space
 
 from subprocess_env import so3lr_subprocess_env
 from so3lr.jaxmd_utils import neighbor_list_featurizer, to_jax_md
-from so3lr.md_settings_validation import canonical_precision, state_precision
+from so3lr.md_settings_validation import (
+    available_precision, canonical_precision, model_precision, resolve_precision, state_precision)
 
 ACETONE = pathlib.Path(__file__).resolve().parent / 'test_data' / 'acetone.xyz'
 
@@ -27,17 +31,32 @@ def x64():
 
 
 def test_precision_helpers():
-    assert canonical_precision(None) == 'float32' and canonical_precision(' Float64 ') == 'float64'
-    with pytest.raises(ValueError):
-        canonical_precision('mixed')
-    assert state_precision('float32', {}) == 'float64'
-    assert state_precision('float32', {'md_precision': 'float32'}) == 'float32'
-    assert state_precision('float32', {'flash_mixed': False}) == 'float32'  # the older form
-    assert state_precision('float32', {'md_precision': 'float64', 'flash_mixed': False}) == 'float64'
-    assert state_precision('float64', {'md_precision': 'float32'}) == 'float64'
-    assert state_precision('float32', {'flash_mixed': None}) == 'float64'  # unset, not off
-    with pytest.raises(ValueError):
-        state_precision('float64', {'md_precision': 'flaot32'})
+    assert canonical_precision(None) == 'mixed' and canonical_precision(' Float64 ') == 'float64'
+    with pytest.raises(ValueError, match='float32, float64 or mixed'):
+        canonical_precision('flaot32')
+    assert [(model_precision(p), state_precision(p)) for p in ('float32', 'mixed', 'float64')] == [
+        ('float32', 'float32'), ('float32', 'float64'), ('float64', 'float64')]
+    # flash_mixed, deprecated, decides a float32 model's run as it did before precision took mixed
+    with mock.patch.object(logging.getLogger('SO3LR'), 'warning') as warning:
+        assert resolve_precision({}) == 'mixed' and not warning.called
+        for precision in (None, 'float32', 'mixed'):
+            assert resolve_precision({'precision': precision, 'flash_mixed': True}) == 'mixed'
+            assert resolve_precision({'precision': precision, 'flash_mixed': False}) == 'float32'
+        assert resolve_precision({'precision': 'float64', 'flash_mixed': False}) == 'float64'
+    assert warning.call_count == 7
+    assert all('flash_mixed is deprecated' in call.args[0] for call in warning.call_args_list)
+    with pytest.raises(ValueError, match='md_precision was replaced'):
+        resolve_precision({'md_precision': 'float32'})
+    with pytest.raises(ValueError, match='flash_mixed must be true or false'):
+        resolve_precision({'flash_mixed': 'false'})  # a settings file bypasses the CLI's choices
+
+
+def test_without_x64_an_unset_precision_is_float32_and_mixed_or_float64_raise():
+    with jax.enable_x64(False):
+        assert available_precision({}) == available_precision({'precision': 'float32'}) == 'float32'
+        for precision in ('mixed', 'float64'):
+            with pytest.raises(ValueError, match='float64 needs'):
+                available_precision({'precision': precision})
 
 
 def test_featurizer_forms_displacements_before_the_cast(x64):
@@ -83,15 +102,14 @@ def _so3lr(tmp_path, *args):
 
 @pytest.mark.slow
 def test_neighbour_list_engine_state_trajectory_and_restart_dtypes(tmp_path):
-    """Default: float64 state, trajectories in the model's float32. A float32-state checkpoint
-    (md_precision float32) continues in another ensemble with the float64 state (the loaded
-    arrays are cast)."""
+    """Default (mixed): float64 state, trajectories in the model's float32. A float32 run's
+    checkpoint continues in another ensemble with the float64 state (the loaded arrays are cast)."""
     _so3lr(tmp_path, 'nve', '--output', str(tmp_path / 'a.hdf5'), '--restart-save', str(tmp_path / 'a.npz'))
     assert np.load(tmp_path / 'a.npz')['position'].dtype == np.float64
     with h5py.File(tmp_path / 'a.hdf5') as f:
         assert f['positions'].dtype == np.float32
 
-    _so3lr(tmp_path, 'nve', '--md-precision', 'float32', '--output', str(tmp_path / 'b.xyz'),
+    _so3lr(tmp_path, 'nve', '--precision', 'float32', '--output', str(tmp_path / 'b.xyz'),
            '--restart-save', str(tmp_path / 'b.npz'))
     assert np.load(tmp_path / 'b.npz')['position'].dtype == np.float32
 
@@ -213,17 +231,19 @@ def test_jax_md_potential_computes_in_its_dtype(x64):
 
 def test_float64_without_x64_raises():
     """JAX truncates float64 to float32 without x64, with a warning only: the ASE calculator and the
-    potential refuse it before loading the model."""
+    potential refuse it before loading the model, the ASE calculator also precision mixed."""
     from so3lr import So3lrCalculator, So3lrPotential
     with jax.enable_x64(False):
         for make in (So3lrCalculator, So3lrPotential):
             with pytest.raises(ValueError, match='float64 needs'):
                 make(model=MODEL, dtype=np.float64)
+        with pytest.raises(ValueError, match='float64 needs'):
+            So3lrCalculator(model=MODEL, precision='mixed')
 
 
 def test_ase_calculator_forms_displacements_before_the_cast(x64):
-    """So3lrCalculator in float32 (its default) around float64 positions, as in so3lr's MD: 400 A
-    from the origin it gives the forces at the origin, in float64; without x64 (float32) it does not."""
+    """So3lrCalculator's default precision, mixed, as in so3lr's MD: 400 A from the origin it gives
+    the forces at the origin, in float64; precision float32 does not."""
     from so3lr import So3lrCalculator
     near, far = _near_and_far()
 
@@ -231,9 +251,9 @@ def test_ase_calculator_forms_displacements_before_the_cast(x64):
         calc = So3lrCalculator(model=MODEL, **kwargs)
         return [calc.get_forces(atoms) for atoms in (near, far)]
 
-    f_near, f_far = forces()
-    with jax.enable_x64(False):
-        g_near, g_far = forces()
-    assert f_near.dtype == np.float64
+    (f_near, f_far), (g_near, g_far) = forces(), forces(precision='float32')
+    assert f_near.dtype == np.float64 and g_near.dtype == np.float32
+    with pytest.raises(ValueError, match='contradicts precision'):
+        So3lrCalculator(model=MODEL, precision='mixed', dtype=np.float64)
     moved, moved_float32 = np.abs(f_near - f_far).max(), np.abs(g_near - g_far).max()
     assert moved < 1e-5 < moved_float32, (moved, moved_float32)
