@@ -38,11 +38,14 @@ def ref_energy(R, idx, w, axis_hat, origin, radius, k_r,
     w = np.asarray(w, dtype=float).reshape(-1, 1)
     axis_hat = np.asarray(axis_hat, dtype=float)
     origin = np.asarray(origin, dtype=float)
-    com = np.sum(w * R[idx], axis=0)
-    p = com - origin
+    X = R[idx]
     if periodic and box is not None:
         box = np.asarray(box, dtype=float)
         diag = np.diag(box) if box.ndim == 2 else box
+        X = X[0] + (X - X[0]) - diag * np.round((X - X[0]) / diag)   # the guest made whole
+    com = np.sum(w * X, axis=0)
+    p = com - origin
+    if periodic and box is not None:
         p = p - diag * np.round(p / diag)
     s = float(np.dot(p, axis_hat))
     r_perp = float(np.linalg.norm(p - s * axis_hat))
@@ -276,6 +279,25 @@ class TestMinimumImage:
         exp = ref_energy(R, idx, np.asarray(w), AXIS, origin, RADIUS, KR,
                          box=box, periodic=True)
         npt.assert_allclose(got, exp, rtol=1e-10, atol=1e-10)
+
+
+    def test_guest_across_a_box_face(self):
+        """Atoms wrapped one at a time (as the integrator wraps them) leave the guest
+        in two pieces at a box face: energy and forces are those of the whole guest."""
+        box = np.array([10.0, 10.0, 10.0])
+        R, idx, w = make_system()
+        R = R.copy(); R[idx] = np.array([[-0.8, 0.3, 0.1], [0.4, -0.2, 0.5], [1.1, 0.9, -0.3]])
+        R[idx] += np.array([0.0, 4.0, 2.0])         # the guest whole, around x = 0
+        wrapped = R.copy(); wrapped[idx] %= box     # its first atom jumps to x = 9.2
+        assert np.ptp(wrapped[idx, 0]) > box[0] / 2
+        kw = dict(axis_hat=jnp.asarray(AXIS), origin=jnp.asarray(np.array([1.0, 1.0, 0.0])),
+                  radius=RADIUS, k_r=KR, axial_min=0.0, axial_max=1.0, k_z=2.0,
+                  box=jnp.asarray(box), periodic=True)
+        e_whole, e_wrapped = E_jax(R, idx, w, **kw), E_jax(wrapped, idx, w, **kw)
+        assert e_whole > 0.1                        # both walls push
+        npt.assert_allclose(e_wrapped, e_whole, rtol=1e-12)
+        grad = jax.grad(lambda X: cylindrical_restraint_energy(X, jnp.asarray(idx), w, **kw))
+        npt.assert_allclose(grad(jnp.asarray(wrapped)), grad(jnp.asarray(R)), rtol=1e-10, atol=1e-12)
 
 
 class TestGeneralAxis:

@@ -1805,14 +1805,22 @@ def cylindrical_restraint_energy(
     axial_min, axial_max : optional flat-bottom axial bounds (Å along the axis from origin).
     k_z : axial force constant; falls back to ``k_r`` if None.
     box : current (possibly NPT-scaled) box for the minimum-image convention.
-    periodic : if True and ``box`` given, apply an orthorhombic minimum image to the
-        origin->COM displacement so the result is independent of the periodic image.
+    periodic : if True and ``box`` given, make the guest whole around its first atom
+        before taking the COM (the integrator wraps atoms one at a time, so a guest
+        that crosses a box face would otherwise get a COM between its two halves), and
+        apply an orthorhombic minimum image to the origin->COM displacement, so the
+        result is independent of the periodic images. The guest must span less than
+        half the box along each axis.
     """
-    com = jnp.sum(weights * cartesian_position[idx], axis=0)
-    p = com - origin
+    x = cartesian_position[idx]
     if periodic and box is not None:
         diag = box_to_diag(jnp.asarray(box))
+        d = x - x[0]
+        com = x[0] + jnp.sum(weights * (d - diag * jnp.round(d / diag)), axis=0)
+        p = com - origin
         p = p - diag * jnp.round(p / diag)
+    else:
+        p = jnp.sum(weights * x, axis=0) - origin
     s = jnp.dot(p, axis_hat)
     perp = p - s * axis_hat
     # Safe norm: jnp.linalg.norm has a NaN gradient at the axis (perp == 0), which is
