@@ -159,12 +159,7 @@ def settings_problem(settings, task="md"):
         return "it needs a long-range cutoff"
     kspace = s.get("kspace_electrostatics") or s.get("kspace_dispersion")
     for key, value in s.items():
-        if key == "do_enhanced_sampling" and task != "md":
-            # enhanced sampling is an MD setting (below): opt, eval and ase decline it as they
-            # did before flash ran PySAGES, so their engine choice does not change
-            if not _off(value):
-                return "it has no enhanced sampling"
-        elif key in UNSUPPORTED:
+        if key in UNSUPPORTED:
             # the tail correction and the mesh re-tuning act only in NPT (the re-tuning
             # only with k-space); perform_md re-tunes every 100 cycles when the key is
             # absent, flash whenever the box leaves its margin
@@ -174,7 +169,11 @@ def settings_problem(settings, task="md"):
                 return f"it has no {UNSUPPORTED[key]}"
         elif key not in HANDLED and key not in IRRELEVANT and not _off(value):
             return f"it does not know the setting {key!r}"
-    if task == "md" and not _off(s.get("do_enhanced_sampling")):
+    if not _off(s.get("do_enhanced_sampling")):
+        # enhanced sampling is an MD setting: opt, eval and ase decline it as they did
+        # before flash ran PySAGES, so their engine choice does not change
+        if task != "md":
+            return "it has no enhanced sampling"
         # PySAGES runs the MD step inside its own jitted loop: the jitted fast mode on one
         # GPU, in nvt or nve (flash's NPT runs each step from Python); and in a periodic box
         # (vacuum_problem)
