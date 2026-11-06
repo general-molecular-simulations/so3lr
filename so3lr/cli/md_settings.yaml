@@ -36,12 +36,10 @@ ensemble: "nvt"                            # Ensemble type: "nvt", "nvt-langevin
 total_charge: 0                            # Total charge of the system [Default: 0]
 num_unpaired_electrons: 0                  # Spin: number of unpaired electrons (2S). [Default: 0]
 seed: 52                                   # Random seed for MD and thermostat initialization [Default: 52]
-precision: "float32"                       # Numerical precision: "float32" or "float64" [Default: "float32"]
+precision: "mixed"                         # "float32" or "float64" throughout, or "mixed": a float32 model around a float64 MD state (positions, momenta, box, energy sums) [Default: "mixed"]
 matmul_precision: "highest"                # JAX matmul precision: "default" / "high" / "highest". "highest" forces full float32 and avoids TF32 drift on GPUs. [Default: "highest"]
 engine: "auto"                             # MD engine: "auto" (flash on an NVIDIA GPU or AMD MI355X when it covers the run, else the neighbour-list engine; the log says which), "flash" or "standard" [Default: "auto"]
 flash_mode: "auto"                         # Flash memory mode, fastest first: "fast", "default", "lean", "leanest", "minimal"; "auto" picks the fastest that fits [Default: "auto"]
-md_precision: null                         # MD state (positions, momenta, box, energy sums) around a float32 model, on both engines: "float64" or "float32"; null takes flash_mixed (float64 unless false). A float64 model always has a float64 state. [Default: null]
-flash_mixed: true                          # Older form of md_precision (true: float64, false: float32); md_precision takes precedence [Default: true]
 
 ## Input/Output Settings
 input_file: "path/to/geometry.xyz"         # Path to the initial geometry file (required)
@@ -94,6 +92,22 @@ mobile_atom_indices: null                  # Alternative: indices of atoms allow
 atom_mask_path: null                       # Alternative: .npz file with 'mobile_atom_indices'/'fixed_atom_indices' arrays (explicit YAML keys override it). [Default: null]
 fixed_atom_constraint: cartesian_anchor    # How frozen atoms are anchored: "cartesian_anchor" pins them in real (Cartesian) space, robust to NPT box changes. [Default: cartesian_anchor]
 output_cartesian_positions: false          # Trajectory output format: for periodic runs, write saved positions in Cartesian coordinates. (NOT the integrator coord system — see enforce_cartesian_coordinates above.) [Default: false]
+
+## Cylindrical / funnel restraint (optional — confine the guest center of mass near a host axis)
+# Flat-bottom potential on the mass-weighted COM of the listed atoms: zero force inside the
+# cylinder (radius) and within the optional axial band, harmonic (inward) outside. Composes with
+# all ensembles and any PySAGES method (added to the energy function; forces come from autodiff).
+# Intended for host-guest binding free-energy runs where the host is held fixed via the atom
+# constraints above, so a static lab-frame axis is well defined.
+cylinder_restraint_enabled: false          # Master switch. [Default: false]
+cylinder_restraint_atom_indices: null      # 0-based indices of guest atoms defining the COM, e.g. [120, 121, 122]. Required when enabled. [Default: null]
+cylinder_restraint_axis: [0.0, 0.0, 1.0]   # Axis direction (auto-normalized). [Default: [0,0,1] (z)]
+cylinder_restraint_axis_origin: null       # Point on the axis, Cartesian Å [x, y, z]. [Default: null -> box center]
+cylinder_restraint_radius: null            # R_cyl in Å; flat-bottom inside, harmonic outside. Required when enabled. [Default: null]
+cylinder_restraint_force_constant: 5.0     # Radial force constant k_r in eV/Å². [Default: 5.0]
+cylinder_restraint_axial_min: null         # Optional lower axial bound (Å along axis, measured from origin). [Default: null]
+cylinder_restraint_axial_max: null         # Optional upper axial bound (Å along axis, measured from origin). [Default: null]
+cylinder_restraint_axial_force_constant: null  # Axial force constant k_z in eV/Å²; falls back to k_r if null. [Default: null]
 
 ## Minimization Settings (used before MD if relax_before_run: true, or with so3lr opt)
 relax_before_run: true                     # Perform geometry relaxation before MD run [Default: true]
