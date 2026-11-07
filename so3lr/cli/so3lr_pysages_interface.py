@@ -7,6 +7,7 @@ without PySAGES installed.
 """
 
 import logging
+import os
 
 import numpy as np
 import jax
@@ -112,6 +113,32 @@ def reset_pysages_runner():
     import importlib
     backend = importlib.import_module("pysages.backends.jax-md")
     backend.jax_fn_container.update(is_defined=False, run_fn=None)
+
+
+# PySAGES' jax-md backend appends each cycle's per-step CVs to this file in the working
+# directory, in one write at the end of the cycle.
+CV_LOG = 'cv_vs_timestep.txt'
+CV_LOG_DISCARDED = 'cv_vs_timestep_discarded.txt'
+
+
+def cv_log_size():
+    """Size of the CV log now: where the next cycle's rows will start."""
+    return os.path.getsize(CV_LOG) if os.path.exists(CV_LOG) else 0
+
+
+def discard_cv_rows(start, note):
+    """Move the rows that a discarded cycle appended to the CV log (from byte ``start``)
+    to the discarded-cycles log, under a ``# note`` line, so the CV log keeps one row per
+    accepted step."""
+    if not os.path.exists(CV_LOG):
+        return
+    with open(CV_LOG, 'rb+') as f:
+        f.seek(start)
+        rows = f.read()
+        f.truncate(start)
+    if rows:
+        with open(CV_LOG_DISCARDED, 'ab') as f:
+            f.write(f'# {note}\n'.encode() + rows)
 
 
 @jit

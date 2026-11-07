@@ -81,8 +81,13 @@ jobs:
             # that validate the restraint thermodynamically. Its
             # test_restraint_force_in_md (four float64 so3lr runs, each loading
             # the model) runs in full mode only.
-            run_short: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py tests/test_cylinder_restraint.py --deselect tests/test_cylinder_restraint.py::test_restraint_force_in_md -v --tb=short --full"
-            run_full: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py tests/test_cylinder_restraint.py tests/test_pysages_cylinder.py tests/test_pysages_doublewell.py -v --tb=short --full"
+            #
+            # test_flash.py's PySAGES tests (the flash driver around a CPU stand-in
+            # engine, and perform_md's repeated cycles) need the pysages extra, so
+            # they run here too, in their own pytest call (-k applies to every file
+            # of a call); "md-regressions" skips them.
+            run_short: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py tests/test_cylinder_restraint.py --deselect tests/test_cylinder_restraint.py::test_restraint_force_in_md -v --tb=short --full || s=$?; uv run --no-sync pytest tests/test_flash.py -k pysages -v --tb=short || s=$?; exit ${s:-0}"
+            run_full: "uv run --no-sync pytest tests/test_pysages_interface.py tests/test_restart_coordinates.py tests/test_pysages_cli.py tests/test_cylinder_restraint.py tests/test_pysages_cylinder.py tests/test_pysages_doublewell.py -v --tb=short --full || s=$?; uv run --no-sync pytest tests/test_flash.py -k pysages -v --tb=short || s=$?; exit ${s:-0}"
           - group: 8
             name: "md-regressions"
             sync_extra: ""

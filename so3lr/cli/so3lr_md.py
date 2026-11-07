@@ -54,7 +54,8 @@ try:
         create_pysages_interface_fns, update_so3lr_after_pysages,
         save_pysages_state, parse_pysages_input, get_pysages_method,
         warn_restart_method_mismatch,
-        load_pysages_state, run_pysages_cycle, reset_pysages_runner
+        load_pysages_state, run_pysages_cycle, reset_pysages_runner,
+        cv_log_size, discard_cv_rows
     )
     HAS_PYSAGES = True
 except ImportError:
@@ -2888,6 +2889,7 @@ def perform_md(
                 k_grid=k_grid, k_grid_disp=k_grid_disp
             )
 
+            cv_log_start = cv_log_size()
             candidate_result = run_pysages_cycle(
                 method, pysages_result, generate_context, md_steps
             )
@@ -2938,6 +2940,9 @@ def perform_md(
             if lr_overflow:
                 lr_overflow_extra += OVERFLOW_EXTRA_LR
             overflow_retries += 1
+            if do_enhanced_sampling:
+                discard_cv_rows(cv_log_start, f"{md_steps} steps from step {current_cycle * md_steps}, "
+                                f"attempt {overflow_retries}: discarded (neighbour lists overflowed)")
             if overflow_retries > MAX_OVERFLOW_RETRIES:
                 raise RuntimeError(
                     f"Neighbor-list overflow did not stabilize after "

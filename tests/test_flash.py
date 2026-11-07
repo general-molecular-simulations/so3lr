@@ -670,16 +670,23 @@ def test_flash_runs_pysages_as_perform_md(tmp_path, monkeypatch):
     """perform_md_flash's PySAGES path (here around the neighbour-list potential) gives
     perform_md's ABF run: per-step CVs, trajectory, final state, the ABF accumulators, and
     across the cycle boundary. A table overflow in the first cycle repeats it from the last
-    accepted state and PySAGES result, with PySAGES' loop compiled again."""
+    accepted state and PySAGES result, with PySAGES' loop compiled again; the discarded
+    attempt's CV rows go to cv_vs_timestep_discarded.txt."""
     pytest.importorskip("pysages")
     ref = _pysages_outputs(_pysages_run(tmp_path, "standard", "standard", monkeypatch))
     for overflows in (0, 1):
-        out = _pysages_outputs(_pysages_run(tmp_path, f"flash{overflows}", "flash", monkeypatch, overflows))
-        log = (tmp_path / f"flash{overflows}" / "out.log").read_text()
+        d = _pysages_run(tmp_path, f"flash{overflows}", "flash", monkeypatch, overflows)
+        out = _pysages_outputs(d)
+        log = (d / "out.log").read_text()
         assert ("cycle repeated" in log) == bool(overflows)
         (traj, state, abf, cv), (traj_ref, state_ref, abf_ref, cv_ref) = out, ref
-        # the overflowing attempt also wrote its CVs, as perform_md's neighbour-list retries do
-        _check("CVs", cv[-len(cv_ref):], cv_ref, 1e-9)
+        _check("CVs", cv, cv_ref, 1e-9)
+        discarded = d / "cv_vs_timestep_discarded.txt"
+        assert discarded.exists() == bool(overflows)
+        if overflows:
+            assert discarded.read_text().startswith(
+                "# 5 steps from step 0, attempt 1: discarded (non-finite forces)\n")
+            assert np.loadtxt(discarded).shape == (5, cv_ref.shape[1])
         for k in ("positions", "momenta"):
             _check(k, traj[k], traj_ref[k], 1e-9)
         for k in ("position", "momentum", "force"):
@@ -688,6 +695,30 @@ def test_flash_runs_pysages_as_perform_md(tmp_path, monkeypatch):
         np.testing.assert_array_equal(np.asarray(abf.hist), np.asarray(abf_ref.hist))
         for k in ("Fsum", "force", "bias"):
             _check(f"ABF {k}", getattr(abf, k), getattr(abf_ref, k), 1e-8)
+
+
+def test_perform_md_repeats_an_overflowed_pysages_cycle(tmp_path, monkeypatch):
+    """A neighbour-list overflow in perform_md's first PySAGES cycle repeats it from the last
+    accepted state and PySAGES result: the same run as without one. The discarded attempt's
+    CV rows go to cv_vs_timestep_discarded.txt, so cv_vs_timestep.txt keeps one row per step."""
+    pytest.importorskip("pysages")
+    from so3lr.cli import so3lr_md
+    ref = _pysages_outputs(_pysages_run(tmp_path, "ref", "standard", monkeypatch))
+    real, calls = so3lr_md.check_overflow, []
+
+    def overflow_once(*args, **kwargs):
+        nbrs, nbrs_lr, sr, lr = real(*args, **kwargs)
+        calls.append(sr)
+        return nbrs, nbrs_lr, sr or len(calls) == 1, lr
+
+    monkeypatch.setattr(so3lr_md, "check_overflow", overflow_once)
+    d = _pysages_run(tmp_path, "repeat", "standard", monkeypatch)
+    assert len(calls) == 3
+    _same_run(_pysages_outputs(d), ref, 1e-9)
+    discarded = d / "cv_vs_timestep_discarded.txt"
+    assert discarded.read_text().startswith(
+        "# 5 steps from step 0, attempt 1: discarded (neighbour lists overflowed)\n")
+    _check("discarded CVs", np.loadtxt(discarded), ref[3][:5], 1e-9)
 
 
 def test_flash_continues_a_perform_md_pysages_run(tmp_path, monkeypatch):

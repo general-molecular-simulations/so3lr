@@ -563,8 +563,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                 position, F0, geo["masses"], geo.get("momenta"))
     if pysages_set_dict is not None:
         from so3lr.cli.so3lr_pysages_interface import (
-            create_pysages_interface_fns, get_pysages_method, reset_pysages_runner, run_pysages_cycle,
-            update_so3lr_after_pysages, warn_restart_method_mismatch)
+            create_pysages_interface_fns, cv_log_size, discard_cv_rows, get_pysages_method,
+            reset_pysages_runner, run_pysages_cycle, update_so3lr_after_pysages, warn_restart_method_mismatch)
         # the CVs as perform_md builds them: coordinationnumber counts the edges of a
         # short-range list like perform_md's, the others read only its starting positions
         if any(cv["type"].lower() == "coordinationnumber" for cv in pysages_set_dict["cv"]):
@@ -591,17 +591,21 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
 
         def advance(st, k):
             """k steps under PySAGES, repeated from the last accepted result with wider tables
-            if a step overflowed; the energy at the last positions too."""
+            if a step overflowed (the discarded attempt's CV rows moved to the discarded-cycles
+            log); the energy at the last positions too."""
             nonlocal pysages_result
             for attempt in range(MAX_OVERFLOW_RETRIES + 1):
                 if "pysages" not in eng.loops:          # a rebuild dropped PySAGES' compiled loop
                     reset_pysages_runner()
                     eng.loops["pysages"] = True
                 context = create_pysages_interface_fns(st, box, step_md_fn, md_dt, None, ensemble=ensemble)
+                cv_log_start = cv_log_size()
                 result = run_pysages_cycle(method, pysages_result, context, k)
                 last = result.snapshots[-1]
                 if bool(jnp.isfinite(last.forces).all() & jnp.isfinite(last.positions).all()):
                     break
+                discard_cv_rows(cv_log_start, f"{k} steps from step {current_cycle * md_steps}, "
+                                f"attempt {attempt + 1}: discarded (non-finite forces)")
                 if attempt == MAX_OVERFLOW_RETRIES:
                     raise RuntimeError(f"Flash: non-finite forces after {MAX_OVERFLOW_RETRIES} repeats of "
                                        f"the cycle with wider tables: {diverged}")
