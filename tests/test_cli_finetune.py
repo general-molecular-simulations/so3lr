@@ -198,3 +198,87 @@ def test_cli_finetune_water_pbc(workdir, test_config_water):
     assert total is not None and trainable == total, (
         f"strategy=full trained {trainable}/{total} parameters"
     )
+
+
+def _write_config(test_config, tmp_path, name, **sections):
+    """`test_config` with extra (nested) sections merged in."""
+    with open(test_config) as f:
+        cfg = yaml.safe_load(f)
+    for section, values in sections.items():
+        cfg.setdefault(section, {})
+        cfg[section].update(values)
+    path = tmp_path / name
+    with open(path, 'w') as f:
+        yaml.dump(cfg, f)
+    return path
+
+
+def test_cli_finetune_readout_only_keeps_the_long_range_heads(workdir, test_config, tmp_path):
+    """A residual readout on a frozen backbone: the charge, a0 and C6 heads and the
+    backbone come out of training bit-identical, the residual readout does not."""
+    import numpy as np
+    import jax
+    from so3lr.model_registry import resolve_model
+    from so3lr.mlff.utils import checkpoint_utils
+
+    config = _write_config(
+        test_config, tmp_path, 'readout_only.yaml',
+        model={'energy_residual_mlp_widths': [32], 'energy_residual_inputs': 'all_layers'},
+    )
+    result = subprocess.run(
+        [
+            'so3lr', 'finetune',
+            '--datafile', str(DATAFILE),
+            '--workdir', str(workdir),
+            '--num-train', '20',
+            '--num-valid', '5',
+            '--config', str(config),
+            '--strategy', 'readout_only',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=so3lr_subprocess_env(),
+    )
+    _assert_finetuning_succeeded(result, workdir, max_loss=0.1)
+    assert 'Residual energy readout: initialised' in (result.stdout + result.stderr)
+
+    before = checkpoint_utils.load_params_from_workdir(resolve_model(None).dir)['params']
+    after = checkpoint_utils.load_params_from_workdir(workdir)['params']
+    for path in (('observables_0', 'electrostatic_energy'), ('observables_2',),
+                 ('observables_3',), ('layers_0',)):
+        a, b = before, after
+        for key in path:
+            a, b = a[key], b[key]
+        for x, y in zip(jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b)):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y), err_msg=str(path))
+    residual = after['observables_0']['energy_residual_dense_final']['kernel']
+    assert np.abs(np.asarray(residual)).max() > 0, 'the residual readout did not train'
+
+
+@pytest.mark.slow
+def test_cli_finetune_with_long_range_anchors(workdir, test_config, tmp_path):
+    """Full fine-tuning with the charges / a0 / C6 anchored to the pretrained model:
+    the anchor terms are scored (and logged) next to the forces."""
+    config = _write_config(
+        test_config, tmp_path, 'anchored.yaml',
+        training={'long_range_anchor_weights': {'partial_charges': 1.0, 'a0_ratios': 1.0,
+                                                'c6_ratios': 1.0}},
+    )
+    result = subprocess.run(
+        [
+            'so3lr', 'finetune',
+            '--datafile', str(DATAFILE),
+            '--workdir', str(workdir),
+            '--num-train', '20',
+            '--num-valid', '5',
+            '--config', str(config),
+            '--strategy', 'full',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=240,
+        env=so3lr_subprocess_env(),
+    )
+    _assert_finetuning_succeeded(result, workdir, max_loss=0.2)
+    assert 'anchor_partial_charges' in (result.stdout + result.stderr)
