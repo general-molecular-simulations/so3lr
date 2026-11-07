@@ -438,7 +438,7 @@ def test_free_space_box_has_no_images_within_reach(rc_lr):
 
 
 @pytest.mark.parametrize("bad", [dict(engine="Flash"), dict(engine="neighbour-list"), dict(flash_mode="Fast"),
-                                 dict(flash_devices=0), dict(flash_devices="2"),
+                                 dict(flash_kernels="CUDA"), dict(flash_devices=0), dict(flash_devices="2"),
                                  dict(flash_devices=2, flash_mode="lean"), dict(flash_devices=4096)])
 def test_bad_engine_options_raise(bad):
     """Settings files bypass the CLI's choices: a value flash does not take is an error."""
@@ -1141,3 +1141,69 @@ def test_pick_splits_takes_only_allowed_splits():
     assert k > 1 and 2160.0 / k >= 12.1 and 2160.0 / k + 2 * 12.1 + 0.1 <= 2160.0
     with pytest.raises(ValueError, match="no domain split fits"):
         pick_splits(10 ** 9, np.diag([40.0] * 3), statics, 4 << 30)
+
+
+# ---- the CUDA kernels (so3lr/flash/cuda) -----------------------------------------------
+def _cuda_kernels_problem():
+    """Why the CUDA kernels cannot run here (None: they can): no GPU, a GPU other than sm_90,
+    no nvcc."""
+    from so3lr.flash.cuda import build
+    return build.problem()
+
+
+CUDA = pytest.mark.skipif(_cuda_kernels_problem() is not None, reason="the CUDA kernels need an sm_90 GPU and nvcc")
+
+
+def _engine(model, atoms, precision, **kw):
+    from so3lr.flash.loader import load_params
+    params, statics = load_params(model, precision=precision, lr_cutoff=12.0)
+    return E.FlashSO3LR(params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]), **kw)
+
+
+@CUDA
+@pytest.mark.parametrize("model", ["so3lr-tauri-m-2606", "so3lr-tauri-s-2606", "so3lr-tauri-l-2606", "so3lr"])
+def test_cuda_kernels_follow_float64(model):
+    """The CUDA kernels (asked for explicitly, in the fast memory mode they serve) give the
+    float64 engine's energy and forces to float32 accuracy, in the jitted program and in the
+    staged one."""
+    atoms = _water((4, 4, 4))
+    R = atoms.get_positions()
+    e_ref, f_ref = _engine(model, atoms, "float64").energy_forces(jnp.asarray(R, jnp.float64))
+    eng = _engine(model, atoms, "float32", keep_attention=True, kernels="cuda")
+    e, f = eng.energy_forces(jnp.asarray(R, jnp.float32))
+    assert eng.cuda_kernels is not None
+    _check("energy", e, e_ref, 1e-6)
+    _check("forces", f, f_ref, 1e-4)
+    e2, f2 = eng.energy_forces_staged(jnp.asarray(R, jnp.float32))
+    _check("staged energy", e2, e, 1e-6)
+    _check("staged forces", f2, f, 1e-5)
+
+
+@CUDA
+def test_cuda_kernels_fall_back_where_they_do_not_apply():
+    """auto takes the Pallas kernels for a float64 model and for the staged memory modes;
+    cuda asked for explicitly raises there instead."""
+    atoms = _water((3, 3, 3))
+    for precision, kw in (("float64", dict(keep_attention=True)), ("float32", dict())):
+        R = jnp.asarray(atoms.get_positions(), jnp.float64 if precision == "float64" else jnp.float32)
+        eng = _engine("so3lr-tauri-m-2606", atoms, precision, **kw)
+        eng.energy_forces(R)
+        assert eng.cuda_kernels is None
+        with pytest.raises(RuntimeError, match="do not serve"):
+            _engine("so3lr-tauri-m-2606", atoms, precision, kernels="cuda", **kw).energy_forces(R)
+
+
+@CUDA
+def test_cuda_kernels_widen_rows():
+    """Neighbour rows too short for water on the CUDA kernels: the engine widens them (its
+    pair records and filters sized for the wider rows at the next program) and gives what
+    wide ones give, jitted and staged."""
+    atoms = _water((3, 3, 3))
+    R = jnp.asarray(atoms.get_positions(), jnp.float32)
+    e_ref, f_ref = _engine("so3lr-tauri-m-2606", atoms, "float32", keep_attention=True, kernels="cuda").energy_forces(R)
+    for staged in (False, True):
+        eng = _engine("so3lr-tauri-m-2606", atoms, "float32", keep_attention=True, kernels="cuda", max_neighbours=16)
+        e, f = (eng.energy_forces_staged if staged else eng.energy_forces)(R)
+        assert eng.K > 16 and eng.cuda_kernels is not None
+        _check("energy", e, e_ref, 1e-6)
+        _check("forces", f, f_ref, 1e-5)

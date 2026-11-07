@@ -110,6 +110,9 @@ include = [
     { path = "so3lr/mlff/utils/robust_loss_jax/data/*.npz", format = ["sdist", "wheel"] },
     # the robust loss's Apache-2.0 notice travels with its code
     { path = "so3lr/mlff/utils/robust_loss_jax/README.md", format = ["sdist", "wheel"] },
+    # the SO3LR-Flash CUDA kernels, compiled by nvcc on first use
+    { path = "so3lr/flash/cuda/*.cu", format = ["sdist", "wheel"] },
+    { path = "so3lr/flash/cuda/*.cuh", format = ["sdist", "wheel"] },
 ]
 
 [tool.uv]

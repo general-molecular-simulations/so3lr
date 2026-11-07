@@ -287,6 +287,7 @@ def evaluate_so3lr_on(
         flash_mode: str = 'auto',
         flash_mixed: Optional[bool] = None,
         flash_devices: int = 1,
+        flash_kernels: str = 'auto',
 ) -> Dict[str, Any]:
     """
     Evaluate SO3LR model on a dataset and calculate error metrics.

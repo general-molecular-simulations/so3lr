@@ -123,9 +123,11 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
                      equilibration_charge=total_charge if equil is None else float(equil),
                      pme_electrostatics=pme_el, pme_dispersion=pme_disp,
                      box_margin=box_margin, devices=devices,
-                     size=size, **kw)
+                     size=size, **kw,
+                     kernels=settings.get("flash_kernels") or None)
+    kib = eng.cuda_kernels.kib if eng.cuda_kernels is not None else mode_kib(mode, statics)
     logger.info(f"Flash: {n} atoms, memory mode {mode} ({'staged' if staged else 'jitted'}), "
-                f"~{mode_kib(mode, statics):.1f} KiB/atom at peak")
+                f"~{kib:.1f} KiB/atom at peak")
     if vacuum:
         logger.info(f"Flash: {_free_space(eng)}")
     if eng.P > 1:

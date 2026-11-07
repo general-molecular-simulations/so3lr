@@ -64,7 +64,7 @@ from jax.experimental.pallas import triton as plgpu
 import jaxpme
 
 from so3lr.flash import blocks
-from so3lr.flash.check import box_problem, cell_grid, is_rocm, vacuum_box, vacuum_fits, vacuum_size
+from so3lr.flash.check import KERNELS, box_problem, cell_grid, is_rocm, vacuum_box, vacuum_fits, vacuum_size
 from so3lr.mlff.nn.embed.embed_sparse import PAIR_FLOOR_WIDTH, nlh_reference_distance
 from so3lr.mlff.nn.observable.observable_sparse import c6_raw_potential
 from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
@@ -1216,7 +1216,7 @@ class FlashSO3LR:
                  equilibration_charge=None, tile=1 << 17, max_neighbours=None, lr_scratch=1024,
                  keep_layer_inputs=True, keep_attention=False, split_channels=False,
                  split_blocks=False, pme_electrostatics=None, pme_dispersion=None, box_margin=0.0,
-                 devices=1, atoms_per_program=None, size=None):
+                 devices=1, atoms_per_program=None, size=None, kernels=None):
         degrees = [int(d) for d in statics["degrees"]]
         self.nh = int(statics["num_heads"])
         # one head per degree entry, each on its own block of G features (so3lr-tauri-s/m: 4 x 32,
@@ -1282,8 +1282,8 @@ class FlashSO3LR:
         self.cdeg = jnp.asarray([(2 * d + 1) ** -0.5 for d in degrees], dt)
         # the attention kernels' launch for this width of the spherical filters' hidden
         # layer: the nearest wider one tabulated (the widest if none is)
-        sh = int(params["layers_0"]["attention_block"]["spherical_filter1_layer_1"]["kernel"].shape[1])
-        self.launch = _att_launch(sh)
+        self.sh = int(params["layers_0"]["attention_block"]["spherical_filter1_layer_1"]["kernel"].shape[1])
+        self.launch = _att_launch(self.sh)
         self.par = jnp.asarray([(-1.0) ** d for d in degrees], dt)
         self.z = jnp.asarray(z)
         # x0 depends on the element only: one row per element present
@@ -1347,6 +1347,14 @@ class FlashSO3LR:
             self._fit(size)
         else:
             self._layout([float(v) for v in np.diag(box)])
+        # kernels: auto (the CUDA kernels where they serve this engine, else Pallas), pallas, cuda
+        self.kernels = kernels or "auto"
+        if self.kernels not in KERNELS:
+            raise ValueError(f"kernels must be one of {', '.join(KERNELS)} (received {self.kernels!r})")
+        self.cuda_kernels = None
+        if self.kernels != "pallas":
+            from .cuda import attach
+            attach(self, strict=self.kernels == "cuda")   # the instance's methods on the CUDA kernels
         self._build_jit()
 
     def _layout(self, L):
@@ -2014,18 +2022,30 @@ class FlashSO3LR:
         if getattr(self, "_stage_cache", None) is None:
             jit = lambda fn, donate_argnums=(): self._stage(fn, donate_argnums)  # noqa: E731
             c = {"build": jit(lambda R: self.build(self._pos3(R)))}
+            ck = self.cuda_kernels
             for li in range(self.statics["num_layers"]):
-                def fwd(x, ev, R, nbr, cnt, li=li):
-                    return self._layer_forward(li, x, ev, self._pos3(R), nbr, cnt)
+                def fwd(x, ev, R, nb, li=li):
+                    if ck is not None:
+                        ck.use(nb)
+                    out = self._layer_forward(li, x, ev, self._pos3(R), nb[3], nb[4])
+                    if ck is not None:
+                        ck.forget(li)              # no backward follows in this program
+                    return out
                 # kept inputs must survive; otherwise the input is dead once read
                 c["fwd", li] = jit(fwd, donate_argnums=() if self.keep else ((0, 1) if li else (1,)))
 
-                def post(x_l, ev_l, kept, g_x, g_ev, R, nbr, cnt, li=li):
-                    return self._post_backward(li, x_l, ev_l, kept, g_x, g_ev, self._pos3(R), nbr, cnt)
+                if ck is not None:
+                    post_fn, att_fn = ck.stage_fns(li)
+                    c["post", li] = jit(post_fn, donate_argnums=(2, 3, 4))
+                    c["att", li, 0] = jit(att_fn, donate_argnums=(4,))
+                    continue
+
+                def post(x_l, ev_l, kept, g_x, g_ev, R, nb, li=li):
+                    return self._post_backward(li, x_l, ev_l, kept, g_x, g_ev, self._pos3(R), nb[3], nb[4])
                 c["post", li] = jit(post, donate_argnums=(2, 3, 4))
                 for pi in range(len(self._passes())):
-                    def att(x_l, ev_l, gdx, gdev, carry, R, nbr, cnt, li=li, pi=pi):
-                        return self._attention_backward_pass(li, pi, x_l, ev_l, self._pos3(R), nbr, cnt,
+                    def att(x_l, ev_l, gdx, gdev, carry, extra, R, nb, li=li, pi=pi):
+                        return self._attention_backward_pass(li, pi, x_l, ev_l, self._pos3(R), nb[3], nb[4],
                                                              gdx, gdev, carry)
                     c["att", li, pi] = jit(att, donate_argnums=(4,))
             c["head"] = jit(lambda x, R, nb: self._head(x, self._pos3(R), nb), donate_argnums=(0,))
@@ -2042,13 +2062,12 @@ class FlashSO3LR:
         """The neighbour table and the layers' forward: {"nb", "x", "saved"}."""
         c = self._stages()
         nb = c["build"](R)
-        nbr, cnt = nb[3], nb[4]
         x, ev = None, jnp.zeros((self.n, self.M), self.dtype)
         saved = []
         for li in range(self.statics["num_layers"]):
             if self.keep:
                 saved.append([x, ev])
-            out = c["fwd", li](x, ev, R, nbr, cnt)
+            out = c["fwd", li](x, ev, R, nb)
             x, ev = out[:2]
             if self.keep:
                 saved[-1] += list(out[2:])
@@ -2062,7 +2081,6 @@ class FlashSO3LR:
         the heads and long range (domains.py)."""
         c = self._stages()
         nb, x, saved = st.pop("nb"), st.pop("x"), st.pop("saved")
-        nbr, cnt = nb[3], nb[4]
         energy, g_x, f3, most = (head or c["head"])(x, R, nb)
         del x
         g_ev = jnp.zeros((self.n, self.M), self.dtype)
@@ -2073,16 +2091,17 @@ class FlashSO3LR:
             else:
                 x_l, ev_l, kept = None, jnp.zeros((self.n, self.M), self.dtype), []
                 for k in range(li):
-                    x_l, ev_l = c["fwd", k](x_l, ev_l, R, nbr, cnt)[:2]
+                    x_l, ev_l = c["fwd", k](x_l, ev_l, R, nb)[:2]
             # dE/d(attention output); then the attention's backward a pass at a time,
             # each its own program, so only one pass's projections are ever alive
-            g_x, g_ev = c["post", li](x_l, ev_l, tuple(kept), g_x, g_ev, R, nbr, cnt)
+            extra = tuple(kept[2:])                # what the forward kept beyond (x1, ev1): the attention's
+            g_x, g_ev = c["post", li](x_l, ev_l, tuple(kept[:2]), g_x, g_ev, R, nb)
             del kept
             carry = (self._g_xin_start(li, x_l, g_x), g_ev + 0.0, *f3)
             if self._inplace(li):
                 x_l = None                         # lives on as carry[0]
             for pi in range(len(self._passes())):
-                carry = c["att", li, pi](x_l, ev_l, g_x, g_ev, carry, R, nbr, cnt)
+                carry = c["att", li, pi](x_l, ev_l, g_x, g_ev, carry, extra, R, nb)
             del x_l, ev_l
             g_xin, g_ev, *f3 = carry
             del carry
