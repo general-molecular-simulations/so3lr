@@ -129,8 +129,15 @@ __device__ __forceinline__ void pair_finish(const B7Params& p, float* FV, float*
     const float fx = fr * ux + (gx - proj * ux) * inv_r;
     const float fy = fr * uy + (gy - proj * uy) * inv_r;
     const float fz = fr * uz + (gzv - proj * uz) * inv_r;
-    *reinterpret_cast<float4*>(FV + (size_t)pi.z * 4) = make_float4(fx, fy, fz, fr * rr);
-    if (rev) *reinterpret_cast<float4*>(FV + (size_t)pi.w * 4) = make_float4(-fx, -fy, -fz, fr * rr);
+    // per slot: the force (fx, fy, fz) and the per-axis virial (the force component times the
+    // displacement component, rr u_a; the angular part cancels only in their sum), padded to 8
+    const float wx = fx * rr * ux, wy = fy * rr * uy, wz = fz * rr * uz;
+    *reinterpret_cast<float4*>(FV + (size_t)pi.z * 8) = make_float4(fx, fy, fz, wx);
+    *reinterpret_cast<float4*>(FV + (size_t)pi.z * 8 + 4) = make_float4(wy, wz, 0.f, 0.f);
+    if (rev) {
+      *reinterpret_cast<float4*>(FV + (size_t)pi.w * 8) = make_float4(-fx, -fy, -fz, wx);
+      *reinterpret_cast<float4*>(FV + (size_t)pi.w * 8 + 4) = make_float4(wy, wz, 0.f, 0.f);
+    }
   }
 }
 
@@ -139,7 +146,7 @@ __device__ __forceinline__ void pair_finish(const B7Params& p, float* FV, float*
 __device__ __forceinline__ void bwd_epilogue(const B7Params& p, const B7Stage& S, const B7Epi& E, int et, int nth, int ch) {
   // one channel per CTA: its copy of the forces and ev gradients; the angular force is the
   // degree channel's
-  float* FV = p.FV + (NCH == 1 ? (size_t)ch * p.nslot * 4 : 0);
+  float* FV = p.FV + (NCH == 1 ? (size_t)ch * p.nslot * 8 : 0);
   float* GEV = p.GEV + (NCH == 1 ? (size_t)ch * p.nslot * M : 0);
   const bool angular = NCH == 2 || ch == 1;
 #pragma unroll 1
@@ -545,7 +552,7 @@ struct GatherParams {
       *__restrict__ Wst, *__restrict__ SC, *__restrict__ FV, *__restrict__ GEV, *__restrict__ gev_in, *__restrict__ f_in;
   const int *__restrict__ nbr, *__restrict__ cnt, *__restrict__ PIDX, *__restrict__ row0;
   float *__restrict__ gq1, *__restrict__ gk1, *__restrict__ gv1, *__restrict__ gq2, *__restrict__ gk2,
-      *__restrict__ gev_out, *__restrict__ f_out;   // f: [4][n] (fx, fy, fz, fw)
+      *__restrict__ gev_out, *__restrict__ f_out;   // f: [6][n] (fx, fy, fz, wx, wy, wz)
   int n, K, nl;
 };
 
@@ -603,7 +610,7 @@ __global__ void __launch_bounds__(GW_ * 32) bwd_gather(GatherParams p) {
         const int m = ms * 32 + lane;
         sv[ms] += m < M ? p.GEV[slot * M + m] : 0.f;
       }
-      fv += lane < 4 ? p.FV[slot * 4 + lane] : 0.f;
+      fv += lane < 6 ? p.FV[slot * 8 + lane] : 0.f;
       if (NCH == 1) {
         const size_t s2 = (size_t)p.n * p.K + slot;
 #pragma unroll
@@ -611,7 +618,7 @@ __global__ void __launch_bounds__(GW_ * 32) bwd_gather(GatherParams p) {
           const int m = ms * 32 + lane;
           sv[ms] += m < M ? p.GEV[s2 * M + m] : 0.f;
         }
-        fv += lane < 4 ? p.FV[s2 * 4 + lane] : 0.f;
+        fv += lane < 6 ? p.FV[s2 * 8 + lane] : 0.f;
       }
     }
   }
@@ -645,7 +652,7 @@ __global__ void __launch_bounds__(GW_ * 32) bwd_gather(GatherParams p) {
     const int m = ms * 32 + lane;
     if (m < M) p.gev_out[(size_t)a * M + m] = p.gev_in[(size_t)a * M + m] + sv[ms];
   }
-  if (lane < 4) p.f_out[(size_t)lane * p.n + a] = p.f_in[(size_t)lane * p.n + a] + fv;
+  if (lane < 6) p.f_out[(size_t)lane * p.n + a] = p.f_in[(size_t)lane * p.n + a] + fv;
 }
 
 static ffi::Error B7Impl(cudaStream_t stream, F32 q1, F32 k1, F32 v1, F32 q2, F32 k2, F32 ev, F32 gdx, F32 gdev,

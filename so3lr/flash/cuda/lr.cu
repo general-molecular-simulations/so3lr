@@ -14,7 +14,7 @@ struct LrParams {
   const double *px, *py, *pz, *box;          // cell order (index k: atom order[k])
   const int *z, *order, *cell_start, *cell_of;
   const float *q, *a0r, *c6r, *alphas, *c6tab, *phi_v, *phi_d, *lrs, *c6lr_v, *c6lr_d;   // q, z, a0r, c6r: cell order
-  const float *e_in, *f_in;       // f_in: [4][n]
+  const float *e_in, *f_in;       // f_in: [6][n] (fx, fy, fz, wx, wy, wz)
   const int* row0;                // this device's rows: row0 <= atom < row0 + nl
   float *e_out, *gq, *ga0, *gc6, *f_out;
   int nl;
@@ -42,7 +42,7 @@ __device__ __forceinline__ void hermite(const float* tv, const float* td, int ti
 }
 
 struct Acc {
-  float e, gq, gal, gc6, fx, fy, fz, fw;
+  float e, gq, gal, gc6, fx, fy, fz, wx, wy, wz;
 };
 
 struct AtomA {
@@ -118,7 +118,8 @@ __device__ __forceinline__ void pair_terms(const LrParams& p, const AtomA& A, fl
     de += hartree * (w * dvr + dw * v);
   }
   const float fr = de / r;
-  acc.fx += fr * dx; acc.fy += fr * dy; acc.fz += fr * dz; acc.fw += de * r;
+  acc.fx += fr * dx; acc.fy += fr * dy; acc.fz += fr * dz;
+  acc.wx += fr * dx * dx; acc.wy += fr * dy * dy; acc.wz += fr * dz * dz;   // per-axis virial
 }
 
 __device__ __forceinline__ void pair(const LrParams& p, const AtomA& A, int j, float dx, float dy, float dz, Acc& acc) {
@@ -152,7 +153,7 @@ __global__ void __launch_bounds__(LW * 32) lr_kernel(LrParams p) {
   const float al_ta = p.alphas[za], c6_ta = p.c6tab[za];
   A.al_a = al_ta * p.a0r[wi];
   A.c6_a = c6_ta * p.c6r[wi];
-  Acc acc = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+  Acc acc = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
   int qn = 0;
   const int W2 = 2 * KC + 1;
   for (int k = 0; k < W2 * W2; ++k) {
@@ -228,7 +229,9 @@ __global__ void __launch_bounds__(LW * 32) lr_kernel(LrParams p) {
     acc.fx += __shfl_xor_sync(0xffffffff, acc.fx, o);
     acc.fy += __shfl_xor_sync(0xffffffff, acc.fy, o);
     acc.fz += __shfl_xor_sync(0xffffffff, acc.fz, o);
-    acc.fw += __shfl_xor_sync(0xffffffff, acc.fw, o);
+    acc.wx += __shfl_xor_sync(0xffffffff, acc.wx, o);
+    acc.wy += __shfl_xor_sync(0xffffffff, acc.wy, o);
+    acc.wz += __shfl_xor_sync(0xffffffff, acc.wz, o);
   }
   if (lane == 0) {
     const int n = p.n;
@@ -239,7 +242,9 @@ __global__ void __launch_bounds__(LW * 32) lr_kernel(LrParams p) {
     p.f_out[a] = p.f_in[a] + acc.fx;
     p.f_out[n + a] = p.f_in[n + a] + acc.fy;
     p.f_out[2 * n + a] = p.f_in[2 * n + a] + acc.fz;
-    p.f_out[3 * n + a] = p.f_in[3 * n + a] + acc.fw;
+    p.f_out[3 * n + a] = p.f_in[3 * n + a] + acc.wx;
+    p.f_out[4 * n + a] = p.f_in[4 * n + a] + acc.wy;
+    p.f_out[5 * n + a] = p.f_in[5 * n + a] + acc.wz;
   }
 }
 
@@ -274,7 +279,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(LongRange, LrImpl,
         .Arg<S32>().Arg<S32>().Arg<S32>().Arg<S32>()                         // z order cell_start cell_of
         .Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>()              // q a0r c6r alphas c6tab
         .Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>()              // phi_v phi_d lrs c6lr_v c6lr_d
-        .Arg<F32>().Arg<F32>().Arg<S32>()                                               // e_in f_in [4, n]
-        .Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>()              // e gq ga0 gc6 f [4, n]
+        .Arg<F32>().Arg<F32>().Arg<S32>()                                               // e_in f_in [6, n]
+        .Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>()              // e gq ga0 gc6 f [6, n]
         .Attr<int64_t>("NX").Attr<int64_t>("NY").Attr<int64_t>("NZ").Attr<int64_t>("KC").Attr<int64_t>("flags")
         .Attr<int64_t>("NL"));

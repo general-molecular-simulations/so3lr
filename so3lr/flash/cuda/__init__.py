@@ -156,11 +156,11 @@ class CudaKernels:
                 msg=call("msg", (S((n, F), f32), S((n, M), f32)), input_output_aliases=al({8: 0, 9: 1})),
                 # the backward: slot scalars, and the forces and ev gradients per slot (a copy per
                 # channel where each channel's CTA writes its own)
-                bwd=call("bwd", (S((n * K * 5 * NH,), f32), S((self.copies * n * K * 4,), f32),
+                bwd=call("bwd", (S((n * K * 5 * NH,), f32), S((self.copies * n * K * 8,), f32),
                                  S((self.copies * n * K * M,), f32))),
-                gather=call("gather", tuple(S((n, F), f32) for _ in range(5)) + (S((n, M), f32), S((4, n), f32)),
+                gather=call("gather", tuple(S((n, F), f32) for _ in range(5)) + (S((n, M), f32), S((6, n), f32)),
                             input_output_aliases=al({9: 5, 10: 6})),
-                lr=call("lr", tuple(S((n,), f32) for _ in range(4)) + (S((4, n), f32),),
+                lr=call("lr", tuple(S((n,), f32) for _ in range(4)) + (S((6, n), f32),),
                         input_output_aliases=al({18: 0, 19: 4})))
         return self._calls
 
@@ -249,12 +249,12 @@ class CudaKernels:
         SC, FV, GEV = c["bwd"](q1, k1, v1, q2, k2, ev_l, gdx, gdev, PI, PG, off, *L["tabs"], *W[:3], *W[4:7], *L["V"],
                                eng.cdeg, self.scal, eng.par, Wst, Sf, P=np.int64(c["pmax"]))
         gq1, gk1, gv1, gq2, gk2, gev, f = c["gather"](q1, k1, q2, k2, gdx, Wst, SC, FV, GEV, gdev,
-                                                      jnp.stack(f3[:4]).astype(jnp.float32), nbr, cnt, PIDX,
+                                                      jnp.stack(f3[:6]).astype(jnp.float32), nbr, cnt, PIDX,
                                                       eng._row_arg(), NL=np.int64(eng.nl))
         if li == 0:                           # no layer below takes dE/dx_in (_g_x_below)
-            return gdx, gev, (f[0], f[1], f[2], f[3])
+            return gdx, gev, tuple(f[i] for i in range(6))
         (gx,) = vjp((gq1, gk1, gv1, gq2, gk2))
-        return gdx + gx, gev, (f[0], f[1], f[2], f[3])
+        return gdx + gx, gev, tuple(f[i] for i in range(6))
 
     def layer_backward(self, li, x_l, ev_l, kept, g_x, g_ev, f3, pos3, nbr, cnt):
         eng = self.eng
@@ -278,7 +278,7 @@ class CudaKernels:
             self.use(nb)
             if x_l is None and eng._inplace(li):
                 x_l = carry[0]                     # in place: the layer input rides in the carry (layer 0: None)
-            g_xin, gev, f3 = self.attention_backward(li, x_l, ev_l, extra[0], extra[1], gdx, gdev, carry[2:6],
+            g_xin, gev, f3 = self.attention_backward(li, x_l, ev_l, extra[0], extra[1], gdx, gdev, carry[2:8],
                                                      nb[3], nb[4], fresh=True)
             return (g_xin, gev) + tuple(f3)
         return post, att
@@ -301,10 +301,10 @@ class CudaKernels:
         e, gq, ga0, gc6, f = c["lr"](
             *(x[order] for x in pos3), eng._box(pos3[0]), eng.z[order], order, cell_start, cell_of,
             q.astype(jnp.float32)[order], a0[order], c6[order], eng.alphas, eng.c6tab, phi_v, phi_d, lrs,
-            c6lr_v, c6lr_d, e_atom, jnp.stack(f3[:4]), eng._row_arg(),
+            c6lr_v, c6lr_d, e_atom, jnp.stack(f3[:6]), eng._row_arg(),
             NX=np.int64(eng.nc[0]), NY=np.int64(eng.nc[1]), NZ=np.int64(eng.nc[2]), KC=np.int64(eng.kc),
             flags=np.int64(self._lr_flags()), NL=np.int64(eng.nl))
-        return e, gq, ga0, gc6, (f[0], f[1], f[2], f[3]), jnp.zeros((), jnp.int32)
+        return e, gq, ga0, gc6, tuple(f[i] for i in range(6)), jnp.zeros((), jnp.int32)
 
     # ---- the heads, their VJP from the forward when the backward follows in the same program
     def heads(self, x, z):
