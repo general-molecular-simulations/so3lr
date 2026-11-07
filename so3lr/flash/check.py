@@ -166,8 +166,9 @@ def settings_problem(settings, task="md"):
                 return f"it has no {UNSUPPORTED[key]}"
         elif key not in HANDLED and key not in IRRELEVANT and not _off(value):
             return f"it does not know the setting {key!r}"
-    if ens == "npt" and (s.get("npt_coupling") or "isotropic") != "isotropic":
-        return f"its NPT is isotropic, not {s.get('npt_coupling')}"
+    coupling = "-".join(str(s.get("npt_coupling") or "isotropic").lower().replace("_", " ").replace("-", " ").split())
+    if ens == "npt" and coupling not in ("isotropic", "semi-isotropic"):
+        return f"its NPT is isotropic or semi-isotropic, not {s.get('npt_coupling')}"
     for key, nodes in (("kspace_electrostatics", "kspace_interp_nodes"),
                        ("kspace_dispersion", "kspace_dispersion_interp_nodes")):
         if s.get(key) not in (None, "pme"):
@@ -176,6 +177,8 @@ def settings_problem(settings, task="md"):
             return f"its PME interpolates with 4 nodes, not {s.get(nodes)}"
     if ens == "npt" and not _jax_md_keeps_dudv():
         return "its NPT needs a jax-md whose NPT state carries dUdV from the previous step"
+    if ens == "npt" and coupling == "semi-isotropic" and not _jax_md_keeps_stress():
+        return "its semi-isotropic NPT needs a jax-md with npt_nose_hoover_flex"
     return None
 
 
@@ -192,6 +195,14 @@ def _jax_md_keeps_dudv():
     the previous step's dUdV from the state (the jax-md pinned by so3lr does)."""
     import jax_md
     return "dUdV" in {f.name for f in dataclasses.fields(jax_md.simulate.NPTNoseHooverState)}
+
+
+def _jax_md_keeps_stress():
+    """The flexible-cell NPT (semi-isotropic) likewise: its state carries the previous
+    step's dE/d(strain) (stress_tensor) for the first half of the next step."""
+    import jax_md
+    cls = getattr(jax_md.simulate, "NPTNoseHooverFlexState", None)
+    return cls is not None and "stress_tensor" in {f.name for f in dataclasses.fields(cls)}
 
 
 def model_problem(model_path):

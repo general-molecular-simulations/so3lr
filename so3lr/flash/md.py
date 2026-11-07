@@ -3,7 +3,8 @@ FIRE with the flash engine.
 
 ``so3lr_md.run`` runs the flash engine whenever it computes what the settings ask for
 (``check.flash_problem`` is None: an NVIDIA GPU or an AMD MI355X, a periodic orthorhombic
-box or none (the gas phase), nve / nvt / nvt-langevin / isotropic npt, no k-space other than PME,
+box or none (the gas phase), nve / nvt / nvt-langevin / isotropic or semi-isotropic npt, no
+k-space other than PME,
 so3lr-tauri-s, -m, -l or the legacy so3lr), else the neighbour-list potential of ``perform_md``;
 ``perform_min`` (``so3lr opt``) likewise runs ``perform_min_flash``. ``--engine flash`` or
 ``--engine standard`` forces one.
@@ -24,7 +25,9 @@ jax-md step, run every step this way; the jitted ones run ``md_steps - 1`` steps
 jitted loop and only the last in two calls, which also gives the energy for the log.
 NPT runs every step in two calls: the engine evaluates in the box the step reaches
 (``set_box``), and the step takes the force and dE/d(strain) through an energy whose
-gradients they are (``_surrogate``).
+gradients they are (``_surrogate``). Semi-isotropic NPT (``npt_coupling: semi-isotropic``,
+jax-md's flexible cell with x and y coupled, z on its own) takes the engine's per-axis
+dE/d(strain_aa) the same way.
 """
 import gc
 import logging
@@ -53,6 +56,7 @@ from so3lr.cli.so3lr_md import (
     setup_run,
     setup_logger,
     validate_and_log_input,
+    normalize_npt_coupling,
     validate_npt_restart_coupling,
     validate_orthorhombic_restart_box,
     warn_legacy_kspace,
@@ -196,7 +200,13 @@ def _surrogate(R, box=None, perturbation=1.0, F=None, W=None, E=None, **kwargs):
     if F is not None:
         e = e - jnp.sum(F.astype(R.dtype) * (R - jax.lax.stop_gradient(R)))
     if W is not None:
-        e = e + jnp.asarray(W, R.dtype) * (jnp.asarray(perturbation, R.dtype) - 1.0)
+        p = jnp.asarray(perturbation, R.dtype)
+        if p.ndim == 2:
+            # the flexible cell (semi-isotropic): W per axis, dE/d(strain_aa), and
+            # perturbation = 1 + diag(strain)
+            e = e + jnp.sum(jnp.asarray(W, R.dtype) * (jnp.diagonal(p) - 1.0))
+        else:
+            e = e + jnp.asarray(W, R.dtype) * (p - 1.0)
     return e
 
 
@@ -390,6 +400,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         raise ValueError(f"flash: {problem}")
     ensemble = s.get("ensemble")
     npt = ensemble == "npt"
+    semi = npt and normalize_npt_coupling(s.get("npt_coupling") or "isotropic") == "semi-isotropic"
 
     output_file, output_format = s.get("output_file"), s.get("output_format")
     overwrite = bool(s.get("overwrite", False))
@@ -441,7 +452,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         eng, staged = build_engine(atoms, s, dtype, positions=np.asarray(start))
         # several GPUs: the MD state on all of them
         position, box, geo, state, start = replicated(eng, (position, box, geo, state, start))
-        strain = eng.energy_forces_strain_staged if staged else eng.energy_forces_strain
+        strain0 = eng.energy_forces_strain_staged if staged else eng.energy_forces_strain
+        strain = (lambda R: strain0(R, diag=True)) if semi else strain0
         e0, F0, W0 = strain(start)
     except Exception as exc:
         raise FlashUnavailable(f"{type(exc).__name__}: {exc}") from exc
@@ -492,21 +504,27 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         thermostat = dict(chain_length=s.get("nhc_chain_length"), chain_steps=s.get("nhc_steps"),
                           sy_steps=s.get("nhc_sy_steps"), tau=md_dt * s.get("nhc_thermo"))
         barostat = dict(thermostat, tau=md_dt * s.get("nhc_baro"))
-        init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
-            _surrogate, shift, md_dt, pressure=P, kT=kT, barostat_kwargs=barostat,
-            thermostat_kwargs=thermostat)
+        if semi:
+            init_fn, apply_fn = jax_md.simulate.npt_nose_hoover_flex(
+                _surrogate, shift, md_dt, pressure=P, kT=kT, coupling="semi-isotropic",
+                barostat_kwargs=barostat, thermostat_kwargs=thermostat)
+        else:
+            init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
+                _surrogate, shift, md_dt, pressure=P, kT=kT, barostat_kwargs=barostat,
+                thermostat_kwargs=thermostat)
 
     def cartesian(st):
         """Positions in A and the box sides of a state."""
         if npt:
-            L1 = box_to_diag(jax_md.simulate.npt_box(st))
+            L1 = box_to_diag(jax_md.simulate.npt_box_flex(st) if semi else jax_md.simulate.npt_box(st))
             return st.position * L1, L1
         return st.position, box
 
     key = jax.random.PRNGKey(s.get("seed", 0))
     if npt:
         zero = jnp.zeros((), sdt)
-        predict = jax.jit(lambda st: cartesian(apply_fn(st, F=jnp.zeros_like(st.position), W=zero, E=zero)))
+        zero_w = jnp.zeros((3,), sdt) if semi else zero
+        predict = jax.jit(lambda st: cartesian(apply_fn(st, F=jnp.zeros_like(st.position), W=zero_w, E=zero)))
         finish = jax.jit(lambda st, F, W, E: apply_fn(st, F=F, W=W, E=E))
 
         def advance(st, k):
@@ -517,7 +535,14 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                 e, F, W = strain(R1)
                 st = finish(st, F, jnp.asarray(W, sdt), jnp.asarray(e, sdt))
             return st, e
-        if state is None:
+        if state is None and semi:
+            # the flexible-cell state holds velocities
+            mom = geo.get("momenta")
+            mass = jnp.asarray(geo["masses"], sdt).reshape(-1, 1)
+            state = init_fn(key, position / box, box, mass=geo["masses"],
+                            velocities=None if mom is None else jnp.asarray(mom, sdt) / mass, kT=kT,
+                            F=F0, W=jnp.asarray(W0, sdt), E=jnp.asarray(e0, sdt))
+        elif state is None:
             state = init_fn(key, position / box, box, mass=geo["masses"], momenta=geo.get("momenta"), kT=kT,
                             F=F0, W=jnp.asarray(W0, sdt), E=jnp.asarray(e0, sdt))
     else:
@@ -544,6 +569,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         temp = float(jax_md.quantity.temperature(momentum=st.momentum, mass=st.mass)) / unit_sys["temperature"]
         if ensemble == "nvt":
             h = float(jax_md.simulate.nvt_nose_hoover_invariant(lambda R, **k: pe, st, kT))
+        elif semi:
+            h = float(jax_md.simulate.npt_nose_hoover_flex_invariant(_surrogate, st, P, kT, E=pe))
         elif npt:
             h = float(jax_md.simulate.npt_nose_hoover_invariant(_surrogate, st, P, kT, E=pe))
         else:

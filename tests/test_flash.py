@@ -57,7 +57,7 @@ def test_pme_electrostatics_matches_jaxpme(smearing, spacing, chunk):
     pbc = jnp.array([True, True, True])
 
     def e_ref(R, q, s=1.0):
-        # box and positions scaled by s together, as jax-md's NPT strain
+        # box and positions scaled by s together, as jax-md's NPT strain (s per axis or one)
         cell = jnp.diag(jnp.asarray(L)) * s
         recip = jaxpme.kspace.get_reciprocal(cell)
         kgrid = jaxpme.kspace.get_kgrid_mesh(jnp.diag(jnp.asarray(L)), mesh_spacing=jnp.array([spacing]))
@@ -70,7 +70,9 @@ def test_pme_electrostatics_matches_jaxpme(smearing, spacing, chunk):
     Rj, qj = jnp.asarray(R), jnp.asarray(q)
     assert tuple(jaxpme.kspace.get_kgrid_mesh(jnp.diag(jnp.asarray(L)), mesh_spacing=jnp.array([spacing])).shape) == mesh
     gR, gq = jax.grad(lambda R, q: e_ref(R, q).sum(), argnums=(0, 1))(Rj, qj)
-    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(1.0)
+    # per axis: side a and positions along a scaled by s_a (semi-isotropic NPT); the sum is
+    # the isotropic strain derivative
+    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(jnp.ones(3))
     e, g, f, w = E.pme_electrostatics(tuple(Rj[:, a] for a in range(3)), qj, list(L), mesh, smearing, KE,
                                       jnp.float64, chunk)
     _check("energy", e, e_ref(Rj, qj))
@@ -102,7 +104,7 @@ def test_pme_dispersion_matches_jaxpme():
 
     Rj, qj = jnp.asarray(R), jnp.asarray(qd)
     gR, gq = jax.grad(lambda R, q: e_ref(R, q).sum(), argnums=(0, 1))(Rj, qj)
-    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(1.0)
+    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(jnp.ones(3))
     e, g, f, w = E.pme_dispersion(tuple(Rj[:, a] for a in range(3)), qj, list(L), mesh, smearing, Bohr,
                                   Hartree, jnp.float64, 70)
     _check("energy", e, e_ref(Rj, qj))
@@ -215,7 +217,9 @@ SETTINGS = dict(ensemble="nvt", model_path=None, lr_cutoff=12.0)
 @pytest.mark.parametrize("change,reason", [
     (dict(), None),
     (dict(ensemble="npt"), None),
-    (dict(ensemble="npt", npt_coupling="semi-isotropic"), "isotropic"),
+    (dict(ensemble="npt", npt_coupling="semi-isotropic"), None),
+    (dict(ensemble="npt", npt_coupling="semi_isotropic"), None),
+    (dict(ensemble="npt", npt_coupling="anisotropic"), "not anisotropic"),
     (dict(ensemble="npt", dispersion_tail_correction=True), "tail correction"),
     (dict(kspace_electrostatics="pme"), None),
     (dict(kspace_electrostatics="ewald"), "PME but not ewald"),
