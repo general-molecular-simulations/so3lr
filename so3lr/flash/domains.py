@@ -396,8 +396,9 @@ class FlashDomains:
             def lr(R, q, a0, c6):
                 pos3 = eng._pos3(R)
                 zero = jnp.zeros((eng.n,), eng.dtype)
+                # forces and the per-axis virial (fx, fy, fz, wx, wy, wz)
                 return eng._long_range(pos3, eng.build_grid(pos3), q, a0, c6, zero,
-                                       (zero + 0.0, zero + 0.0, zero + 0.0, zero + 0.0))
+                                       tuple(zero + 0.0 for _ in range(6)))
             return lr
         for _ in range(MAX_REBUILDS + 1):
             e, gq, ga0, gc6, f3, most = _staged(eng, "long_range", make)(pos, q, a0, c6)
