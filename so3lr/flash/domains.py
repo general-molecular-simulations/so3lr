@@ -395,9 +395,8 @@ class FlashDomains:
         def make():
             def lr(R, q, a0, c6):
                 pos3 = eng._pos3(R)
-                zero = jnp.zeros((eng.n,), eng.dtype)
-                return eng._long_range(pos3, eng.build_grid(pos3), q, a0, c6, zero,
-                                       (zero + 0.0, zero + 0.0, zero + 0.0, zero + 0.0))
+                return eng._long_range(pos3, eng.build_grid(pos3), q, a0, c6, jnp.zeros((eng.n,), eng.dtype),
+                                       eng._fw_zeros())
             return lr
         for _ in range(MAX_REBUILDS + 1):
             e, gq, ga0, gc6, f3, most = _staged(eng, "long_range", make)(pos, q, a0, c6)

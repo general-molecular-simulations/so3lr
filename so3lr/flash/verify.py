@@ -1,5 +1,5 @@
 """Check SO3LR-Flash against the neighbour-list potential of ``so3lr nve``: energy, forces
-and dE/d(strain) (the NPT pressure's virial).
+and dE/d(strain) (the NPT pressure's virial), isotropic and per axis (semi-isotropic NPT).
 
     python -m so3lr.flash.verify --input water.xyz [--model so3lr-tauri-m] [--precision float64]
         [--pme electrostatics,dispersion --kspace-smearing 2 --kspace-spacing 1.55]
@@ -89,16 +89,23 @@ def main(argv=None):
         # dE/d(strain): box and positions scaled together, as jax-md's NPT takes it
         w_ref = float(jax.jit(jax.grad(lambda eps: energy_fn(position, perturbation=1.0 + eps, **kw)))(
             jnp.asarray(0.0, dtype)))
-        e, f, w = strain(jnp.asarray(at.get_positions(), dtype))
+        # per axis: side a and positions along a scaled by 1 + eps_a (semi-isotropic NPT)
+        w3_ref = np.asarray(jax.jit(jax.grad(lambda eps: energy_fn(
+            position, perturbation=jnp.eye(3, dtype=dtype) + jnp.diag(eps), **kw)))(jnp.zeros(3, dtype)), np.float64)
+        e, f, w3 = strain(jnp.asarray(at.get_positions(), dtype), diag=True)
+        w3 = np.asarray(w3, np.float64)
+        w = float(w3.sum())                      # the isotropic dE/d(strain)
         de = abs(float(e) - e_ref) / len(at)
         df = float(np.abs(np.asarray(f, np.float64) - f_ref).max())
         dw = abs(float(w) - w_ref) / max(abs(w_ref), 1.0)
+        dw3 = float(np.abs(w3 - w3_ref).max()) / max(float(np.abs(w3_ref).max()), 1.0)
         tol = (1e-9, 1e-5, 1e-8) if dtype == jnp.float64 else (1e-6, 5e-3, 1e-3)
-        good = de < tol[0] and df < tol[1] and dw < tol[2]
+        good = de < tol[0] and df < tol[1] and dw < tol[2] and dw3 < tol[2]
         ok &= good
         print(f"  {name:<14} {args.precision} pme={args.pme or '-'}  E/atom {e_ref / len(at):.6f}  |dE|/atom {de:.1e}  "
               f"max|dF| {df:.1e} eV/A  (max|F| {np.abs(f_ref).max():.1f})  dE/dstrain {w_ref:.4f} "
-              f"rel diff {dw:.1e}  {'PASS' if good else 'FAIL'}",
+              f"rel diff {dw:.1e}  per axis {np.round(w3_ref, 4).tolist()} rel diff {dw3:.1e}  "
+              f"{'PASS' if good else 'FAIL'}",
               flush=True)
     print("ALL PASS" if ok else "SOME CHECKS FAILED")
     return ok
