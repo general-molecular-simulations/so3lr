@@ -18,27 +18,30 @@ constexpr float FLOOR_W = 0.05f;          // the pair distance floor's width, as
 // ===================================================================================== //
 struct PrepParams {
   const double *px, *py, *pz, *box;
-  const int *nbr, *cnt, *z, *off, *lo, *hi, *tile_atom, *row0;
+  const int *nbr, *cnt, *z, *off, *lo, *hi, *tile_atom, *row0;   // off, lo, hi, tile_atom: per row of the range
   const float *rmin, *scal;
-  int4* PI;        // a, b, slot(a <- b), slot(b <- a) (a shadow slot >= n K when b is another device's)
+  int4* PI;        // a, b, slot(a <- b), slot(b <- a) (a shadow slot >= nl K when b is outside the range)
   float4* PG;      // [2 per pair]: (ux, uy, uz, r), (ce, dce, drt, rt / spacing)
   int* PIDX;       // directed slot -> pair
-  int n, K, zmax, nl, pmax;      // pmax: the records' room (n K / 2 pairs; more only while a row overflows)
+  int n, K, zmax, nl, pmax;      // pmax: the records' room
 };
 
-// This device's pairs: for each of its rows a (row0 <= a < row0 + nl) the neighbours b of
-// another device, and the larger local ones (a pair of two local atoms once). In the sorted
-// row the kept columns are [0, lo) (b < row0) and [hi, cnt) (b > a). A partner on another
-// device gets no slot in b's row: its reverse score goes to the pair's shadow slot n K + q.
+// The pairs of a range of rows (a device's, or a chunk of them): for each of its rows a
+// (row0 <= a < row0 + nl) the neighbours b outside the range, and the larger ones inside (a
+// pair of two atoms of the range once). In the sorted row the kept columns are [0, lo)
+// (b < row0) and [hi, cnt) (b > a). The directed slots and the per-row arrays are the
+// range's own: slot (a - row0) K + column, so a range's buffers hold its rows only. A
+// partner outside the range gets no slot: its reverse score goes to the shadow slot nl K + q.
 __global__ void pair_prep(PrepParams p) {
-  const int P = min(p.off[p.n], p.pmax);
+  const int P = min(p.off[p.nl], p.pmax);
   const int q = blockIdx.x * blockDim.x + threadIdx.x;
   if (q >= P) return;
   const float spacing = p.scal[1], rc = p.scal[3];
   const int r0 = p.row0[0];
-  int a = p.tile_atom[q >> 4];
-  while (p.off[a + 1] <= q) ++a;
-  const int j = q - p.off[a], la = p.lo[a], ha = p.hi[a];
+  int al = p.tile_atom[q >> 4];                      // the row within the range
+  while (p.off[al + 1] <= q) ++al;
+  const int a = r0 + al;
+  const int j = q - p.off[al], la = p.lo[al], ha = p.hi[al];
   const int c = j < la ? j : j + (ha - la);
   const int b = p.nbr[(size_t)a * p.K + c];
   const bool b_local = b >= r0 && b < r0 + p.nl;
@@ -49,10 +52,10 @@ __global__ void pair_prep(PrepParams p) {
     int mid = (lo + hi) >> 1;
     if (row[mid] < a) lo = mid + 1; else hi = mid;
   }
-  // b's slot of a: none when b is another device's, or (a row overflowed; the engine widens the
-  // rows and calls again) when b's truncated row lacks a: the reverse score goes to the shadow
+  // b's slot of a: none when b is outside the range, or (a row overflowed; the engine widens
+  // the rows and calls again) when b's truncated row lacks a: the reverse score goes to the shadow
   const bool found = lo < cm && row[lo] == a;
-  const int sba = found ? b * p.K + lo : p.n * p.K + q;
+  const int sba = found ? (b - r0) * p.K + lo : p.nl * p.K + q;
   const double Lx = p.box[0], Ly = p.box[1], Lz = p.box[2];
   double dxd = p.px[b] - p.px[a], dyd = p.py[b] - p.py[a], dzd = p.pz[b] - p.pz[a];
   dxd -= Lx * floor(dxd * (1.0 / Lx) + 0.5);
@@ -75,9 +78,9 @@ __global__ void pair_prep(PrepParams p) {
   bool above = rr >= d_off;
   float rt = above ? rr : d_off - FLOOR_W * th;
   float drt = above ? 1.f : 1.f - th * th;
-  p.PI[q] = make_int4(a, b, a * p.K + c, sba);
-  p.PIDX[a * p.K + c] = q;
-  if (found) p.PIDX[b * p.K + lo] = q;
+  p.PI[q] = make_int4(a, b, al * p.K + c, sba);
+  p.PIDX[al * p.K + c] = q;
+  if (found) p.PIDX[(b - r0) * p.K + lo] = q;
   p.PG[2 * q] = make_float4(ok ? dx * inv : 1.f, ok ? dy * inv : 0.f, ok ? dz * inv : 0.f, rr);
   p.PG[2 * q + 1] = make_float4(ce, dce, drt, rt / spacing);
 }
@@ -125,6 +128,8 @@ struct Stage {
 #else
 #define LQ(ptr) (*reinterpret_cast<const float2*>(ptr))
 #endif
+// KEEPW: write the filters per pair for the backward (else the scores only)
+template <bool KEEPW>
 __global__ void __launch_bounds__(NTH, MINB) att_pair(PairParams p) {
   extern __shared__ float smf[];
   float* Bs = smf;                                                   // [FC][KD + 4] fp32, transposed (n rows, k columns)
@@ -320,10 +325,12 @@ __global__ void __launch_bounds__(NTH, MINB) att_pair(PairParams p) {
           sab1 += qa1.x * w10 * kb1.x + qa1.y * w11 * kb1.y;
           sba1 += qb1.x * w10 * ka1.x + qb1.y * w11 * ka1.y;
 #ifndef NOWST
-          if (pi0.z >= 0)
-            WST_STORE(reinterpret_cast<float2*>(p.Wst + ((size_t)(t * TP + r0) * 2 + ch) * F + col), make_float2(w00, w01));
-          if (pi1.z >= 0)
-            WST_STORE(reinterpret_cast<float2*>(p.Wst + ((size_t)(t * TP + r1) * 2 + ch) * F + col), make_float2(w10, w11));
+          if constexpr (KEEPW) {
+            if (pi0.z >= 0)
+              WST_STORE(reinterpret_cast<float2*>(p.Wst + ((size_t)(t * TP + r0) * 2 + ch) * F + col), make_float2(w00, w01));
+            if (pi1.z >= 0)
+              WST_STORE(reinterpret_cast<float2*>(p.Wst + ((size_t)(t * TP + r1) * 2 + ch) * F + col), make_float2(w10, w11));
+          }
 #endif
         }
 #pragma unroll
@@ -383,12 +390,14 @@ __global__ void __launch_bounds__(MW * 32) att_msg(MsgParams p) {
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, e = lane & 15, half = lane >> 4;
   const int r0 = p.row0[0];
   const int a = r0 + blockIdx.x * MW + warp;
-  if (a >= r0 + p.nl || a >= p.n) return;
+  // the range's rows from row0[1] on: a chunk shifted back to end at the last row leaves
+  // the rows it shares with the one before it as that one wrote them
+  if (a < p.row0[1] || a >= r0 + p.nl || a >= p.n) return;
   const double Lx = p.box[0], Ly = p.box[1], Lz = p.box[2];
   const double iLx = 1.0 / Lx, iLy = 1.0 / Ly, iLz = 1.0 / Lz;
   const double ax = p.px[a], ay = p.py[a], az = p.pz[a];
   const int n_a = min(p.cnt[a], p.K);
-  const float* Sa = p.S + (size_t)a * p.K * 2 * NH;
+  const float* Sa = p.S + (size_t)(a - r0) * p.K * 2 * NH;         // the range's slots
   const int* row = p.nbr + (size_t)a * p.K;
   float acc[NH];
 #pragma unroll
@@ -477,7 +486,7 @@ static int smem_bytes() {
 static ffi::Error PairImpl(cudaStream_t stream, F32 q1, F32 k1, F32 q2, F32 k2, F32 ev, S32 PI, F32 PG, S32 off,
                            F32 u1v, F32 u1d, F32 u2v, F32 u2d, F32 wa1, F32 ba1, F32 wb1, F32 bb1, F32 wa2, F32 ba2,
                            F32 wb2, F32 bb2, F32 vr1, F32 vr2, F32 cdeg, F32 scal, RF32 S,
-                           RF32 Wst, int64_t P) {
+                           RF32 Wst, int64_t P, int64_t keep_w) {
   PairParams p;
   p.q1 = q1.typed_data(); p.k1 = k1.typed_data(); p.q2 = q2.typed_data(); p.k2 = k2.typed_data();
   p.ev = ev.typed_data(); p.PI = reinterpret_cast<const int4*>(PI.typed_data());
@@ -489,8 +498,13 @@ static ffi::Error PairImpl(cudaStream_t stream, F32 q1, F32 k1, F32 q2, F32 k2, 
   p.S = S->typed_data(); p.Wst = Wst->typed_data();
   p.n = (int)off.dimensions()[0] - 1; p.pmax = (int)P;
   const int smem = smem_bytes();
-  set_max_smem<att_pair>(smem);
-  att_pair<<<dim3(num_sms(), 2), NTH, smem, stream>>>(p);
+  if (keep_w) {
+    set_max_smem<att_pair<true>>(smem);
+    att_pair<true><<<dim3(num_sms(), 2), NTH, smem, stream>>>(p);
+  } else {
+    set_max_smem<att_pair<false>>(smem);
+    att_pair<false><<<dim3(num_sms(), 2), NTH, smem, stream>>>(p);
+  }
   return launch_status();
 }
 
@@ -525,7 +539,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(AttPair, PairImpl,
         .Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>()                       // wa1 ba1 wb1 bb1
         .Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>()                       // wa2 ba2 wb2 bb2
         .Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>()                       // vr1 vr2 cdeg scal
-        .Ret<F32>().Ret<F32>().Attr<int64_t>("P"));                       // S, w per pair
+        .Ret<F32>().Ret<F32>().Attr<int64_t>("P").Attr<int64_t>("keep_w"));  // S, w per pair (if keep_w)
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(AttMsg, MsgImpl,
     ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()

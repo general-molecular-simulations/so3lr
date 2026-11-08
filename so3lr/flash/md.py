@@ -122,21 +122,41 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
     devices = int(settings.get("flash_devices") or 1)
     # several GPUs run the jitted fast mode (validate_options refuses another)
     mode = "fast" if devices > 1 else (settings.get("flash_mode") or "auto")
+    kernels = settings.get("flash_kernels") or None
+    picked = None
     if mode == "auto":
-        mode = pick_mode(n, _free_bytes() - reserve, statics)
+        from .cuda import pick_mode as cuda_mode
+        # the CUDA kernels' fastest mode that fits, else the Pallas kernels' (theirs go
+        # further); the CUDA kernels need no long-range scratch, and PME's meshes are not
+        # alive at their peak (2 GiB left for what the engine allocates before it plans)
+        picked = cuda_mode(n, _free_bytes() - (2 << 30), params, statics) if kernels != "pallas" else None
+        mode = picked or pick_mode(n, _free_bytes() - reserve, statics)
+        if not picked and kernels is None:
+            kernels = "pallas"           # not the CUDA kernels in a mode of theirs auto does not pick
     total_charge = float(settings.get("total_charge") or 0)
     embed = settings.get("charge_embed_total_charge")
     equil = settings.get("charge_equilibration_total_charge")
-    kw, staged, _ = MODES[mode]
-    # the sides only: structure_problem takes a cell with off-diagonals up to 1e-9 as orthorhombic
-    eng = FlashSO3LR(params, statics, atoms.get_atomic_numbers(), None if vacuum else np.diag(L),
-                     total_charge=total_charge if embed is None else float(embed),
-                     total_spin=float(settings.get("num_unpaired_electrons") or 0),
-                     equilibration_charge=total_charge if equil is None else float(equil),
-                     pme_electrostatics=pme_el, pme_dispersion=pme_disp,
-                     box_margin=box_margin, devices=devices,
-                     size=size, **kw,
-                     kernels=settings.get("flash_kernels") or None)
+
+    def make(kw, staged, kernels):
+        # the sides only: structure_problem takes a cell with off-diagonals up to 1e-9 as orthorhombic
+        return FlashSO3LR(params, statics, atoms.get_atomic_numbers(), None if vacuum else np.diag(L),
+                          total_charge=total_charge if embed is None else float(embed),
+                          total_spin=float(settings.get("num_unpaired_electrons") or 0),
+                          equilibration_charge=total_charge if equil is None else float(equil),
+                          pme_electrostatics=pme_el, pme_dispersion=pme_disp,
+                          box_margin=box_margin, devices=devices,
+                          size=size, **kw,
+                          kernels=kernels, staged=staged)
+    kw, staged = MODES[mode][:2]
+    eng = make(kw, staged, kernels)
+    if picked and eng.cuda_kernels is None:
+        # the CUDA kernels declined after all (not built, or less free than the pick saw): the
+        # Pallas kernels' mode for the memory free now
+        del eng
+        gc.collect()                     # the engine's programs hold it in a cycle
+        mode = pick_mode(n, _free_bytes() - reserve, statics)
+        kw, staged = MODES[mode][:2]
+        eng = make(kw, staged, "pallas")
     kib = eng.cuda_kernels.kib if eng.cuda_kernels is not None else mode_kib(mode, statics)
     logger.info(f"Flash: {n} atoms, memory mode {mode} ({'staged' if staged else 'jitted'}), "
                 f"~{kib:.1f} KiB/atom at peak")

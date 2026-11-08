@@ -52,6 +52,7 @@ neighbour-list potential.
 """
 from __future__ import annotations
 
+import contextlib
 import math
 from functools import partial
 
@@ -1180,6 +1181,19 @@ def mode_kib(mode, statics):
     return MODES[mode][2] * width / 152.0
 
 
+def model_widths(params, statics):
+    """(features, heads, features per head, equivariant components, the spherical filters'
+    hidden units) of a model, as the engine takes them."""
+    F, nh = int(params["feature_embeddings_0"]["Embed_0"]["embedding"].shape[1]), int(statics["num_heads"])
+    sh = int(params["layers_0"]["attention_block"]["spherical_filter1_layer_1"]["kernel"].shape[1])
+    return F, nh, F // nh, sum(2 * int(d) + 1 for d in statics["degrees"]), sh
+
+
+def neighbour_rows(rc):
+    """Neighbour rows' width for water at cutoff rc (the engine widens them on overflow)."""
+    return int(math.ceil(64 * (rc / 4.5) ** 3 / 16) * 16)
+
+
 def pick_mode(n, free_bytes, statics):
     """The fastest of MODES whose peak for n atoms fits in free_bytes, else the leanest."""
     for name in MODES:
@@ -1206,17 +1220,51 @@ def pme_bytes(L, pme, itemsize):
     return max((5 * math.prod(pme_mesh_shape(L, p[1])) * itemsize for p in pme if p), default=0)
 
 
+def spatial_order(R, L):
+    """The atoms at R (box sides L) along a Morton curve of the box (2^10 cells a side):
+    atoms near in the order are near in space."""
+    frac = R / L.astype(R.dtype)
+    c = jnp.clip(jnp.floor((frac - jnp.floor(frac)) * 1024), 0, 1023).astype(jnp.uint32)
+
+    def spread(v):                           # the 10 bits of v to every third of 30
+        v = (v | (v << 16)) & 0x030000FF
+        v = (v | (v << 8)) & 0x0300F00F
+        v = (v | (v << 4)) & 0x030C30C3
+        return (v | (v << 2)) & 0x09249249
+    key = spread(c[:, 0]) | (spread(c[:, 1]) << 1) | (spread(c[:, 2]) << 2)
+    return jnp.argsort(key, stable=True).astype(jnp.int32)
+
+
+@jax.jit
+def _sorted(R, L, z, elem):
+    """The spatial order of the atoms, and R, z, elem in it (the staged path's, one program)."""
+    perm = spatial_order(R, L)
+    return perm, R[perm], z[perm], elem[perm]
+
+
+@jax.jit
+def _unsorted(f, perm):
+    """Rows of f (the atoms in the order perm, or None: in the input's) in the input's order."""
+    return f if perm is None else jnp.zeros_like(f).at[perm].set(f, unique_indices=True)
+
+
 class FlashSO3LR:
     """Energy and forces of SO3LR (params, statics from ``loader.load_params``) for atoms
     ``z`` in an orthorhombic periodic ``box``, or in free space (box None, laid out for
     atoms of ``size``, ``check.vacuum_size``), with so3lr_dev's descriptor floor at
-    contacts. The memory options are those of ``MODES``."""
+    contacts. The memory options are those of ``MODES``. sort_atoms: each force call runs
+    with the atoms along a Morton curve of the box (``spatial_order``), the forces given
+    back in the input's order, so the rows a device or a chunk of the CUDA kernels takes,
+    and the neighbours' rows every kernel reads, stay local whatever that order is. staged:
+    the caller runs the staged path (energy_forces_strain_staged), which the CUDA kernels
+    plan their memory for."""
 
     def __init__(self, params, statics, z, box, *, total_charge=0.0, total_spin=0.0,
                  equilibration_charge=None, tile=1 << 17, max_neighbours=None, lr_scratch=1024,
                  keep_layer_inputs=True, keep_attention=False, split_channels=False,
                  split_blocks=False, pme_electrostatics=None, pme_dispersion=None, box_margin=0.0,
-                 devices=1, atoms_per_program=None, size=None, kernels=None):
+                 devices=1, atoms_per_program=None, size=None, kernels=None, sort_atoms=True,
+                 staged=False):
         degrees = [int(d) for d in statics["degrees"]]
         self.nh = int(statics["num_heads"])
         # one head per degree entry, each on its own block of G features (so3lr-tauri-s/m: 4 x 32,
@@ -1259,21 +1307,21 @@ class FlashSO3LR:
         self.device_mesh = jax.sharding.Mesh(np.array(devs), (AXIS,)) if self.P > 1 else None
         self.tile = min(int(tile), self.nl)
         # neighbour rows sized for water at the model's cutoff (widened on overflow)
-        self.K = int(max_neighbours or math.ceil(64 * (self.rc / 4.5) ** 3 / 16) * 16)
+        self.K = int(max_neighbours or neighbour_rows(self.rc))
         self.keep = bool(keep_layer_inputs)
         self.keep_attention = bool(keep_attention) and self.keep
         self.split = bool(split_channels)
         self.blocks = bool(split_blocks)
+        self.sort_atoms = bool(sort_atoms)
+        self.staged = bool(staged)
         # the charge embedding sees total_charge, the charge equilibration conserves
         # equilibration_charge (so3lr_dev's two overrides; both follow total_charge by default)
         self.total_charge = float(total_charge if equilibration_charge is None else equilibration_charge)
         dt = self.dtype
-        self.F = int(params["feature_embeddings_0"]["Embed_0"]["embedding"].shape[1])
-        self.G = self.F // self.nh
+        self.F, _, self.G, self.M, self.sh = model_widths(params, statics)
         if self.G * self.nh != self.F or self.G & (self.G - 1):
             raise ValueError(f"{self.F} features over {self.nh} heads: needs a power-of-two block per head")
         mdeg = [i for i, d in enumerate(degrees) for _ in range(2 * d + 1)]
-        self.M = len(mdeg)
         self.MP = max(32, 1 << (self.M - 1).bit_length())     # the kernels' power-of-two width
         self.mdeg = jnp.asarray(mdeg + [-1] * (self.MP - self.M), jnp.int32)
         # where each degree entry's columns start, and its degree's first harmonic component
@@ -1282,7 +1330,6 @@ class FlashSO3LR:
         self.cdeg = jnp.asarray([(2 * d + 1) ** -0.5 for d in degrees], dt)
         # the attention kernels' launch for this width of the spherical filters' hidden
         # layer: the nearest wider one tabulated (the widest if none is)
-        self.sh = int(params["layers_0"]["attention_block"]["spherical_filter1_layer_1"]["kernel"].shape[1])
         self.launch = _att_launch(self.sh)
         self.par = jnp.asarray([(-1.0) ** d for d in degrees], dt)
         self.z = jnp.asarray(z)
@@ -1501,10 +1548,11 @@ class FlashSO3LR:
         return e_loc, raw_q, a0, c6
 
     # ---- tiles --------------------------------------------------------------------
-    def _tile_loop(self, body, carry):
-        """body(start, first_new, carry) over tiles of this device's rows; the last tile is
-        shifted back to end at its last row, and first_new marks where its new atoms begin."""
-        T, n, r0 = self.tile, self.nl, self._r0
+    def _tile_loop(self, body, carry, T=None):
+        """body(start, first_new, carry) over tiles of T rows (default: the engine's tile) of
+        this device's rows; the last tile is shifted back to end at its last row, and
+        first_new marks where its new atoms begin."""
+        T, n, r0 = T or self.tile, self.nl, self._r0
         nt = -(-n // T)
 
         def step(t, c):
@@ -1571,8 +1619,8 @@ class FlashSO3LR:
     def _sum(self, v):
         return v if self.P == 1 else lax.psum(v, AXIS)
 
-    def _rows_mask(self, start, first_new):
-        return (start + jnp.arange(self.tile) >= first_new)[:, None]
+    def _rows_mask(self, start, first_new, T=None):
+        return (start + jnp.arange(T or self.tile) >= first_new)[:, None]
 
     def _map_rows(self, fn, arrays, outs):
         """outs[i][rows] = fn(*arrays[rows])[i] for every tile (new rows only). An input
@@ -1945,21 +1993,36 @@ class FlashSO3LR:
 
     # ---- one jitted program (usable inside jax-md's jitted steps) --------------------
     def _energy_forces(self, R):
-        """(energy, forces, overflow, dE/d(strain)); on several devices one program per
-        device (shard_map), each computing its own rows, R and the results the same on all."""
-        if self.P == 1:
-            return self._energy_forces_rows(R)
-        from jax.sharding import PartitionSpec
-        rep = PartitionSpec()
+        """(energy, forces, overflow, dE/d(strain)), the atoms in a spatial order inside
+        (sort_atoms) and the forces in R's; on several devices one program per device
+        (shard_map), each computing its own rows, R and the results the same on all."""
+        perm, Rs, z, elem = None, R, self.z, self.elem
+        if self.sort_atoms:
+            perm, Rs, z, elem = _sorted(R, self._box(R[:, 0]), z, elem)
 
-        def per_device(R, L):
-            keep, self._Lt = self._Lt, L
-            try:
+        def rows(R, L, z, elem):
+            with self._atoms(z, elem, L):
                 return self._energy_forces_rows(R)
-            finally:
-                self._Lt = keep
-        return jax.shard_map(per_device, mesh=self.device_mesh, in_specs=(rep, rep), out_specs=(rep,) * 4,
-                             check_vma=False)(R, self.box if self._Lt is None else self._Lt)
+        if self.P == 1:
+            e, f, over, w = rows(Rs, self._Lt, z, elem)
+        else:
+            from jax.sharding import PartitionSpec
+            rep = PartitionSpec()
+            e, f, over, w = jax.shard_map(rows, mesh=self.device_mesh, in_specs=(rep,) * 4,
+                                          out_specs=(rep,) * 4, check_vma=False)(
+                Rs, self.box if self._Lt is None else self._Lt, z, elem)
+        return e, _unsorted(f, perm), over, w
+
+    @contextlib.contextmanager
+    def _atoms(self, z, elem, L=None):
+        """The engine's z and elem as given (the atoms sorted), and its box L where given (an
+        argument of the program), while its methods trace or run."""
+        keep = self.z, self.elem, self._Lt
+        self.z, self.elem, self._Lt = z, elem, self._Lt if L is None else L
+        try:
+            yield
+        finally:
+            self.z, self.elem, self._Lt = keep
 
     def _energy_forces_rows(self, R):
         n, dt, M = self.n, self.dtype, self.M
@@ -2013,12 +2076,8 @@ class FlashSO3LR:
         constants: one compiled program serves any box within the cell grid's margin
         (NPT)."""
         def g(z, elem, L, *args):
-            keep = self.z, self.elem, self._Lt
-            self.z, self.elem, self._Lt = z, elem, L
-            try:
+            with self._atoms(z, elem, L):
                 return fn(*args)
-            finally:
-                self.z, self.elem, self._Lt = keep
         j = jax.jit(g, donate_argnums=tuple(d + 3 for d in donate))
         return lambda *args: j(self.z, self.elem, self.box, *args)
 
@@ -2040,8 +2099,9 @@ class FlashSO3LR:
                 # kept inputs must survive; otherwise the input is dead once read
                 c["fwd", li] = jit(fwd, donate_argnums=() if self.keep else ((0, 1) if li else (1,)))
 
-                if ck is not None:
-                    post_fn, att_fn = ck.stage_fns(li)
+                fns = ck.stage_fns(li) if ck is not None else None
+                if fns:
+                    post_fn, att_fn = fns
                     c["post", li] = jit(post_fn, donate_argnums=(2, 3, 4))
                     c["att", li, 0] = jit(att_fn, donate_argnums=(4,))
                     continue
@@ -2120,15 +2180,21 @@ class FlashSO3LR:
         per axis, shape [3], whose sum that is)."""
         R = jnp.asarray(R)
         R = R if R.dtype == jnp.float64 else R.astype(self.dtype)
-        for _ in range(MAX_REBUILDS + 1):
-            if bool(self._outgrown(R)) and self._recover(R, 2):     # before the work, which needs the box
-                continue
-            st = self._forward_staged(R)
-            cnt = st["nb"][4]
-            energy, f3, most = self._backward_staged(R, st)
-            if not self._recover(R, int(int(jnp.max(cnt)) > self.K or int(most) > self.maxh)):
-                w3 = self._strain(f3[3:], R)
-                return energy, jnp.stack(f3[:3], -1), (w3 if diag else w3.sum())
+        # the atoms in a spatial order (sort_atoms) for the stages, as in the jitted call (any
+        # order gives the same result: one for all the rebuilds)
+        perm, Rs, z, elem = None, R, self.z, self.elem
+        if self.sort_atoms:
+            perm, Rs, z, elem = _sorted(R, self.box, z, elem)
+        with self._atoms(z, elem):
+            for _ in range(MAX_REBUILDS + 1):
+                if bool(self._outgrown(R)) and self._recover(R, 2):     # before the work, which needs the box
+                    continue
+                st = self._forward_staged(Rs)
+                cnt = st["nb"][4]
+                energy, f3, most = self._backward_staged(Rs, st)
+                if not self._recover(R, int(int(jnp.max(cnt)) > self.K or int(most) > self.maxh)):
+                    w3 = self._strain(f3[3:], Rs)
+                    return energy, _unsorted(jnp.stack(f3[:3], -1), perm), (w3 if diag else w3.sum())
         raise RuntimeError(f"Flash: overflowed again after {MAX_REBUILDS} rebuilds")
 
     def widen(self):

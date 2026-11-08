@@ -8,8 +8,12 @@ model of 8 heads runs every head of a channel in one CTA.
 ``attach(eng)`` replaces the engine's methods on the instance; the kernels are built with nvcc
 on first use (see ``build``). Per force call the neighbour rows are sorted, and each unordered
 pair's record (its atoms, its two directed slots, its geometry) is made once; every layer's
-forward keeps the filter per pair and the scores per slot for its backward (``kib_per_atom``:
-more than the Pallas fast mode holds, so the kernels decline where that does not fit).
+forward keeps the filter per pair and the scores per slot for its backward (``kib_per_atom``).
+Where that does not fit, the kernels serve the engine's attention alone, a chunk of rows at a
+time: each chunk's per-pair data is made in the forward for the scores and again in the
+backward, at about 1.3x the time of keeping it, and the engine's memory mode decides what is
+kept per atom (``chunked_kib_per_atom``; the modes picked: ``MODES``). Where none fits, the
+engine keeps the Pallas kernels.
 
 Numerics: radial filter tables are the engine's at every 8th node (512 intervals, cubic
 Hermite: the same accuracy, an 8x smaller table), the long-range pair tables at every 64th
@@ -17,6 +21,7 @@ Hermite: the same accuracy, an 8x smaller table), the long-range pair tables at 
 (the finite difference (f0 - f1) / h loses digits as h shrinks)."""
 import functools
 import logging
+import types
 
 import jax
 import jax.numpy as jnp
@@ -36,6 +41,12 @@ def _f64(pos3):
     return tuple(c if c.dtype == jnp.float64 else c.astype(jnp.float64) for c in pos3)
 
 
+def _row_arg(start, first_new):
+    """The kernels' row argument of a range of rows: its first row, and the first it writes
+    (the rows before are another range's: a chunk shifted back to end at the last row)."""
+    return jnp.stack([jnp.asarray(start, jnp.int32), jnp.asarray(first_new, jnp.int32)])
+
+
 def variant(eng):
     """The kernels' build variant of this engine's model: (features, heads, equivariant
     components, the spherical filters' hidden units, the entries' degrees as nibbles, the
@@ -48,19 +59,73 @@ def variant(eng):
 
 
 def kib_per_atom(eng):
-    """What the engine holds per atom at its peak on the kernels, in KiB (an estimate; the
-    margin is unsupported's): the fast mode's arrays, per layer the filter per pair (K F
-    floats), the scores per slot, the projections with their VJP's inputs and the post
-    block's, the heads' VJP, and one layer's backward temporaries per slot (its slot scalars,
-    and per channel copy the force and per-axis virial record and the ev gradient)."""
+    """What the engine holds per atom at its peak on the kernels, every layer's per-pair data
+    kept for its backward, in KiB (an estimate, MARGIN aside; on water so3lr-tauri-s/m/l hold
+    95/136/406 KiB): the fast mode's arrays, per layer the filter per pair (K F floats), the
+    scores per slot, the projections and the post block's VJP inputs, the heads' VJP, and one
+    layer's backward temporaries per slot (its slot scalars, and per channel copy the force and
+    per-axis virial record and the ev gradient)."""
     from ..engine import mode_kib
-    per_layer = eng.K * eng.F + 3 * eng.K * eng.nh + 16 * eng.F + 3 * eng.M     # floats
-    bwd = eng.K * (5 * eng.nh + bwd_copies(variant(eng)) * (8 + eng.M))
-    return mode_kib("fast", eng.statics) + (eng.statics["num_layers"] * per_layer + 8 * eng.F + bwd) * 4 / 1024
+    per_layer = eng.K * eng.F + 3 * eng.K * eng.nh + 3 * eng.F + 3 * eng.M     # floats
+    floats = eng.statics["num_layers"] * per_layer + 8 * eng.F + _slot_floats(eng)
+    return mode_kib("fast", eng.statics) + floats * 4 / 1024
+
+
+def _slot_floats(eng):
+    """One layer's backward temporaries per row, in floats: per slot its scalars, and per
+    channel copy the force and per-axis virial record and the ev gradient."""
+    return eng.K * (5 * eng.nh + bwd_copies(variant(eng)) * (8 + eng.M))
+
+
+def chunked_kib_per_atom(eng):
+    """What the engine holds per atom at its peak with the per-pair data made a chunk of rows
+    at a time (chunk_kib_per_row), in KiB (MARGIN aside; so3lr-tauri-s/m/l on water in MD:
+    the measured peaks within 2%). The peak is the top layer's backward: its projections and
+    gradients, the neighbour rows, the MD state, and what the memory mode keeps of the layers
+    below, their inputs and attention outputs; one program (jitted) holds more of the
+    backward's temporaries at once than its own stage does. PME's meshes are not alive then."""
+    F, M, K, L = eng.F, eng.M, eng.K, eng.statics["num_layers"]
+    w = F + M
+    floats = 6.5 * w + K + 145
+    if eng.keep:
+        floats += (L - 1) * w - F
+    if eng.keep_attention:
+        floats += (L - 1) * w
+    if not eng.staged:
+        floats += 4.8 * w
+    return floats * 4 / 1024
+
+
+def chunk_kib_per_row(eng):
+    """A chunk's per-pair and per-slot buffers per row, in KiB: its pairs' filters (at most K a
+    row: a pair with a partner outside the chunk is the chunk's too), its slots' and shadow
+    slots' scores, the pair records and slot index, the backward's slot records, and its
+    rows' projections' gradients."""
+    K, F, NH = eng.K, eng.F, eng.nh
+    return (K * 2 * F + 2 * K * 2 * NH + K * 12 + 2 * K + _slot_floats(eng) + 5 * F) * 4 / 1024
+
+
+GIB = 1 << 30
+MARGIN = 1.05            # on the per-atom estimates
+MIN_CHUNK = 2 * GIB      # bytes for a chunk's buffers: fewer rows would spend more on duplicated pairs
+CHUNK_BUDGET = (24 * GIB, 64 * GIB)  # bytes for a chunk's buffers: at least (room allowing), at most
+# staged: a stage's temporaries are one allocation, which the GPU's memory, fragmented by what
+# stays between the stages and steps, may not hold in one piece; the largest (every atom's
+# projections, the attention output where it is made again, a chunk's buffers) at most this
+# share of the free memory (larger ones failed after the first MD step)
+STAGE_SHARE = 0.4
+
+# The engine's memory modes (engine.MODES) picked for the kernels, fastest first; "default"
+# is "fast" staged (each stage a program of its own: fewer temporaries alive at once, the
+# same speed). The kernels serve the leaner modes too (the attention outputs, then the layer
+# inputs, made again in the backward; flash_mode), but they are not picked: on the systems
+# they are for, one stage holds every atom's projections in a single allocation of most of
+# the GPU, which after the first step the allocator does not always find in one piece.
+MODES = ("fast", "default")
 
 
 def unsupported(eng):
-    """Why the CUDA kernels cannot serve this engine (None: they can)."""
+    """Why the CUDA kernels cannot serve this engine (None: they can, memory aside)."""
     why = problem()
     if why:
         return why
@@ -70,12 +135,52 @@ def unsupported(eng):
         return "float32 positions (the kernels take float64 ones: jax_enable_x64)"
     if variant(eng) is None:
         return "a model other than so3lr-tauri-s/m/l or so3lr (32 features per head, 4 or 8 heads of degrees 1-4)"
-    if not eng.keep_attention or eng.split or eng.blocks:
-        return "a memory mode other than fast"
-    from ..md import _free_bytes
-    need, free = eng.n * kib_per_atom(eng) * 1024 * 1.1 + (1 << 30), _free_bytes()
-    if need > free:
-        return f"{eng.n} atoms' pair filters and scores need ~{need / 2 ** 30:.0f} GiB of the {free / 2 ** 30:.0f} free"
+    if eng.split or eng.blocks:
+        return "a memory mode of the Pallas kernels' own (the attention in passes)"
+    return None
+
+
+def plan(eng, free=None):
+    """(bytes for a chunk's buffers, None) for the kernels on this engine: None where every
+    layer's per-pair data fits for its backward (in a mode keeping the attention outputs),
+    else a chunk's (CHUNK_BUDGET) next to the per-atom arrays of the engine's mode; or (None,
+    why) where neither fits."""
+    if free is None:
+        from ..md import _free_bytes
+        free = _free_bytes()
+    if eng.keep_attention and eng.n * kib_per_atom(eng) * 1024 * MARGIN + GIB <= free:
+        return None, None
+    room = free - eng.n * chunked_kib_per_atom(eng) * 1024 * MARGIN - GIB
+    # half the room, between the bounds: larger chunks make fewer pairs twice (at their edges)
+    budget = min(room, max(CHUNK_BUDGET[0], min(room / 2, CHUNK_BUDGET[1])))
+    if eng.staged:
+        stage = 4 * eng.n * (5 * eng.F + (0 if eng.keep_attention else eng.F + eng.M))
+        budget = min(budget, STAGE_SHARE * free - stage)
+    if budget < min(MIN_CHUNK, eng.nl * chunk_kib_per_row(eng) * 1024):
+        need = eng.n * chunked_kib_per_atom(eng) * 1024 * MARGIN + GIB + MIN_CHUNK
+        return None, (f"{eng.n} atoms need ~{need / GIB:.0f} GiB of the {free / GIB:.0f} free, a chunk of rows "
+                      f"at a time, and a stage's temporaries in one piece")
+    return budget, None
+
+
+def pick_mode(n, free, params, statics):
+    """The fastest of MODES in which the kernels fit n atoms in free bytes (their per-pair data
+    kept, or a chunk of rows at a time), or None: they do not serve this model here, or it
+    fits none (the Pallas kernels' modes go further)."""
+    from .. import engine as E
+    # what the estimates read of an engine for these atoms, as the engine would make it
+    F, nh, G, M, sh = E.model_widths(params, statics)
+    eng = types.SimpleNamespace(n=n, nl=n, statics=statics, dtype=statics.get("dtype", jnp.float32), F=F, nh=nh,
+                                G=G, M=M, sh=sh, K=E.neighbour_rows(float(statics["cutoff"])), split=False,
+                                blocks=False, keep=True, keep_attention=True, staged=False)
+    if unsupported(eng):
+        return None
+    for name in MODES:
+        kw, eng.staged = E.MODES[name][:2]
+        eng.keep = kw.get("keep_layer_inputs", True)
+        eng.keep_attention = kw.get("keep_attention", False) and eng.keep
+        if plan(eng, free)[1] is None:
+            return name
     return None
 
 
@@ -105,10 +210,16 @@ def ffi_prefix(var):
 
 class CudaKernels:
     """The engine's CUDA methods: build (sorted rows + pair records), the layers' forward
-    and backward, the long range, and the heads with their VJP reused."""
+    and backward, the long range, and the heads with their VJP reused. In chunks (``chunk``
+    rows, or as many as ``budget`` bytes hold) the per-pair data is made a chunk of rows at a
+    time, in the forward for the scores and again in the backward, instead of kept for every
+    layer (for systems whose per-pair data does not fit), and the kernels serve the engine's
+    attention alone: a chunk's pairs are those of its rows, a pair with a partner outside the
+    chunk made by both chunks, as the devices do."""
 
-    def __init__(self, eng):
+    def __init__(self, eng, chunk=None, budget=None):
         self.eng = eng
+        self._chunk, self._budget = chunk, budget
         self.variant = variant(eng)
         NH, rank = self.variant[1], self.variant[5]
         self.copies = bwd_copies(self.variant)      # of the per-slot forces and ev gradients
@@ -128,94 +239,141 @@ class CudaKernels:
             self.layers.append(dict(W=W, tabs=[u1v, u1d, u2v, u2d], V=[v1, v2]))
         self.scal = eng.scal.at[1].multiply(TABLE_SUB).at[2].divide(TABLE_SUB)
         self.pair_tables = (eng.phi_v[::PAIR_SUB], eng.phi_d[::PAIR_SUB], eng.c6lr_v[::PAIR_SUB], eng.c6lr_d[::PAIR_SUB])
-        self.kib = kib_per_atom(eng)
+        self.kib = (kib_per_atom(eng) if self.chunk is None
+                    else chunked_kib_per_atom(eng) + chunk_kib_per_row(eng) * self.chunk / eng.n)
         self._orig_build, self._orig_heads, self._orig_head_backward = eng.build, eng._heads, eng._head_backward
-        self._calls = None                # the FFI calls for the rows' current layout (_sized)
+        self._calls = {}                  # the FFI calls per layout of the rows and range (_sized)
         self._pp = None                   # the current trace's pair records (PI, PG, PIDX, off)
         self._post_vjp, self._proj, self._heads_vjp = {}, {}, None
 
-    def _sized(self):
-        """The FFI calls with their output shapes, and the pair capacity, for the rows as laid
-        out now: made at trace time, so wider rows (widen) take effect at the next program."""
+    @property
+    def chunk(self):
+        """Rows per chunk (None: every layer's per-pair data kept): as asked, or as many as the
+        budget holds with the rows as laid out now (wider after an overflow: fewer), in chunks
+        of equal size (the last one, shifted back to end at the range's last row, then makes
+        fewer than one row a chunk twice)."""
+        if self._chunk is None and self._budget is None:
+            return None
+        nl = self.eng.nl
+        rows = self._chunk or self._budget // (chunk_kib_per_row(self.eng) * 1024)
+        rows = max(1, min(int(rows), nl))
+        return -(-nl // -(-nl // rows))
+
+    def _sized(self, rows=None):
+        """The FFI calls with their output shapes and fixed attributes, and the pair capacity,
+        for ranges of ``rows`` rows (default: the device's) and the rows as laid out now: made
+        at trace time, so wider rows (widen) take effect at the next program."""
         eng = self.eng
-        n, K, P = eng.n, eng.K, eng.P
-        if self._calls is None or self._calls["key"] != (n, K, P):
+        n, K = eng.n, eng.K
+        nl = eng.nl if rows is None else rows
+        if (K, nl) not in self._calls:
             F, NH, M = eng.F, eng.nh, eng.M
             f32, i32, S = jnp.float32, jnp.int32, jax.ShapeDtypeStruct
-            pmax = n * K // 2
-            # several devices: each its rows' pairs; a partner on another device has no slot in
-            # its row, its reverse score goes to the pair's shadow slot (n K + pair). The per-row
-            # kernels then write this device's rows into the input (aliased), the other rows
-            # keep the input's; one device writes every row, so its outputs need not alias
-            al = lambda d: d if P > 1 else None
-            call = lambda name, out, **kw: jax.ffi.ffi_call(f"{self.prefix}_{name}", out, **kw)
-            self._calls = dict(
-                key=(n, K, P), pmax=pmax, tiles16=-(-pmax // 16),
+            # the per-slot and per-pair buffers hold this device's range of rows: its nl K
+            # directed slots, and its pairs (each once where the range is every row: n K / 2;
+            # else at most K a row, a pair with a partner outside the range being the range's
+            # too). A partner outside the range has no slot in its row: its reverse score goes
+            # to the pair's shadow slot (nl K + pair). The per-row kernels then write the
+            # range's rows into the input (aliased), the other rows keep the input's; a range
+            # of every row writes them all, so its outputs need not alias
+            pmax, slots = min(n * K // 2, nl * K), nl * K
+            al = lambda d: d if nl < n else None
+
+            def call(name, out, aliases=None, **attrs):
+                """A kernel's FFI call, its attributes fixed."""
+                return functools.partial(jax.ffi.ffi_call(f"{self.prefix}_{name}", out, input_output_aliases=aliases),
+                                         **{k: np.int64(v) for k, v in attrs.items()})
+            scores = S(((slots + pmax) * 2 * NH,), f32)
+            # in chunks the gather writes the projections' gradients of the chunk's rows only
+            # (local), into a carry of the dE/dev and force sums (aliased)
+            local = self.chunk is not None
+            self._calls[K, nl] = dict(
+                pmax=pmax, tiles16=-(-pmax // 16),
                 # the pair records; PIDX from a zeroed input (a slot without a pair, while a row
                 # overflows, reads pair 0 rather than anything)
-                prep=call("prep", (S((pmax * 4,), i32), S((pmax * 8,), f32), S((n * K,), i32)), input_output_aliases={14: 2}),
-                fwd=call("fwd", (S(((n * K + pmax) * 2 * NH,), f32), S((pmax * 2 * F,), f32))),
-                msg=call("msg", (S((n, F), f32), S((n, M), f32)), input_output_aliases=al({8: 0, 9: 1})),
+                prep=call("prep", (S((pmax * 4,), i32), S((pmax * 8,), f32), S((slots,), i32)), {14: 2},
+                          zmax=eng.zmax, P=pmax, NL=nl),
+                # the scores per slot, with the filters per pair for the backward (fwd) or not
+                fwd=call("fwd", (scores, S((pmax * 2 * F,), f32)), P=pmax, keep_w=1),
+                scores=call("fwd", (scores, S((1,), f32)), P=pmax, keep_w=0),
+                msg=call("msg", (S((n, F), f32), S((n, M), f32)), al({8: 0, 9: 1}), NL=nl),
                 # the backward: slot scalars, and the forces and ev gradients per slot (a copy per
                 # channel where each channel's CTA writes its own)
-                bwd=call("bwd", (S((n * K * 5 * NH,), f32), S((self.copies * n * K * 8,), f32),   # 8 floats per slot (FVS)
-                                 S((self.copies * n * K * M,), f32))),
-                gather=call("gather", tuple(S((n, F), f32) for _ in range(5)) + (S((n, M), f32), S((6, n), f32)),
-                            input_output_aliases=al({9: 5, 10: 6})),
-                lr=call("lr", tuple(S((n,), f32) for _ in range(4)) + (S((6, n), f32),),
-                        input_output_aliases=al({18: 0, 19: 4})))
-        return self._calls
+                bwd=call("bwd", (S((slots * 5 * NH,), f32), S((self.copies * slots * 8,), f32),   # 8 floats per slot (FVS)
+                                 S((self.copies * slots * M,), f32)), P=pmax),
+                gather=call("gather", tuple(S((nl if local else n, F), f32) for _ in range(5))
+                            + (S((n, M), f32), S((6, n), f32)), {9: 5, 10: 6} if local else al({9: 5, 10: 6}),
+                            NL=nl, local=int(local)),
+                lr=call("lr", tuple(S((n,), f32) for _ in range(4)) + (S((6, n), f32),), al({18: 0, 19: 4})))
+        return self._calls[K, nl]
 
     # ---- once per force call: sorted rows and the pair records ---------------------------
     def build(self, pos3):
         """The engine's build, with the neighbour rows sorted and, appended to its tuple,
-        the pair records (PI, PG, PIDX, off) every layer reads."""
-        eng, c = self.eng, self._sized()
+        the pair records (PI, PG, PIDX, off) every layer reads (in chunks: none, each chunk
+        makes its own)."""
+        eng = self.eng
         pos3 = _f64(pos3)                 # the kernels form every distance in float64
         order, cell_start, cell_of, nbr, cnt = self._orig_build(pos3)
         n, Kc = nbr.shape
         cm = jnp.minimum(cnt, Kc)
         ns = jnp.sort(jnp.where(jnp.arange(Kc)[None, :] < cm[:, None], nbr, I32MAX), axis=1)
-        # this device's rows [r0, r0 + nl): a row keeps its partners on other devices and the
-        # larger local ones (sorted: columns [0, lo) and [hi, cnt))
-        row0 = eng._row_arg()
-        ar = jnp.arange(n, dtype=jnp.int32)
-        local = (ar >= row0[0]) & (ar < row0[0] + eng.nl)
-        lo = jnp.where(local, jnp.sum(ns < row0[0], axis=1), 0).astype(jnp.int32)
-        hi = jnp.where(local, jnp.sum(ns < ar[:, None], axis=1), 0).astype(jnp.int32)
-        npairs = jnp.where(local, cm - (hi - lo), 0)
-        off = jnp.concatenate([jnp.zeros((1,), jnp.int32), jnp.cumsum(npairs).astype(jnp.int32)])
+        if self.chunk is not None:
+            return order, cell_start, cell_of, ns, cnt
+        self._pp = self._records(pos3, ns, cnt, _row_arg(eng._r0, eng._r0), eng.nl)
+        return (order, cell_start, cell_of, ns, cnt) + self._pp
+
+    def _records(self, pos3, ns, cnt, row0, nl):
+        """The pair records (PI, PG, PIDX, off) of the rows [r0, r0 + nl) (r0 = row0[0]), with
+        their per-row arrays: a row keeps its partners outside the range and the larger ones
+        inside it (sorted: columns [0, lo) and [hi, cnt))."""
+        eng, c = self.eng, self._sized(nl)
+        r0 = row0[0]
+        rows = jax.lax.dynamic_slice_in_dim(ns, r0, nl)
+        cm = jnp.minimum(jax.lax.dynamic_slice_in_dim(cnt, r0, nl), ns.shape[1])
+        lo = jnp.sum(rows < r0, axis=1).astype(jnp.int32)
+        hi = jnp.sum(rows < (r0 + jnp.arange(nl, dtype=jnp.int32))[:, None], axis=1).astype(jnp.int32)
+        off = jnp.concatenate([jnp.zeros((1,), jnp.int32), jnp.cumsum(cm - (hi - lo)).astype(jnp.int32)])
         tile_atom = jnp.clip(jnp.searchsorted(off, 16 * jnp.arange(c["tiles16"], dtype=jnp.int32), side="right") - 1,
-                             0, n - 1).astype(jnp.int32)
+                             0, nl - 1).astype(jnp.int32)
         PI, PG, PIDX = c["prep"](*pos3, eng._box(pos3[0]), ns, cnt, eng.z, off, lo, hi, tile_atom, row0, eng.rmin,
-                                 self.scal, jnp.zeros((n * Kc,), jnp.int32),
-                                 zmax=np.int64(eng.zmax), P=np.int64(c["pmax"]), NL=np.int64(eng.nl))
-        self._pp = (PI, PG, PIDX, off)
-        return order, cell_start, cell_of, ns, cnt, PI, PG, PIDX, off
+                                 self.scal, jnp.zeros((nl * ns.shape[1],), jnp.int32))
+        return PI, PG, PIDX, off
+
+    def _pairs(self, c, li, proj, ev, rec, keep_w=True):
+        """Layer li's scores per slot and (keep_w) filters per pair, for the pair records rec."""
+        L = self.layers[li]
+        q1, k1, _, q2, k2 = proj
+        return c["fwd" if keep_w else "scores"](q1, k1, q2, k2, ev, rec[0], rec[1], rec[3], *L["tabs"], *L["W"],
+                                                *L["V"], self.eng.cdeg, self.scal)
+
+    def _pair_backward(self, c, li, proj, ev, gdx, gdev, rec, Wst, S):
+        """Layer li's backward per pair: (slot scalars, forces and virial records, ev gradients)."""
+        L, W = self.layers[li], self.layers[li]["W"]
+        return c["bwd"](*proj, ev, gdx, gdev, rec[0], rec[1], rec[3], *L["tabs"], *W[:3], *W[4:7], *L["V"],
+                        self.eng.cdeg, self.scal, self.eng.par, Wst, S)
 
     def use(self, nb):
         """The pair records of a build tuple, for a program traced apart from the build."""
         if len(nb) > 5:
             self._pp = tuple(nb[5:9])
 
-    # ---- layers ------------------------------------------------------------------------
+    # ---- layers, every layer's per-pair data kept ----------------------------------------
     def layer_forward(self, li, x, ev, pos3, nbr, cnt):
-        eng, L, c = self.eng, self.layers[li], self._sized()
-        PI, PG, PIDX, off = self._pp
+        eng, c = self.eng, self._sized()
         pos3 = _f64(pos3)
         xt = eng._x_in(li, x, eng.elem)
-        (q1, k1, v1, q2, k2), pvjp = jax.vjp(lambda xx: tuple(eng._project(li, xx)), xt)
-        S, Wst = c["fwd"](q1, k1, q2, k2, ev, PI, PG, off, *L["tabs"], *L["W"], *L["V"], eng.cdeg, self.scal,
-                          P=np.int64(c["pmax"]))
-        x1, ev1 = c["msg"](v1, S, *pos3, eng._box(pos3[0]), nbr, cnt, xt, ev, eng.scal, eng._row_arg(),
-                           NL=np.int64(eng.nl))
+        proj, pvjp = jax.vjp(lambda xx: tuple(eng._project(li, xx)), xt)
+        S, Wst = self._pairs(c, li, proj, ev, self._pp)
+        x1, ev1 = c["msg"](proj[2], S, *pos3, eng._box(pos3[0]), nbr, cnt, xt, ev, eng.scal,
+                           _row_arg(eng._r0, eng._r0))
         # the post block on this device's rows, gathered for the next layer's neighbours (the
         # heads take the last layer's rows as they are)
         (x2l, ev2l), post_vjp = jax.vjp(lambda a, b: eng._post(li, a, b), eng._mine(x1), eng._mine(ev1))
         x2, ev2 = eng._gather_rows(x2l, ev2l) if li < eng.statics["num_layers"] - 1 else (x2l, ev2l)
         # kept for the backward of the same program (the jitted force call runs both in one
         # trace; the staged programs ask for fresh VJPs instead, see forget)
-        self._proj[li] = (q1, k1, v1, q2, k2, pvjp)
+        self._proj[li] = (proj, pvjp)
         self._post_vjp[li] = post_vjp
         return (x2, ev2, x1, ev1, Wst, S)
 
@@ -239,24 +397,21 @@ class CudaKernels:
     def attention_backward(self, li, x_l, ev_l, Wst, Sf, gdx, gdev, f3, nbr, cnt, fresh=False):
         """(dE/dx_in, dE/dev, forces) of layer li from dE/d(its attention output), with the
         forward's filters per pair (Wst) and scores per slot (Sf)."""
-        eng, L, c = self.eng, self.layers[li], self._sized()
-        PI, PG, PIDX, off = self._pp
+        eng, c = self.eng, self._sized()
         cached = None if fresh else self._proj.pop(li, None)
         if cached is not None:
-            q1, k1, v1, q2, k2, vjp = cached
+            proj, vjp = cached
         else:
             xt = eng._x_in(li, x_l, eng.elem)
-            (q1, k1, v1, q2, k2), vjp = jax.vjp(lambda xx: tuple(eng._project(li, xx)), xt)
-        W = L["W"]
-        SC, FV, GEV = c["bwd"](q1, k1, v1, q2, k2, ev_l, gdx, gdev, PI, PG, off, *L["tabs"], *W[:3], *W[4:7], *L["V"],
-                               eng.cdeg, self.scal, eng.par, Wst, Sf, P=np.int64(c["pmax"]))
-        gq1, gk1, gv1, gq2, gk2, gev, f = c["gather"](q1, k1, q2, k2, gdx, Wst, SC, FV, GEV, gdev,
-                                                      jnp.stack(f3).astype(jnp.float32), nbr, cnt, PIDX,
-                                                      eng._row_arg(), NL=np.int64(eng.nl))
+            proj, vjp = jax.vjp(lambda xx: tuple(eng._project(li, xx)), xt)
+        SC, FV, GEV = self._pair_backward(c, li, proj, ev_l, gdx, gdev, self._pp, Wst, Sf)
+        q1, k1, _, q2, k2 = proj
+        *g, gev, f = c["gather"](q1, k1, q2, k2, gdx, Wst, SC, FV, GEV, gdev, jnp.stack(f3).astype(jnp.float32),
+                                 nbr, cnt, self._pp[2], _row_arg(eng._r0, eng._r0))
         f = tuple(f)                          # forces and the per-axis virial
         if li == 0:                           # no layer below takes dE/dx_in (_g_x_below)
             return gdx, gev, f
-        (gx,) = vjp((gq1, gk1, gv1, gq2, gk2))
+        (gx,) = vjp(tuple(g))
         return gdx + gx, gev, f
 
     def layer_backward(self, li, x_l, ev_l, kept, g_x, g_ev, f3, pos3, nbr, cnt):
@@ -266,12 +421,66 @@ class CudaKernels:
         g_xin, gev, f3 = self.attention_backward(li, x_l, ev_l, kept[2], kept[3], gdx, gdev, f3, nbr, cnt)
         return eng._g_x_below(li, g_xin), gev, f3
 
+    # ---- in chunks: the engine's attention, a chunk of rows at a time ---------------------
+    def attend(self, li, x_l, ev_l, pos3, nbr, cnt):
+        """The engine's _attend: (x_in + dx, ev + dev) of layer li, each chunk's pair records
+        and scores made, its rows' messages added, and dropped."""
+        eng, nc = self.eng, self.chunk
+        c = self._sized(nc)
+        pos3 = _f64(pos3)
+        box = eng._box(pos3[0])
+        proj = eng._projections(li, x_l, range(5))
+
+        def chunk(start, first_new, carry):
+            row = _row_arg(start, first_new)
+            S, _ = self._pairs(c, li, proj, ev_l, self._records(pos3, nbr, cnt, row, nc), keep_w=False)
+            return tuple(c["msg"](proj[2], S, *pos3, box, nbr, cnt, *carry, eng.scal, row))
+        # the messages added into x_in (its own buffer) and a copy of ev, each row once
+        return eng._tile_loop(chunk, (eng._x_in(li, x_l, eng.elem), ev_l + 0.0), nc)
+
+    def attention_backward_pass(self, li, pi, x_l, ev, pos3, nbr, cnt, gdx, gdev, carry):
+        """The engine's _attention_backward_pass (one pass: the kernels take both channels):
+        each chunk's pair records, filters and scores made again, its pairs' backward, its
+        rows' gathers, and its rows' dE/dx_in from their projections' gradients. carry = (dE/dx_in,
+        dE/dev, the per-atom force and virial sums); in place (x_l None), carry[0] holds the
+        layer input until a chunk overwrites its rows."""
+        eng, nc = self.eng, self.chunk
+        c = self._sized(nc)
+        pos3 = _f64(pos3)
+        inplace = eng._inplace(li)
+        proj = eng._projections(li, carry[0] if inplace else x_l, range(5))
+        q1, k1, _, q2, k2 = proj
+
+        def chunk(start, first_new, carry):
+            g_xin, g_ev, f = carry
+            row = _row_arg(start, first_new)
+            rec = self._records(pos3, nbr, cnt, row, nc)
+            S, Wst = self._pairs(c, li, proj, ev, rec)
+            SC, FV, GEV = self._pair_backward(c, li, proj, ev, gdx, gdev, rec, Wst, S)
+            *g, g_ev, f = c["gather"](q1, k1, q2, k2, gdx, Wst, SC, FV, GEV, g_ev, f, nbr, cnt, rec[2], row)
+            if li > 0:                        # layer 0's input is the constant embedding
+                rows = jax.lax.dynamic_slice_in_dim(g_xin if inplace else x_l, start, nc)
+                xt = eng._x_in(li, rows, jax.lax.dynamic_slice_in_dim(eng.elem, start, nc))
+                _, vjp = jax.vjp(lambda xx: tuple(eng._project(li, xx)), xt)
+                (gx,) = vjp(tuple(g))
+                old = jax.lax.dynamic_slice_in_dim(g_xin, start, nc)
+                new = (jax.lax.dynamic_slice_in_dim(gdx, start, nc) if inplace else old) + gx
+                # the rows the previous chunk wrote (the last chunk shifted back) keep theirs
+                g_xin = jax.lax.dynamic_update_slice_in_dim(
+                    g_xin, jnp.where(eng._rows_mask(start, first_new, nc), new, old), start, 0)
+            return g_xin, g_ev, f
+        g_xin, g_ev, f = eng._tile_loop(chunk, (carry[0], carry[1], jnp.stack(carry[2:])), nc)
+        return (g_xin, g_ev, *f)
+
     # ---- the staged programs (domains, the staged memory path) --------------------------
     def stage_fns(self, li):
         """(post, att) for the staged backward: post(x_l, ev_l, kept, g_x, g_ev, R, nb) ->
         (gdx, gdev); att(x_l, ev_l, gdx, gdev, carry, extra, R, nb) -> carry', extra being
-        what the forward kept beyond (x1, ev1): the filters per pair and the scores."""
+        what the forward kept beyond (x1, ev1): the filters per pair and the scores. None in
+        chunks: the engine's own stages, its attention on the kernels."""
         eng = self.eng
+        if self.chunk is not None:
+            return None
 
         def post(x_l, ev_l, kept, g_x, g_ev, R, nb):
             self.use(nb)
@@ -327,29 +536,37 @@ class CudaKernels:
         return cached[1]((e_l.astype(g_raw.dtype), g_raw, ga0.astype(g_raw.dtype), gc6.astype(g_raw.dtype)))[0]
 
 
-def attach(eng, strict=False):
+def attach(eng, strict=False, chunk=None):
     """The engine's methods on the CUDA kernels (the instance only). Returns the kernels
     object, or None (with a log line) where they do not apply or cannot be built; strict
-    (kernels="cuda" asked for explicitly) raises instead of falling back."""
-    why = unsupported(eng)
+    (kernels="cuda" asked for explicitly) raises instead of falling back. chunk (rows): the
+    per-pair data a chunk at a time whatever the memory (default: as plan finds room)."""
+    why, budget = unsupported(eng), None
+    if why is None and chunk is None:
+        budget, why = plan(eng)
     if why:
         if strict:
             raise RuntimeError(f"Flash: the CUDA kernels do not serve this engine ({why})")
         logger.info("Flash: CUDA kernels not used (%s); Pallas kernels", why)
         return None
     try:
-        ck = CudaKernels(eng)
+        ck = CudaKernels(eng, chunk, budget)
     except (BuildError, OSError) as e:       # nvcc failed or unusable, a library does not load, no lock
         if strict:
             raise
         logger.warning("Flash: CUDA kernels not built (%s); Pallas kernels", str(e).splitlines()[0][:160])
         return None
     eng.build = ck.build
-    eng._layer_forward = ck.layer_forward
-    eng._layer_backward = ck.layer_backward
     eng._long_range = ck.long_range
-    eng._heads = ck.heads
-    eng._head_backward = ck.head_backward
+    if ck.chunk is None:                     # the layers, with what the forward keeps for the backward
+        eng._layer_forward = ck.layer_forward
+        eng._layer_backward = ck.layer_backward
+        eng._heads = ck.heads
+        eng._head_backward = ck.head_backward
+    else:                                    # the attention alone, in the engine's layers and modes
+        eng._attend = ck.attend
+        eng._attention_backward_pass = ck.attention_backward_pass
     eng.cuda_kernels = ck
-    logger.info("Flash: CUDA kernels (TF32 x3 attention, gather-only messages and gradients; ~%.0f KiB/atom)", ck.kib)
+    logger.info("Flash: CUDA kernels (TF32 x3 attention, gather-only messages and gradients; %s; ~%.0f KiB/atom)",
+                f"chunks of {ck.chunk} rows" if ck.chunk else "per-pair data kept", ck.kib)
     return ck

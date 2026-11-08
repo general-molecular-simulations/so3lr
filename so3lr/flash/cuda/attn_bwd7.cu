@@ -40,8 +40,8 @@ struct B7Params {
   const float* Wst;
   const float* Sf;               // the forward's scores per directed slot [slots][2 NH]
   float *SC, *FV, *GEV;
-  int n, nslot, pmax;            // nslot = n K directed slots (a pair's reverse slot >= nslot is a shadow:
-};                               // its partner is another device's; no scalars, gradient or force for it
+  int n, nslot, pmax;            // nslot = nl K: the range's directed slots (a pair's reverse slot >= nslot
+};                               // is a shadow: its partner is outside the range; no scalars, gradient or force)
 
 struct B7Stage {
   float DZ[NCH][TP][SH + 8];     // silu'(z) (row stride 40: conflict-free float2 reads)
@@ -557,6 +557,7 @@ struct GatherParams {
   float *__restrict__ gq1, *__restrict__ gk1, *__restrict__ gv1, *__restrict__ gq2, *__restrict__ gk2,
       *__restrict__ gev_out, *__restrict__ f_out;   // f: [6][n] (fx, fy, fz, wx, wy, wz)
   int n, K, nl;
+  int local;                     // the projections' gradients for the range's rows only ([nl, F], from row0)
 };
 
 constexpr int GW_ = 8;
@@ -576,9 +577,18 @@ __global__ void __launch_bounds__(GW_ * 32) bwd_gather(GatherParams p) {
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const int part = warp % GSPLIT, hw = (warp / GSPLIT) % HSPLIT;
   const int r0 = p.row0[0];
-  const int a = r0 + (blockIdx.x * GW_ + warp) / WPA;         // this device's rows
-  const bool live = a < r0 + p.nl && a < p.n;
+  const int a = r0 + (blockIdx.x * GW_ + warp) / WPA;         // the range's rows, written from row0[1] on
+  const bool live = a >= p.row0[1] && a < r0 + p.nl && a < p.n;
   const int n_a = live ? min(p.cnt[a], p.K) : 0;
+  if (p.local && part == 0 && a < p.row0[1]) {
+    // the range-local projections' gradients of a row before row0[1] (a chunk shifted back:
+    // the previous chunk's rows) zeros, not left unwritten
+#pragma unroll
+    for (int j = 0; j < HPW; ++j) {
+      const size_t o = (size_t)(a - r0) * F + (hw * HPW + j) * 32 + lane;
+      p.gq1[o] = 0.f; p.gk1[o] = 0.f; p.gv1[o] = 0.f; p.gq2[o] = 0.f; p.gk2[o] = 0.f;
+    }
+  }
   float acc[5][HPW], sv[MS], fv = 0.f;
 #pragma unroll
   for (int i = 0; i < 5; ++i)
@@ -586,11 +596,11 @@ __global__ void __launch_bounds__(GW_ * 32) bwd_gather(GatherParams p) {
     for (int j = 0; j < HPW; ++j) acc[i][j] = 0.f;
 #pragma unroll
   for (int ms = 0; ms < MS; ++ms) sv[ms] = 0.f;
-  const size_t row0 = (size_t)a * p.K;
+  const size_t nrow = (size_t)a * p.K, srow = (size_t)(a - r0) * p.K;   // the neighbour row, the range's slots
 #pragma unroll 1
   for (int c = part; c < n_a; c += GSPLIT) {
-    const size_t slot = row0 + c;
-    const int b = p.nbr[slot], pq = p.PIDX[slot];
+    const size_t slot = srow + c;
+    const int b = p.nbr[nrow + c], pq = p.PIDX[slot];
     const float* sc = p.SC + slot * NSC;
     const float* w1 = p.Wst + (size_t)pq * 2 * F;
     const float* w2 = w1 + F;
@@ -615,7 +625,7 @@ __global__ void __launch_bounds__(GW_ * 32) bwd_gather(GatherParams p) {
       }
       fv += lane < NFW ? p.FV[slot * FVS + lane] : 0.f;
       if (NCH == 1) {
-        const size_t s2 = (size_t)p.n * p.K + slot;
+        const size_t s2 = (size_t)p.nl * p.K + slot;                // the second channel's copy
 #pragma unroll
         for (int ms = 0; ms < MS; ++ms) {
           const int m = ms * 32 + lane;
@@ -646,7 +656,7 @@ __global__ void __launch_bounds__(GW_ * 32) bwd_gather(GatherParams p) {
   }
 #pragma unroll
   for (int j = 0; j < HPW; ++j) {
-    const size_t o = (size_t)a * F + (hw * HPW + j) * 32 + lane;
+    const size_t o = (size_t)(p.local ? a - r0 : a) * F + (hw * HPW + j) * 32 + lane;
     p.gq1[o] = acc[0][j]; p.gk1[o] = acc[1][j]; p.gv1[o] = acc[2][j]; p.gq2[o] = acc[3][j]; p.gk2[o] = acc[4][j];
   }
   if (hw != 0) return;
@@ -681,9 +691,10 @@ static ffi::Error B7Impl(cudaStream_t stream, F32 q1, F32 k1, F32 v1, F32 q2, F3
   return launch_status();
 }
 
+// local: the projections' gradients are the range's rows only ([nl, F] outputs, row r0 first)
 static ffi::Error GatherImpl(cudaStream_t stream, F32 q1, F32 k1, F32 q2, F32 k2, F32 gdx, F32 Wst, F32 SC, F32 FV,
                              F32 GEV, F32 gev_in, F32 f_in, S32 nbr, S32 cnt, S32 PIDX, S32 row0, RF32 gq1, RF32 gk1,
-                             RF32 gv1, RF32 gq2, RF32 gk2, RF32 gev_out, RF32 f_out, int64_t NL) {
+                             RF32 gv1, RF32 gq2, RF32 gk2, RF32 gev_out, RF32 f_out, int64_t NL, int64_t local) {
   GatherParams p;
   p.q1 = q1.typed_data(); p.k1 = k1.typed_data(); p.q2 = q2.typed_data(); p.k2 = k2.typed_data();
   p.gdx = gdx.typed_data(); p.Wst = Wst.typed_data(); p.SC = SC.typed_data(); p.FV = FV.typed_data();
@@ -692,7 +703,7 @@ static ffi::Error GatherImpl(cudaStream_t stream, F32 q1, F32 k1, F32 q2, F32 k2
   p.gq1 = gq1->typed_data(); p.gk1 = gk1->typed_data(); p.gv1 = gv1->typed_data(); p.gq2 = gq2->typed_data();
   p.gk2 = gk2->typed_data(); p.gev_out = gev_out->typed_data(); p.f_out = f_out->typed_data();
   auto d = nbr.dimensions();
-  p.n = (int)d[0]; p.K = (int)d[1]; p.nl = (int)NL; p.row0 = row0.typed_data();
+  p.n = (int)d[0]; p.K = (int)d[1]; p.nl = (int)NL; p.row0 = row0.typed_data(); p.local = (int)local;
   bwd_gather<<<(p.nl * WPA + GW_ - 1) / GW_, GW_ * 32, 0, stream>>>(p);
   return launch_status();
 }
@@ -713,4 +724,5 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(BwdGather, GatherImpl,
         .Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>()            // q1 k1 q2 k2 gdx
         .Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>()  // Wst SC FV GEV gev_in f_in
         .Arg<S32>().Arg<S32>().Arg<S32>().Arg<S32>()                         // nbr cnt PIDX row0
-        .Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Attr<int64_t>("NL"));
+        .Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Attr<int64_t>("NL")
+        .Attr<int64_t>("local"));
