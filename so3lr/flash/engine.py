@@ -1992,33 +1992,33 @@ class FlashSO3LR:
         return g_xin * self.params["resid_lambdas"][li] if li > 0 else None
 
     # ---- one jitted program (usable inside jax-md's jitted steps) --------------------
-    def _energy_forces(self, R):
-        """(energy, forces, overflow, dE/d(strain)), the atoms in a spatial order inside
-        (sort_atoms) and the forces in R's; on several devices one program per device
-        (shard_map), each computing its own rows, R and the results the same on all."""
+    def _energy_forces(self, R, L=None):
+        """(energy, forces, overflow, dE/d(strain)) in the box L (default the engine's; an
+        argument of the jitted program), the atoms in a spatial order inside (sort_atoms) and
+        the forces in R's; on several devices one program per device (shard_map), each
+        computing its own rows, R and the results the same on all."""
+        L = self.box if L is None else L
         perm, Rs, z, elem = None, R, self.z, self.elem
         if self.sort_atoms:
-            perm, Rs, z, elem = _sorted(R, self._box(R[:, 0]), z, elem)
+            perm, Rs, z, elem = _sorted(R, L.astype(R.dtype), z, elem)
 
         def rows(R, L, z, elem):
             with self._atoms(z, elem, L):
                 return self._energy_forces_rows(R)
-        if self.P == 1:
-            e, f, over, w = rows(Rs, self._Lt, z, elem)
-        else:
+        if self.P > 1:
             from jax.sharding import PartitionSpec
             rep = PartitionSpec()
-            e, f, over, w = jax.shard_map(rows, mesh=self.device_mesh, in_specs=(rep,) * 4,
-                                          out_specs=(rep,) * 4, check_vma=False)(
-                Rs, self.box if self._Lt is None else self._Lt, z, elem)
+            rows = jax.shard_map(rows, mesh=self.device_mesh, in_specs=(rep,) * 4, out_specs=(rep,) * 4,
+                                 check_vma=False)
+        e, f, over, w = rows(Rs, L, z, elem)
         return e, _unsorted(f, perm), over, w
 
     @contextlib.contextmanager
     def _atoms(self, z, elem, L=None):
-        """The engine's z and elem as given (the atoms sorted), and its box L where given (an
-        argument of the program), while its methods trace or run."""
+        """The engine's z and elem as given (the atoms sorted) and its box L (an argument of
+        the program; None: the engine's), while its methods trace or run."""
         keep = self.z, self.elem, self._Lt
-        self.z, self.elem, self._Lt = z, elem, self._Lt if L is None else L
+        self.z, self.elem, self._Lt = z, elem, L
         try:
             yield
         finally:
@@ -2204,13 +2204,7 @@ class FlashSO3LR:
         self._build_jit()
 
     def _build_jit(self):
-        def ef(R, L):
-            keep, self._Lt = self._Lt, L
-            try:
-                return self._energy_forces(R)
-            finally:
-                self._Lt = keep
-        self._jit = jax.jit(ef)
+        self._jit = jax.jit(self._energy_forces)
         self._stage_cache = None
         self.builds += 1                 # programs to compile at the next call
         # programs others build on this engine's force (md's jitted step loops): they

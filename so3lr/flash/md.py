@@ -122,7 +122,7 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
     devices = int(settings.get("flash_devices") or 1)
     # several GPUs run the jitted fast mode (validate_options refuses another)
     mode = "fast" if devices > 1 else (settings.get("flash_mode") or "auto")
-    kernels = settings.get("flash_kernels") or None
+    kernels = settings.get("flash_kernels") or "auto"
     picked = None
     if mode == "auto":
         from .cuda import pick_mode as cuda_mode
@@ -131,7 +131,7 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
         # alive at their peak (2 GiB left for what the engine allocates before it plans)
         picked = cuda_mode(n, _free_bytes() - (2 << 30), params, statics) if kernels != "pallas" else None
         mode = picked or pick_mode(n, _free_bytes() - reserve, statics)
-        if not picked and kernels is None:
+        if not picked and kernels == "auto":
             kernels = "pallas"           # not the CUDA kernels in a mode of theirs auto does not pick
     total_charge = float(settings.get("total_charge") or 0)
     embed = settings.get("charge_embed_total_charge")
@@ -164,8 +164,9 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
         logger.info(f"Flash: {_free_space(eng)}")
     if eng.P > 1:
         logger.info(f"Flash: {eng.P} GPUs, {eng.nl} atoms' rows each")
-        # each GPU holds every atom's arrays of the fast mode
-        alone = pick_mode(n, _free_bytes() - reserve, statics)
+        # each GPU holds every atom's arrays of the fast mode (the CUDA kernels planned their
+        # own: the per-pair data kept, or a chunk of rows at a time)
+        alone = pick_mode(n, _free_bytes() - reserve, statics) if eng.cuda_kernels is None else "fast"
         if alone != "fast":
             logger.warning(f"Flash: {n} atoms may not fit the fast mode each of the {eng.P} GPUs runs "
                            f"(one GPU would run {alone})")
