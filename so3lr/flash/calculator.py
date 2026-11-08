@@ -11,8 +11,8 @@ neighbour-list model, takes any structure). The engine is built at the first cal
 kept while the atoms, charge and spin stay the same (``md.SinglePoints``): a new cell is
 laid out again (and compiles), and other atoms build a new engine (and compile). The
 charge and spin come from ``atoms.info`` as for ``So3lrCalculator`` (``charge``, default
-0; ``multiplicity`` - 1, default 0). No stress: the engine's strain derivative is
-isotropic only.
+0; ``multiplicity`` - 1, default 0). No stress: the engine's strain derivative is the
+isotropic one or its diagonal (``diag=True``), and an ASE stress needs the shear as well.
 """
 from ase.calculators.calculator import Calculator, all_changes
 

@@ -48,13 +48,15 @@ def variant(eng):
 
 
 def kib_per_atom(eng):
-    """What the engine holds per atom at the end of a forward on the kernels, in KiB (an
-    estimate; the margin is unsupported's): the fast mode's arrays, per layer the filter per
-    pair (K F floats), the scores per slot, the projections with their VJP's inputs and the
-    post block's, and the heads' VJP."""
+    """What the engine holds per atom at its peak on the kernels, in KiB (an estimate; the
+    margin is unsupported's): the fast mode's arrays, per layer the filter per pair (K F
+    floats), the scores per slot, the projections with their VJP's inputs and the post
+    block's, the heads' VJP, and one layer's backward temporaries per slot (its slot scalars,
+    and per channel copy the force and per-axis virial record and the ev gradient)."""
     from ..engine import mode_kib
     per_layer = eng.K * eng.F + 3 * eng.K * eng.nh + 16 * eng.F + 3 * eng.M     # floats
-    return mode_kib("fast", eng.statics) + (eng.statics["num_layers"] * per_layer + 8 * eng.F) * 4 / 1024
+    bwd = eng.K * (5 * eng.nh + bwd_copies(variant(eng)) * (8 + eng.M))
+    return mode_kib("fast", eng.statics) + (eng.statics["num_layers"] * per_layer + 8 * eng.F + bwd) * 4 / 1024
 
 
 def unsupported(eng):
@@ -156,7 +158,7 @@ class CudaKernels:
                 msg=call("msg", (S((n, F), f32), S((n, M), f32)), input_output_aliases=al({8: 0, 9: 1})),
                 # the backward: slot scalars, and the forces and ev gradients per slot (a copy per
                 # channel where each channel's CTA writes its own)
-                bwd=call("bwd", (S((n * K * 5 * NH,), f32), S((self.copies * n * K * 8,), f32),
+                bwd=call("bwd", (S((n * K * 5 * NH,), f32), S((self.copies * n * K * 8,), f32),   # 8 floats per slot (FVS)
                                  S((self.copies * n * K * M,), f32))),
                 gather=call("gather", tuple(S((n, F), f32) for _ in range(5)) + (S((n, M), f32), S((6, n), f32)),
                             input_output_aliases=al({9: 5, 10: 6})),
@@ -249,12 +251,13 @@ class CudaKernels:
         SC, FV, GEV = c["bwd"](q1, k1, v1, q2, k2, ev_l, gdx, gdev, PI, PG, off, *L["tabs"], *W[:3], *W[4:7], *L["V"],
                                eng.cdeg, self.scal, eng.par, Wst, Sf, P=np.int64(c["pmax"]))
         gq1, gk1, gv1, gq2, gk2, gev, f = c["gather"](q1, k1, q2, k2, gdx, Wst, SC, FV, GEV, gdev,
-                                                      jnp.stack(f3[:6]).astype(jnp.float32), nbr, cnt, PIDX,
+                                                      jnp.stack(f3).astype(jnp.float32), nbr, cnt, PIDX,
                                                       eng._row_arg(), NL=np.int64(eng.nl))
+        f = tuple(f)                          # forces and the per-axis virial
         if li == 0:                           # no layer below takes dE/dx_in (_g_x_below)
-            return gdx, gev, tuple(f[i] for i in range(6))
+            return gdx, gev, f
         (gx,) = vjp((gq1, gk1, gv1, gq2, gk2))
-        return gdx + gx, gev, tuple(f[i] for i in range(6))
+        return gdx + gx, gev, f
 
     def layer_backward(self, li, x_l, ev_l, kept, g_x, g_ev, f3, pos3, nbr, cnt):
         eng = self.eng
@@ -278,7 +281,7 @@ class CudaKernels:
             self.use(nb)
             if x_l is None and eng._inplace(li):
                 x_l = carry[0]                     # in place: the layer input rides in the carry (layer 0: None)
-            g_xin, gev, f3 = self.attention_backward(li, x_l, ev_l, extra[0], extra[1], gdx, gdev, carry[2:8],
+            g_xin, gev, f3 = self.attention_backward(li, x_l, ev_l, extra[0], extra[1], gdx, gdev, carry[2:],
                                                      nb[3], nb[4], fresh=True)
             return (g_xin, gev) + tuple(f3)
         return post, att
@@ -301,10 +304,10 @@ class CudaKernels:
         e, gq, ga0, gc6, f = c["lr"](
             *(x[order] for x in pos3), eng._box(pos3[0]), eng.z[order], order, cell_start, cell_of,
             q.astype(jnp.float32)[order], a0[order], c6[order], eng.alphas, eng.c6tab, phi_v, phi_d, lrs,
-            c6lr_v, c6lr_d, e_atom, jnp.stack(f3[:6]), eng._row_arg(),
+            c6lr_v, c6lr_d, e_atom, jnp.stack(f3), eng._row_arg(),
             NX=np.int64(eng.nc[0]), NY=np.int64(eng.nc[1]), NZ=np.int64(eng.nc[2]), KC=np.int64(eng.kc),
             flags=np.int64(self._lr_flags()), NL=np.int64(eng.nl))
-        return e, gq, ga0, gc6, tuple(f[i] for i in range(6)), jnp.zeros((), jnp.int32)
+        return e, gq, ga0, gc6, tuple(f), jnp.zeros((), jnp.int32)
 
     # ---- the heads, their VJP from the forward when the backward follows in the same program
     def heads(self, x, z):

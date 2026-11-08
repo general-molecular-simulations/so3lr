@@ -92,8 +92,9 @@ def main(argv=None):
         # per axis: side a and positions along a scaled by 1 + eps_a (semi-isotropic NPT)
         w3_ref = np.asarray(jax.jit(jax.grad(lambda eps: energy_fn(
             position, perturbation=jnp.eye(3, dtype=dtype) + jnp.diag(eps), **kw)))(jnp.zeros(3, dtype)), np.float64)
-        e, f, w = strain(jnp.asarray(at.get_positions(), dtype))
-        w3 = np.asarray(strain(jnp.asarray(at.get_positions(), dtype), diag=True)[2], np.float64)
+        e, f, w3 = strain(jnp.asarray(at.get_positions(), dtype), diag=True)
+        w3 = np.asarray(w3, np.float64)
+        w = float(w3.sum())                      # the isotropic dE/d(strain)
         de = abs(float(e) - e_ref) / len(at)
         df = float(np.abs(np.asarray(f, np.float64) - f_ref).max())
         dw = abs(float(w) - w_ref) / max(abs(w_ref), 1.0)

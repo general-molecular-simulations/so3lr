@@ -11,6 +11,8 @@
 #include "ffi_common.cuh"
 
 constexpr int NSC = 5 * NH;               // slot scalars: gs, gr, ce s' / avg_nc (heads), gs, gr (degrees)
+constexpr int NFW = 6;                    // per slot: the force (3) and the per-axis virial (3)
+constexpr int FVS = 8;                    // the slot record's floats: NFW, padded to two float4
 #ifndef TP
 #define TP 32
 #endif
@@ -130,14 +132,15 @@ __device__ __forceinline__ void pair_finish(const B7Params& p, float* FV, float*
     const float fy = fr * uy + (gy - proj * uy) * inv_r;
     const float fz = fr * uz + (gzv - proj * uz) * inv_r;
     // per slot: the force (fx, fy, fz) and the per-axis virial (the force component times the
-    // displacement component, rr u_a; the angular part cancels only in their sum), padded to 8
+    // displacement component, rr u_a; the angular part cancels only in their sum), padded to FVS;
+    // the reverse slot: the opposite force, the same virial
     const float wx = fx * rr * ux, wy = fy * rr * uy, wz = fz * rr * uz;
-    *reinterpret_cast<float4*>(FV + (size_t)pi.z * 8) = make_float4(fx, fy, fz, wx);
-    *reinterpret_cast<float4*>(FV + (size_t)pi.z * 8 + 4) = make_float4(wy, wz, 0.f, 0.f);
-    if (rev) {
-      *reinterpret_cast<float4*>(FV + (size_t)pi.w * 8) = make_float4(-fx, -fy, -fz, wx);
-      *reinterpret_cast<float4*>(FV + (size_t)pi.w * 8 + 4) = make_float4(wy, wz, 0.f, 0.f);
-    }
+    auto put = [&](int slot, float sgn) {
+      *reinterpret_cast<float4*>(FV + (size_t)slot * FVS) = make_float4(sgn * fx, sgn * fy, sgn * fz, wx);
+      *reinterpret_cast<float4*>(FV + (size_t)slot * FVS + 4) = make_float4(wy, wz, 0.f, 0.f);
+    };
+    put(pi.z, 1.f);
+    if (rev) put(pi.w, -1.f);
   }
 }
 
@@ -146,7 +149,7 @@ __device__ __forceinline__ void pair_finish(const B7Params& p, float* FV, float*
 __device__ __forceinline__ void bwd_epilogue(const B7Params& p, const B7Stage& S, const B7Epi& E, int et, int nth, int ch) {
   // one channel per CTA: its copy of the forces and ev gradients; the angular force is the
   // degree channel's
-  float* FV = p.FV + (NCH == 1 ? (size_t)ch * p.nslot * 8 : 0);
+  float* FV = p.FV + (NCH == 1 ? (size_t)ch * p.nslot * FVS : 0);
   float* GEV = p.GEV + (NCH == 1 ? (size_t)ch * p.nslot * M : 0);
   const bool angular = NCH == 2 || ch == 1;
 #pragma unroll 1
@@ -610,7 +613,7 @@ __global__ void __launch_bounds__(GW_ * 32) bwd_gather(GatherParams p) {
         const int m = ms * 32 + lane;
         sv[ms] += m < M ? p.GEV[slot * M + m] : 0.f;
       }
-      fv += lane < 6 ? p.FV[slot * 8 + lane] : 0.f;
+      fv += lane < NFW ? p.FV[slot * FVS + lane] : 0.f;
       if (NCH == 1) {
         const size_t s2 = (size_t)p.n * p.K + slot;
 #pragma unroll
@@ -618,7 +621,7 @@ __global__ void __launch_bounds__(GW_ * 32) bwd_gather(GatherParams p) {
           const int m = ms * 32 + lane;
           sv[ms] += m < M ? p.GEV[s2 * M + m] : 0.f;
         }
-        fv += lane < 6 ? p.FV[s2 * 8 + lane] : 0.f;
+        fv += lane < NFW ? p.FV[s2 * FVS + lane] : 0.f;
       }
     }
   }
@@ -652,7 +655,7 @@ __global__ void __launch_bounds__(GW_ * 32) bwd_gather(GatherParams p) {
     const int m = ms * 32 + lane;
     if (m < M) p.gev_out[(size_t)a * M + m] = p.gev_in[(size_t)a * M + m] + sv[ms];
   }
-  if (lane < 6) p.f_out[(size_t)lane * p.n + a] = p.f_in[(size_t)lane * p.n + a] + fv;
+  if (lane < NFW) p.f_out[(size_t)lane * p.n + a] = p.f_in[(size_t)lane * p.n + a] + fv;
 }
 
 static ffi::Error B7Impl(cudaStream_t stream, F32 q1, F32 k1, F32 v1, F32 q2, F32 k2, F32 ev, F32 gdx, F32 gdev,

@@ -42,7 +42,8 @@ __device__ __forceinline__ void hermite(const float* tv, const float* td, int ti
 }
 
 struct Acc {
-  float e, gq, gal, gc6, fx, fy, fz, wx, wy, wz;
+  float e, gq, gal, gc6;
+  float f[6];                     // fx, fy, fz and the per-axis virial wx, wy, wz
 };
 
 struct AtomA {
@@ -118,8 +119,12 @@ __device__ __forceinline__ void pair_terms(const LrParams& p, const AtomA& A, fl
     de += hartree * (w * dvr + dw * v);
   }
   const float fr = de / r;
-  acc.fx += fr * dx; acc.fy += fr * dy; acc.fz += fr * dz;
-  acc.wx += fr * dx * dx; acc.wy += fr * dy * dy; acc.wz += fr * dz * dz;   // per-axis virial
+  const float d[3] = {dx, dy, dz};
+#pragma unroll
+  for (int k = 0; k < 3; ++k) {
+    acc.f[k] += fr * d[k];
+    acc.f[3 + k] += fr * d[k] * d[k];       // per-axis virial: the force component times the displacement's
+  }
 }
 
 __device__ __forceinline__ void pair(const LrParams& p, const AtomA& A, int j, float dx, float dy, float dz, Acc& acc) {
@@ -153,7 +158,7 @@ __global__ void __launch_bounds__(LW * 32) lr_kernel(LrParams p) {
   const float al_ta = p.alphas[za], c6_ta = p.c6tab[za];
   A.al_a = al_ta * p.a0r[wi];
   A.c6_a = c6_ta * p.c6r[wi];
-  Acc acc = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+  Acc acc = {};
   int qn = 0;
   const int W2 = 2 * KC + 1;
   for (int k = 0; k < W2 * W2; ++k) {
@@ -226,12 +231,8 @@ __global__ void __launch_bounds__(LW * 32) lr_kernel(LrParams p) {
     acc.gq += __shfl_xor_sync(0xffffffff, acc.gq, o);
     acc.gal += __shfl_xor_sync(0xffffffff, acc.gal, o);
     acc.gc6 += __shfl_xor_sync(0xffffffff, acc.gc6, o);
-    acc.fx += __shfl_xor_sync(0xffffffff, acc.fx, o);
-    acc.fy += __shfl_xor_sync(0xffffffff, acc.fy, o);
-    acc.fz += __shfl_xor_sync(0xffffffff, acc.fz, o);
-    acc.wx += __shfl_xor_sync(0xffffffff, acc.wx, o);
-    acc.wy += __shfl_xor_sync(0xffffffff, acc.wy, o);
-    acc.wz += __shfl_xor_sync(0xffffffff, acc.wz, o);
+#pragma unroll
+    for (int k = 0; k < 6; ++k) acc.f[k] += __shfl_xor_sync(0xffffffff, acc.f[k], o);
   }
   if (lane == 0) {
     const int n = p.n;
@@ -239,12 +240,8 @@ __global__ void __launch_bounds__(LW * 32) lr_kernel(LrParams p) {
     p.gq[a] = acc.gq;
     p.ga0[a] = acc.gal * al_ta;
     p.gc6[a] = acc.gc6 * c6_ta;
-    p.f_out[a] = p.f_in[a] + acc.fx;
-    p.f_out[n + a] = p.f_in[n + a] + acc.fy;
-    p.f_out[2 * n + a] = p.f_in[2 * n + a] + acc.fz;
-    p.f_out[3 * n + a] = p.f_in[3 * n + a] + acc.wx;
-    p.f_out[4 * n + a] = p.f_in[4 * n + a] + acc.wy;
-    p.f_out[5 * n + a] = p.f_in[5 * n + a] + acc.wz;
+#pragma unroll
+    for (int k = 0; k < 6; ++k) p.f_out[k * n + a] = p.f_in[k * n + a] + acc.f[k];
   }
 }
 
