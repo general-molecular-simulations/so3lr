@@ -14,6 +14,52 @@ DEFAULT_PRECISION = 'mixed'
 DEFAULT_PRESSURE = 1.0  # bar
 
 
+def expand_indices(spec):
+    """Expand a YAML index specification into a flat list of ints.
+
+    Supported forms:
+      - int:                       5             -> [5]
+      - list / tuple (any mix):    [0, 1, 2]     -> [0, 1, 2]
+                                   [0, "3-5"]    -> [0, 3, 4, 5]
+      - inclusive range string:    "0-19"        -> [0, 1, ..., 19]
+      - multi-token string:        "0-2, 5, 8-9" -> [0, 1, 2, 5, 8, 9]
+        (tokens separated by commas and/or whitespace; each token is a single
+        index or an inclusive "a-b" range with a <= b)
+      - a NumPy array or integer of the above.
+
+    Ranges "a-b" include BOTH endpoints. Negative indices are not supported.
+    """
+    def expand_token(tok):
+        if isinstance(tok, bool):
+            raise ValueError(f"Invalid index: {tok!r}")
+        if isinstance(tok, Integral):
+            return [int(tok)]
+        if isinstance(tok, str):
+            out = []
+            for piece in tok.replace(',', ' ').split():
+                if '-' in piece:
+                    a, b = piece.split('-')
+                    a, b = int(a), int(b)
+                    if b < a:
+                        raise ValueError(
+                            f"Invalid index range '{piece}': end < start."
+                        )
+                    out.extend(range(a, b + 1))
+                else:
+                    out.append(int(piece))
+            return out
+        raise ValueError(f"Unsupported index token: {tok!r}")
+
+    if hasattr(spec, 'tolist') and not isinstance(spec, str):   # NumPy array or scalar
+        spec = spec.tolist()
+    if isinstance(spec, (list, tuple)):
+        result = []
+        for item in spec:
+            result.extend(expand_token(item))
+        return result
+    return expand_token(spec)
+
+
 def canonical_ensemble(name) -> str:
     """The ensemble name perform_md expects. Case and '_' vs '-' do not matter
     (nvt_langevin is nvt-langevin); anything else raises with a did-you-mean."""

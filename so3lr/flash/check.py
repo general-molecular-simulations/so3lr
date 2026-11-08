@@ -50,21 +50,25 @@ HANDLED = {
     "kspace_dispersion_smearing", "kspace_dispersion_spacing", "kspace_dispersion_interp_nodes",
     "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
     "engine", "flash_mode", "flash_mixed", "flash_devices", "flash_kernels", "md_precision",
+    "do_enhanced_sampling", "pysages_input", "restart_pysages_load_path", "restart_pysages_save_path",
+    "buffer_size_multiplier_sr", "buffer_sr",       # the coordinationnumber CV's neighbour list
 }
 # settings that only concern the neighbour-list engine, other commands sharing a settings
 # file (eval, tune-ewald), or act only together with a declined setting below (the
-# PySAGES files with do_enhanced_sampling, the constraint mode with fixed atoms)
+# constraint mode with fixed atoms, the cylinder parameters with cylinder_restraint_enabled)
 IRRELEVANT = {
-    "buffer_size_multiplier_sr", "buffer_sr", "buffer_size_multiplier_lr", "buffer_lr",
-    "minimum_cell_size_multiplier", "jit_compile", "datafile", "save_to", "targets", "batch_size",
-    "accuracy", "cutoff_lo", "cutoff_hi", "cutoff_it", "dispersion_damping_lo", "dispersion_damping_hi",
-    "dispersion_damping_it", "mesh_lo", "mesh_hi", "nodes_lo", "nodes_hi", "ns_lo", "ns_hi", "smear_lo",
-    "smear_hi", "smear_it", "help",
-    "pysages_input", "restart_pysages_load_path", "restart_pysages_save_path", "fixed_atom_constraint",
+    "buffer_size_multiplier_lr", "buffer_lr", "minimum_cell_size_multiplier", "jit_compile", "datafile",
+    "save_to", "targets", "batch_size", "accuracy", "cutoff_lo", "cutoff_hi", "cutoff_it",
+    "dispersion_damping_lo", "dispersion_damping_hi", "dispersion_damping_it", "mesh_lo", "mesh_hi",
+    "nodes_lo", "nodes_hi", "ns_lo", "ns_hi", "smear_lo", "smear_hi", "smear_it", "help",
+    "fixed_atom_constraint",
+    "cylinder_restraint_atom_indices", "cylinder_restraint_axis", "cylinder_restraint_axis_origin",
+    "cylinder_restraint_radius", "cylinder_restraint_force_constant", "cylinder_restraint_axial_min",
+    "cylinder_restraint_axial_max", "cylinder_restraint_axial_force_constant",
 }
 # settings flash does not implement: it declines when one is active
 UNSUPPORTED = {
-    "do_enhanced_sampling": "enhanced sampling",
+    "cylinder_restraint_enabled": "cylindrical restraint",
     "observables": "observables", "observable": "observables",
     "atom_mask_path": "fixed atoms", "mobile_atom_indices": "fixed atoms", "fixed_atom_indices": "fixed atoms",
     "dispersion_tail_correction": "the dispersion tail correction",
@@ -168,6 +172,20 @@ def settings_problem(settings, task="md"):
                 return f"it has no {UNSUPPORTED[key]}"
         elif key not in HANDLED and key not in IRRELEVANT and not _off(value):
             return f"it does not know the setting {key!r}"
+    if not _off(s.get("do_enhanced_sampling")):
+        # enhanced sampling is an MD setting: opt, eval and ase decline it as they did
+        # before flash ran PySAGES, so their engine choice does not change
+        if task != "md":
+            return "it has no enhanced sampling"
+        # PySAGES runs the MD step inside its own jitted loop: the jitted fast mode on one
+        # GPU, in nvt or nve (flash's NPT runs each step from Python); and in a periodic box
+        # (vacuum_problem)
+        if ens not in ("nvt", "nve"):
+            return f"its enhanced sampling runs nvt and nve, not {ens}"
+        if (s.get("flash_mode") or "auto") not in ("auto", "fast"):
+            return f"its enhanced sampling runs flash_mode fast, not {s.get('flash_mode')}"
+        if int(s.get("flash_devices") or 1) > 1:
+            return "its enhanced sampling runs on one GPU"
     if ens == "npt":
         try:
             normalize_npt_coupling(s.get("npt_coupling") or "isotropic")    # isotropic or semi-isotropic
@@ -287,6 +305,12 @@ def vacuum_fits(size, L, rc, rc_lr, reach):
 
 def vacuum_problem(settings):
     """Why flash cannot run these settings in free space (None if it can)."""
+    if not _off(settings.get("do_enhanced_sampling")):
+        # PySAGES runs a whole cycle inside its own loop, where perform_md_flash widens the
+        # engine's tables but cannot lay out free space's box again when the atoms outgrow
+        # it, and the coordinationnumber CV's neighbour list needs a periodic box: the
+        # neighbour-list engine runs these, as it did before flash took free space
+        return "its enhanced sampling needs a box"
     if settings.get("ensemble") == "npt":
         return "its NPT needs a box"
     for key in ("kspace_electrostatics", "kspace_dispersion"):

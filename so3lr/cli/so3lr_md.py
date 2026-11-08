@@ -42,22 +42,19 @@ from so3lr.mlff.nn.observable.observable_sparse import (
 )
 
 from so3lr.jaxmd_utils import nbrs_cutoff, to_jax_md as _to_jax_md
-from so3lr.pbc import is_fully_periodic, lattice_rows, minimum_image_problem
+from so3lr.pbc import box_to_diag, is_fully_periodic, lattice_rows, minimum_image_problem
 from so3lr import kspace_defaults as KS
 from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
 
 
-# Optional PySAGES integration
-try:
-    import pysages
-    from .so3lr_pysages_interface import (
-        create_pysages_interface_fns, update_so3lr_after_pysages,
-        save_pysages_state, parse_pysages_input, get_pysages_method,
-        load_pysages_state
-    )
-    HAS_PYSAGES = True
-except ImportError:
-    HAS_PYSAGES = False
+# PySAGES integration (optional: the interface module guards its PySAGES imports)
+from .so3lr_pysages_interface import (
+    check_enhanced_sampling, check_pysages_restart_ensemble, create_pysages_interface_fns,
+    cv_log_size, discard_cv_rows, get_pysages_method, load_pysages_restart,
+    reset_pysages_runner, run_pysages_cycle, save_pysages_state, update_so3lr_after_pysages,
+    warn_restart_method_mismatch,
+)
+from so3lr.restraints import build_cylinder_restraint, cylindrical_restraint_energy, parse_cylinder_settings
 
 import h5py
 from collections import namedtuple
@@ -1208,18 +1205,6 @@ def process_model(
     return neighbor_fn, neighbor_fn_lr, energy_or_obs_fn
 
 
-def box_to_diag(box):
-    """Return orthorhombic lengths from a box vector or diagonal matrix.
-
-    This is intentionally not a conversion for general cells. Fully flexible
-    cells are rejected by :func:`normalize_npt_coupling` before they can reach
-    any caller of this helper.
-    """
-    if box is not None and hasattr(box, 'ndim') and box.ndim == 2:
-        return jnp.diag(box)
-    return box
-
-
 def validate_orthorhombic_restart_box(box, label: str = 'box') -> None:
     """Reject a sheared checkpoint cell (e.g. from a legacy anisotropic run)."""
     m = np.asarray(box)
@@ -1938,46 +1923,22 @@ def perform_md(
             f"are the only supported modes."
         )
 
+    # Cylindrical / funnel restraint (optional). Confines the mass-weighted COM of
+    # the listed atoms to a flat-bottom cylinder (radius) with optional axial bounds.
+    # Scalar settings are validated here; baked constants (mass weights, normalized
+    # axis, origin) are built later, once the box/coordinate system and atom count are
+    # known (build_cylinder_restraint, after load_atom_masks below).
+    cyl_settings = parse_cylinder_settings(all_settings)
+
     # Enhanced sampling (PySAGES)
     do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
-    pysages_input_path = all_settings.get('pysages_input', './pysages_input.yaml')
     restart_pysages_save_path = all_settings.get('restart_pysages_save_path')
     restart_pysages_load_path = all_settings.get('restart_pysages_load_path')
     enforce_cartesian_coordinates = all_settings.get('enforce_cartesian_coordinates', False)
 
     validate_md_counts(all_settings)
 
-    restart_pysages = do_enhanced_sampling and restart_pysages_load_path is not None
-    if restart_pysages and not restart:
-        raise ValueError(
-            "restart_pysages_load_path needs an SO3LR restart (restart_load_path; "
-            "restart=True when calling perform_md directly): the PySAGES state "
-            "continues the dynamics it was saved with."
-        )
-    if restart_pysages_load_path is not None and not do_enhanced_sampling:
-        logger.warning("restart_pysages_load_path is ignored: do_enhanced_sampling is off.")
-
-    if do_enhanced_sampling and not HAS_PYSAGES:
-        raise ImportError(
-            "PySAGES is required for enhanced sampling but is not installed. "
-            "Install it with: pip install so3lr[pysages]"
-        )
-
-    # Methods that only add a fixed bias potential (no histogram accumulation
-    # or adaptive forces) work correctly with any ensemble.
-    PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS = {'harmonic', 'unbiased'}
-
-    if do_enhanced_sampling:
-        pysages_set_dict = parse_pysages_input(pysages_input_path)
-        pysages_method_name = pysages_set_dict['method'].lower()
-        if (pysages_method_name not in PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS
-                and ensemble not in ('nvt',)):
-            raise ValueError(
-                f"Enhanced sampling method '{pysages_method_name}' currently only "
-                f"supports the NVT ensemble (Nose-Hoover thermostat), but "
-                f"'{ensemble}' was selected. Methods that support all ensembles: "
-                f"{', '.join(sorted(PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS))}."
-            )
+    pysages_set_dict, restart_pysages = check_enhanced_sampling(all_settings, ensemble, restart)
 
     # Handling of restart
     if restart_save_path is not None:
@@ -2070,6 +2031,11 @@ def perform_md(
             f'constraint={fixed_atom_constraint}'
         )
 
+    # Baked constants for the cylindrical / funnel restraint, now that the box,
+    # coordinate system, and atom count are known.
+    cyl_restraint = (None if cyl_settings is None else build_cylinder_restraint(
+        cyl_settings, initial_geometry_dict['masses'], box, dtype))
+
     save_buffer = min(md_cycles, save_buffer)
     hdf5_store = None
 
@@ -2089,12 +2055,7 @@ def perform_md(
                 validate_npt_restart_coupling(state, box, npt_coupling)
             position = state.position
         except RestartInNewEnsembleError as e:
-            if restart_pysages and not e.reset_only:
-                raise ValueError(
-                    f"restart_pysages_load_path cannot continue in another ensemble "
-                    f"({e.loaded_state.get('ensemble')} -> {ensemble}): the PySAGES state "
-                    f"continues the dynamics it was saved with."
-                ) from e
+            check_pysages_restart_ensemble(e, restart_pysages, ensemble)
             logger.warning(e)
             position = e.loaded_state['position']
             initial_geometry_dict['masses'] = e.loaded_state['mass']
@@ -2124,53 +2085,7 @@ def perform_md(
             raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
 
         if restart_pysages:
-            restart_data_pysages = load_pysages_state(restart_pysages_load_path)
-            # Match the dtypes of the pickled PySAGES result to the run precision,
-            # exactly as load_state() does for the .npz state above. The PySAGES
-            # snapshot is pickled at whatever dtype the *originating* run carried
-            # (a fresh run keeps e.g. the Nose-Hoover chain `tau` at float32 even
-            # under x64, because jax-md hardcodes `tau = f32(tau)` in its
-            # integrator factories). On restart that pickled snapshot seeds the
-            # fori_loop carry's snapshot slot, while the jax-md state comes from
-            # load_state() normalized to `dtype`. If the two disagree, the loop
-            # carry input (snapshot float32) != output (re-snapshot of the
-            # float64 state) and jax.lax.scan rejects it:
-            #   loop_carry[...].chain_data['tau']: float32 vs float64
-            #
-            # The PySAGES Result is a plain class (not a registered pytree), so
-            # we normalize its pytree-valued `snapshots` attribute (a list of
-            # registered NamedTuples) rather than the Result itself -- a
-            # tree_map over the Result would treat it as a single opaque leaf
-            # and do nothing.
-            #
-            # IMPORTANT: only `snapshots` is normalized, NOT `states`. The
-            # method `states` (e.g. ABFState: Fsum/Wp/force/bias) are the
-            # sampler's internal accumulators, which are *not* part of the
-            # integrator carry that `_match_float_dtypes` pins to the run
-            # precision. PySAGES always computes them at its float64 working
-            # precision (the method view promotes the snapshot to float64 via
-            # `_as_default_float`), and a fresh run carries them at float64
-            # regardless of the integrator dtype. Casting them down to float32
-            # here both (a) silently degrades the accumulated mean force to
-            # float32 for the continued run, and (b) breaks ABF's out-of-bounds
-            # `cond` in `estimate_force`: the `average_force` branch derives its
-            # dtype from `Fsum` (now float32) while the `restraints_force`
-            # branch stays at the float64 of the restraint bounds baked into
-            # `method`, so `lax.cond` rejects the mismatched branches with
-            #   "true_fun output float64[1] vs false_fun output float32[1]".
-            # Leaving `states` at their pickled (float64) dtype matches exactly
-            # what a fresh run produces.
-            def _to_run_precision(x):
-                if hasattr(x, 'dtype') and jnp.issubdtype(
-                    jnp.asarray(x).dtype, jnp.floating
-                ):
-                    return jnp.asarray(x).astype(dtype)
-                return x
-
-            if restart_data_pysages.snapshots is not None:
-                restart_data_pysages.snapshots = jax.tree_util.tree_map(
-                    _to_run_precision, restart_data_pysages.snapshots
-                )
+            restart_data_pysages = load_pysages_restart(restart_pysages_load_path, dtype)
 
     patched_potential_kwargs = intermediate_quantity_kwargs(observables)
 
@@ -2308,6 +2223,36 @@ def perform_md(
             return E
         energy_fn = jax.jit(energy_fn_with_tail)
         logger.info('Dispersion tail correction enabled for NPT.')
+
+    # --- Cylindrical / funnel restraint ---
+    # Flat-bottom potential on the mass-weighted COM of the restrained atoms:
+    #   E_cyl = 0.5*k_r*relu(r_perp - R_cyl)^2  (+ optional axial-band terms)
+    # Wraps energy_fn exactly like the dispersion tail correction above so the force,
+    # virial, and NPT box-derivative all come from autodiff. Composes with every
+    # ensemble and every PySAGES method (the restraint lives in the potential; a
+    # method only ever adds its own bias force on top).
+    if cyl_restraint is not None:
+        _cyl_base_energy_fn = energy_fn
+
+        def energy_fn_with_cylinder(R, **kwargs):
+            E = _cyl_base_energy_fn(R, **kwargs)
+            box_kw = kwargs.get('box', None)
+            pert = kwargs.get('perturbation', None)
+            if box_kw is not None and pert is not None:  # NPT box scaling (mirror tail corr)
+                box_kw = box_kw * pert
+            # Convert to Cartesian if the integrator carries fractional coordinates, with
+            # jax-md's `transform`: its derivative passes the gradient through unchanged (as
+            # the model's displacements do), so the restraint's force on fractional positions
+            # stays in real space. The plain product of positions_to_cartesian would scale it
+            # by the box (a restraint box-length times too strong).
+            if fractional_coordinates and box_kw is not None:
+                R_cart = jax_md.space.transform(box_kw, R)
+            else:
+                R_cart = R
+            return E + cylindrical_restraint_energy(R_cart, box=box_kw, **cyl_restraint)
+
+        energy_fn = jax.jit(energy_fn_with_cylinder)
+        logger.info('Cylindrical / funnel restraint enabled.')
 
     # Apply units
     # Unit boundary: handle_units takes (dt in ps, T in K, P in bar) and returns
@@ -2472,15 +2417,20 @@ def perform_md(
 
     # PySAGES setup (pysages_set_dict was already parsed during validation)
     if do_enhanced_sampling:
+        # PySAGES caches its compiled run loop, with the step of the run that built it,
+        # for the process: a second run in one process must not step with the first's
+        reset_pysages_runner()
         method = get_pysages_method(
             pysages_set_dict,
             nbrs=nbrs,
             species=initial_geometry_dict['species'],
-            box=box
+            box=box,
+            input_atoms=initial_geometry
         )
         if restart_pysages:
             logger.info('Restarting from previous PySAGES run.')
             pysages_result = restart_data_pysages
+            warn_restart_method_mismatch(method, pysages_result.method)
         else:
             pysages_result = None
 
@@ -2579,15 +2529,10 @@ def perform_md(
                 k_grid=k_grid, k_grid_disp=k_grid_disp
             )
 
-            if pysages_result:
-                candidate_result = jax.block_until_ready(
-                    pysages.run(pysages_result, generate_context, md_steps,
-                                context_args={})
-                )
-            else:
-                candidate_result = jax.block_until_ready(
-                    pysages.run(method, generate_context, md_steps)
-                )
+            cv_log_start = cv_log_size()
+            candidate_result = run_pysages_cycle(
+                method, pysages_result, generate_context, md_steps
+            )
 
             new_state, nbrs, nbrs_lr, new_box, k_grid, k_grid_disp = jax.block_until_ready(
                 update_so3lr_after_pysages(
@@ -2635,6 +2580,9 @@ def perform_md(
             if lr_overflow:
                 lr_overflow_extra += OVERFLOW_EXTRA_LR
             overflow_retries += 1
+            if do_enhanced_sampling:
+                discard_cv_rows(cv_log_start, f"{md_steps} steps from step {current_cycle * md_steps}, "
+                                f"attempt {overflow_retries}: discarded (neighbour lists overflowed)")
             if overflow_retries > MAX_OVERFLOW_RETRIES:
                 raise RuntimeError(
                     f"Neighbor-list overflow did not stabilize after "
