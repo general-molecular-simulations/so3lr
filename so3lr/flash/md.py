@@ -3,10 +3,10 @@ FIRE with the flash engine.
 
 ``so3lr_md.run`` runs the flash engine whenever it computes what the settings ask for
 (``check.flash_problem`` is None: an NVIDIA GPU or an AMD MI355X, a periodic orthorhombic
-box or none (the gas phase), nve / nvt / nvt-langevin / isotropic npt, no k-space other than PME,
-so3lr-tauri-s, -m, -l or the legacy so3lr), else the neighbour-list potential of ``perform_md``;
-``perform_min`` (``so3lr opt``) likewise runs ``perform_min_flash``. ``--engine flash`` or
-``--engine standard`` forces one.
+box or none (the gas phase), nve / nvt / nvt-langevin / isotropic or semi-isotropic npt, no
+k-space other than PME, so3lr-tauri-s, -m, -l or the legacy so3lr), else the neighbour-list
+potential of ``perform_md``; ``perform_min`` (``so3lr opt``) likewise runs ``perform_min_flash``.
+``--engine flash`` or ``--engine standard`` forces one.
 
 Same settings, units, log lines, trajectory and restart files as ``perform_md``; the
 forces come from ``FlashSO3LR`` instead of the neighbour-list potential. NVE and NVT
@@ -24,11 +24,14 @@ jax-md step, run every step this way; the jitted ones run ``md_steps - 1`` steps
 jitted loop and only the last in two calls, which also gives the energy for the log.
 NPT runs every step in two calls: the engine evaluates in the box the step reaches
 (``set_box``), and the step takes the force and dE/d(strain) through an energy whose
-gradients they are (``_surrogate``).
+gradients they are (``_surrogate``). Semi-isotropic NPT (``npt_coupling: semi-isotropic``,
+jax-md's flexible cell with x and y coupled, z on its own) takes the engine's per-axis
+dE/d(strain_aa) the same way.
 """
 import gc
 import logging
 import time
+from functools import partial
 from pathlib import Path
 
 import jax
@@ -45,9 +48,12 @@ from so3lr.cli.so3lr_md import (
     atoms_to_jnp,
     box_to_diag,
     cell_from_atoms_boundary_conditions,
+    format_md_row,
     handle_units,
     init_hdf5_store,
     load_state,
+    npt_nose_hoover_for,
+    npt_start_motion,
     run_dtypes,
     save_restart_checkpoints,
     setup_run,
@@ -59,7 +65,7 @@ from so3lr.cli.so3lr_md import (
     write_to_extxyz,
     write_to_hdf5,
 )
-from so3lr.md_settings_validation import validate_md_counts
+from so3lr.md_settings_validation import normalize_npt_coupling, validate_md_counts
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported, supported_atomic_numbers_for_model)
 
@@ -123,9 +129,11 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
                      equilibration_charge=total_charge if equil is None else float(equil),
                      pme_electrostatics=pme_el, pme_dispersion=pme_disp,
                      box_margin=box_margin, devices=devices,
-                     size=size, **kw)
+                     size=size, **kw,
+                     kernels=settings.get("flash_kernels") or None)
+    kib = eng.cuda_kernels.kib if eng.cuda_kernels is not None else mode_kib(mode, statics)
     logger.info(f"Flash: {n} atoms, memory mode {mode} ({'staged' if staged else 'jitted'}), "
-                f"~{mode_kib(mode, statics):.1f} KiB/atom at peak")
+                f"~{kib:.1f} KiB/atom at peak")
     if vacuum:
         logger.info(f"Flash: {_free_space(eng)}")
     if eng.P > 1:
@@ -194,7 +202,16 @@ def _surrogate(R, box=None, perturbation=1.0, F=None, W=None, E=None, **kwargs):
     if F is not None:
         e = e - jnp.sum(F.astype(R.dtype) * (R - jax.lax.stop_gradient(R)))
     if W is not None:
-        e = e + jnp.asarray(W, R.dtype) * (jnp.asarray(perturbation, R.dtype) - 1.0)
+        p = jnp.asarray(perturbation, R.dtype)
+        if p.ndim == 2:
+            # the flexible cell (semi-isotropic): W per axis, dE/d(strain_aa), and
+            # perturbation = 1 + strain with its diagonal only (no W for a shear)
+            W = jnp.asarray(W, R.dtype)
+            if W.shape != (3,):
+                raise ValueError(f"the flexible cell takes dE/d(strain) per axis, shape (3,), not {W.shape}")
+            e = e + jnp.sum(W * (jnp.diagonal(p) - 1.0))
+        else:
+            e = e + jnp.asarray(W, R.dtype) * (p - 1.0)
     return e
 
 
@@ -388,6 +405,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         raise ValueError(f"flash: {problem}")
     ensemble = s.get("ensemble")
     npt = ensemble == "npt"
+    coupling = s.get("npt_coupling") or "isotropic"
+    semi = npt and normalize_npt_coupling(coupling) == "semi-isotropic"
 
     output_file, output_format = s.get("output_file"), s.get("output_format")
     overwrite = bool(s.get("overwrite", False))
@@ -414,7 +433,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                                                     restart_reset=s.get("restart_reset", False),
                                                     fractional_coordinates=npt, precision=sdt)
             if npt:
-                validate_npt_restart_coupling(state, rbox, s.get("npt_coupling") or "isotropic")
+                validate_npt_restart_coupling(state, rbox, coupling)
             if not vacuum:                   # (structure_problem: a restart in free space has no box)
                 box = jnp.asarray(box_to_diag(rbox), sdt)
         except RestartInNewEnsembleError as e:
@@ -439,7 +458,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         eng, staged = build_engine(atoms, s, dtype, positions=np.asarray(start))
         # several GPUs: the MD state on all of them
         position, box, geo, state, start = replicated(eng, (position, box, geo, state, start))
-        strain = eng.energy_forces_strain_staged if staged else eng.energy_forces_strain
+        # dE/d(strain) for the barostat: one number, or per axis for the flexible cell
+        strain = partial(eng.energy_forces_strain_staged if staged else eng.energy_forces_strain, diag=semi)
         e0, F0, W0 = strain(start)
     except Exception as exc:
         raise FlashUnavailable(f"{type(exc).__name__}: {exc}") from exc
@@ -479,6 +499,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         return jax_md.simulate.nvt_langevin(
             force_fn, shift, md_dt, kT, gamma=1.0 / (md_dt * thermo),
             center_velocity=s.get("langevin_removecmmotion"))
+    # NPT: jax-md's isotropic barostat, or its flexible cell with x and y coupled (semi-isotropic),
+    # as perform_md runs them
+    npt_fn, npt_box, npt_invariant = npt_nose_hoover_for(coupling) if npt else (None, None, None)
     if not npt:
         init_fn, apply_fn = integrator()
     else:
@@ -490,21 +513,21 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         thermostat = dict(chain_length=s.get("nhc_chain_length"), chain_steps=s.get("nhc_steps"),
                           sy_steps=s.get("nhc_sy_steps"), tau=md_dt * s.get("nhc_thermo"))
         barostat = dict(thermostat, tau=md_dt * s.get("nhc_baro"))
-        init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
-            _surrogate, shift, md_dt, pressure=P, kT=kT, barostat_kwargs=barostat,
-            thermostat_kwargs=thermostat)
+        init_fn, apply_fn = npt_fn(_surrogate, shift, md_dt, pressure=P, kT=kT, barostat_kwargs=barostat,
+                                   thermostat_kwargs=thermostat)
 
     def cartesian(st):
         """Positions in A and the box sides of a state."""
         if npt:
-            L1 = box_to_diag(jax_md.simulate.npt_box(st))
+            L1 = box_to_diag(npt_box(st))
             return st.position * L1, L1
         return st.position, box
 
     key = jax.random.PRNGKey(s.get("seed", 0))
     if npt:
         zero = jnp.zeros((), sdt)
-        predict = jax.jit(lambda st: cartesian(apply_fn(st, F=jnp.zeros_like(st.position), W=zero, E=zero)))
+        zero_w = jnp.zeros(jnp.shape(W0), sdt)          # one number, or per axis (semi-isotropic)
+        predict = jax.jit(lambda st: cartesian(apply_fn(st, F=jnp.zeros_like(st.position), W=zero_w, E=zero)))
         finish = jax.jit(lambda st, F, W, E: apply_fn(st, F=F, W=W, E=E))
 
         def advance(st, k):
@@ -516,8 +539,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                 st = finish(st, F, jnp.asarray(W, sdt), jnp.asarray(e, sdt))
             return st, e
         if state is None:
-            state = init_fn(key, position / box, box, mass=geo["masses"], momenta=geo.get("momenta"), kT=kT,
-                            F=F0, W=jnp.asarray(W0, sdt), E=jnp.asarray(e0, sdt))
+            state = init_fn(key, position / box, box, mass=geo["masses"], kT=kT, F=F0, W=jnp.asarray(W0, sdt),
+                            E=jnp.asarray(e0, sdt), **npt_start_motion(geo.get("momenta"), geo["masses"], coupling))
     else:
         predict, finish = _two_call_step(apply_fn)
 
@@ -543,18 +566,16 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         if ensemble == "nvt":
             h = float(jax_md.simulate.nvt_nose_hoover_invariant(lambda R, **k: pe, st, kT))
         elif npt:
-            h = float(jax_md.simulate.npt_nose_hoover_invariant(_surrogate, st, P, kT, E=pe))
+            h = float(npt_invariant(_surrogate, st, P, kT, E=pe))
         else:
             h = ke + pe
         return ke, pe, h, temp
 
     def line(step, ke, pe, h, temp, per_step):
-        """perform_md's log line (NPT with the box sides)."""
-        b = ""
-        if npt:
-            L1 = np.asarray(cartesian(state)[1])
-            b = f"\t({L1[0]:.3f},{L1[1]:.3f},{L1[2]:.3f})"
-        return f"{step}\t{ke + pe:.3f}\t{ke:.3f}\t{pe:.3f}\t{h:.3f}\t{temp:.1f}{b}\t{per_step:.2e}"
+        """perform_md's log line (NPT: the box sides; the flexible cell also its pressure tensor's
+        diagonal)."""
+        return format_md_row(step, ke, pe, h, temp, per_step, npt_state=state if npt else None,
+                             box=np.asarray(cartesian(state)[1]) if npt else None)
 
     # trajectory positions as perform_md writes them: fractional unless asked otherwise (or
     # with no box)
@@ -582,7 +603,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     drift_ref, drift_warned = None, False
 
     logger.info("Starting MD simulation (flash engine)...")
-    logger.info("Step\tE [eV]\tKE\tPE\tH\tTemp [K]" + ("\tBox [A]" if npt else "") + "\ttime/step [s]")
+    logger.info("Step\tE [eV]\tKE\tPE\tH\tTemp [K]" + ("\tP [bar] (xx,yy,zz)" if semi else "")
+                + ("\tBox [A]" if npt else "") + "\ttime/step [s]")
     logger.info(line(current_cycle * md_steps, *quantities(state, e0), 0.0))
     positions, momenta, boxes, obs = [], [], [], {}
     total_time, timed = 0.0, 0

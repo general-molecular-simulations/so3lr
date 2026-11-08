@@ -15,6 +15,8 @@ import os
 
 import numpy as np
 
+from so3lr.md_settings_validation import normalize_npt_coupling
+
 # NPT: the cell grid is laid out for a box this much smaller, so the box moves without
 # a compile (and is laid out again if it leaves the margin)
 NPT_BOX_MARGIN = 0.03
@@ -26,6 +28,7 @@ ENGINES = ("auto", "flash", "standard")
 # the AMD GPUs (gfx targets) flash is tested on: the MI355X
 ROCM_TARGETS = ("gfx950",)
 FLASH_MODES = ("auto", "fast", "default", "lean", "leanest", "minimal")     # engine.MODES and auto
+KERNELS = ("auto", "pallas", "cuda")      # flash_kernels: the CUDA kernels where they apply, Pallas, CUDA only
 TASKS = ("md", "opt", "eval", "ase")
 # what so3lr eval can take from the engine
 EVAL_TARGETS = ("energy", "forces")
@@ -46,7 +49,7 @@ HANDLED = {
     "kspace_smearing", "kspace_spacing", "kspace_interp_nodes", "kspace_dispersion",
     "kspace_dispersion_smearing", "kspace_dispersion_spacing", "kspace_dispersion_interp_nodes",
     "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
-    "engine", "flash_mode", "flash_mixed", "flash_devices", "md_precision",
+    "engine", "flash_mode", "flash_mixed", "flash_devices", "flash_kernels", "md_precision",
 }
 # settings that only concern the neighbour-list engine, other commands sharing a settings
 # file (eval, tune-ewald), or act only together with a declined setting below (the
@@ -109,9 +112,9 @@ def _off(value):
 
 
 def validate_options(settings):
-    """Raise on an engine, flash_mode or flash_devices value flash does not take (a settings
-    file bypasses the CLI's choices)."""
-    for key, allowed in (("engine", ENGINES), ("flash_mode", FLASH_MODES)):
+    """Raise on an engine, flash_mode, flash_kernels or flash_devices value flash does not take
+    (a settings file bypasses the CLI's choices)."""
+    for key, allowed in (("engine", ENGINES), ("flash_mode", FLASH_MODES), ("flash_kernels", KERNELS)):
         if settings.get(key) is not None and settings[key] not in allowed:
             raise ValueError(f"{key} must be one of {', '.join(allowed)} (received {settings[key]!r})")
     n = settings.get("flash_devices")
@@ -165,8 +168,11 @@ def settings_problem(settings, task="md"):
                 return f"it has no {UNSUPPORTED[key]}"
         elif key not in HANDLED and key not in IRRELEVANT and not _off(value):
             return f"it does not know the setting {key!r}"
-    if ens == "npt" and (s.get("npt_coupling") or "isotropic") != "isotropic":
-        return f"its NPT is isotropic, not {s.get('npt_coupling')}"
+    if ens == "npt":
+        try:
+            normalize_npt_coupling(s.get("npt_coupling") or "isotropic")    # isotropic or semi-isotropic
+        except ValueError:
+            return f"its NPT is isotropic or semi-isotropic, not {s.get('npt_coupling')}"
     for key, nodes in (("kspace_electrostatics", "kspace_interp_nodes"),
                        ("kspace_dispersion", "kspace_dispersion_interp_nodes")):
         if s.get(key) not in (None, "pme"):

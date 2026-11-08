@@ -8,5 +8,7 @@ cells or none (the gas phase); real-space long range or PME; dE/d(strain) for NP
 exactly (energy and forces; real-space long range). ``loader.load_params`` reads a
 registry model; ``md.perform_md_flash`` runs ``so3lr nve|nvt|nvt-langevin|npt``, which
 use it by default wherever it applies (``check.flash_problem``); ``verify`` compares it
-with the neighbour-list potential.
+with the neighbour-list potential. On an sm_90 GPU with nvcc, so3lr-tauri-s/m/l's fast mode
+runs CUDA kernels (cuda: the attention per pair on tensor cores, 3x the speed), picked
+automatically (flash_kernels); the Pallas kernels serve everything else.
 """

@@ -57,7 +57,7 @@ def test_pme_electrostatics_matches_jaxpme(smearing, spacing, chunk):
     pbc = jnp.array([True, True, True])
 
     def e_ref(R, q, s=1.0):
-        # box and positions scaled by s together, as jax-md's NPT strain
+        # box and positions scaled by s together, as jax-md's NPT strain (s per axis or one)
         cell = jnp.diag(jnp.asarray(L)) * s
         recip = jaxpme.kspace.get_reciprocal(cell)
         kgrid = jaxpme.kspace.get_kgrid_mesh(jnp.diag(jnp.asarray(L)), mesh_spacing=jnp.array([spacing]))
@@ -70,7 +70,9 @@ def test_pme_electrostatics_matches_jaxpme(smearing, spacing, chunk):
     Rj, qj = jnp.asarray(R), jnp.asarray(q)
     assert tuple(jaxpme.kspace.get_kgrid_mesh(jnp.diag(jnp.asarray(L)), mesh_spacing=jnp.array([spacing])).shape) == mesh
     gR, gq = jax.grad(lambda R, q: e_ref(R, q).sum(), argnums=(0, 1))(Rj, qj)
-    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(1.0)
+    # per axis: side a and positions along a scaled by s_a (semi-isotropic NPT); the sum is
+    # the isotropic strain derivative
+    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(jnp.ones(3))
     e, g, f, w = E.pme_electrostatics(tuple(Rj[:, a] for a in range(3)), qj, list(L), mesh, smearing, KE,
                                       jnp.float64, chunk)
     _check("energy", e, e_ref(Rj, qj))
@@ -102,7 +104,7 @@ def test_pme_dispersion_matches_jaxpme():
 
     Rj, qj = jnp.asarray(R), jnp.asarray(qd)
     gR, gq = jax.grad(lambda R, q: e_ref(R, q).sum(), argnums=(0, 1))(Rj, qj)
-    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(1.0)
+    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(jnp.ones(3))
     e, g, f, w = E.pme_dispersion(tuple(Rj[:, a] for a in range(3)), qj, list(L), mesh, smearing, Bohr,
                                   Hartree, jnp.float64, 70)
     _check("energy", e, e_ref(Rj, qj))
@@ -215,7 +217,9 @@ SETTINGS = dict(ensemble="nvt", model_path=None, lr_cutoff=12.0)
 @pytest.mark.parametrize("change,reason", [
     (dict(), None),
     (dict(ensemble="npt"), None),
-    (dict(ensemble="npt", npt_coupling="semi-isotropic"), "isotropic"),
+    (dict(ensemble="npt", npt_coupling="semi-isotropic"), None),
+    (dict(ensemble="npt", npt_coupling="semi_isotropic"), None),
+    (dict(ensemble="npt", npt_coupling="anisotropic"), "not anisotropic"),
     (dict(ensemble="npt", dispersion_tail_correction=True), "tail correction"),
     (dict(kspace_electrostatics="pme"), None),
     (dict(kspace_electrostatics="ewald"), "PME but not ewald"),
@@ -438,7 +442,7 @@ def test_free_space_box_has_no_images_within_reach(rc_lr):
 
 
 @pytest.mark.parametrize("bad", [dict(engine="Flash"), dict(engine="neighbour-list"), dict(flash_mode="Fast"),
-                                 dict(flash_devices=0), dict(flash_devices="2"),
+                                 dict(flash_kernels="CUDA"), dict(flash_devices=0), dict(flash_devices="2"),
                                  dict(flash_devices=2, flash_mode="lean"), dict(flash_devices=4096)])
 def test_bad_engine_options_raise(bad):
     """Settings files bypass the CLI's choices: a value flash does not take is an error."""
@@ -735,6 +739,53 @@ def test_md_restarts_on_flash(tmp_path):
         assert "Engine: flash" in log, log[-2000:]
 
 
+
+@GPU
+def test_semi_isotropic_npt_on_flash(tmp_path):
+    """Semi-isotropic NPT on flash (npt_coupling: semi-isotropic, jax-md's flexible cell, the
+    engine's per-axis dE/d(strain)): it runs, x and y stay equal, the log has the pressure
+    tensor's diagonal, and a restart file continues it."""
+    import yaml
+    from ase.io import write
+    write(tmp_path / "w.xyz", _water((3, 3, 3)))
+    base = dict(input_file="w.xyz", ensemble="npt", npt_coupling="semi-isotropic", md_P=1.0, md_T=300.0,
+                md_dt=0.5, md_cycles=2, md_steps=5, relax_before_run=False)
+    for name, extra in (("a", dict(restart_save_path="a.npz")), ("b", dict(restart_load_path="a.npz"))):
+        (tmp_path / f"{name}.yaml").write_text(yaml.safe_dump(
+            dict(base, output_file=f"{name}.hdf5", log_file=f"{name}.log", **extra)))
+        _so3lr(["--settings", f"{name}.yaml"], tmp_path)
+        log = (tmp_path / f"{name}.log").read_text()
+        assert "Engine: flash" in log and "P [bar] (xx,yy,zz)" in log, log[-2000:]
+        rows = [r.split(" - ")[-1].split("\t") for r in log.splitlines()]
+        rows = [r for r in rows if len(r) > 6 and r[0].isdigit()]
+        sides = [float(v) for v in rows[-1][-2].strip("()").split(",")]
+        assert sides[0] == sides[1] and np.isfinite(sides).all(), rows[-1]
+
+
+def test_surrogate_takes_the_strain_derivative_per_axis():
+    """The NPT step's surrogate energy (CPU): its gradient by a flexible-cell perturbation
+    (1 + diag(strain)) is the per-axis dE/d(strain) given, by the isotropic one (1 + strain)
+    the number given; a per-axis W needs three numbers."""
+    from so3lr.flash.md import _surrogate
+    R = jnp.zeros((2, 3))
+    W3 = jnp.asarray([1.0, 2.0, 3.0])
+    g = jax.grad(lambda e: _surrogate(R, perturbation=jnp.eye(3) + jnp.diag(e), W=W3))(jnp.zeros(3))
+    np.testing.assert_allclose(np.asarray(g), np.asarray(W3))
+    assert float(jax.grad(lambda e: _surrogate(R, perturbation=1.0 + e, W=6.0))(0.0)) == 6.0
+    with pytest.raises(ValueError, match="per axis"):
+        _surrogate(R, perturbation=jnp.eye(3), W=6.0)
+
+
+def test_npt_start_motion():
+    """The NPT init's starting motion (CPU): momenta for the isotropic state, velocities
+    (momenta / masses) for the flexible cell, None where none are given."""
+    from so3lr.cli.so3lr_md import npt_start_motion
+    p, m = jnp.ones((2, 3)), jnp.asarray([2.0, 4.0])
+    assert npt_start_motion(p, m, "isotropic")["momenta"] is p
+    v = npt_start_motion(p, m, "semi_isotropic")["velocities"]
+    np.testing.assert_allclose(np.asarray(v), np.asarray(p / m[:, None]))
+    assert npt_start_motion(None, m, "semi-isotropic") == dict(velocities=None)
+
 @GPU
 @pytest.mark.parametrize("model", [None, "so3lr"])
 def test_opt_on_flash_follows_neighbour_lists(tmp_path, model):
@@ -1019,8 +1070,8 @@ GPUS = pytest.mark.skipif(check.device_problem() is not None or len(jax.local_de
 @GPUS
 @pytest.mark.parametrize("precision,tol", [("float64", 1e-10), ("float32", 1e-5)])
 def test_several_gpus_give_one_gpus_forces(precision, tol):
-    """Energy, forces and dE/d(strain) on two and on all visible GPUs as on one: PME for
-    both, an atom count the GPUs do not divide (the last one shares rows); and with
+    """Energy, forces and dE/d(strain) per axis on two and on all visible GPUs as on one: PME
+    for both, an atom count the GPUs do not divide (the last one shares rows); and with
     neighbour rows too short, widened as on one GPU."""
     from so3lr.flash.loader import load_params
     atoms = _water((3, 3, 3))[:-3]
@@ -1028,12 +1079,12 @@ def test_several_gpus_give_one_gpus_forces(precision, tol):
     args = (params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]))
     kw = dict(pme_electrostatics=(2.0, 1.55), pme_dispersion=(2.0, 1.55), **E.MODES["fast"][0])
     R = jnp.asarray(atoms.get_positions(), statics["dtype"])
-    e_ref, f_ref, w_ref = E.FlashSO3LR(*args, **kw).energy_forces_strain(R)
+    e_ref, f_ref, w_ref = E.FlashSO3LR(*args, **kw).energy_forces_strain(R, diag=True)
     for P in sorted({2, len(jax.local_devices())}):
-        e, f, w = E.FlashSO3LR(*args, devices=P, **kw).energy_forces_strain(R)
+        e, f, w = E.FlashSO3LR(*args, devices=P, **kw).energy_forces_strain(R, diag=True)
         _check(f"energy on {P} GPUs", e, e_ref, tol / 100)
         _check(f"forces on {P} GPUs", f, f_ref, tol)
-        _check(f"dE/d(strain) on {P} GPUs", w, w_ref, tol)
+        _check(f"dE/d(strain) per axis on {P} GPUs", w, w_ref, tol)
     if precision == "float64":
         eng = E.FlashSO3LR(*args, devices=2, max_neighbours=16, **kw)
         e, f, w = eng.energy_forces_strain(R)
@@ -1141,3 +1192,72 @@ def test_pick_splits_takes_only_allowed_splits():
     assert k > 1 and 2160.0 / k >= 12.1 and 2160.0 / k + 2 * 12.1 + 0.1 <= 2160.0
     with pytest.raises(ValueError, match="no domain split fits"):
         pick_splits(10 ** 9, np.diag([40.0] * 3), statics, 4 << 30)
+
+
+# ---- the CUDA kernels (so3lr/flash/cuda) -----------------------------------------------
+def _cuda_kernels_problem():
+    """Why the CUDA kernels cannot run here (None: they can): no GPU, a GPU other than sm_90,
+    no nvcc."""
+    from so3lr.flash.cuda import build
+    return build.problem()
+
+
+CUDA = pytest.mark.skipif(_cuda_kernels_problem() is not None, reason="the CUDA kernels need an sm_90 GPU and nvcc")
+
+
+def _engine(model, atoms, precision, **kw):
+    from so3lr.flash.loader import load_params
+    params, statics = load_params(model, precision=precision, lr_cutoff=12.0)
+    return E.FlashSO3LR(params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]), **kw)
+
+
+@CUDA
+@pytest.mark.parametrize("model", ["so3lr-tauri-m-2606", "so3lr-tauri-s-2606", "so3lr-tauri-l-2606", "so3lr"])
+def test_cuda_kernels_follow_float64(model):
+    """The CUDA kernels (asked for explicitly, in the fast memory mode they serve) give the
+    float64 engine's energy, forces and dE/d(strain) per axis (the angular forces' part, which
+    cancels in the isotropic sum) to float32 accuracy, in the jitted program and in the
+    staged one."""
+    atoms = _water((4, 4, 4))
+    R = atoms.get_positions()
+    e_ref, f_ref, w_ref = _engine(model, atoms, "float64").energy_forces_strain(jnp.asarray(R, jnp.float64), diag=True)
+    eng = _engine(model, atoms, "float32", keep_attention=True, kernels="cuda")
+    e, f, w = eng.energy_forces_strain(jnp.asarray(R, jnp.float32), diag=True)
+    assert eng.cuda_kernels is not None
+    _check("energy", e, e_ref, 1e-6)
+    _check("forces", f, f_ref, 1e-4)
+    _check("dE/d(strain) per axis", w, w_ref, 1e-4)
+    e2, f2, w2 = eng.energy_forces_strain_staged(jnp.asarray(R, jnp.float32), diag=True)
+    _check("staged energy", e2, e, 1e-6)
+    _check("staged forces", f2, f, 1e-5)
+    _check("staged dE/d(strain) per axis", w2, w, 1e-5)
+
+
+@CUDA
+def test_cuda_kernels_fall_back_where_they_do_not_apply():
+    """auto takes the Pallas kernels for a float64 model and for the staged memory modes;
+    cuda asked for explicitly raises there instead."""
+    atoms = _water((3, 3, 3))
+    for precision, kw in (("float64", dict(keep_attention=True)), ("float32", dict())):
+        R = jnp.asarray(atoms.get_positions(), jnp.float64 if precision == "float64" else jnp.float32)
+        eng = _engine("so3lr-tauri-m-2606", atoms, precision, **kw)
+        eng.energy_forces(R)
+        assert eng.cuda_kernels is None
+        with pytest.raises(RuntimeError, match="do not serve"):
+            _engine("so3lr-tauri-m-2606", atoms, precision, kernels="cuda", **kw).energy_forces(R)
+
+
+@CUDA
+def test_cuda_kernels_widen_rows():
+    """Neighbour rows too short for water on the CUDA kernels: the engine widens them (its
+    pair records and filters sized for the wider rows at the next program) and gives what
+    wide ones give, jitted and staged."""
+    atoms = _water((3, 3, 3))
+    R = jnp.asarray(atoms.get_positions(), jnp.float32)
+    e_ref, f_ref = _engine("so3lr-tauri-m-2606", atoms, "float32", keep_attention=True, kernels="cuda").energy_forces(R)
+    for staged in (False, True):
+        eng = _engine("so3lr-tauri-m-2606", atoms, "float32", keep_attention=True, kernels="cuda", max_neighbours=16)
+        e, f = (eng.energy_forces_staged if staged else eng.energy_forces)(R)
+        assert eng.K > 16 and eng.cuda_kernels is not None
+        _check("energy", e, e_ref, 1e-6)
+        _check("forces", f, f_ref, 1e-5)

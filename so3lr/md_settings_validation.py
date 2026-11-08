@@ -26,6 +26,28 @@ def canonical_ensemble(name) -> str:
     return canonical
 
 
+def normalize_npt_coupling(npt_coupling: str) -> str:
+    """Return 'isotropic' or 'semi-isotropic' (spaces/underscores/hyphens accepted).
+
+    Semi-isotropic coupling is experimental. Fully anisotropic coupling is
+    rejected: the integrator would evolve shear, but the neighbour-list,
+    reciprocal-space and dispersion-tail paths assume an orthorhombic cell.
+    """
+    coupling = '-'.join(str(npt_coupling).strip().lower().replace('_', ' ').replace('-', ' ').split())
+    if coupling == 'anisotropic':
+        raise ValueError(
+            "npt_coupling='anisotropic' is experimental and not supported by SO3LR MD: "
+            "the cell would shear, but the neighbour-list, reciprocal-space and "
+            "dispersion-tail paths assume an orthorhombic cell. Use 'isotropic' or "
+            "the experimental 'semi-isotropic' (coupled x/y, independent z)."
+        )
+    if coupling not in ('isotropic', 'semi-isotropic'):
+        raise ValueError(
+            f"Unknown npt_coupling={npt_coupling!r}. Supported values: isotropic, semi-isotropic."
+        )
+    return coupling
+
+
 def canonical_precision(precision) -> str:
     """A run's precision (mixed if unset): float32 or float64 throughout, or mixed, a float32
     model around a float64 MD state (float32 coordinates of a 500 A box round to 6e-5 A).

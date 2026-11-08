@@ -11,8 +11,8 @@ neighbour-list model, takes any structure). The engine is built at the first cal
 kept while the atoms, charge and spin stay the same (``md.SinglePoints``): a new cell is
 laid out again (and compiles), and other atoms build a new engine (and compile). The
 charge and spin come from ``atoms.info`` as for ``So3lrCalculator`` (``charge``, default
-0; ``multiplicity`` - 1, default 0). No stress: the engine's strain derivative is
-isotropic only.
+0; ``multiplicity`` - 1, default 0). No stress: the engine's strain derivative is the
+isotropic one or its diagonal (``diag=True``), and an ASE stress needs the shear as well.
 """
 from ase.calculators.calculator import Calculator, all_changes
 
@@ -37,7 +37,8 @@ class FlashCalculator(Calculator):
                  kspace_electrostatics=None, kspace_smearing=None, kspace_spacing=None,
                  kspace_dispersion=None, kspace_dispersion_smearing=None, kspace_dispersion_spacing=None,
                  charge_embed_total_charge=None, charge_equilibration_total_charge=None,
-                 flash_mode="auto", flash_mixed=None, flash_devices=1, matmul_precision="highest", **kwargs):
+                 flash_mode="auto", flash_mixed=None, flash_devices=1, flash_kernels="auto", matmul_precision="highest",
+                 **kwargs):
         super().__init__(**kwargs)
         precision = available_precision(dict(precision=precision, flash_mixed=flash_mixed))
         settings = dict(
@@ -48,7 +49,7 @@ class FlashCalculator(Calculator):
             kspace_dispersion_spacing=kspace_dispersion_spacing,
             charge_embed_total_charge=charge_embed_total_charge,
             charge_equilibration_total_charge=charge_equilibration_total_charge,
-            engine="flash", flash_mode=flash_mode, flash_devices=flash_devices)
+            engine="flash", flash_mode=flash_mode, flash_devices=flash_devices, flash_kernels=flash_kernels)
         validate_options(settings)
         from .md import SinglePoints
         # no grid margin: a cell that changes is laid out again (and compiles)

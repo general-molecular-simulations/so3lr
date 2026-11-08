@@ -21,7 +21,7 @@ from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
 from ..md_observables import MD_OBSERVABLES
 from ..md_settings_validation import (
     DEFAULT_PRECISION, DEFAULT_PRESSURE, PRECISIONS, load_settings_yaml, resolve_ensemble, validate_md_counts)
-from ..flash.check import ENGINES, FLASH_MODES, reserve_gpu
+from ..flash.check import ENGINES, FLASH_MODES, KERNELS, reserve_gpu
 # Import-cheap (standard library only); the --model help is built from it so the
 # listed names and the default cannot go stale when a release lands.
 from ..model_registry import DEFAULT_MODEL, available_models
@@ -517,8 +517,8 @@ def flash_options(f: Callable) -> Callable:
                           'GPU) whenever it computes what the other options ask for -- an NVIDIA '
                           'GPU or an AMD MI355X, a periodic orthorhombic box or none (gas phase), '
                           'real-space long range or PME, '
-                          'so3lr-tauri-s/m/l or the legacy so3lr; for MD nve/nvt/nvt-langevin/isotropic '
-                          'npt, for eval the targets energy and forces -- else the neighbour-list potential; the '
+                          'so3lr-tauri-s/m/l or the legacy so3lr; for MD nve/nvt/nvt-langevin/isotropic or '
+                          'semi-isotropic npt, for eval the targets energy and forces -- else the neighbour-list potential; the '
                           'log says which and why. flash or standard forces one. [default: auto]')(f)
     f = click.option('--flash-mode', 'flash_mode', default='auto',
                      type=click.Choice(list(FLASH_MODES)),
@@ -526,6 +526,11 @@ def flash_options(f: Callable) -> Callable:
                           '[default: auto]')(f)
     f = click.option('--flash-mixed/--no-flash-mixed', 'flash_mixed', default=None,
                      help='Deprecated: --precision mixed (on) or float32 (off).')(f)
+    f = click.option('--flash-kernels', 'flash_kernels', default='auto',
+                     type=click.Choice(list(KERNELS)),
+                     help='SO3LR-Flash kernels: cuda (so3lr-tauri-s/m/l and so3lr, fast mode, an sm_90 GPU with '
+                          'nvcc: tensor-core attention, 3x faster, built on first use) or pallas (Triton, any '
+                          'GPU); auto takes cuda where it applies, else pallas, and says which. [default: auto]')(f)
     f = click.option('--flash-devices', 'flash_devices', default=1, type=click.IntRange(min=1),
                      help='SO3LR-Flash on this many GPUs of the node: each computes an equal share '
                           'of the atoms, for systems that fit on one GPU but should run faster. '
@@ -654,7 +659,7 @@ KNOWN_YAML_KEYS_EXTRA: set = {
     # Minimization (overrides cycles/steps if set)
     'force_convergence',
     # flash engine
-    'engine', 'flash_mode', 'flash_mixed', 'flash_devices',
+    'engine', 'flash_mode', 'flash_mixed', 'flash_devices', 'flash_kernels',
     # retired: a value raises with what replaced it (md_settings_validation.resolve_precision)
     'md_precision',
     # Eval keys (allowed in the same YAML even though `so3lr eval` does not use
@@ -1023,6 +1028,7 @@ def run_md_simulation(
     flash_mode: str = 'auto',
     flash_mixed: Optional[bool] = None,
     flash_devices: int = 1,
+    flash_kernels: str = 'auto',
 ) -> None:
     """Shared runner for NVT, NVT-Langevin, NPT, and NVE MD simulations."""
     if not input_file or help:
@@ -1082,6 +1088,7 @@ def run_md_simulation(
         'flash_mode': flash_mode,
         'flash_mixed': flash_mixed,
         'flash_devices': flash_devices,
+        'flash_kernels': flash_kernels,
     }
 
     # Only insert kspace_npt_cycles when the user explicitly passed
@@ -1179,6 +1186,7 @@ def fire_optimization(
     flash_mode: str = 'auto',
     flash_mixed: Optional[bool] = None,
     flash_devices: int = 1,
+    flash_kernels: str = 'auto',
 ) -> None:
     """
     Run geometry optimization using the FIRE algorithm.
@@ -1282,6 +1290,7 @@ def fire_optimization(
         'flash_mode': flash_mode,
         'flash_mixed': flash_mixed,
         'flash_devices': flash_devices,
+        'flash_kernels': flash_kernels,
     }
     reserve_gpu(settings, task='opt')   # before JAX starts
     get_hardware_info()
@@ -1476,6 +1485,7 @@ def eval_model(
     flash_mode: str = 'auto',
     flash_mixed: Optional[bool] = None,
     flash_devices: int = 1,
+    flash_kernels: str = 'auto',
 ) -> None:
     """
     Evaluate SO3LR model on a dataset.
@@ -1549,7 +1559,7 @@ def eval_model(
         kspace_dispersion=kspace_dispersion, kspace_dispersion_smearing=kspace_dispersion_smearing,
         kspace_dispersion_spacing=kspace_dispersion_spacing,
         kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
-        engine=engine, flash_mode=flash_mode, flash_mixed=flash_mixed, flash_devices=flash_devices)
+        engine=engine, flash_mode=flash_mode, flash_mixed=flash_mixed, flash_devices=flash_devices, flash_kernels=flash_kernels)
     # before JAX starts: what flash may run (the structures are checked once read)
     reserve_gpu(settings, task='eval')
     # Log hardware info

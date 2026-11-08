@@ -64,8 +64,8 @@ from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
 from ..md_settings_validation import (
-    DEFAULT_PRECISION, model_precision, resolve_ensemble, resolve_precision, state_precision,
-    validate_md_counts)
+    DEFAULT_PRECISION, model_precision, normalize_npt_coupling, resolve_ensemble, resolve_precision,
+    state_precision, validate_md_counts)
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -1220,28 +1220,6 @@ def box_to_diag(box):
     return box
 
 
-def normalize_npt_coupling(npt_coupling: str) -> str:
-    """Return 'isotropic' or 'semi-isotropic' (spaces/underscores/hyphens accepted).
-
-    Semi-isotropic coupling is experimental. Fully anisotropic coupling is
-    rejected: the integrator would evolve shear, but the neighbour-list,
-    reciprocal-space and dispersion-tail paths assume an orthorhombic cell.
-    """
-    coupling = '-'.join(str(npt_coupling).strip().lower().replace('_', ' ').replace('-', ' ').split())
-    if coupling == 'anisotropic':
-        raise ValueError(
-            "npt_coupling='anisotropic' is experimental and not supported by SO3LR MD: "
-            "the cell would shear, but the neighbour-list, reciprocal-space and "
-            "dispersion-tail paths assume an orthorhombic cell. Use 'isotropic' or "
-            "the experimental 'semi-isotropic' (coupled x/y, independent z)."
-        )
-    if coupling not in ('isotropic', 'semi-isotropic'):
-        raise ValueError(
-            f"Unknown npt_coupling={npt_coupling!r}. Supported values: isotropic, semi-isotropic."
-        )
-    return coupling
-
-
 def validate_orthorhombic_restart_box(box, label: str = 'box') -> None:
     """Reject a sheared checkpoint cell (e.g. from a legacy anisotropic run)."""
     m = np.asarray(box)
@@ -1421,6 +1399,26 @@ def compute_quantities(
     current_T = jax_md.quantity.temperature(momentum=state.momentum, mass=state.mass) / unit['temperature']
     return KE, PE, H, current_T
 
+def npt_nose_hoover_for(npt_coupling):
+    """jax-md's Nose-Hoover NPT for a coupling, as both MD engines (perform_md and flash) run
+    it: (the simulator, the box of a state, the conserved quantity). Isotropic: one strain
+    for the cell; semi-isotropic: the flexible cell, x and y coupled, z on its own."""
+    if normalize_npt_coupling(npt_coupling) == 'isotropic':  # also guards direct Python callers
+        return (jax_md.simulate.npt_nose_hoover, jax_md.simulate.npt_box,
+                jax_md.simulate.npt_nose_hoover_invariant)
+    return (partial(jax_md.simulate.npt_nose_hoover_flex, coupling='semi-isotropic'),
+            jax_md.simulate.npt_box_flex, jax_md.simulate.npt_nose_hoover_flex_invariant)
+
+
+def npt_start_motion(momenta, masses, npt_coupling):
+    """The NPT init_fn's keyword for the starting momenta (None: drawn at kT): the isotropic
+    state takes momenta, the flexible cell's (semi-isotropic) velocities (it has no momenta
+    argument: momenta= would reach the energy function and the velocities be drawn)."""
+    if normalize_npt_coupling(npt_coupling) == 'isotropic':
+        return dict(momenta=momenta)
+    return dict(velocities=None if momenta is None else momenta / jnp.reshape(masses, (-1, 1)))
+
+
 def create_npt_nhc_fn(
     energy_fn,
     shift,
@@ -1431,34 +1429,17 @@ def create_npt_nhc_fn(
     barostat_kwargs,
     npt_coupling='isotropic'
 ):
-    npt_coupling = normalize_npt_coupling(npt_coupling)  # also guards direct Python callers
-    if npt_coupling == 'isotropic':
-        init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
-            energy_fn,
-            shift,
-            dt=dt,
-            kT=T,
-            pressure=P,
-            barostat_kwargs=barostat_kwargs,
-            thermostat_kwargs=nhc_kwargs
-        )
-        init_fn = jax.jit(init_fn)
-        step_md_fn = create_md_fn(jax.jit(apply_fn), jax_md.simulate.npt_box, kT=T, pressure=P)
-    else:
-        init_fn, apply_fn = jax_md.simulate.npt_nose_hoover_flex(
-            energy_fn,
-            shift,
-            dt=dt,
-            kT=T,
-            pressure=P,
-            coupling=npt_coupling,
-            barostat_kwargs=barostat_kwargs,
-            thermostat_kwargs=nhc_kwargs
-        )
-        init_fn = jax.jit(init_fn)
-        step_md_fn = create_md_fn(jax.jit(apply_fn), jax_md.simulate.npt_box_flex, kT=T, pressure=P)
-
-    return init_fn, step_md_fn
+    simulate_fn, box_from_state, _ = npt_nose_hoover_for(npt_coupling)
+    init_fn, apply_fn = simulate_fn(
+        energy_fn,
+        shift,
+        dt=dt,
+        kT=T,
+        pressure=P,
+        barostat_kwargs=barostat_kwargs,
+        thermostat_kwargs=nhc_kwargs
+    )
+    return jax.jit(init_fn), create_md_fn(jax.jit(apply_fn), box_from_state, kT=T, pressure=P)
 
 def create_md_fn(
     apply_fn: callable,
@@ -2401,6 +2382,9 @@ def perform_md(
     rng_key = jax.random.PRNGKey(seed)
 
     if not restart:
+        momenta = initial_geometry_dict.get('momenta')
+        motion = (npt_start_motion(momenta, initial_geometry_dict['masses'], npt_coupling)
+                  if ensemble == 'npt' else dict(momenta=momenta))
         state = init_fn(
             rng_key,
             position,
@@ -2409,9 +2393,9 @@ def perform_md(
             neighbor_lr=nbrs_lr.idx,
             kT=md_T,
             mass=initial_geometry_dict['masses'],
-            momenta=initial_geometry_dict.get('momenta'),
             k_grid=k_grid,
-            k_grid_disp=k_grid_disp
+            k_grid_disp=k_grid_disp,
+            **motion
         )
 
     # Setup additional observables
