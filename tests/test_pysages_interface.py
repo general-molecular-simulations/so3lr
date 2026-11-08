@@ -23,7 +23,8 @@ import jax.numpy as jnp
 import jax_md
 import yaml
 
-from so3lr.cli.so3lr_md import handle_box, HAS_PYSAGES
+from so3lr.cli.so3lr_md import handle_box
+from so3lr.cli.so3lr_pysages_interface import HAS_PYSAGES
 
 # ---------------------------------------------------------------------------
 # Paths and shared settings
@@ -58,25 +59,22 @@ def _write_yaml(path, data):
 class TestImportGuard:
     """Tests for optional PySAGES import behavior."""
 
-    def test_has_pysages_flags_are_true(self):
-        """PySAGES is installed here, so both import guards must report it.
+    def test_has_pysages_flag_is_true(self):
+        """PySAGES is installed here, so the import guard must report it.
 
-        Each module wraps its PySAGES imports in ``try/except ImportError``, so
-        a broken import (e.g. a renamed symbol after a PySAGES pin bump) would
-        silently turn enhanced sampling into "PySAGES is not installed". The
-        two flags are independent: the interface module can lose a pysages
-        import while so3lr_md still imports the interface successfully.
+        The interface module wraps its PySAGES imports in ``try/except ImportError``,
+        so a broken import (e.g. a renamed symbol after a PySAGES pin bump) would
+        silently turn enhanced sampling into "PySAGES is not installed".
         """
-        from so3lr.cli.so3lr_pysages_interface import HAS_PYSAGES as iface_flag
         assert HAS_PYSAGES is True
-        assert iface_flag is True
 
     def test_do_enhanced_sampling_requires_pysages(self):
         """When HAS_PYSAGES is False and do_enhanced_sampling is True, raise ImportError."""
         import so3lr.cli.so3lr_md as md_module
-        original = md_module.HAS_PYSAGES
+        import so3lr.cli.so3lr_pysages_interface as iface
+        original = iface.HAS_PYSAGES
         try:
-            md_module.HAS_PYSAGES = False
+            iface.HAS_PYSAGES = False
             settings = {
                 'do_enhanced_sampling': True,
                 'input_file': 'dummy.xyz',
@@ -93,7 +91,7 @@ class TestImportGuard:
             with pytest.raises(ImportError, match="PySAGES is required"):
                 md_module.perform_md(settings)
         finally:
-            md_module.HAS_PYSAGES = original
+            iface.HAS_PYSAGES = original
 
     @pytest.mark.parametrize("ensemble", ["npt", "nve", "nvt-langevin"])
     def test_nvt_restricted_method_rejects_non_nvt(self, ensemble, tmp_path):
@@ -206,7 +204,7 @@ class TestImportGuard:
         """The proton-transfer CVs keep the starting box for their minimum image: a
         harmonic or unbiased run (which pass the method/ensemble gate) cannot take
         them into NPT, and NVT is unaffected."""
-        from so3lr.cli.so3lr_md import check_enhanced_sampling
+        from so3lr.cli.so3lr_pysages_interface import check_enhanced_sampling
         pysages_path = tmp_path / "pysages_input.yaml"
         _write_yaml(pysages_path, {"method": "unbiased", "cv": [
             {"type": cv_type, "reference": [0], "indices": [0], "grid_min": -5.0,

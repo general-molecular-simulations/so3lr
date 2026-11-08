@@ -20,7 +20,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
-from so3lr.cli.so3lr_md import cylindrical_restraint_energy, parse_cylinder_settings
+from so3lr.restraints import cylindrical_restraint_energy, parse_cylinder_settings
 
 
 # --------------------------------------------------------------------------- #

@@ -22,7 +22,7 @@ pytest.importorskip("jax_md", reason="jax-md is required for this test")
 
 import numpy as np
 
-from so3lr.cli.so3lr_md import cylindrical_restraint_energy
+from so3lr.restraints import cylindrical_restraint_energy
 
 # physical setup mirrors tests/test_pysages_doublewell.py (metal units: A, eV, amu)
 KB = 8.617333262145e-5

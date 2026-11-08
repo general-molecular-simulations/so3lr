@@ -48,14 +48,10 @@ from so3lr.cli.so3lr_md import (
     _existing_regular_output_mode,
     _validate_md_output_write_policy,
     atoms_to_jnp,
-    box_to_diag,
     cell_from_atoms_boundary_conditions,
-    check_enhanced_sampling,
-    check_pysages_restart_ensemble,
     format_md_row,
     handle_units,
     init_hdf5_store,
-    load_pysages_restart,
     load_state,
     npt_nose_hoover_for,
     npt_start_motion,
@@ -70,9 +66,14 @@ from so3lr.cli.so3lr_md import (
     write_to_extxyz,
     write_to_hdf5,
 )
+from so3lr.cli.so3lr_pysages_interface import (
+    check_enhanced_sampling, check_pysages_restart_ensemble, create_pysages_interface_fns, cv_log_size,
+    discard_cv_rows, get_pysages_method, load_pysages_restart, reset_pysages_runner, run_pysages_cycle,
+    update_so3lr_after_pysages, warn_restart_method_mismatch)
 from so3lr.md_settings_validation import normalize_npt_coupling, validate_md_counts
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported, supported_atomic_numbers_for_model)
+from so3lr.pbc import box_to_diag
 
 from .check import NPT_BOX_MARGIN, flash_problem, in_vacuum, model_cutoff, structure_problem, vacuum_box, vacuum_size
 from .engine import MODES, FlashSO3LR, lr_scratch_bytes, mode_kib, pick_mode, pme_bytes
@@ -585,9 +586,6 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
             state = jax.jit(lambda R, F, m, p: init_fn(key, R, kT=kT, mass=m, momenta=p, F=F))(
                 position, F0, geo["masses"], geo.get("momenta"))
     if pysages_set_dict is not None:
-        from so3lr.cli.so3lr_pysages_interface import (
-            create_pysages_interface_fns, cv_log_size, discard_cv_rows, get_pysages_method,
-            reset_pysages_runner, run_pysages_cycle, update_so3lr_after_pysages, warn_restart_method_mismatch)
         # the CVs as perform_md builds them: coordinationnumber counts the edges of a
         # short-range list like perform_md's, the others read only its starting positions
         if any(cv["type"].lower() == "coordinationnumber" for cv in pysages_set_dict["cv"]):
