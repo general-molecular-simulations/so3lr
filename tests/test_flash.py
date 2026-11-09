@@ -915,6 +915,26 @@ def test_float32_follows_float64(model):
 
 
 @GPU
+def test_atoms_in_any_order():
+    """Each call runs with the atoms sorted in space: shuffled atoms give the energy, the
+    dE/d(strain) per axis and each atom's force (in the input's order) of the atoms in their
+    own order without the sort, jitted and staged (float64, PME)."""
+    atoms = _water((3, 3, 3))
+    perm = np.random.default_rng(0).permutation(len(atoms))
+    pme = dict(pme_electrostatics=(2.0, 1.55))
+    e0, f0, w0 = _engine(None, atoms, "float64", sort_atoms=False, **pme).energy_forces_strain(
+        jnp.asarray(atoms.get_positions(), jnp.float64), diag=True)
+    shuffled = atoms[perm]
+    R = jnp.asarray(shuffled.get_positions(), jnp.float64)
+    eng = _engine(None, shuffled, "float64", **pme)
+    for call in (eng.energy_forces_strain, eng.energy_forces_strain_staged):
+        e, f, w = call(R, diag=True)
+        _check("energy", e, e0, 1e-10)
+        _check("forces", f, np.asarray(f0)[perm], 1e-9)
+        _check("dE/d(strain) per axis", w, w0, 1e-9)
+
+
+@GPU
 def test_narrow_neighbour_rows_widen():
     """Neighbour rows too short for water: the engine widens them and gives what wide ones
     give, jitted and staged (the kernels never read past a row that overflowed)."""
@@ -1624,10 +1644,12 @@ def test_cuda_kernels_follow_float64(model):
 
 @CUDA
 def test_cuda_kernels_fall_back_where_they_do_not_apply():
-    """auto takes the Pallas kernels for a float64 model and for the staged memory modes;
-    cuda asked for explicitly raises there instead."""
+    """auto takes the Pallas kernels for a float64 model and for the memory modes that split
+    the attention into passes (the Pallas kernels' own); cuda asked for explicitly raises
+    there instead."""
     atoms = _water((3, 3, 3))
-    for precision, kw in (("float64", dict(keep_attention=True)), ("float32", dict())):
+    for precision, kw in (("float64", dict(keep_attention=True)),
+                          ("float32", dict(keep_layer_inputs=False, split_channels=True))):
         R = jnp.asarray(atoms.get_positions(), jnp.float64 if precision == "float64" else jnp.float32)
         eng = _engine("so3lr-tauri-m-2606", atoms, precision, **kw)
         eng.energy_forces(R)
@@ -1650,3 +1672,38 @@ def test_cuda_kernels_widen_rows():
         assert eng.K > 16 and eng.cuda_kernels is not None
         _check("energy", e, e_ref, 1e-6)
         _check("forces", f, f_ref, 1e-5)
+
+
+@CUDA
+@pytest.mark.parametrize("model,kw", [
+    ("so3lr-tauri-m-2606", dict(keep_attention=True)),
+    ("so3lr-tauri-m-2606", dict()),                              # the attention outputs made again
+    ("so3lr-tauri-m-2606", dict(keep_layer_inputs=False)),       # the layer inputs too
+    ("so3lr-tauri-s-2606", dict(keep_attention=True)),
+    ("so3lr-tauri-l-2606", dict(keep_attention=True)),
+    ("so3lr-tauri-l-2606", dict(keep_layer_inputs=False)),
+])
+def test_cuda_kernels_in_chunks(model, kw):
+    """The CUDA kernels a chunk of rows at a time (each chunk's per-pair data made in the
+    forward and again in the backward; chunks forced small: several, the last one shifted back
+    over the one before it), in the engine's memory modes, give what the kernels keeping every
+    layer's per-pair data give: energy, forces and dE/d(strain) per axis, jitted and staged,
+    and on two GPUs."""
+    from so3lr.flash import cuda
+    atoms = _water((3, 3, 3))
+    R = jnp.asarray(atoms.get_positions(), jnp.float32)
+    ref = _engine(model, atoms, "float32", keep_attention=True, kernels="cuda")
+    assert ref.cuda_kernels is not None and ref.cuda_kernels.chunk is None
+    e_ref, f_ref, w_ref = ref.energy_forces_strain(R, diag=True)
+    runs = [(1, False, 1100), (1, True, 1100)]
+    if len(jax.local_devices()) >= 2 and kw.get("keep_attention"):
+        runs.append((2, False, 550))                               # several GPUs run the jitted fast mode
+    for devices, staged, rows in runs:
+        eng = _engine(model, atoms, "float32", kernels="pallas", devices=devices, **kw)
+        ck = cuda.attach(eng, strict=True, chunk=rows)
+        nchunks = -(-eng.nl // ck.chunk)
+        assert nchunks > 1 and nchunks * ck.chunk > eng.nl          # the last chunk shifted back
+        e, f, w = (eng.energy_forces_strain_staged if staged else eng.energy_forces_strain)(R, diag=True)
+        _check("energy", e, e_ref, 1e-6)
+        _check("forces", f, f_ref, 1e-5)
+        _check("dE/d(strain) per axis", w, w_ref, 1e-5)

@@ -326,8 +326,8 @@ class FlashDomains:
             self._engines.pop((p, key), None)
             gc.collect()
             params = self._on(p, "params", lambda: self.params)
-            eng = FlashSO3LR(params, self.statics, np.asarray(zz), np.diag(sub_L),
-                             total_charge=self.total_charge, total_spin=self.total_spin, **kw)
+            eng = FlashSO3LR(params, self.statics, np.asarray(zz), np.diag(sub_L),     # run staged, a domain at a time
+                             total_charge=self.total_charge, total_spin=self.total_spin, **dict(kw, staged=True))
             eng.x0_table = self._on(p, "x0", lambda: eng._embed_table(
                 jnp.asarray(self.zu), jnp.asarray(self.counts, eng.dtype), self.total_charge,
                 self.total_spin))                # before anything is traced
