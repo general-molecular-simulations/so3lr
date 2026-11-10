@@ -1303,7 +1303,10 @@ def check_overflow(
 ) -> Tuple[jax_md.partition.NeighborList, jax_md.partition.NeighborList, bool, bool]:
     """
 
-    Check if the neighbor lists have overflowed and reallocate them if needed.
+    Check if the neighbor lists have overflowed, or their cells have become
+    smaller than the cutoff (an NPT box that shrank: the cell list then misses
+    pairs), and reallocate them for the current box if needed. Either way the
+    caller repeats the cycle.
 
     Args:
         neighbor_fn (callable): Function that creates the short range neighbor list.
@@ -1321,14 +1324,18 @@ def check_overflow(
     sr_overflow = False
     lr_overflow = False
     box_diag = box_to_diag(box)
-    if nbrs.did_buffer_overflow:
+    def why(lists):
+        return ('cells became smaller than the cutoff (the box shrank)'
+                if lists.cell_size_too_small else 'overflowed')
+
+    if nbrs.did_buffer_overflow or nbrs.cell_size_too_small:
         sr_overflow = True
-        logger.info(f'Neighbor list overflowed, reallocating (SR extra_capacity={sr_extra}).')
+        logger.info(f'Neighbor list {why(nbrs)}, reallocating (SR extra_capacity={sr_extra}).')
         nbrs = neighbor_fn.allocate(state.position, box=box_diag, extra_capacity=sr_extra)
         log_nbrs_info(nbrs, 'SR', box=box)
-    if nbrs_lr.did_buffer_overflow:
+    if nbrs_lr.did_buffer_overflow or nbrs_lr.cell_size_too_small:
         lr_overflow = True
-        logger.info(f'Long-range neighbor list overflowed, reallocating (LR extra_capacity={lr_extra}).')
+        logger.info(f'Long-range neighbor list {why(nbrs_lr)}, reallocating (LR extra_capacity={lr_extra}).')
         nbrs_lr = neighbor_fn_lr.allocate(state.position, box=box_diag, extra_capacity=lr_extra)
         log_nbrs_info(nbrs_lr, 'LR', box=box)
     return nbrs, nbrs_lr, sr_overflow, lr_overflow
