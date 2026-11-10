@@ -10,7 +10,7 @@ import pytest
 from ase.io import read
 
 from so3lr import So3lrCalculator, So3lrEngine
-from so3lr.flash.check import device_problem
+from so3lr.flash.check import NPT_BOX_MARGIN, device_problem
 
 pytestmark = pytest.mark.usefixtures("x64")
 
@@ -33,16 +33,20 @@ def _molecule():
     return atoms
 
 
-def _reference(atoms, charge=0, multiplicity=1, **kwargs):
+def _calculator(**kwargs):
+    return So3lrCalculator(model=MODEL, lr_cutoff=LR, precision="float64", **kwargs)
+
+
+def _reference(atoms, charge=0, multiplicity=1, calc=None, **kwargs):
     atoms = atoms.copy()
     atoms.info.update(charge=charge, multiplicity=multiplicity)
-    atoms.calc = So3lrCalculator(model=MODEL, lr_cutoff=LR, precision="float64", **kwargs)
+    atoms.calc = calc or _calculator(**kwargs)
     return atoms.get_potential_energy(), atoms.get_forces()
 
 
 def _engine(atoms, **kwargs):
-    kwargs = dict(dict(model=MODEL, lr_cutoff=LR, precision="float64", engine="standard"), **kwargs)
-    return So3lrEngine(atoms.numbers, **kwargs)
+    return So3lrEngine(atoms.numbers, **{"model": MODEL, "lr_cutoff": LR, "precision": "float64",
+                                         "engine": "standard", **kwargs})
 
 
 def _box(atoms):
@@ -64,12 +68,12 @@ def test_free_space_matches_calculator(charge, multiplicity):
 
 def test_periodic_matches_calculator_as_positions_and_box_change():
     atoms = _water()
-    engine = _engine(atoms)
+    engine, calc = _engine(atoms), _calculator()
     rng = np.random.default_rng(0)
     for scale in (1.0, 1.0, 1.01, 0.995):
         atoms.set_cell(atoms.cell * scale, scale_atoms=True)
         atoms.positions += rng.normal(scale=0.02, size=atoms.positions.shape)
-        _assert_close(engine(atoms.positions, _box(atoms)), _reference(atoms))
+        _assert_close(engine(atoms.positions, _box(atoms)), _reference(atoms, calc=calc))
         assert engine.backend == "neighbour-list"
 
 
@@ -80,19 +84,20 @@ def test_pme_matches_calculator():
     _assert_close(engine(atoms.positions, _box(atoms)), _reference(atoms, **kspace), energy=1e-6, forces=1e-5)
 
 
-def test_thin_and_triclinic_cells_take_exact_images():
-    atoms = _water()
-    exact = dict(neighbor_backend="exact")
-    thin = _engine(atoms, skin=1.0)                           # 12.4 A < 2 x (6 + 1) A
-    _assert_close(thin(atoms.positions, _box(atoms)), _reference(atoms, **exact))
-    assert thin.backend == "exact"
-    skewed = atoms.copy()
-    cell = np.asarray(skewed.cell[:]).copy()
+def _skewed(atoms):
+    cell = np.asarray(atoms.cell[:]).copy()
     cell[1, 0] = 2.0
-    skewed.set_cell(cell, scale_atoms=False)
-    skewed.wrap()
-    engine = _engine(skewed)
-    _assert_close(engine(skewed.positions, _box(skewed)), _reference(skewed, **exact))
+    atoms.set_cell(cell, scale_atoms=False)
+    atoms.wrap()
+    return atoms
+
+
+# thin: 12.4 A < 2 x (6 + 1) A
+@pytest.mark.parametrize("skin,skew", [(1.0, False), (0.0, True)], ids=["thin", "triclinic"])
+def test_thin_and_triclinic_cells_take_exact_images(skin, skew):
+    atoms = _skewed(_water()) if skew else _water()
+    engine = _engine(atoms, skin=skin)
+    _assert_close(engine(atoms.positions, _box(atoms)), _reference(atoms, neighbor_backend="exact"))
     assert engine.backend == "exact"
 
 
@@ -102,10 +107,18 @@ def test_overflowing_lists_are_allocated_again():
     dilute.set_cell(dilute.cell * 1.15, scale_atoms=True)
     engine = _engine(atoms)
     engine(dilute.positions, _box(dilute))
-    capacity = engine._nbrs.idx.shape
+    capacity = engine._nbrs.idx.shape[1]
     # 1.5 x the density of the box the lists were sized in: they overflow
     _assert_close(engine(atoms.positions, _box(atoms)), _reference(atoms))
-    assert engine._nbrs.idx.shape[1] > capacity[1]
+    assert engine._nbrs.idx.shape[1] > capacity
+
+
+def test_a_zero_box_is_free_space_and_a_flat_one_is_refused():
+    atoms = _molecule()
+    engine = _engine(atoms)
+    _assert_close(engine(atoms.positions, np.zeros((3, 3))), engine(atoms.positions), energy=1e-10, forces=1e-10)
+    with pytest.raises(ValueError, match="spans no volume"):
+        engine(atoms.positions, np.diag([10.0, 10.0, 0.0]))
 
 
 def test_pickles_as_its_arguments():
@@ -140,14 +153,34 @@ def test_engine_flash_raises_where_flash_cannot_run():
         engine(atoms.positions)
 
 
+def test_auto_falls_back_where_flash_fails_to_start(monkeypatch):
+    import so3lr.flash.check as flash_check
+    import so3lr.flash.md as flash_md
+
+    def fails(*args, **kwargs):
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(flash_md, "SinglePoints", fails)
+    monkeypatch.setattr(flash_check, "structure_problem", lambda *args: None)
+    atoms = _molecule()
+    engine = _engine(atoms, engine="auto")
+    engine._flash_refusal = None            # as on a GPU where the settings, model and device pass
+    with pytest.warns(UserWarning, match="failed to start"):
+        result = engine(atoms.positions)
+    assert engine.backend == "neighbour-list"
+    _assert_close(result, _reference(atoms))
+
+
 @GPU
 @pytest.mark.parametrize("periodic", [False, True])
 def test_flash_matches_neighbour_lists(periodic):
-    atoms = _water() if periodic else _molecule()
-    if periodic:
-        atoms = atoms.repeat(2)
+    atoms = _water().repeat(2) if periodic else _molecule()
     flash = _engine(atoms, engine="auto")
     lists = _engine(atoms)
-    result = flash(atoms.positions, _box(atoms))
-    assert flash.backend == "flash"
-    _assert_close(result, lists(atoms.positions, _box(atoms)), energy=1e-7, forces=1e-6)
+    for scale in (1.0, 0.99, 0.995):         # periodic: the box moves, flash built again once
+        if periodic:
+            atoms.set_cell(atoms.cell * scale, scale_atoms=True)
+        result = flash(atoms.positions, _box(atoms))
+        assert flash.backend == "flash"
+        _assert_close(result, lists(atoms.positions, _box(atoms)), energy=1e-7, forces=1e-6)
+    assert flash._flash.box_margin == (NPT_BOX_MARGIN if periodic else 0.0)
