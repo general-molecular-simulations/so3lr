@@ -42,8 +42,6 @@ def kernel_flags(variant):
     hidden units, degrees as nibbles, rank) on this GPU."""
     F, NH, M, SH, degs, rank = variant
     t = tiles(variant)
-    if t is None:
-        raise BuildError(f"Flash CUDA kernels: {variant} needs more shared memory per block than this GPU's")
     v = [f"-DVF={F}", f"-DVNH={NH}", f"-DVM={M}", f"-DVSH={SH}", f"-DVDEGS={degs:#x}", f"-DRANK={rank}"]
     extra = os.environ.get("SO3LR_CUDA_FLAGS", "").split()
     return {
@@ -73,10 +71,11 @@ class Tile(NamedTuple):
                                                        f"-DCTAS={self.ctas}", f"-DSMEM={self.smem}"]
 
 
-def fwd_smem(variant, pairs, stages, split=True):
+def fwd_smem(variant, pairs, stages, split):
     """The forward's shared memory per CTA in bytes (attn_pair7.cu asserts the same): a channel's
     weights [FC][KD + 4], the stages of a tile of pairs (their [hz | coefficients] rows,
-    records, cutoffs and scores), the filters' first layer. It runs a CTA per channel (split)."""
+    records, cutoffs and scores), the filters' first layer. It always runs a CTA per channel
+    (split, as bwd_smem's, is not read)."""
     _, NH, _, SH, _, R = variant
     FC, KD = 32 * NH, SH + R
     return 4 * (FC * (KD + 4) + 2 * (NH + 1) * SH) + stages * pairs * (4 * (KD + 4) + 20 + 8 * NH)
@@ -173,8 +172,9 @@ def problem():
         return f"no GPU (this process has {dev.platform})"
     if is_rocm():
         return "an AMD GPU"
-    if int(dev.compute_capability.split(".")[0]) < 8:
-        return f"a GPU of compute capability {dev.compute_capability} (the kernels need 8.0 or newer)"
+    cc = str(getattr(dev, "compute_capability", None))
+    if not cc[:1].isdigit() or int(cc.split(".")[0]) < 8:
+        return f"a GPU of compute capability {cc} (the kernels need 8.0 or newer)"
     try:
         smem()
     except (OSError, BuildError) as exc:      # the driver library, or its answer

@@ -125,7 +125,7 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
     kernels = settings.get("flash_kernels") or "auto"
     picked = None
     if mode == "auto":
-        from .cuda import pick_mode as cuda_mode
+        from .cuda import pick_mode as cuda_mode, serves as cuda_serves
         # the CUDA kernels' fastest mode that fits, else the Pallas kernels' (theirs go
         # further); the CUDA kernels need no long-range scratch, and PME's meshes are not
         # alive at their peak (2 GiB left for what the engine allocates before it plans)
@@ -134,11 +134,11 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
         mode = picked or pick_mode(n, _free_bytes() - reserve, statics)
         if not picked and kernels == "auto":
             kernels = "pallas"           # not the CUDA kernels in a mode of theirs auto does not pick
-        elif not picked and kernels == "cuda" and {"split_channels", "split_blocks"} & set(MODES[mode][0]):
+        elif not picked and kernels == "cuda" and not cuda_serves(mode):
             # asked for, the kernels serve the leaner modes in chunks, but not those of the
-            # attention in passes
-            raise RuntimeError(f"Flash: flash_kernels cuda: the CUDA kernels' modes do not fit this run ({why}), and "
-                               f"the memory mode that fits it, {mode}, is the Pallas kernels' own "
+            # attention in passes (why: their memory, or what they do not serve at all)
+            raise RuntimeError(f"Flash: flash_kernels cuda: the CUDA kernels do not serve this run ({why}), and "
+                               f"the memory mode it fits in, {mode}, is the Pallas kernels' own "
                                f"(flash_kernels auto or pallas)")
     total_charge = float(settings.get("total_charge") or 0)
     embed = settings.get("charge_embed_total_charge")

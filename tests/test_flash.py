@@ -1703,25 +1703,31 @@ def test_cuda_kernels_fall_back_where_they_do_not_apply():
 
 
 @CUDA
-def test_cuda_kernels_widen_rows():
+def test_cuda_kernels_widen_rows(monkeypatch):
     """Neighbour rows too short for water on the CUDA kernels: the engine widens them (its
     pair records and filters sized for the wider rows at the next program) and gives what
     wide ones give, jitted and staged; where the wider rows' per-pair data no longer fits the
     memory the kernels were planned in, a chunk of rows at a time."""
     from so3lr.flash import cuda
+    from so3lr.flash import md as flash_md
     atoms = _water((3, 3, 3))
     R = jnp.asarray(atoms.get_positions(), jnp.float32)
     e_ref, f_ref, _ = _cuda_ref("so3lr-tauri-m-2606")
-    need = None                          # the widened rows' per-pair data, kept
-    for tight, staged in ((False, False), (False, True), (True, False), (True, True)):
+
+    def widened(staged):
         eng = _engine("so3lr-tauri-m-2606", atoms, "float32", keep_attention=True, kernels="cuda", max_neighbours=16)
-        if tight:
-            eng.cuda_kernels._free = need - 1
         e, f = (eng.energy_forces_staged if staged else eng.energy_forces)(R)
-        assert eng.K > 16 and (eng.cuda_kernels.chunk is not None) == tight
-        need = need or cuda.kept_bytes(eng)
+        assert eng.K > 16
         _check("energy", e, e_ref, 1e-6)
         _check("forces", f, f_ref, 1e-5)
+        return eng
+
+    for staged in (False, True):
+        eng = widened(staged)
+        assert eng.cuda_kernels.chunk is None
+    need = cuda.kept_bytes(eng)          # the wider rows' per-pair data, kept
+    monkeypatch.setattr(flash_md, "_free_bytes", lambda: need - 1)
+    assert widened(False).cuda_kernels.chunk is not None
 
 
 @CUDA
@@ -1769,6 +1775,8 @@ def test_cuda_kernels_for_less_shared_memory(monkeypatch, limits, fits, declines
     shared memory than a block has takes the Pallas kernels."""
     from so3lr.flash import cuda
     from so3lr.flash.cuda import build
+    if build.arch() == "sm_80" and build.smem() == limits:
+        pytest.skip("this GPU's own build")
     atoms = _water((3, 3, 3))
     R = jnp.asarray(atoms.get_positions(), jnp.float32)
     refs = {m: _cuda_ref(m) for m in fits}                         # this GPU's build, before the patch
@@ -1784,9 +1792,10 @@ def test_cuda_kernels_for_less_shared_memory(monkeypatch, limits, fits, declines
             _check("forces", f, f_ref, 1e-5)
             _check("dE/d(strain) per axis", w, w_ref, 1e-5)
     for m in declines:
-        assert _engine(m, atoms, "float32", keep_attention=True).cuda_kernels is None
+        eng = _engine(m, atoms, "float32", keep_attention=True, kernels="pallas")
+        assert cuda.attach(eng) is None
         with pytest.raises(RuntimeError, match="shared memory"):
-            _engine(m, atoms, "float32", keep_attention=True, kernels="cuda")
+            cuda.attach(eng, strict=True)
 
 
 @CUDA

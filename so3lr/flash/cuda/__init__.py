@@ -125,6 +125,14 @@ STAGE_SHARE = 0.4
 MODES = ("fast", "default")
 
 
+def serves(mode):
+    """Whether the kernels serve an engine memory mode (engine.MODES): all but the Pallas
+    kernels' own, those of the attention in passes (as unsupported finds on an engine)."""
+    from .. import engine as E
+    kw = E.MODES[mode][0]
+    return not (kw.get("split_channels") or kw.get("split_blocks"))
+
+
 def unsupported(eng):
     """Why the CUDA kernels cannot serve this engine (None: they can, memory aside)."""
     why = problem()
@@ -134,9 +142,10 @@ def unsupported(eng):
         return "float64"
     if not jax.config.jax_enable_x64:
         return "float32 positions (the kernels take float64 ones: jax_enable_x64)"
-    if variant(eng) is None:
+    var = variant(eng)
+    if var is None:
         return "a model other than so3lr-tauri-s/m/l or so3lr (32 features per head, 4 or 8 heads of degrees 1-4)"
-    if build.tiles(variant(eng)) is None:
+    if build.tiles(var) is None:
         return f"the model's kernels need more shared memory per block than this GPU's {build.smem()[0] // 1024} KiB"
     if eng.split or eng.blocks:
         return "a memory mode of the Pallas kernels' own (the attention in passes)"
@@ -230,10 +239,10 @@ class CudaKernels:
     attention alone: a chunk's pairs are those of its rows, a pair with a partner outside the
     chunk made by both chunks, as the devices do."""
 
-    def __init__(self, eng, chunk=None, budget=None, free=None):
+    def __init__(self, eng, chunk=None, free=None):
         self.eng = eng
-        self._chunk, self._budget = chunk, budget
-        self._free = free                 # the bytes plan found free (None: chunk asked for)
+        self._chunk, self._free = chunk, free         # rows asked for, or the bytes planned in
+        self._budget = None if free is None else plan(eng, free)[0]     # a chunk's (None: kept)
         self.variant = variant(eng)
         NH, rank = self.variant[1], self.variant[5]
         self.copies = bwd_copies(self.variant)      # of the per-slot forces and ev gradients
@@ -280,14 +289,15 @@ class CudaKernels:
         if self._chunk is not None:                   # rows asked for
             return
         budget, why = plan(self.eng, self._free)
-        if budget is None and why is None:
-            return                                    # the per-pair data kept still fits
         if why:
             logger.warning("Flash: the neighbour rows widened (%d): %s; CUDA kernels in the smallest chunks",
                            self.eng.K, why)
             budget = MIN_CHUNK
-        kept, self._budget = self._budget is None, budget      # the FFI calls follow at the next trace (_sized)
-        if kept:
+        elif budget is None:
+            return                                    # the per-pair data kept still fits
+        was_kept = self._budget is None
+        self._budget = budget                         # the FFI calls follow at the next trace (_sized)
+        if was_kept:
             self.wire()
             logger.info("Flash: the neighbour rows widened (%d): CUDA kernels in chunks of %d rows (~%.0f KiB/atom)",
                         self.eng.K, self.chunk, self.kib)
@@ -594,18 +604,18 @@ def attach(eng, strict=False, chunk=None):
     object, or None (with a log line) where they do not apply or cannot be built; strict
     (kernels="cuda" asked for explicitly) raises instead of falling back. chunk (rows): the
     per-pair data a chunk at a time whatever the memory (default: as plan finds room)."""
-    why, budget, free = unsupported(eng), None, None
+    why, free = unsupported(eng), None
     if why is None and chunk is None:
         from ..md import _free_bytes
         free = _free_bytes()
-        budget, why = plan(eng, free)
+        why = plan(eng, free)[1]
     if why:
         if strict:
             raise RuntimeError(f"Flash: the CUDA kernels do not serve this engine ({why})")
         logger.info("Flash: CUDA kernels not used (%s); Pallas kernels", why)
         return None
     try:
-        ck = CudaKernels(eng, chunk, budget, free)
+        ck = CudaKernels(eng, chunk, free)
     except (BuildError, OSError) as e:       # nvcc failed or unusable, a library does not load, no lock
         if strict:
             raise
