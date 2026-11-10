@@ -1279,7 +1279,8 @@ def log_nbrs_info(nbrs, label: str = 'SR', box=None):
         cell_size_ang = nbrs.cell_size
         if box is not None and cell_size_ang is not None:
             box_diag = jnp.diag(box) if box.ndim == 2 else box
-            cell_size_ang = float(nbrs.cell_size * jnp.min(box_diag))
+            # a scalar, or one fractional size per axis in newer jax-md
+            cell_size_ang = float(jnp.min(jnp.asarray(nbrs.cell_size) * jnp.asarray(box_diag)))
         logger.info(f'  {label} cell list: capacity={nbrs.cell_list_capacity}, '
                     f'cell_size={cell_size_ang:.2f} A')
 
@@ -3568,6 +3569,8 @@ def load_state(
     _new_vals = {}
     for _f in dataclasses.fields(state):
         _v = getattr(state, _f.name)
+        if _f.metadata.get('static', False):
+            continue    # pytree metadata (e.g. jax-md's fix_center_of_mass), not an array
         if _v is None:
             _new_vals[_f.name] = None
         elif _f.name in _weak_fields:
