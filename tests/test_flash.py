@@ -12,6 +12,7 @@ PME); ``so3lr opt``, ``so3lr eval``, MD and the ASE calculator against the neigh
 potential, periodic and with no box (12 and 1000 A cutoffs); PySAGES on flash against the
 neighbour-list engine. With two or more: the same on several GPUs as on one, and MD on two.
 """
+import functools
 import itertools
 import json
 import pathlib
@@ -1084,11 +1085,13 @@ def test_eval_falls_back_for_other_targets(tmp_path):
     assert "flash cannot: it evaluates energy and forces, not dipole_vec, hirshfeld_ratios" in log, log[-2000:]
 
 
-def _so3lr(args, cwd, env=None):
+def _so3lr(args, cwd):
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
     from subprocess_env import so3lr_subprocess_env
+    # this process holds most of each GPU (its own tests): the runs allocate as they go,
+    # leaving them room on smaller GPUs, and NCCL and cuSolver room
     result = subprocess.run(["so3lr", *args], cwd=cwd, capture_output=True, text=True,
-                            env=so3lr_subprocess_env(env))
+                            env=so3lr_subprocess_env({"XLA_PYTHON_CLIENT_PREALLOCATE": "false"}))
     assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
 
 
@@ -1523,11 +1526,8 @@ def test_md_on_two_gpus(tmp_path):
     write(tmp_path / "w.xyz", _water((3, 3, 3)))
     run = ["--input", "w.xyz", "--no-relax", "--md-cycles", "2", "--md-steps", "5", "--precision", "float64",
            "--lr-cutoff", "10", "--kspace-electrostatics", "pme"]
-    # this process holds most of each GPU (its own tests): the runs allocate as they go,
-    # leaving NCCL and cuSolver room
-    env = {"XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
-    _so3lr(["nvt", *run, "--output", "a.hdf5"], tmp_path, env)
-    _so3lr(["nvt", *run, "--flash-devices", "2", "--output", "b.hdf5"], tmp_path, env)
+    _so3lr(["nvt", *run, "--output", "a.hdf5"], tmp_path)
+    _so3lr(["nvt", *run, "--flash-devices", "2", "--output", "b.hdf5"], tmp_path)
     assert "Flash: 2 GPUs" in (tmp_path / "b.log").read_text()
     with h5py.File(tmp_path / "a.hdf5") as a, h5py.File(tmp_path / "b.hdf5") as b:
         _check("positions", b["positions"][:], a["positions"][:], 1e-9)
@@ -1605,19 +1605,62 @@ def test_pick_splits_takes_only_allowed_splits():
 
 # ---- the CUDA kernels (so3lr/flash/cuda) -----------------------------------------------
 def _cuda_kernels_problem():
-    """Why the CUDA kernels cannot run here (None: they can): no GPU, a GPU other than sm_90,
-    no nvcc."""
+    """Why the CUDA kernels cannot run here (None: they can): no GPU, one of compute capability
+    below 8.0, no nvcc."""
     from so3lr.flash.cuda import build
     return build.problem()
 
 
-CUDA = pytest.mark.skipif(_cuda_kernels_problem() is not None, reason="the CUDA kernels need an sm_90 GPU and nvcc")
+CUDA = pytest.mark.skipif(_cuda_kernels_problem() is not None,
+                          reason="the CUDA kernels need a GPU of compute capability 8.0 or newer and nvcc")
+
+
+# shared memory in bytes: per block (opt-in), per SM, reserved per block
+SMEM_227K, SMEM_163K, SMEM_99K = (232448, 233472, 1024), (166912, 167936, 1024), (101376, 102400, 1024)
+# the kernels' build variants of so3lr-tauri-m and -l (cuda.variant)
+M_VARIANT, L_VARIANT = (128, 4, 24, 32, 0x4321, 48), (256, 8, 48, 64, 0x44332211, 64)
+
+
+@pytest.mark.parametrize("limits,m,l", [
+    (SMEM_227K, ((64, 2, True, 2), (32, 2, False, 1)), ((64, 2, True, 1), (32, 2, True, 1))),
+    (SMEM_163K, ((32, 2, True, 2), (32, 2, False, 1)), ((16, 2, True, 1), (16, 1, True, 1))),
+    (SMEM_99K, ((64, 2, True, 1), (32, 2, True, 1)), None),
+])
+def test_cuda_kernel_tiles(monkeypatch, limits, m, l):
+    """The attention kernels' tiles (pairs, stages, a CTA per channel, CTAs per SM) follow the
+    GPU's shared memory per block and per SM: the largest that fit, two CTAs of four heads on an
+    SM where they fit; none for so3lr-tauri-l where a block has less than its 16-pair tiles'."""
+    from so3lr.flash.cuda import build
+    monkeypatch.setattr(build, "smem", lambda: limits)
+    for var, want in ((M_VARIANT, m), (L_VARIANT, l)):
+        t = build.tiles(var)
+        assert (None if t is None else (t["fwd"][:4], t["bwd"][:4])) == want
+        assert t is None or max(t["fwd"].smem, t["bwd"].smem) <= limits[0]
 
 
 def _engine(model, atoms, precision, **kw):
     from so3lr.flash.loader import load_params
     params, statics = load_params(model, precision=precision, lr_cutoff=12.0)
     return E.FlashSO3LR(params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]), **kw)
+
+
+def _skip_without_tiles(model):
+    """Skip on a GPU whose shared memory per block so3lr-tauri-l's kernels do not fit."""
+    from so3lr.flash.cuda import build
+    if "tauri-l" in model and build.tiles(L_VARIANT) is None:
+        pytest.skip("so3lr-tauri-l's CUDA kernels need more shared memory per block than this GPU has")
+
+
+@functools.cache
+def _cuda_ref(model):
+    """Energy, forces and dE/d(strain) per axis of 27 water boxes on the CUDA kernels as built for
+    this GPU, every layer's per-pair data kept: the reference of the kernels' other paths."""
+    _skip_without_tiles(model)
+    atoms = _water((3, 3, 3))
+    eng = _engine(model, atoms, "float32", keep_attention=True, kernels="cuda")
+    assert eng.cuda_kernels is not None and eng.cuda_kernels.chunk is None
+    return tuple(np.asarray(x) for x in eng.energy_forces_strain(jnp.asarray(atoms.get_positions(), jnp.float32),
+                                                                   diag=True))
 
 
 @CUDA
@@ -1627,6 +1670,7 @@ def test_cuda_kernels_follow_float64(model):
     float64 engine's energy, forces and dE/d(strain) per axis (the angular forces' part, which
     cancels in the isotropic sum) to float32 accuracy, in the jitted program and in the
     staged one."""
+    _skip_without_tiles(model)
     atoms = _water((4, 4, 4))
     R = atoms.get_positions()
     e_ref, f_ref, w_ref = _engine(model, atoms, "float64").energy_forces_strain(jnp.asarray(R, jnp.float64), diag=True)
@@ -1662,14 +1706,20 @@ def test_cuda_kernels_fall_back_where_they_do_not_apply():
 def test_cuda_kernels_widen_rows():
     """Neighbour rows too short for water on the CUDA kernels: the engine widens them (its
     pair records and filters sized for the wider rows at the next program) and gives what
-    wide ones give, jitted and staged."""
+    wide ones give, jitted and staged; where the wider rows' per-pair data no longer fits the
+    memory the kernels were planned in, a chunk of rows at a time."""
+    from so3lr.flash import cuda
     atoms = _water((3, 3, 3))
     R = jnp.asarray(atoms.get_positions(), jnp.float32)
-    e_ref, f_ref = _engine("so3lr-tauri-m-2606", atoms, "float32", keep_attention=True, kernels="cuda").energy_forces(R)
-    for staged in (False, True):
+    e_ref, f_ref, _ = _cuda_ref("so3lr-tauri-m-2606")
+    need = None                          # the widened rows' per-pair data, kept
+    for tight, staged in ((False, False), (False, True), (True, False), (True, True)):
         eng = _engine("so3lr-tauri-m-2606", atoms, "float32", keep_attention=True, kernels="cuda", max_neighbours=16)
+        if tight:
+            eng.cuda_kernels._free = need - 1
         e, f = (eng.energy_forces_staged if staged else eng.energy_forces)(R)
-        assert eng.K > 16 and eng.cuda_kernels is not None
+        assert eng.K > 16 and (eng.cuda_kernels.chunk is not None) == tight
+        need = need or cuda.kept_bytes(eng)
         _check("energy", e, e_ref, 1e-6)
         _check("forces", f, f_ref, 1e-5)
 
@@ -1692,9 +1742,7 @@ def test_cuda_kernels_in_chunks(model, kw):
     from so3lr.flash import cuda
     atoms = _water((3, 3, 3))
     R = jnp.asarray(atoms.get_positions(), jnp.float32)
-    ref = _engine(model, atoms, "float32", keep_attention=True, kernels="cuda")
-    assert ref.cuda_kernels is not None and ref.cuda_kernels.chunk is None
-    e_ref, f_ref, w_ref = ref.energy_forces_strain(R, diag=True)
+    e_ref, f_ref, w_ref = _cuda_ref(model)
     runs = [(1, False, 1100), (1, True, 1100)]
     if len(jax.local_devices()) >= 2 and kw.get("keep_attention"):
         runs.append((2, False, 550))                               # several GPUs run the jitted fast mode
@@ -1707,3 +1755,47 @@ def test_cuda_kernels_in_chunks(model, kw):
         _check("energy", e, e_ref, 1e-6)
         _check("forces", f, f_ref, 1e-5)
         _check("dE/d(strain) per axis", w, w_ref, 1e-5)
+
+
+@CUDA
+@pytest.mark.parametrize("limits,fits,declines", [
+    (SMEM_163K, ["so3lr-tauri-m-2606", "so3lr-tauri-l-2606"], []),
+    (SMEM_99K, ["so3lr-tauri-m-2606"], ["so3lr-tauri-l-2606"]),
+])
+def test_cuda_kernels_for_less_shared_memory(monkeypatch, limits, fits, declines):
+    """The kernels as built for compute capability 8.0 (this GPU's driver compiles their PTX)
+    and a GPU of less shared memory (smaller tiles, one stage, a CTA per channel) give what this
+    GPU's build gives, the per-pair data kept and in chunks; a model whose kernels need more
+    shared memory than a block has takes the Pallas kernels."""
+    from so3lr.flash import cuda
+    from so3lr.flash.cuda import build
+    atoms = _water((3, 3, 3))
+    R = jnp.asarray(atoms.get_positions(), jnp.float32)
+    refs = {m: _cuda_ref(m) for m in fits}                         # this GPU's build, before the patch
+    monkeypatch.setattr(build, "arch", lambda: "sm_80")
+    monkeypatch.setattr(build, "smem", lambda: limits)
+    for m in fits:
+        e_ref, f_ref, w_ref = refs[m]
+        for chunk in (None, 1100):
+            eng = _engine(m, atoms, "float32", keep_attention=True, kernels="pallas")
+            assert "_sm_80_" in cuda.attach(eng, strict=True, chunk=chunk).prefix
+            e, f, w = eng.energy_forces_strain(R, diag=True)
+            _check("energy", e, e_ref, 1e-6)
+            _check("forces", f, f_ref, 1e-5)
+            _check("dE/d(strain) per axis", w, w_ref, 1e-5)
+    for m in declines:
+        assert _engine(m, atoms, "float32", keep_attention=True).cuda_kernels is None
+        with pytest.raises(RuntimeError, match="shared memory"):
+            _engine(m, atoms, "float32", keep_attention=True, kernels="cuda")
+
+
+@CUDA
+def test_cuda_kernels_asked_for_say_why_they_do_not_fit(monkeypatch):
+    """flash_kernels cuda where the CUDA kernels fit none of their modes and the mode that fits
+    is one they do not serve (the attention in passes): the MD's engine says so, with the memory
+    they need."""
+    from so3lr.flash import md as flash_md
+    monkeypatch.setattr(flash_md, "_free_bytes", lambda: 1 << 29)
+    with pytest.raises(RuntimeError, match="flash_kernels cuda.*GiB of the 0 free.*minimal"):
+        flash_md.build_engine(_water((3, 3, 3)), dict(model_path="so3lr-tauri-m-2606", flash_kernels="cuda"),
+                              jnp.float32)

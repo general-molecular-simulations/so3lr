@@ -528,9 +528,10 @@ def flash_options(f: Callable) -> Callable:
                      help='Deprecated: --precision mixed (on) or float32 (off).')(f)
     f = click.option('--flash-kernels', 'flash_kernels', default='auto',
                      type=click.Choice(list(KERNELS)),
-                     help='SO3LR-Flash kernels: cuda (so3lr-tauri-s/m/l and so3lr, fast mode, an sm_90 GPU with '
-                          'nvcc: tensor-core attention, 3x faster, built on first use) or pallas (Triton, any '
-                          'GPU); auto takes cuda where it applies, else pallas, and says which. [default: auto]')(f)
+                     help='SO3LR-Flash kernels: cuda (so3lr-tauri-s/m/l and so3lr, fast mode, a GPU of compute '
+                          'capability 8.0 or newer with nvcc: tensor-core attention, 3x faster, built on first '
+                          'use) or pallas (Triton, any GPU); auto takes cuda where it applies, else pallas, and '
+                          'says which. [default: auto]')(f)
     f = click.option('--flash-devices', 'flash_devices', default=1, type=click.IntRange(min=1),
                      help='SO3LR-Flash on this many GPUs of the node: each computes an equal share '
                           'of the atoms, for systems that fit on one GPU but should run faster. '

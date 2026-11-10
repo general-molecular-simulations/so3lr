@@ -98,7 +98,11 @@ constexpr int MT = TP / 16;                        // mma row tiles per tile
 #define NSTAGES 2
 #endif
 // one channel per CTA (blockIdx.y): 4 producer + HC consumer warps; two CTAs per SM with 4 heads
-constexpr int NCW = HC, MINB = HC == 4 ? 2 : 1;      // consumer warps (one per head), CTAs per SM
+// where the shared memory holds them (CTAS: the registers' bound)
+#ifndef CTAS
+#define CTAS (HC == 4 ? 2 : 1)
+#endif
+constexpr int NCW = HC;                              // consumer warps (one per head)
 constexpr int NPW = 4, NTH = (NPW + NCW) * 32, NST = NSTAGES;
 constexpr int BS_FLOATS = FC * (KD + 4);           // the weights, transposed: n rows, k columns
 
@@ -130,11 +134,11 @@ struct Stage {
 #endif
 // KEEPW: write the filters per pair for the backward (else the scores only)
 template <bool KEEPW>
-__global__ void __launch_bounds__(NTH, MINB) att_pair(PairParams p) {
+__global__ void __launch_bounds__(NTH, CTAS) att_pair(PairParams p) {
   extern __shared__ float smf[];
   float* Bs = smf;                                                   // [FC][KD + 4] fp32, transposed (n rows, k columns)
   Stage* st = reinterpret_cast<Stage*>(smf + BS_FLOATS);             // [NST]
-  __shared__ float WA[2][NH + 1][SH];
+  __shared__ FilterW1 WA;
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const int ch0 = (int)blockIdx.y;                                   // the CTA's channel
   for (int i = tid; i < KD * FC; i += NTH) {
@@ -479,9 +483,11 @@ static ffi::Error PrepImpl(cudaStream_t stream, F64 px, F64 py, F64 pz, F64 box,
   return launch_status();
 }
 
-static int smem_bytes() {
-  return BS_FLOATS * sizeof(float) + NST * sizeof(Stage);
-}
+constexpr int PAIR_SMEM = BS_FLOATS * sizeof(float) + NST * sizeof(Stage);
+#ifdef SMEM
+// build.py sized the tiles by its count of the shared memory (with WA's): the kernel's own
+static_assert(PAIR_SMEM + sizeof(FilterW1) == SMEM, "build.fwd_smem differs from the kernel's");
+#endif
 
 static ffi::Error PairImpl(cudaStream_t stream, F32 q1, F32 k1, F32 q2, F32 k2, F32 ev, S32 PI, F32 PG, S32 off,
                            F32 u1v, F32 u1d, F32 u2v, F32 u2d, F32 wa1, F32 ba1, F32 wb1, F32 bb1, F32 wa2, F32 ba2,
@@ -497,13 +503,12 @@ static ffi::Error PairImpl(cudaStream_t stream, F32 q1, F32 k1, F32 q2, F32 k2, 
   p.vr1 = vr1.typed_data(); p.vr2 = vr2.typed_data(); p.cdeg = cdeg.typed_data(); p.scal = scal.typed_data();
   p.S = S->typed_data(); p.Wst = Wst->typed_data();
   p.n = (int)off.dimensions()[0] - 1; p.pmax = (int)P;
-  const int smem = smem_bytes();
   if (keep_w) {
-    set_max_smem<att_pair<true>>(smem);
-    att_pair<true><<<dim3(num_sms(), 2), NTH, smem, stream>>>(p);
+    set_max_smem<att_pair<true>>(PAIR_SMEM);
+    att_pair<true><<<dim3(num_sms(), 2), NTH, PAIR_SMEM, stream>>>(p);
   } else {
-    set_max_smem<att_pair<false>>(smem);
-    att_pair<false><<<dim3(num_sms(), 2), NTH, smem, stream>>>(p);
+    set_max_smem<att_pair<false>>(PAIR_SMEM);
+    att_pair<false><<<dim3(num_sms(), 2), NTH, PAIR_SMEM, stream>>>(p);
   }
   return launch_status();
 }

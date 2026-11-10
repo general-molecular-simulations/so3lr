@@ -23,9 +23,12 @@ constexpr int MT = TP / 16;
 #ifdef CHSPLIT
 // one channel per CTA (blockIdx.y): 4 producer + HC consumer warps; each channel's CTA writes
 // its own copy of the per-slot forces and ev gradients, which the gather sums
-constexpr int NCH = 1, NCW = HC, MINB = HC == 4 ? 2 : 1;
+constexpr int NCH = 1, NCW = HC;
 #else
-constexpr int NCH = 2, NCW = 2 * HC, MINB = 1;
+constexpr int NCH = 2, NCW = 2 * HC;
+#endif
+#ifndef CTAS                  // CTAs per SM (the registers' bound): as many as the shared memory holds, up to two
+#define CTAS (NCH == 1 && HC == 4 ? 2 : 1)
 #endif
 constexpr int NPW = 4, NTH = (NPW + NCW) * 32, NST = NSTAGES;
 constexpr int BSW = FC + 4;   // wb rows read transposed (gz = gw @ wb^T: B[kk][n] = wb[n][kk])
@@ -189,13 +192,18 @@ __device__ __forceinline__ void bwd_epilogue(const B7Params& p, const B7Stage& S
 
 constexpr int BVW = R + 4;    // V transposed, fp32: [FC n][R + 4] per channel (ldmatrix)
 constexpr int BV_FLOATS = NCH * FC * BVW;
-__global__ void __launch_bounds__(NTH, MINB) bwd7(B7Params p) {
+constexpr int B7_SMEM = (BV_FLOATS + NCH * SH * BSW) * sizeof(float) + NST * sizeof(B7Stage) + sizeof(B7Epi);
+#ifdef SMEM
+// build.py sized the tiles by its count of the shared memory (with WA's): the kernel's own
+static_assert(B7_SMEM + sizeof(FilterW1) == SMEM, "build.bwd_smem differs from the kernel's");
+#endif
+__global__ void __launch_bounds__(NTH, CTAS) bwd7(B7Params p) {
   extern __shared__ float smf[];
   float* Bv = smf;                                                     // [NCH][R][BVW]: V rows (uint2 hi/lo, or fp32)
   float* Bw = smf + BV_FLOATS;                                         // [NCH][SH][BSW]: wb rows
   B7Stage* st = reinterpret_cast<B7Stage*>(Bw + NCH * SH * BSW);       // [NST]
   B7Epi* Es = reinterpret_cast<B7Epi*>(st + NST);           // one: the consumers run each tile's epilogue
-  __shared__ float WA[2][NH + 1][SH];
+  __shared__ FilterW1 WA;
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const int ch0 = NCH == 1 ? (int)blockIdx.y : 0;                      // the CTA's channel (CHSPLIT)
   for (int i = tid; i < NCH * KD * FC; i += NTH) {
@@ -685,9 +693,8 @@ static ffi::Error B7Impl(cudaStream_t stream, F32 q1, F32 k1, F32 v1, F32 q2, F3
   p.SC = SC->typed_data(); p.FV = FV->typed_data(); p.GEV = GEV->typed_data();
   p.n = (int)off.dimensions()[0] - 1;
   p.nslot = (int)(SC->dimensions()[0] / NSC); p.pmax = (int)P;
-  const int smem = (BV_FLOATS + NCH * SH * BSW) * sizeof(float) + NST * sizeof(B7Stage) + sizeof(B7Epi);
-  set_max_smem<bwd7>(smem);
-  bwd7<<<dim3(num_sms(), NCH == 1 ? 2 : 1), NTH, smem, stream>>>(p);
+  set_max_smem<bwd7>(B7_SMEM);
+  bwd7<<<dim3(num_sms(), NCH == 1 ? 2 : 1), NTH, B7_SMEM, stream>>>(p);
   return launch_status();
 }
 
