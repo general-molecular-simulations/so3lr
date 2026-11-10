@@ -59,8 +59,8 @@ jobs:
           - group: 6
             name: "so3lr-other"
             sync_extra: ""
-            run_short: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_model_invariance.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_glp_cell_list_overflow.py tests/test_prepare_dimer.py -v --tb=short"
-            run_full: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_model_invariance.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_glp_cell_list_overflow.py tests/test_prepare_dimer.py tests/test_hessian.py -v --tb=short --full"
+            run_short: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_model_invariance.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_engine.py tests/test_glp_cell_list_overflow.py tests/test_prepare_dimer.py -v --tb=short"
+            run_full: "uv run --no-sync pytest tests/test_potential.py tests/test_ase.py tests/test_jaxmd.py tests/test_observables.py tests/test_model_invariance.py tests/test_observable_gradients.py tests/test_pme.py tests/test_charge_embed_override.py tests/test_pbc_validation.py tests/test_ase_small_cell.py tests/test_engine.py tests/test_glp_cell_list_overflow.py tests/test_prepare_dimer.py tests/test_hessian.py -v --tb=short --full"
           - group: 7
             name: "pysages"
             sync_extra: "--extra pysages"
