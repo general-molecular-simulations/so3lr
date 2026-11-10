@@ -27,6 +27,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from . import build
 from .build import BuildError, bwd_copies, load_kernels, problem
 
 logger = logging.getLogger("SO3LR")
@@ -124,6 +125,14 @@ STAGE_SHARE = 0.4
 MODES = ("fast", "default")
 
 
+def serves(mode):
+    """Whether the kernels serve an engine memory mode (engine.MODES): all but the Pallas
+    kernels' own, those of the attention in passes (as unsupported finds on an engine)."""
+    from .. import engine as E
+    kw = E.MODES[mode][0]
+    return not (kw.get("split_channels") or kw.get("split_blocks"))
+
+
 def unsupported(eng):
     """Why the CUDA kernels cannot serve this engine (None: they can, memory aside)."""
     why = problem()
@@ -133,22 +142,27 @@ def unsupported(eng):
         return "float64"
     if not jax.config.jax_enable_x64:
         return "float32 positions (the kernels take float64 ones: jax_enable_x64)"
-    if variant(eng) is None:
+    var = variant(eng)
+    if var is None:
         return "a model other than so3lr-tauri-s/m/l or so3lr (32 features per head, 4 or 8 heads of degrees 1-4)"
+    if build.tiles(var) is None:
+        return f"the model's kernels need more shared memory per block than this GPU's {build.smem()[0] // 1024} KiB"
     if eng.split or eng.blocks:
         return "a memory mode of the Pallas kernels' own (the attention in passes)"
     return None
 
 
-def plan(eng, free=None):
-    """(bytes for a chunk's buffers, None) for the kernels on this engine: None where every
-    layer's per-pair data fits for its backward (in a mode keeping the attention outputs),
-    else a chunk's (CHUNK_BUDGET) next to the per-atom arrays of the engine's mode; or (None,
-    why) where neither fits."""
-    if free is None:
-        from ..md import _free_bytes
-        free = _free_bytes()
-    if eng.keep_attention and eng.n * kib_per_atom(eng) * 1024 * MARGIN + GIB <= free:
+def kept_bytes(eng):
+    """The bytes the kernels need on this engine with every layer's per-pair data kept."""
+    return eng.n * kib_per_atom(eng) * 1024 * MARGIN + GIB
+
+
+def plan(eng, free):
+    """(bytes for a chunk's buffers, None) for the kernels on this engine in free bytes: None
+    where every layer's per-pair data fits for its backward (in a mode keeping the attention
+    outputs), else a chunk's (CHUNK_BUDGET) next to the per-atom arrays of the engine's mode;
+    or (None, why) where neither fits."""
+    if eng.keep_attention and kept_bytes(eng) <= free:
         return None, None
     room = free - eng.n * chunked_kib_per_atom(eng) * 1024 * MARGIN - GIB
     # half the room, between the bounds: larger chunks make fewer pairs twice (at their edges)
@@ -164,24 +178,26 @@ def plan(eng, free=None):
 
 
 def pick_mode(n, free, params, statics):
-    """The fastest of MODES in which the kernels fit n atoms in free bytes (their per-pair data
-    kept, or a chunk of rows at a time), or None: they do not serve this model here, or it
-    fits none (the Pallas kernels' modes go further)."""
+    """(the fastest of MODES in which the kernels fit n atoms in free bytes (their per-pair
+    data kept, or a chunk of rows at a time), None), or (None, why): they do not serve this
+    model here, or it fits none (the Pallas kernels' modes go further)."""
     from .. import engine as E
     # what the estimates read of an engine for these atoms, as the engine would make it
     F, nh, G, M, sh = E.model_widths(params, statics)
     eng = types.SimpleNamespace(n=n, nl=n, statics=statics, dtype=statics.get("dtype", jnp.float32), F=F, nh=nh,
                                 G=G, M=M, sh=sh, K=E.neighbour_rows(float(statics["cutoff"])), split=False,
                                 blocks=False, keep=True, keep_attention=True, staged=False)
-    if unsupported(eng):
-        return None
+    why = unsupported(eng)
+    if why:
+        return None, why
     for name in MODES:
         kw, eng.staged = E.MODES[name][:2]
         eng.keep = kw.get("keep_layer_inputs", True)
         eng.keep_attention = kw.get("keep_attention", False) and eng.keep
-        if plan(eng, free)[1] is None:
-            return name
-    return None
+        why = plan(eng, free)[1]
+        if why is None:
+            return name, None
+    return None, why
 
 
 def low_rank(T, D, rank, spacing=None):
@@ -194,18 +210,24 @@ def low_rank(T, D, rank, spacing=None):
     return jnp.asarray(T @ V, jnp.float32), jnp.asarray(D @ V, jnp.float32), jnp.asarray(V.T, jnp.float32)
 
 
-@functools.cache
 def ffi_prefix(var):
-    """The FFI target names' prefix of a variant's kernels, registered once per process. The
-    names depend on the variant alone, so the jitted programs hit the persistent compilation
-    cache from one process to the next."""
+    """The FFI target names' prefix of a variant's kernels as built for this GPU (its
+    architecture and tiles), registered once per process. The names depend on these alone, so
+    the jitted programs hit the persistent compilation cache from one process to the next."""
+    t = build.tiles(var)
+    prefix = ("so3lr_flash_cuda_" + "_".join(f"{v:x}" if i == 4 else str(v) for i, v in enumerate(var))
+              + f"_{build.arch()}_" + "_".join(str(int(v)) for tile in t.values() for v in tile[:4]))
+    _register(prefix, var)
+    return prefix
+
+
+@functools.cache
+def _register(prefix, var):
     libs = load_kernels(var)
-    prefix = "so3lr_flash_cuda_" + "_".join(f"{v:x}" if i == 4 else str(v) for i, v in enumerate(var))
     for name, (lib, sym) in (("prep", (libs["fwd"], "PairPrep")), ("fwd", (libs["fwd"], "AttPair")),
                              ("msg", (libs["fwd"], "AttMsg")), ("bwd", (libs["bwd"], "BwdPair7")),
                              ("gather", (libs["bwd"], "BwdGather")), ("lr", (libs["lr"], "LongRange"))):
         jax.ffi.register_ffi_target(f"{prefix}_{name}", jax.ffi.pycapsule(getattr(lib, sym)), platform="CUDA")
-    return prefix
 
 
 class CudaKernels:
@@ -217,9 +239,10 @@ class CudaKernels:
     attention alone: a chunk's pairs are those of its rows, a pair with a partner outside the
     chunk made by both chunks, as the devices do."""
 
-    def __init__(self, eng, chunk=None, budget=None):
+    def __init__(self, eng, chunk=None, free=None):
         self.eng = eng
-        self._chunk, self._budget = chunk, budget
+        self._chunk, self._free = chunk, free         # rows asked for, or the bytes planned in
+        self._budget = None if free is None else plan(eng, free)[0]     # a chunk's (None: kept)
         self.variant = variant(eng)
         NH, rank = self.variant[1], self.variant[5]
         self.copies = bwd_copies(self.variant)      # of the per-slot forces and ev gradients
@@ -239,12 +262,52 @@ class CudaKernels:
             self.layers.append(dict(W=W, tabs=[u1v, u1d, u2v, u2d], V=[v1, v2]))
         self.scal = eng.scal.at[1].multiply(TABLE_SUB).at[2].divide(TABLE_SUB)
         self.pair_tables = (eng.phi_v[::PAIR_SUB], eng.phi_d[::PAIR_SUB], eng.c6lr_v[::PAIR_SUB], eng.c6lr_d[::PAIR_SUB])
-        self.kib = (kib_per_atom(eng) if self.chunk is None
-                    else chunked_kib_per_atom(eng) + chunk_kib_per_row(eng) * self.chunk / eng.n)
         self._orig_build, self._orig_heads, self._orig_head_backward = eng.build, eng._heads, eng._head_backward
         self._calls = {}                  # the FFI calls per layout of the rows and range (_sized)
         self._pp = None                   # the current trace's pair records (PI, PG, PIDX, off)
         self._post_vjp, self._proj, self._heads_vjp = {}, {}, None
+
+    def wire(self):
+        """The engine's methods on these kernels: with the per-pair data kept, the layers (with
+        what the forward keeps for the backward) and the heads; in chunks the attention alone,
+        in the engine's layers and modes."""
+        eng = self.eng
+        eng.build, eng._long_range = self.build, self.long_range
+        kept = dict(_layer_forward=self.layer_forward, _layer_backward=self.layer_backward,
+                    _heads=self.heads, _head_backward=self.head_backward)
+        chunked = dict(_attend=self.attend, _attention_backward_pass=self.attention_backward_pass)
+        on, off = (kept, chunked) if self.chunk is None else (chunked, kept)
+        for name in off:
+            eng.__dict__.pop(name, None)          # the engine's own
+        for name, fn in on.items():
+            setattr(eng, name, fn)
+
+    def replan(self):
+        """After the neighbour rows widen, planned again in the memory the kernels were planned
+        in: the per-pair data kept while it fits, else a chunk of rows at a time (the chunks'
+        budget made again; the smallest chunks where the estimate finds room for none)."""
+        if self._chunk is not None:                   # rows asked for
+            return
+        budget, why = plan(self.eng, self._free)
+        if why:
+            logger.warning("Flash: the neighbour rows widened (%d): %s; CUDA kernels in the smallest chunks",
+                           self.eng.K, why)
+            budget = MIN_CHUNK
+        elif budget is None:
+            return                                    # the per-pair data kept still fits
+        was_kept = self._budget is None
+        self._budget = budget                         # the FFI calls follow at the next trace (_sized)
+        if was_kept:
+            self.wire()
+            logger.info("Flash: the neighbour rows widened (%d): CUDA kernels in chunks of %d rows (~%.0f KiB/atom)",
+                        self.eng.K, self.chunk, self.kib)
+
+    @property
+    def kib(self):
+        """What the engine holds per atom at its peak on these kernels, in KiB (the estimates)."""
+        eng = self.eng
+        return (kib_per_atom(eng) if self.chunk is None
+                else chunked_kib_per_atom(eng) + chunk_kib_per_row(eng) * self.chunk / eng.n)
 
     @property
     def chunk(self):
@@ -541,31 +604,24 @@ def attach(eng, strict=False, chunk=None):
     object, or None (with a log line) where they do not apply or cannot be built; strict
     (kernels="cuda" asked for explicitly) raises instead of falling back. chunk (rows): the
     per-pair data a chunk at a time whatever the memory (default: as plan finds room)."""
-    why, budget = unsupported(eng), None
+    why, free = unsupported(eng), None
     if why is None and chunk is None:
-        budget, why = plan(eng)
+        from ..md import _free_bytes
+        free = _free_bytes()
+        why = plan(eng, free)[1]
     if why:
         if strict:
             raise RuntimeError(f"Flash: the CUDA kernels do not serve this engine ({why})")
         logger.info("Flash: CUDA kernels not used (%s); Pallas kernels", why)
         return None
     try:
-        ck = CudaKernels(eng, chunk, budget)
+        ck = CudaKernels(eng, chunk, free)
     except (BuildError, OSError) as e:       # nvcc failed or unusable, a library does not load, no lock
         if strict:
             raise
         logger.warning("Flash: CUDA kernels not built (%s); Pallas kernels", str(e).splitlines()[0][:160])
         return None
-    eng.build = ck.build
-    eng._long_range = ck.long_range
-    if ck.chunk is None:                     # the layers, with what the forward keeps for the backward
-        eng._layer_forward = ck.layer_forward
-        eng._layer_backward = ck.layer_backward
-        eng._heads = ck.heads
-        eng._head_backward = ck.head_backward
-    else:                                    # the attention alone, in the engine's layers and modes
-        eng._attend = ck.attend
-        eng._attention_backward_pass = ck.attention_backward_pass
+    ck.wire()
     eng.cuda_kernels = ck
     logger.info("Flash: CUDA kernels (TF32 x3 attention, gather-only messages and gradients; %s; ~%.0f KiB/atom)",
                 f"chunks of {ck.chunk} rows" if ck.chunk else "per-pair data kept", ck.kib)

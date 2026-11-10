@@ -37,6 +37,9 @@ static_assert(NH % HC == 0 && F == NH * 32 && M % 8 == 0 && SH % 32 == 0, "one h
 #endif
 constexpr int R = RANK;                   // the radial tables' rank
 constexpr int KD = SH + R;                // the filter product's inner dimension: [hz | coeffs]
+// the spherical filters' first layer of both channels (a row of weights per degree entry, then
+// the bias), in both kernels' shared memory
+using FilterW1 = float[2][NH + 1][SH];
 // the entries' first equivariant component and harmonic offset (d^2 - 1), as the engine's ys
 __host__ __device__ constexpr int ev_start(int e) {
   int st = 0;

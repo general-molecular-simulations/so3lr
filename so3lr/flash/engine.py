@@ -2201,6 +2201,8 @@ class FlashSO3LR:
         """Wider neighbour rows and long-range scratch after an overflow; recompiles."""
         self.K = int(math.ceil(self.K * 1.25 / 16) * 16)
         self.maxh = min(int(self.maxh * 1.5), self.n)
+        if self.cuda_kernels is not None:
+            self.cuda_kernels.replan()   # the per-pair data in chunks where kept it no longer fits
         self._build_jit()
 
     def _build_jit(self):
