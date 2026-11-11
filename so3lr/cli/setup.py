@@ -409,7 +409,7 @@ def _positive(console, label, default):
 def _collect(console, previous):
     # Read authoritative CLI defaults only after entering the wizard. There
     # is no runtime import from the MD implementation and no duplicated table.
-    from .so3lr_cli import (DEFAULT_MD_CYCLES, DEFAULT_MD_STEPS_PER_CYCLE,
+    from .so3lr_cli import (DEFAULT_MD_CYCLES, DEFAULT_MD_STEPS_PER_CYCLE, DEFAULT_SAVE_BUFFER,
                             DEFAULT_SEED, DEFAULT_TEMPERATURE, DEFAULT_TIMESTEP)
     from .setup_physics import long_range_settings
     old = previous or {}
@@ -426,7 +426,8 @@ def _collect(console, previous):
             _say(console, 'NPT requires a fully periodic, positive, axis-aligned orthorhombic cell.', 'red')
         model = _select_model(console, old.get('model', DEFAULT_MODEL))
         try:
-            proposal = long_range_settings(structure.periodic, structure.minimum_cell_height, model)
+            proposal = long_range_settings(structure.periodic, structure.minimum_cell_height, model,
+                                           ensemble=ensemble)
             break
         except ValueError as exc:
             _say(console, exc, 'red')
@@ -461,7 +462,11 @@ def _collect(console, previous):
     relax = click.confirm('Relax the geometry before MD?', default=old.get('relax', True))
     if 'kspace_electrostatics' in proposal:
         _say(console, f'Proposed for this cell: {proposal["lr_cutoff"]:g} Å real-space cutoff, '
-             'PME electrostatics and PME dispersion, each with 2 Å smearing. '
+             'PME electrostatics and PME dispersion. '
+             f'Electrostatics: {proposal["kspace_smearing"]:g} Å smearing, '
+             f'{proposal["kspace_spacing"]:g} Å mesh spacing; '
+             f'dispersion: {proposal["kspace_dispersion_smearing"]:g} Å smearing, '
+             f'{proposal["kspace_dispersion_spacing"]:g} Å mesh spacing. '
              'These are starting settings; convergence depends on the system.')
     same_input = (old.get('source') == str(structure.path) and old.get('model') == model
                   and old.get('isolated', False) == structure.isolated)
@@ -470,7 +475,7 @@ def _collect(console, previous):
         cutoff = _positive(console, 'Long-range cutoff (Å)', cutoff_default)
         try:
             long_range = long_range_settings(structure.periodic, structure.minimum_cell_height, model,
-                                             cutoff=float(cutoff))
+                                             cutoff=float(cutoff), ensemble=ensemble)
             break
         except ValueError as exc:
             _say(console, exc, 'red')
@@ -490,7 +495,7 @@ def _collect(console, previous):
                     restart_save_path='restart.npz', overwrite=False, model=model,
                     engine='auto', precision=DEFAULT_PRECISION, ensemble=ensemble,
                     md_T=float(temperature), md_dt=float(dt), md_cycles=cycles,
-                    md_steps=cadence, save_buffer=min(50, cycles),
+                    md_steps=cadence, save_buffer=min(DEFAULT_SAVE_BUFFER, cycles),
                     total_charge=charge, num_unpaired_electrons=spin, seed=seed,
                     relax_before_run=relax)
     settings.update(long_range)
@@ -544,9 +549,11 @@ def review_view(structure, destination, settings):
     if 'md_P' in settings:
         rows.insert(5, ('Target pressure', f"{settings['md_P']:g} bar"))
     if settings.get('kspace_electrostatics') == 'pme':
-        rows.insert(-3, ('Electrostatics', f"PME · {settings['kspace_smearing']:g} Å smearing"))
+        rows.insert(-3, ('Electrostatics', f"PME · {settings['kspace_smearing']:g} Å smearing · "
+                         f"{settings['kspace_spacing']:g} Å mesh spacing"))
     if settings.get('kspace_dispersion') == 'pme':
-        rows.insert(-3, ('Dispersion', f"PME · {settings['kspace_dispersion_smearing']:g} Å smearing"))
+        rows.insert(-3, ('Dispersion', f"PME · {settings['kspace_dispersion_smearing']:g} Å smearing · "
+                         f"{settings['kspace_dispersion_spacing']:g} Å mesh spacing"))
     table = Table.grid(padding=(0, 2))
     table.add_column(style='dim')
     table.add_column(overflow='fold')

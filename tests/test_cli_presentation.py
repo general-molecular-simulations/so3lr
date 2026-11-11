@@ -196,3 +196,83 @@ def test_unknown_yaml_operation_fails_without_falling_back_to_md(tmp_path, monke
     result = CliRunner().invoke(cli, ['--settings', str(settings)])
     assert result.exit_code == 2
     assert "Unsupported settings operation 'typo'" in result.output
+
+
+@pytest.mark.parametrize('error', [KeyError('forces'), AssertionError()])
+def test_main_preserves_unexpected_exceptions_outside_display(monkeypatch, error):
+    from so3lr.cli import so3lr_cli
+    def fail():
+        raise error
+    monkeypatch.setattr(so3lr_cli, 'cli', fail)
+    with pytest.raises(type(error)) as caught:
+        so3lr_cli.main()
+    assert caught.value is error
+    assert caught.traceback[-1].name == 'fail'
+
+
+def test_main_unexpected_command_failure_keeps_terminal_traceback(tmp_path):
+    import subprocess
+    import sys
+    result = subprocess.run([sys.executable, '-c',
+        'from so3lr.cli import so3lr_cli as app; '
+        'app.cli = lambda: 1 / 0; app.main()'], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert 'Traceback (most recent call last)' in result.stderr
+    assert 'ZeroDivisionError: division by zero' in result.stderr
+
+
+def test_main_display_owned_plain_failure_names_exception(tmp_path, monkeypatch, capsys):
+    from so3lr.cli import so3lr_cli
+    presentation.configure(display='plain')
+    def fail():
+        with presentation.run_display({'log_file': tmp_path / 'run.log'}):
+            raise KeyError('forces')
+    monkeypatch.setattr(so3lr_cli, 'cli', fail)
+    try:
+        with pytest.raises(SystemExit) as caught:
+            so3lr_cli.main()
+    finally:
+        presentation.reset()
+    assert caught.value.code == 1
+    assert "Error: KeyError: 'forces'" in capsys.readouterr().err
+
+
+def test_md_short_terminal_error_retains_complete_traceback_in_file(tmp_path, monkeypatch, capsys):
+    import logging
+    from so3lr.cli import so3lr_cli as app
+    logger = app.logger
+    old_level = logger.level
+    monkeypatch.setattr(logger, 'handlers', [])
+    monkeypatch.setattr(logger, 'propagate', False)
+    logger.setLevel(logging.INFO)
+    log_path = tmp_path / 'run.log'
+    presentation.configure(display='plain')
+    def setup(path):
+        logger.addHandler(presentation.make_console_handler())
+        logger.addHandler(logging.FileHandler(path))
+        presentation.get_reporter().logger_ready(path)
+    def runtime(settings):
+        raise AssertionError('runtime failure')
+    monkeypatch.setattr(app, 'setup_logger', setup)
+    monkeypatch.setattr(app, 'get_hardware_info', lambda: None)
+    monkeypatch.setattr(app, 'reserve_gpu', lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, 'log_simulation_settings', lambda *args: None)
+    monkeypatch.setattr(app, 'run', runtime)
+    monkeypatch.setattr(app, 'cli', lambda: app._execute_md({'log_file': str(log_path)}))
+    try:
+        with pytest.raises(SystemExit) as caught:
+            app.main()
+    finally:
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+            handler.close()
+        logger.setLevel(old_level)
+        presentation.reset()
+    assert caught.value.code == 1
+    terminal = capsys.readouterr().err
+    assert 'AssertionError: runtime failure' in terminal
+    assert 'Traceback (most recent call last)' not in terminal
+    durable = log_path.read_text()
+    assert 'Traceback (most recent call last)' in durable
+    assert 'AssertionError: runtime failure' in durable
+    assert 'Execution: failed' in durable

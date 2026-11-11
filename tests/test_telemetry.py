@@ -275,7 +275,139 @@ def test_warnings_errors_are_recorded_in_plain_mode_and_not_duplicated(tmp_path,
 def test_library_reporter_does_not_create_files(tmp_path):
     reporter = ui.get_reporter()
     assert not reporter.enabled
+    assert not reporter.observing
     reporter.phase('Loading')
     reporter.start_md(0, 100, 0.5)
     reporter.progress(1)
     assert not list(tmp_path.iterdir())
+
+
+def test_plain_cli_observes_without_terminal_rendering(tmp_path):
+    with ui.run_display({'log_file': tmp_path / 'run.log'}) as reporter:
+        assert reporter.observing and not reporter.enabled
+
+
+def test_concurrent_journal_writes_have_unique_ordered_sequences(tmp_path):
+    import threading
+    import time
+    journal = telemetry.EventJournal({'log_file': tmp_path / 'run.log'})
+    original = journal._stream
+    class SlowStream:
+        def write(self, value):
+            time.sleep(.0001)  # release the GIL between sequence assignment and write
+            return original.write(value)
+        def flush(self):
+            original.flush()
+        def close(self):
+            original.close()
+    journal._stream = SlowStream()
+    barrier = threading.Barrier(5)
+    def write(worker):
+        barrier.wait()
+        for item in range(30):
+            journal.emit('test', {'worker': worker, 'item': item})
+    threads = [threading.Thread(target=write, args=(worker,), daemon=True) for worker in range(4)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=3)
+        assert not thread.is_alive(), 'journal writer deadlocked'
+    journal.close()
+    records = events(journal.path)
+    assert [record['seq'] for record in records] == list(range(1, 122))
+    for worker in range(4):
+        assert [record['data']['item'] for record in records[1:]
+                if record['data']['worker'] == worker] == list(range(30))
+
+
+def test_worker_logging_uses_invocation_handler_and_does_not_leak_after_close(tmp_path, capsys):
+    import gc
+    import threading
+    import weakref
+    with ui.run_display({'log_file': tmp_path / 'run.log'}) as reporter:
+        handler = ui.make_console_handler()
+        reporter.start_md(0, 20, .5)
+        barrier = threading.Barrier(5)
+        def warn(worker):
+            assert not ui.get_reporter().observing  # ContextVars stay thread-local
+            barrier.wait()
+            for item in range(20):
+                handler.handle(logging.makeLogRecord(dict(name='worker', levelno=logging.WARNING,
+                    levelname='WARNING', msg=f'{worker}:{item}')))
+        threads = [threading.Thread(target=warn, args=(worker,), daemon=True) for worker in range(4)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for step in range(20):
+            reporter.progress(step + 1, temperature=300.)
+        for thread in threads:
+            thread.join(timeout=3)
+            assert not thread.is_alive(), 'worker logging deadlocked'
+        path = reporter.journal.path
+        reference = weakref.ref(reporter)
+    before = path.read_bytes()
+    records = events(path)
+    assert [record['seq'] for record in records] == list(range(1, len(records) + 1))
+    assert records[-1]['type'] == 'run_completed'
+    warnings = [record['data']['message'] for record in records if record['type'] == 'warning']
+    assert len(warnings) == 80
+    for worker in range(4):
+        assert [message for message in warnings if message.startswith(f'{worker}:')] == [f'{worker}:{i}' for i in range(20)]
+    handler.handle(logging.makeLogRecord(dict(levelno=logging.WARNING, msg='after close')))
+    assert path.read_bytes() == before
+    del reporter
+    gc.collect()
+    assert reference() is None, 'console handler must not retain a finished invocation'
+    assert 'after close' in capsys.readouterr().err
+    handler.close()
+
+
+def test_journal_failure_during_console_handler_replacement_does_not_deadlock(tmp_path):
+    import subprocess
+    import sys
+    # Isolate a deliberate lock-interleaving probe: a regression must time out
+    # this subprocess, not leave pytest blocked in logging.shutdown.
+    code = '''
+import logging, threading
+from so3lr.cli import presentation as ui
+ui.configure(display='plain')
+with ui.run_display({'log_file':'run.log'}) as reporter:
+    old, new = ui.make_console_handler(), ui.make_console_handler()
+    logger = logging.getLogger('SO3LR')
+    logger.handlers[:] = [old]
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+    entered, release, second_holds_handler = [threading.Event() for _ in range(3)]
+    class BrokenStream:
+        def write(self, line):
+            entered.set()
+            assert release.wait(2)
+            raise OSError('simulated disk failure')
+        def close(self):
+            pass
+    reporter.journal._stream.close()
+    reporter.journal._stream = BrokenStream()
+    original = new.emit
+    def noted_emit(record):
+        second_holds_handler.set()
+        original(record)
+    new.emit = noted_emit
+    first = threading.Thread(target=lambda: old.handle(logging.makeLogRecord(dict(
+        name='SO3LR', msg='old warning', levelno=logging.WARNING, levelname='WARNING'))), daemon=True)
+    first.start()
+    assert entered.wait(2)
+    logger.handlers[:] = [new]
+    second = threading.Thread(target=lambda: logger.warning('new warning'), daemon=True)
+    second.start()
+    assert second_holds_handler.wait(2)
+    release.set()
+    first.join(2); second.join(2)
+    assert not first.is_alive() and not second.is_alive(), 'handler/journal lock inversion'
+    assert not reporter.journal.active
+logger.handlers.clear()
+'''
+    result = subprocess.run([sys.executable, '-c', code], cwd=tmp_path,
+                            capture_output=True, text=True, timeout=8)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count('Run telemetry disabled') == 1

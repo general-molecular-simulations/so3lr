@@ -243,6 +243,23 @@ def test_compact_view_has_controls_in_24_rows(tmp_path):
     assert 'q: detach' in text
 
 
+@pytest.mark.parametrize('width', [32, 50, 60, 80])
+@pytest.mark.parametrize('completed', [False, True])
+def test_ascii_paged_controls_fit_after_arrow_names_expand(tmp_path, width, completed):
+    path = tmp_path / 'run.events.jsonl'
+    entries = samples(1)
+    if completed:
+        entries.append(event(100, 'run_completed', message='Completed'))
+    write(path, entries)
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    text = render(reader, width=width, height=24, ascii_only=True)
+    assert text.isascii() and '\\x0a' not in text
+    assert len(text.splitlines()) <= 24
+    assert all(len(line) <= width for line in text.splitlines())
+    assert ('q: close' if completed else 'q: detach') in text.splitlines()[-1]
+
+
 def test_cycle_throughput_and_checkpoint_age_are_explicit(tmp_path):
     path = tmp_path / 'run.events.jsonl'
     write(path, samples())
@@ -619,6 +636,10 @@ def test_keyboard_restores_terminal_on_failure(monkeypatch):
 @pytest.mark.parametrize('chunks, expected', [
     ([b'\x1b[Ceq'], ['next', 'e', 'q']),
     ([b'\x1b', b'[', b'Dq'], ['', '', 'previous', 'q']),
+    ([b'\x1bOA\x1bOB\x1bOCeq'], ['up', 'down', 'next', 'e', 'q']),
+    ([b'\x1b', b'O', b'Dq'], ['', '', 'previous', 'q']),
+    ([b'\x1b[1;5Aq'], ['', 'q']),  # unsupported modifier sequence is one key
+    ([b'\x1bOPq'], ['', 'q']),  # an unsupported SS3 key must not become O
 ])
 def test_keyboard_preserves_batched_keys_and_split_arrows(monkeypatch, chunks, expected):
     import select
@@ -629,6 +650,51 @@ def test_keyboard_preserves_batched_keys_and_split_arrows(monkeypatch, chunks, e
     monkeypatch.setattr(os, 'read', lambda *args: chunks.pop(0))
     assert [keyboard.read(timeout=0) for _ in expected] == expected
     assert keyboard.pending == ''
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX terminal byte stream')
+def test_real_pty_application_arrows_preserve_shortcuts_and_restore_input(monkeypatch):
+    import pty
+    import termios
+
+    master, slave = pty.openpty()
+    saved = termios.tcgetattr(slave)
+    stream = os.fdopen(os.dup(slave), 'r')
+    monkeypatch.setattr(sys, 'stdin', stream)
+    try:
+        with pytest.raises(RuntimeError, match='restore after input'):
+            with monitor._Keyboard() as keyboard:
+                os.write(master, b'\x1bOA\x1bOCeq')
+                assert [keyboard.read(timeout=0.2) for _ in range(4)] == ['up', 'next', 'e', 'q']
+                os.write(master, b'\x1b')
+                assert keyboard.read(timeout=0.2) == ''
+                os.write(master, b'O')
+                assert keyboard.read(timeout=0.2) == ''
+                os.write(master, b'Dq')
+                assert keyboard.read(timeout=0.2) == 'previous'
+                assert keyboard.read(timeout=0.2) == 'q'
+                raise RuntimeError('restore after input')
+        restored = termios.tcgetattr(slave)
+        pending = getattr(termios, 'PENDIN', 0)
+        assert saved[:3] == restored[:3] and saved[4:] == restored[4:]
+        assert saved[3] & ~pending == restored[3] & ~pending
+    finally:
+        stream.close()
+        os.close(master)
+        os.close(slave)
+
+
+def test_incomplete_unknown_escape_cannot_grow_without_bound(monkeypatch):
+    import select
+    chunks = [b'\x1b[' + b'1' * 30, b'1' * 32, b'q']
+    keyboard = monitor._Keyboard()
+    keyboard.fd, keyboard.pending = 42, ''
+    monkeypatch.setattr(select, 'select', lambda *args: ([42], [], []) if chunks else ([], [], []))
+    monkeypatch.setattr(os, 'read', lambda *args: chunks.pop(0))
+    assert keyboard.read(timeout=0) == ''
+    assert keyboard.read(timeout=0) == ''
+    assert keyboard.pending == ''
+    assert keyboard.read(timeout=0) == 'q'
 
 
 def test_solid_guide_preserves_trace_and_never_colors_guide_as_data():

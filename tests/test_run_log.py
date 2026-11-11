@@ -230,10 +230,10 @@ def test_export_never_deletes_a_preexisting_atomic_temporary(tmp_path):
 def test_unknown_and_nonfinite_settings_are_not_exported(tmp_path):
     source = settings(tmp_path)
     source.update(secret='private', datafile='evaluation.xyz', flash_mixed=True,
-                  md_precision=None, made_up=42, kspace_spacing=float('nan'))
+                  md_precision=None, made_up=42, kspace_spacing=float('nan'), output_format='hdf5')
     exported = resolved_settings(source, {'precision': 'mixed'}, 'md', tmp_path)
     assert all(key not in exported for key in ('secret', 'datafile', 'flash_mixed',
-                                              'md_precision', 'made_up', 'kspace_spacing'))
+                                              'md_precision', 'made_up', 'kspace_spacing', 'output_format'))
 
 
 def test_explicit_null_does_not_silently_restore_a_nonnull_md_default(tmp_path):

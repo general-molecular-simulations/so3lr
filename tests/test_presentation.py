@@ -243,6 +243,196 @@ def test_plain_error_is_not_marked_reported():
     assert not getattr(error, '_so3lr_reported', False)
 
 
+def test_failure_uses_actual_exception_chain_instead_of_previous_error(monkeypatch):
+    import json
+    monkeypatch.setattr(sys, 'stderr', Terminal())
+    ui.configure(display='rich')
+    with pytest.raises(RuntimeError):
+        with ui.run_display({}) as reporter:
+            ui.make_console_handler().handle(logging.makeLogRecord({
+                'msg': 'Earlier recoverable diagnostic', 'levelno': logging.ERROR,
+                'levelname': 'ERROR'}))
+            try:
+                raise ValueError('bad geometry')
+            except ValueError as cause:
+                raise RuntimeError('initialization failed') from cause
+    expected = 'RuntimeError: initialization failed (caused by ValueError: bad geometry)'
+    assert reporter.renderer._state.message == expected
+    records = [json.loads(line) for line in reporter.journal.path.read_text().splitlines()]
+    assert records[-1]['data']['message'] == expected
+    assert ui.exception_message(AssertionError()) == 'AssertionError'
+
+
+def test_worker_warning_renders_only_on_owner_thread(monkeypatch):
+    import json
+    import threading
+    output = Terminal()
+    monkeypatch.setattr(sys, 'stderr', output)
+    ui.configure(display='rich')
+    with ui.run_display({}) as reporter:
+        handler = ui.make_console_handler()
+        original = reporter.renderer.log_record
+        rendered_on = []
+        def render_record(record, message):
+            rendered_on.append(threading.get_ident())
+            original(record, message)
+        monkeypatch.setattr(reporter.renderer, 'log_record', render_record)
+        thread = threading.Thread(target=lambda: handler.handle(logging.makeLogRecord({
+            'msg': 'worker diagnostic', 'levelno': logging.WARNING, 'levelname': 'WARNING'})))
+        thread.start()
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+        assert not rendered_on
+        assert 'worker diagnostic' not in output.getvalue()
+        records = [json.loads(line) for line in reporter.journal.path.read_text().splitlines()]
+        assert records[-1]['type'] == 'warning'
+        reporter.phase('Running')
+        assert rendered_on == [threading.get_ident()]
+        assert 'worker diagnostic' in output.getvalue()
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX signal dispositions')
+def test_signal_scope_preserves_custom_ignored_and_worker_dispositions():
+    import signal
+    import threading
+    original_term, original_hup = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)
+    def custom(number, frame):
+        pass
+    try:
+        signal.signal(signal.SIGTERM, custom)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        with ui.run_display({}):
+            assert signal.getsignal(signal.SIGTERM) is custom
+            assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+        assert signal.getsignal(signal.SIGTERM) is custom
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        failures = []
+        def worker():
+            try:
+                with ui.run_display({}):
+                    assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+            except BaseException as exc:
+                failures.append(exc)
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join(timeout=3)
+        assert not thread.is_alive() and not failures
+        with ui.run_display({}):
+            assert callable(signal.getsignal(signal.SIGTERM))
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGTERM, original_term)
+        signal.signal(signal.SIGHUP, original_hup)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX signal dispositions')
+@pytest.mark.parametrize('interruption', ['keyboard', 'termination'])
+def test_signal_installation_is_owned_before_it_can_be_interrupted(monkeypatch, interruption):
+    import signal
+    original_signal = signal.signal
+    previous = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGHUP)}
+    redelivered = []
+    try:
+        for number in previous:
+            original_signal(number, signal.SIG_DFL)
+        def install(number, handler):
+            result = original_signal(number, handler)
+            if number == signal.SIGHUP and callable(handler):
+                if interruption == 'keyboard':
+                    raise KeyboardInterrupt
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return result
+        monkeypatch.setattr(signal, 'signal', install)
+        monkeypatch.setattr(signal, 'raise_signal', redelivered.append)
+        with pytest.raises(KeyboardInterrupt if interruption == 'keyboard' else SystemExit) as caught:
+            with ui._termination_signals():
+                pytest.fail('interrupted installation must not enter the body')
+        assert all(signal.getsignal(number) == signal.SIG_DFL for number in previous)
+        if interruption == 'termination':
+            assert redelivered == [signal.SIGTERM]
+            assert caught.value.code == 128 + signal.SIGTERM
+        else:
+            assert not redelivered
+    finally:
+        for number, handler in previous.items():
+            original_signal(number, handler)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX PTY and termination signals')
+@pytest.mark.parametrize('signal_name', ['SIGTERM', 'SIGHUP'])
+def test_real_terminal_termination_restores_modes_and_preserves_signal_exit(tmp_path, signal_name):
+    import fcntl
+    import json
+    import pty
+    import select
+    import signal
+    import struct
+    import termios
+    code = '''
+import fcntl, json, pathlib, sys, termios, time
+from so3lr.cli import presentation as ui
+fcntl.ioctl(sys.stdin.fileno(), termios.TIOCSCTTY, 0)
+before = termios.tcgetattr(sys.stdin.fileno())
+original = ui._Reporter.close
+def close(self):
+    try:
+        original(self)
+    finally:
+        after = termios.tcgetattr(sys.stdin.fileno())
+        pending = getattr(termios, 'PENDIN', 0)
+        restored = (before[:3] == after[:3] and before[4:] == after[4:]
+                    and before[3] & ~pending == after[3] & ~pending)
+        pathlib.Path('terminal.json').write_text(json.dumps({'restored': restored}))
+ui._Reporter.close = close
+ui.configure(display='rich')
+with ui.run_display({'log_file': 'run.log', 'ensemble': 'nve'}) as reporter:
+    reporter.start_md(0, 100, .5)
+    reporter.progress(0, temperature=300, energy=-10)
+    pathlib.Path('ready').write_text(str(reporter.journal.path))
+    while True:
+        time.sleep(.05)
+'''
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
+    process = subprocess.Popen([sys.executable, '-c', code], cwd=tmp_path,
+                               stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                               env=dict(os.environ, TERM='xterm', COLUMNS='80', LINES='24'))
+    capture, sent = bytearray(), False
+    deadline = time.monotonic() + 10
+    def read():
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:
+            return False
+        capture.extend(chunk)
+        return bool(chunk)
+    try:
+        while process.poll() is None:
+            assert time.monotonic() < deadline, 'signal cleanup timed out'
+            if select.select([master], [], [], .05)[0] and not read():
+                process.wait(timeout=2)
+                break
+            if not sent and (tmp_path / 'ready').exists():
+                os.kill(process.pid, getattr(signal, signal_name))
+                sent = True
+        while select.select([master], [], [], .05)[0] and read():
+            pass
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(master)
+        os.close(slave)
+    assert sent and process.returncode == -getattr(signal, signal_name)
+    assert json.loads((tmp_path / 'terminal.json').read_text())['restored']
+    assert b'\x1b[?25l' in capture and b'\x1b[?25h' in capture
+    journal = next(tmp_path.glob('*.events.jsonl'))
+    records = [json.loads(line) for line in journal.read_text().splitlines()]
+    assert records[-1]['type'] == 'run_failed'
+    assert signal_name in records[-1]['data']['message']
+    assert not any(record['type'] == 'run_completed' for record in records)
+
+
 def test_progress_refresh_is_throttled(monkeypatch):
     monkeypatch.setattr(sys, 'stderr', Terminal())
     clock = [10.0]

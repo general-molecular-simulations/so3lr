@@ -933,8 +933,9 @@ def check_cell(
     # Sanity check the long-range cutoff up front, before the all-zero cell
     # early return. Otherwise non-periodic systems would silently accept a
     # too-small lr_cutoff because this check used to live below the return.
-    if lr_cutoff < 10 and (kspace_electrostatics == None or kspace_smearing == None):
-        raise ValueError(f'Long-range cutoff below 10 Å is not supported yet. Provided cutoff: {lr_cutoff} Å.')
+    if lr_cutoff < KS.MIN_DIRECT_LR_CUTOFF and (kspace_electrostatics == None or kspace_smearing == None):
+        raise ValueError(f'Long-range cutoff below {KS.MIN_DIRECT_LR_CUTOFF:g} Å is not supported yet. '
+                         f'Provided cutoff: {lr_cutoff} Å.')
 
     if np.all(cell == 0):
         return None
@@ -1263,11 +1264,11 @@ def format_md_row(step, KE, PE, H, T, time_per_step, npt_state=None, box=None, *
         metrics['energy'] = float(energy)
     if npt_state is not None:
         if isinstance(npt_state, jax_md.simulate.NPTNoseHooverFlexState):
-            pressure_tensor = jax_md.simulate.pressure_tensor_flex(npt_state)
-            P = pressure_tensor / units.metal_unit_system()['pressure']
-            cols.append('({:.1f},{:.1f},{:.1f})'.format(*(float(P[i, i]) for i in range(3))))
+            pressure_diagonal = np.diag(np.asarray(jax_md.simulate.pressure_tensor_flex(npt_state)))
+            P = pressure_diagonal / np.asarray(units.metal_unit_system()['pressure'])
+            cols.append('({:.1f},{:.1f},{:.1f})'.format(*P))
             if metrics is not None:
-                metrics['pressure_diagonal'] = np.diag(np.asarray(pressure_tensor)).tolist()
+                metrics['pressure_diagonal'] = pressure_diagonal.tolist()
         L = np.atleast_1d(np.asarray(box_to_diag(box)))
         cols.append(f'{L[0]:.3f}' if len(L) == 1 else f'({L[0]:.3f},{L[1]:.3f},{L[2]:.3f})')
     cols.append(f'{time_per_step:.2e}')
@@ -1284,6 +1285,39 @@ def format_md_row(step, KE, PE, H, T, time_per_step, npt_state=None, box=None, *
             if volume > 0:
                 metrics.update(box=cell.tolist(), volume=volume)
     return '\t'.join(cols)
+
+
+def report_md_row(reporter, step, KE, PE, H, T, time_per_step, *, ensemble,
+                  npt_state=None, box=None, timing_valid=True):
+    """Log one accepted state and share its exact values with an active observer.
+
+    Plain CLI runs still record telemetry. Direct library calls without an
+    observer avoid cell conversion/volume work used only by the display.
+    The first cycle's timing includes compilation and is excluded from ETA.
+    """
+    metrics = {} if reporter.observing else None
+    logger.info(format_md_row(step, KE, PE, H, T, time_per_step,
+                              npt_state, box, metrics=metrics))
+    if metrics is not None:
+        reporter.progress(step, temperature=T, potential_energy=PE,
+                          time_per_step=time_per_step if timing_valid else None,
+                          kinetic_energy=float(KE),
+                          conserved_energy=None if ensemble == 'nvt-langevin' or H is None else float(H),
+                          **metrics)
+
+
+def report_opt_step(reporter, step, energy, force_max, *, total_steps=None, force_target=None):
+    """Share the optimizer's existing energy and force evaluations with observers."""
+    energy, force_max = float(energy), float(force_max)
+    logger.info(f'{step}\t {energy:.3f}\t {force_max:.3f}')
+    if not reporter.observing:
+        return
+    values = dict(opt_step=step, opt_energy_eV=energy, opt_force_max_eVA=force_max)
+    if total_steps is not None:
+        values.update(operation='optimization', opt_total_steps=total_steps)
+        if force_target is not None:
+            values['opt_force_target_eVA'] = float(force_target)
+    reporter.update_info(**values)
 
 
 def log_nbrs_info(nbrs, label: str = 'SR', box=None):
@@ -1757,10 +1791,11 @@ def save_restart_checkpoints(
     restart_save_path: Optional[str] = None,
     pysages_result=None,
     restart_pysages_save_path: Optional[str] = None,
-) -> None:
-    """Persist SO3LR and optional PySAGES state for one accepted cycle."""
+) -> Optional[str]:
+    """Persist one accepted cycle and return the primary checkpoint actually written."""
+    path = None
     if restart_save_path is not None:
-        save_state(
+        path = save_state(
             state,
             box,
             current_cycle,
@@ -1769,15 +1804,10 @@ def save_restart_checkpoints(
             fractional_coordinates=fractional_coordinates,
         )
     if restart_pysages_save_path is not None:
-        save_pysages_state(pysages_result, restart_pysages_save_path)
-
-
-def checkpoint_output_path(restart_save_path, restart_pysages_save_path=None):
-    """The actual reported filename, including save_state's implicit .npz suffix."""
-    if restart_save_path is None:
-        return restart_pysages_save_path
-    path = str(restart_save_path)
-    return path if path.endswith('.npz') else path + '.npz'
+        pysages_path = save_pysages_state(pysages_result, restart_pysages_save_path)
+        if path is None:
+            path = pysages_path
+    return path
 
 
 def _validate_md_output_write_policy(
@@ -2423,15 +2453,10 @@ def perform_md(
         md_P,
         k_grid_disp=k_grid_disp
     )
-    cell_metrics = {}
-    logger.info(format_md_row(current_cycle * md_steps, KE, PE, H, current_T, 0.0,
-                              state if ensemble == 'npt' else None, box, metrics=cell_metrics))
     reporter.start_md(current_cycle * md_steps, md_cycles * md_steps, md_dt_ps * 1000.0)
-    reporter.progress(current_cycle * md_steps, temperature=current_T,
-                      potential_energy=PE, time_per_step=None,
-                      kinetic_energy=float(KE),
-                      conserved_energy=None if ensemble == 'nvt-langevin' or H is None else float(H),
-                      **cell_metrics)
+    report_md_row(reporter, current_cycle * md_steps, KE, PE, H, current_T, 0.0,
+                  ensemble=ensemble, npt_state=state if ensemble == 'npt' else None,
+                  box=box, timing_valid=False)
 
     # --- Conserved-quantity drift watchdog --------------------------------
     # For NVE the conserved quantity is the total energy E = KE+PE; for the
@@ -2738,18 +2763,11 @@ def perform_md(
                                 f"to change the equilibration window; some drift early in the run is normal.)")
                             drift_warned = True
 
-            cell_metrics = {}
-            logger.info(format_md_row(current_cycle * md_steps, KE, PE, H, current_T, time_per_step,
-                                      state if ensemble == 'npt' else None, box, metrics=cell_metrics))
             reporter.phase('Running')
-            # Only accepted cycles advance the display. The first accepted cycle
-            # can include compilation/reallocation and must not drive the ETA.
-            reporter.progress(current_cycle * md_steps, temperature=current_T,
-                              potential_energy=PE,
-                              time_per_step=time_per_step if cycle_md > 1 else None,
-                              kinetic_energy=float(KE),
-                              conserved_energy=None if ensemble == 'nvt-langevin' or H is None else float(H),
-                              **cell_metrics)
+            # Only accepted cycles advance the display.
+            report_md_row(reporter, current_cycle * md_steps, KE, PE, H, current_T, time_per_step,
+                          ensemble=ensemble, npt_state=state if ensemble == 'npt' else None,
+                          box=box, timing_valid=cycle_md > 1)
 
             out_pos = output_position_array(
                 state.position, box, fractional_coordinates, output_cartesian_positions
@@ -2798,7 +2816,7 @@ def perform_md(
                 if create_restart or (
                     do_enhanced_sampling and restart_pysages_save_path is not None
                 ):
-                    save_restart_checkpoints(
+                    checkpoint_path = save_restart_checkpoints(
                         state,
                         box,
                         current_cycle,
@@ -2811,8 +2829,7 @@ def perform_md(
                         ),
                     )
                     last_checkpoint_cycle = current_cycle
-                    reporter.checkpoint(current_cycle * md_steps,
-                                        checkpoint_output_path(restart_save_path, restart_pysages_save_path))
+                    reporter.checkpoint(current_cycle * md_steps, checkpoint_path)
                 reporter.phase('Running')
 
     # A frame-major HDF5 layout and extxyz both support arbitrary batch sizes,
@@ -2853,7 +2870,7 @@ def perform_md(
             or (do_enhanced_sampling and restart_pysages_save_path is not None)
         )
     ):
-        save_restart_checkpoints(
+        checkpoint_path = save_restart_checkpoints(
             state,
             box,
             current_cycle,
@@ -2865,8 +2882,7 @@ def perform_md(
                 restart_pysages_save_path if do_enhanced_sampling else None
             ),
         )
-        reporter.checkpoint(current_cycle * md_steps,
-                            checkpoint_output_path(restart_save_path, restart_pysages_save_path))
+        reporter.checkpoint(current_cycle * md_steps, checkpoint_path)
 
     logger.info('Results saved to: ' + output_file)
     # The first cycle is excluded from timing (it includes JIT compilation /
@@ -3240,12 +3256,8 @@ def perform_min(
     )
     f_max = np.abs(F).max()
     energy = float(E)
-    logger.info('{}\t {:.3f}\t {:.3f}'.format(0, energy, f_max))
-    reporter.update_info(operation='optimization', opt_step=0,
-                         opt_total_steps=min_cycles * min_steps,
-                         opt_energy_eV=energy, opt_force_max_eVA=float(f_max),
-                         **({'opt_force_target_eVA': float(force_convergence)}
-                            if force_convergence is not None else {}))
+    report_opt_step(reporter, 0, energy, f_max, total_steps=min_cycles * min_steps,
+                    force_target=force_convergence)
 
     # If tracking trajectory, store all positions
     minimization_trajectory = []
@@ -3281,9 +3293,7 @@ def perform_min(
 
         f_max = np.abs(F).max()
         energy = float(E)
-        logger.info('{}\t {:.3f}\t {:.3f}'.format(i*min_steps, energy, f_max))
-        reporter.update_info(opt_step=i * min_steps, opt_energy_eV=energy,
-                             opt_force_max_eVA=float(f_max))
+        report_opt_step(reporter, i * min_steps, energy, f_max)
 
         # Save the current positions to the trajectory
         minimization_trajectory.append(np.array(min_state.position))
@@ -3335,9 +3345,9 @@ def save_state(
     path_to_save: str,
     ensemble: str = 'nvt',
     fractional_coordinates: bool = True
-) -> None:
+) -> str:
     """
-    Save the state of the simulation to a .npz file.
+    Save the state of the simulation and return the actual .npz filename.
 
     Args:
         state: Current state of the simulation.
@@ -3421,6 +3431,7 @@ def save_state(
         if output_mode is not None:
             temporary_path.chmod(output_mode)
         os.replace(temporary_path, destination)
+    return str(destination)
 
 
 def load_state(

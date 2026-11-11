@@ -49,7 +49,8 @@ from so3lr.cli.so3lr_md import (
     _validate_md_output_write_policy,
     atoms_to_jnp,
     cell_from_atoms_boundary_conditions,
-    format_md_row,
+    report_md_row,
+    report_opt_step,
     handle_units,
     init_hdf5_store,
     load_atom_masks,
@@ -58,7 +59,6 @@ from so3lr.cli.so3lr_md import (
     npt_start_motion,
     run_dtypes,
     save_restart_checkpoints,
-    checkpoint_output_path,
     setup_run,
     setup_logger,
     validate_and_log_input,
@@ -330,12 +330,8 @@ def relax_flash(eng, staged, position, shift, box, settings, atoms, start, opt_f
     logger.info("Starting minimization (flash engine)...")
     logger.info("Step\tE [eV]\tF_max [eV/Å]")
     energy = float(e)
-    logger.info(f"0\t {energy:.3f}\t {f_max:.3f}")
-    reporter.update_info(operation='optimization', opt_step=0,
-                         opt_total_steps=min_cycles * min_steps,
-                         opt_energy_eV=energy, opt_force_max_eVA=f_max,
-                         **({'opt_force_target_eVA': float(fconv)}
-                            if fconv is not None else {}))
+    report_opt_step(reporter, 0, energy, f_max, total_steps=min_cycles * min_steps,
+                    force_target=fconv)
     frames = [np.asarray(position)]
     for c in range(1, min_cycles + 1):
         if staged:
@@ -346,9 +342,7 @@ def relax_flash(eng, staged, position, shift, box, settings, atoms, start, opt_f
         e, F = ef(state.position)
         f_max = float(jnp.abs(F).max())
         energy = float(e)
-        logger.info(f"{c * min_steps}\t {energy:.3f}\t {f_max:.3f}")
-        reporter.update_info(opt_step=c * min_steps, opt_energy_eV=energy,
-                             opt_force_max_eVA=f_max)
+        report_opt_step(reporter, c * min_steps, energy, f_max)
         frames.append(np.asarray(state.position))
         if fconv is not None and f_max <= fconv:
             logger.info(f"Convergence criterion met at step {c * min_steps}: Fmax = {f_max:.3f} eV/Å")
@@ -751,12 +745,12 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
             h = ke + pe
         return ke, pe, h, temp
 
-    def line(step, ke, pe, h, temp, per_step, metrics=None):
-        """perform_md's log line (NPT: the box sides; the flexible cell also its pressure tensor's
-        diagonal)."""
-        return format_md_row(step, ke, pe, h, temp, per_step, npt_state=state if npt else None,
-                             box=np.asarray(cartesian(state)[1]) if npt else (None if vacuum else box),
-                             metrics=metrics)
+    def report(step, ke, pe, h, temp, per_step, *, timing_valid):
+        """Use the shared MD row and observer values, with this engine's physical cell."""
+        report_md_row(reporter, step, ke, pe, h, temp, per_step, ensemble=ensemble,
+                      npt_state=state if npt else None,
+                      box=cartesian(state)[1] if npt else (None if vacuum else box),
+                      timing_valid=timing_valid)
 
     # trajectory positions as perform_md writes them: fractional unless asked otherwise (or
     # with no box, or with PySAGES, which perform_md integrates in Cartesian coordinates)
@@ -790,15 +784,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     logger.info("Step\tE [eV]\tKE\tPE\tH\tTemp [K]" + ("\tP [bar] (xx,yy,zz)" if semi else "")
                 + ("\tBox [A]" if npt else "") + "\ttime/step [s]")
     initial_ke, initial_pe, initial_h, initial_temp = quantities(state, e0)
-    cell_metrics = {}
-    logger.info(line(current_cycle * md_steps, initial_ke, initial_pe, initial_h, initial_temp, 0.0,
-                     metrics=cell_metrics))
     reporter.start_md(current_cycle * md_steps, md_cycles * md_steps, md_dt_ps * 1000.0)
-    reporter.progress(current_cycle * md_steps, temperature=initial_temp,
-                      potential_energy=initial_pe, time_per_step=None,
-                      kinetic_energy=initial_ke,
-                      conserved_energy=None if ensemble == 'nvt-langevin' else initial_h,
-                      **cell_metrics)
+    report(current_cycle * md_steps, initial_ke, initial_pe, initial_h, initial_temp, 0.0,
+           timing_valid=False)
     positions, momenta, boxes, obs = [], [], [], {}
     total_time, timed = 0.0, 0
     last_checkpoint = None
@@ -815,16 +803,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         ke, pe, h, temp = quantities(state, pe)
         if not np.all(np.isfinite([ke, pe, temp])):
             raise RuntimeError("MD simulation diverged: NaN/Inf detected in energy or temperature.")
-        cell_metrics = {}
-        logger.info(line(current_cycle * md_steps, ke, pe, h, temp, per_step, metrics=cell_metrics))
         reporter.phase('Running')
         # advance returns only an accepted cycle, including any overflow retries.
-        # Its first timing includes compilation and is not a throughput sample.
-        reporter.progress(current_cycle * md_steps, temperature=temp, potential_energy=pe,
-                          time_per_step=per_step if cycle > 0 else None,
-                          kinetic_energy=ke,
-                          conserved_energy=None if ensemble == 'nvt-langevin' else h,
-                          **cell_metrics)
+        report(current_cycle * md_steps, ke, pe, h, temp, per_step, timing_valid=cycle > 0)
         if ensemble != "nvt-langevin" and not drift_warned and np.isfinite(h) and h != 0.0:
             t_ps = current_cycle * md_steps * md_dt_ps
             if drift_ref is None:
@@ -856,20 +837,20 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                     fractional_coordinates=frac_out, append=append_extxyz, overwrite=overwrite)
                 append_extxyz = True
             if checkpointing:
-                save_restart_checkpoints(state, L1, current_cycle, ensemble=ensemble,
-                                         fractional_coordinates=npt, restart_save_path=restart_save_path,
-                                         pysages_result=pysages_result, restart_pysages_save_path=pysages_save_path)
+                checkpoint_path = save_restart_checkpoints(
+                    state, L1, current_cycle, ensemble=ensemble,
+                    fractional_coordinates=npt, restart_save_path=restart_save_path,
+                    pysages_result=pysages_result, restart_pysages_save_path=pysages_save_path)
                 last_checkpoint = current_cycle
-                reporter.checkpoint(current_cycle * md_steps,
-                                    checkpoint_output_path(restart_save_path, pysages_save_path))
+                reporter.checkpoint(current_cycle * md_steps, checkpoint_path)
             reporter.phase('Running')
     if checkpointing and last_checkpoint != current_cycle:
         reporter.phase('Saving', 'Writing the final checkpoint')
-        save_restart_checkpoints(state, cartesian(state)[1], current_cycle, ensemble=ensemble,
-                                 fractional_coordinates=npt, restart_save_path=restart_save_path,
-                                 pysages_result=pysages_result, restart_pysages_save_path=pysages_save_path)
-        reporter.checkpoint(current_cycle * md_steps,
-                            checkpoint_output_path(restart_save_path, pysages_save_path))
+        checkpoint_path = save_restart_checkpoints(
+            state, cartesian(state)[1], current_cycle, ensemble=ensemble,
+            fractional_coordinates=npt, restart_save_path=restart_save_path,
+            pysages_result=pysages_result, restart_pysages_save_path=pysages_save_path)
+        reporter.checkpoint(current_cycle * md_steps, checkpoint_path)
     logger.info("Results saved to: " + str(Path(output_file)))
     if timed:
         logger.info(f"Average time per step: {total_time / timed:.2e} seconds")

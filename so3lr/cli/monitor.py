@@ -16,6 +16,7 @@ import sys
 import time
 
 from .formatting import optimization_status, precision_label, throughput_label, terminal_text
+from .formatting import terminal_text as _literal
 
 
 ENERGIES = {
@@ -46,13 +47,6 @@ def _stamp(value):
         return result.replace(tzinfo=timezone.utc) if result.tzinfo is None else result
     except (ValueError, TypeError):
         return None
-
-
-def _literal(value):
-    """Keep arbitrary paths and messages literal, including terminal controls."""
-    text = str(value)
-    return ''.join(f'\\x{ord(char):02x}' if ord(char) < 32 or 127 <= ord(char) < 160 else char
-                   for char in text)
 
 
 def _age(timestamp, now):
@@ -742,11 +736,12 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
 
 def _paged_monitor(console, options, readers, selected, energy, width, height, page, now, ascii_only, attached=False):
     """Pack complete plot blocks into short screens; keep controls visible."""
+    from rich.cells import cell_len
     from rich.console import Group
     from rich.text import Text as RichText
 
-    def Text(value='', style=''):
-        return RichText(terminal_text(value, ascii_only), style=style, no_wrap=True,
+    def Text(value='', style='', *, allow_newlines=False):
+        return RichText(terminal_text(value, ascii_only, allow_newlines=allow_newlines), style=style, no_wrap=True,
                         overflow='crop' if ascii_only else 'ellipsis')
 
     def line_count(renderable):
@@ -796,15 +791,18 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
     if state.status == 'Failed' and state.message:
         footer.append(Text(_literal(state.message), 'red'))
     controls_text = _controls(state, attached, paged=True, multiple=len(readers) > 1)
-    if width < 60 and not (attached and state.status in ('Completed', 'Failed')):
+    if (cell_len(terminal_text(controls_text, ascii_only)) > width
+            and not (attached and state.status in ('Completed', 'Failed'))):
         if attached:
-            controls_text = (('↑/↓ plots · e energy · q hide\n' if state.info.get('_attached_keyboard') else '')
+            controls_text = (('↑/↓: plots · e: energy · q: hide\n' if state.info.get('_attached_keyboard') else '')
                              + 'Ctrl+C interrupts MD')
         else:
-            controls_text = ('←/→ run · o overview\n' if len(readers) > 1 else '') + '↑/↓ plots · e energy · q close'
+            close = 'q: close' if state.status in ('Completed', 'Failed') else 'q: detach'
+            controls_text = ('←/→: run · o: overview\n' if len(readers) > 1 else '') + '↑/↓: plots · e: energy · ' + close
         if ascii_only:
-            controls_text = controls_text.replace('↑/↓', 'up/down').replace('←/→', 'left/right').replace('energy', 'E')
-    controls = Text(controls_text, 'dim')
+            controls_text = (controls_text.replace('↑/↓', 'up/down').replace('←/→', 'left/right')
+                             .replace('energy', 'E').replace('plots', 'plot'))
+    controls = Text(controls_text, 'dim', allow_newlines=True)
     if attached and state.status in ('Completed', 'Failed'):
         # The saved-directory command must stay copyable even for long paths.
         controls.no_wrap, controls.overflow = False, 'fold'
@@ -895,6 +893,11 @@ class _Keyboard(AbstractContextManager):
         return self
 
     def read(self, timeout=0.1):
+        from .prompts import decode_key
+
+        def adapt(key):
+            return {'left': 'previous', 'right': 'next', 'ignore': '', '\x1b': ''}.get(key, key)
+
         if os.name == 'nt':
             import msvcrt
             if not msvcrt.kbhit():
@@ -902,25 +905,25 @@ class _Keyboard(AbstractContextManager):
                 return ''
             char = msvcrt.getwch()
             if char in ('\x00', '\xe0'):
-                return {'K': 'previous', 'M': 'next', 'H': 'up', 'P': 'down'}.get(msvcrt.getwch(), '')
-            return char
+                char += msvcrt.getwch()
+            key, _ = decode_key(char, final=True, literal=True)
+            return adapt(key)
         import select
-        if not self.pending or self.pending in ('\x1b', '\x1b['):
+        key, remainder = decode_key(self.pending, literal=True)
+        if key is None:
             if not select.select([self.fd], [], [], timeout)[0]:
                 return ''
             chunk = os.read(self.fd, 32).decode('utf-8', errors='ignore')
             if not chunk:
                 return 'q'
             self.pending += chunk
-        if self.pending in ('\x1b', '\x1b['):
-            return ''
+            key, remainder = decode_key(self.pending, literal=True)
+            if key is None:
+                return ''
         # Preserve queued keys. A single terminal read can contain an arrow,
         # energy selection and quit/toggle; each must get its own UI update.
-        if self.pending.startswith('\x1b['):
-            code, self.pending = self.pending[2], self.pending[3:]
-            return {'D': 'previous', 'C': 'next', 'A': 'up', 'B': 'down'}.get(code, '')
-        key, self.pending = self.pending[0], self.pending[1:]
-        return '' if key == '\x1b' else key
+        self.pending = remainder
+        return adapt(key)
 
     def __exit__(self, *args):
         if self.previous is not None:

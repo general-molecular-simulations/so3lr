@@ -14,6 +14,8 @@ from so3lr.cli.so3lr_cli import YAML_DEFAULTS
 
 
 class Recorder:
+    observing = True
+
     def __init__(self):
         self.starts, self.samples, self.saved = [], [], []
         self.info = []
@@ -131,6 +133,34 @@ def test_checkpoint_report_uses_actual_npz_filename(driver):
     assert recorder.saved == [(4, 2), (6, 3)]
 
 
+def test_checkpoint_report_uses_writer_returned_path(driver, monkeypatch):
+    run, _, settings, recorder = driver
+    save = so3lr_md.save_state
+
+    def relocated(state, box, cycle, path_to_save, **kwargs):
+        return save(state, box, cycle, str(path_to_save) + '.relocated', **kwargs)
+
+    monkeypatch.setattr(so3lr_md, 'save_state', relocated)
+    run(settings)
+    assert not Path(settings['restart_save_path']).exists()
+    assert Path(settings['restart_save_path'] + '.relocated.npz').exists()
+    assert recorder.saved == [(4, 2), (6, 3)]
+
+
+def test_library_reporting_skips_observer_only_cell_work(monkeypatch):
+    from so3lr.cli.presentation import _NullReporter
+
+    class DeviceBox:
+        def __array__(self, *args, **kwargs):
+            raise AssertionError('A fixed-cell library call should not transfer the box for telemetry')
+
+    rows = []
+    monkeypatch.setattr(so3lr_md.logger, 'info', rows.append)
+    so3lr_md.report_md_row(_NullReporter(), 2, 1., -2., -1., 300., .1,
+                          ensemble='nve', box=DeviceBox())
+    assert rows == ['2\t-1.000\t1.000\t-2.000\t-1.000\t300.0\t1.00e-01']
+
+
 def test_standard_rejected_cycle_does_not_advance_progress(driver, monkeypatch):
     run, module, settings, recorder = driver
     if module is not so3lr_md:
@@ -241,12 +271,13 @@ def test_langevin_samples_do_not_label_energy_as_conserved(driver):
     assert 'Step\tE [eV]\tKE\tPE\tH\tTemp [K]\ttime/step [s]' in log
 
 
-def test_pressure_is_shared_between_log_and_metrics(monkeypatch):
+@pytest.mark.parametrize('dtype', [np.float32, np.float64])
+def test_pressure_is_shared_between_log_and_metrics(monkeypatch, dtype):
     class FlexibleState:
         pass
 
     calls = []
-    tensor = np.diag([0.01, 0.02, 0.03])
+    tensor = np.diag(np.asarray([0.01, 0.02, 0.03], dtype=dtype))
     monkeypatch.setattr(so3lr_md.jax_md.simulate, 'NPTNoseHooverFlexState', FlexibleState)
 
     def pressure(state):
@@ -259,8 +290,9 @@ def test_pressure_is_shared_between_log_and_metrics(monkeypatch):
     row = so3lr_md.format_md_row(100, 1., -2., -1., 300., 0.1,
                                state, np.array([10., 11., 12.]), metrics=metrics)
     assert calls == [state]
-    assert metrics['pressure_diagonal'] == [0.01, 0.02, 0.03]
-    pressure_bar = tensor.diagonal() / so3lr_md.units.metal_unit_system()['pressure']
+    assert metrics['pressure_diagonal'] == pytest.approx([0.01, 0.02, 0.03])
+    # Match the previous device-side conversion, including printed rounding.
+    pressure_bar = np.diag(np.asarray(jnp.asarray(tensor) / so3lr_md.units.metal_unit_system()['pressure']))
     assert row.split('\t')[6] == '({:.1f},{:.1f},{:.1f})'.format(*pressure_bar)
 
 

@@ -5,6 +5,8 @@ import math
 import os
 from pathlib import Path
 
+from .formatting import terminal_text as _literal
+
 
 def _number(value):
     if isinstance(value, bool):
@@ -14,13 +16,6 @@ def _number(value):
     except (TypeError, ValueError, OverflowError):
         return None
     return value if math.isfinite(value) else None
-
-
-def _literal(value, ascii_only=False):
-    value = str(value)
-    value = ''.join(f'\\x{ord(char):02x}' if ord(char) < 32 or 127 <= ord(char) < 160 else char
-                    for char in value)
-    return value.encode('ascii', errors='backslashreplace').decode('ascii') if ascii_only else value
 
 
 def _shorten(value, width, ascii_only):

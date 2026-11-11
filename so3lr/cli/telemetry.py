@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import socket
 import sys
+import threading
 import time
 import uuid
 
@@ -56,6 +57,7 @@ class EventJournal:
         self.seq = 0
         self._stream = None
         self._warned = False
+        self._lock = threading.RLock()
         self._initializing = True
         self._pending_initial_error = None
         self._started_at = time.monotonic()
@@ -101,9 +103,10 @@ class EventJournal:
 
     @property
     def active(self):
-        return self._stream is not None
+        with self._lock:
+            return self._stream is not None
 
-    def _disable(self, exc):
+    def _disable_locked(self, exc):
         stream, self._stream = self._stream, None
         if stream is not None:
             try:
@@ -114,13 +117,20 @@ class EventJournal:
             # The SO3LR logger can still own a previous invocation's handlers.
             # Wait until this invocation installs its file and warning counter.
             self._pending_initial_error = exc
-        else:
+            return False
+        return True
+
+    def _disable(self, exc):
+        with self._lock:
+            warn = self._disable_locked(exc)
+        if warn:
             self._warn(exc)
 
     def _warn(self, exc):
-        if self._warned:
-            return
-        self._warned = True
+        with self._lock:
+            if self._warned:
+                return
+            self._warned = True
         # This marker prevents the reporting handler from journaling its
         # own failure notification. Logging must not fail the calculation.
         try:
@@ -131,43 +141,62 @@ class EventJournal:
 
     def flush_initial_warning(self):
         """Report a startup failure after this invocation's logger is ready."""
-        error, self._pending_initial_error = self._pending_initial_error, None
+        with self._lock:
+            error, self._pending_initial_error = self._pending_initial_error, None
         if error is not None:
             self._warn(error)
 
-    def emit(self, event_type, data):
-        if self._stream is None:
-            return
-        try:
-            event = {
-                'schema': 1,
-                'run_id': self.run_id,
-                'seq': self.seq + 1,
-                'timestamp': datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
-                'elapsed_s': float(max(0.0, time.monotonic() - self._started_at)),
-                'type': event_type,
-                'data': json_value(data),
-            }
-            line = json.dumps(event, allow_nan=False, ensure_ascii=False, separators=(',', ':')) + '\n'
-            self._stream.write(line)
-            self._stream.flush()
-            self.seq += 1
-        except Exception as exc:
-            self._disable(exc)
+    def emit(self, event_type, data, *, defer_warning=False):
+        """Write one ordered event; optionally return a deferred IO diagnostic.
+
+        A caller serializing its own lifecycle must release its lock before
+        logging the returned failure, since logging owns handler locks too.
+        """
+        error = None
+        with self._lock:
+            if self._stream is None:
+                return
+            try:
+                event = {
+                    'schema': 1,
+                    'run_id': self.run_id,
+                    'seq': self.seq + 1,
+                    'timestamp': datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
+                    'elapsed_s': float(max(0.0, time.monotonic() - self._started_at)),
+                    'type': event_type,
+                    'data': json_value(data),
+                }
+                line = json.dumps(event, allow_nan=False, ensure_ascii=False, separators=(',', ':')) + '\n'
+                self._stream.write(line)
+                self._stream.flush()
+                self.seq += 1
+            except Exception as exc:
+                if self._disable_locked(exc):
+                    error = exc
+        # Logging can acquire a console-handler lock held by another thread.
+        # Never emit diagnostics while holding the journal's write lock.
+        if error is not None and not defer_warning:
+            self._warn(error)
+        return error
 
     def close(self):
-        stream, self._stream = self._stream, None
-        if stream is not None:
-            try:
-                stream.close()
-            except Exception as exc:
-                self._disable(exc)
-        if self._pending_initial_error is not None and not self._warned:
+        error = pending = None
+        with self._lock:
+            stream, self._stream = self._stream, None
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception as exc:
+                    error = exc
+            if self._pending_initial_error is not None and not self._warned:
+                pending, self._pending_initial_error = self._pending_initial_error, None
+                self._warned = True
+        if error is not None:
+            self._warn(error)
+        if pending is not None:
             # Startup can be interrupted before setup_logger. Preserve the
             # diagnostic without ever writing into a previous run's file.
-            error, self._pending_initial_error = self._pending_initial_error, None
-            self._warned = True
             try:
-                sys.stderr.write(f'WARNING: Run telemetry disabled: {error}\n')
+                sys.stderr.write(f'WARNING: Run telemetry disabled: {pending}\n')
             except Exception:
                 pass

@@ -1,26 +1,34 @@
 """Small keyboard-driven selections without another terminal dependency."""
 from contextlib import contextmanager
 import os
+import re
 import sys
 
 import click
+
+from .formatting import terminal_text
 
 
 _KEYS = {
     '\x1b[A': 'up', '\x1bOA': 'up', '\xe0H': 'up', '\x00H': 'up',
     '\x1b[B': 'down', '\x1bOB': 'down', '\xe0P': 'down', '\x00P': 'down',
+    '\x1b[C': 'right', '\x1bOC': 'right', '\xe0M': 'right', '\x00M': 'right',
+    '\x1b[D': 'left', '\x1bOD': 'left', '\xe0K': 'left', '\x00K': 'left',
     '\x1b[H': 'home', '\x1bOH': 'home', '\x1b[1~': 'home', '\xe0G': 'home',
     '\x1b[F': 'end', '\x1bOF': 'end', '\x1b[4~': 'end', '\xe0O': 'end',
     '\x1b[5~': 'page_up', '\xe0I': 'page_up',
     '\x1b[6~': 'page_down', '\xe0Q': 'page_down',
 }
+_CSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 
 
-def decode_key(buffer, *, final=False):
+def decode_key(buffer, *, final=False, literal=False):
     """Consume one key, retaining incomplete escape sequences for the next read.
 
     ``final`` is set after a short escape timeout, distinguishing Escape from
     an arrow key even when the terminal sends that key in several chunks.
+    ``literal`` preserves ordinary characters for monitor shortcuts; prompt
+    callers retain their existing enter/cancel/ignore behavior.
     """
     if not buffer:
         return None, buffer
@@ -29,12 +37,23 @@ def decode_key(buffer, *, final=False):
             return name, buffer[len(sequence):]
     if not final and any(sequence.startswith(buffer) for sequence in _KEYS):
         return None, buffer
+    # Consume unsupported escape sequences as a unit: their payload must not
+    # accidentally become a shortcut (notably the O in application-cursor keys).
+    if buffer.startswith('\x1b['):
+        match = _CSI.match(buffer)
+        if match:
+            return 'ignore', buffer[match.end():]
+        if not final and len(buffer) < 64:
+            return None, buffer
+        return 'ignore', buffer[min(len(buffer), 64):]
+    if buffer.startswith('\x1bO') and len(buffer) >= 3:
+        return 'ignore', buffer[3:]
     char, rest = buffer[0], buffer[1:]
     if char in ('\x03', '\x04', '\x1a', '\x1b'):
-        return 'cancel', rest
+        return (char if literal else 'cancel'), rest
     if char in ('\r', '\n'):
-        return 'enter', rest.lstrip('\r\n')
-    return 'ignore', rest
+        return (char if literal else 'enter'), rest if literal else rest.lstrip('\r\n')
+    return (char if literal else 'ignore'), rest
 
 
 class _Keys:
@@ -104,12 +123,6 @@ def terminal_keys():
 def arrow_input_available(console):
     return (console.is_terminal and bool(getattr(sys.stdin, 'isatty', lambda: False)())
             and os.environ.get('TERM') != 'dumb')
-
-
-def terminal_text(value):
-    """Show arbitrary paths and labels without emitting terminal controls."""
-    return ''.join(f'\\x{ord(char):02x}' if ord(char) < 32 or 127 <= ord(char) < 160 else char
-                   for char in str(value))
 
 
 def selection_view(title, choices, selected=0, height=24):

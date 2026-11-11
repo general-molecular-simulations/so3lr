@@ -1880,8 +1880,13 @@ def main() -> None:
     try:
         cli()
     except Exception as exc:
+        # Only display-owned simulations have already preserved a traceback
+        # in their log. Other commands and programmatic callers must retain
+        # the original exception and its diagnostic traceback.
+        if not getattr(exc, '_so3lr_display_owned', False):
+            raise
         if not getattr(exc, '_so3lr_reported', False):
-            click.ClickException(str(exc)).show()
+            click.ClickException(presentation.exception_message(exc)).show()
         sys.exit(1)
 
 

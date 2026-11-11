@@ -86,6 +86,36 @@ def test_save_exports_user_units_and_preserves_source_metadata(tmp_path, structu
     assert normalized['md_cycles'] * normalized['md_steps'] * normalized['md_dt'] == 5.0
 
 
+@pytest.mark.parametrize('default_buffer', [7, 200])
+def test_setup_uses_cli_buffer_default_bounded_by_run_length(tmp_path, structure_file, monkeypatch, default_buffer):
+    from so3lr.cli import so3lr_cli
+    monkeypatch.setattr(setup, '_interactive', lambda: True)
+    monkeypatch.setattr(so3lr_cli, 'DEFAULT_SAVE_BUFFER', default_buffer)
+    destination = tmp_path / 'buffer-default'
+    result = CliRunner().invoke(wizard, input=answers(structure_file, destination))
+    assert result.exit_code == 0, result.output
+    exported = yaml.safe_load((destination / 'settings.yaml').read_text())
+    assert exported['save_buffer'] == min(default_buffer, exported['md_cycles'])
+
+
+def test_npt_setup_proposes_margin_and_retries_an_unsafe_custom_cutoff(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup, '_interactive', lambda: True)
+    source = tmp_path / 'periodic.xyz'
+    source.write_text('2\nLattice="24 0 0 0 24 0 0 0 24" pbc="T T T"\nH 0 0 0\nH 0 0 .74\n')
+    destination = tmp_path / 'npt-margin'
+    text = '\n'.join([str(len(setup.available_presets()) + 2), str(source),
+                      '4', '1', '300', '1', '0.5', '0.01', '10', '0', '0', '52', 'n',
+                      '12', '', str(destination), '2']) + '\n'
+    result = CliRunner().invoke(wizard, input=text)
+    assert result.exit_code == 0, result.output
+    assert '3% NPT contraction margin' in ' '.join(result.output.split())
+    exported = yaml.safe_load((destination / 'settings.yaml').read_text())
+    assert exported['ensemble'] == 'npt'
+    assert exported['lr_cutoff'] == 10.8
+    assert exported['kspace_spacing'] == 1.0
+    assert '1 Å mesh spacing' in ' '.join(result.output.split())
+
+
 @pytest.mark.parametrize('action', ['1', ''])
 def test_run_locally_is_first_and_default_and_returns_saved_absolute_settings_path(tmp_path, structure_file, monkeypatch, action):
     monkeypatch.setattr(setup, '_interactive', lambda: True)
@@ -545,6 +575,10 @@ def test_manual_water_input_reviews_pme_and_explicit_velocity_choice(tmp_path, m
     assert settings['lr_cutoff'] == 5.5
     assert settings['kspace_electrostatics'] == settings['kspace_dispersion'] == 'pme'
     assert settings['kspace_smearing'] == settings['kspace_dispersion_smearing'] == 2.0
+    assert settings['kspace_spacing'] == 1.0
+    assert settings['kspace_dispersion_spacing'] == 3.0
+    assert '1 Å mesh spacing' in ' '.join(result.output.split())
+    assert '3 Å mesh spacing' in ' '.join(result.output.split())
     assert settings['md_T'] == 300
     exported = read(destination / 'structure.extxyz')
     assert exported.has('momenta') == retain

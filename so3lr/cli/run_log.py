@@ -25,7 +25,7 @@ _NON_SIMULATION_KEYS = frozenset({
     'cutoff_lo', 'cutoff_it', 'cutoff_hi', 'smear_lo', 'smear_hi', 'smear_it',
     'ns_lo', 'ns_hi', 'nodes_lo', 'nodes_hi', 'mesh_lo', 'mesh_hi',
     'dispersion_damping_lo', 'dispersion_damping_hi', 'dispersion_damping_it',
-    'md_precision', 'flash_mixed',
+    'md_precision', 'flash_mixed', 'output_format',
 })
 
 

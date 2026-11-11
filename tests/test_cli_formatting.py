@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from so3lr.cli.formatting import precision_label, throughput_label
+from so3lr.cli.formatting import precision_label, throughput_label, terminal_text
 
 
 def test_mixed_precision_explains_model_and_dynamics():
@@ -70,3 +70,41 @@ def test_formatter_imports_no_numerical_or_terminal_dependencies():
                     'import sys; '
                     'assert not {"jax", "jax_md", "flax", "numpy", "rich"}.intersection(sys.modules)'],
                    check=True)
+
+
+@pytest.mark.parametrize('ascii_only', [False, True])
+def test_terminal_text_escapes_controls_before_literal_rich_rendering(ascii_only):
+    import io
+    from rich.console import Console
+    from rich.text import Text
+
+    source = '[red]molecule-α.xyz\x1b[2J\x1b]0;title\x1b\\\x9b3J\nnext\rline\t\x07'
+    output = io.StringIO()
+    Console(file=output, force_terminal=True, color_system=None).print(Text(terminal_text(source, ascii_only)))
+    rendered = output.getvalue()
+    assert '\x1b' not in rendered and '\x9b' not in rendered and '\x07' not in rendered
+    assert '\\x1b[2J' in rendered and '\\x9b3J' in rendered
+    assert '\\x0anext\\x0dline\\x09\\x07' in rendered
+    assert '[red]' in rendered  # no markup interpretation
+    assert ('\\u03b1' if ascii_only else 'α') in rendered
+    if ascii_only:
+        assert rendered.isascii()
+
+
+def test_terminal_text_preserves_only_explicitly_allowed_layout_newlines():
+    source = 'first\nsecond\x1b[2J\rthird\t'
+    assert terminal_text(source) == 'first\\x0asecond\\x1b[2J\\x0dthird\\x09'
+    assert terminal_text(source, allow_newlines=True) == 'first\nsecond\\x1b[2J\\x0dthird\\x09'
+    assert terminal_text('Volume [Å³] · target ≤ 2', ascii_only=True) == 'Volume [A^3] | target <= 2'
+
+
+def test_prompt_choices_use_the_same_control_escaping():
+    import io
+    from rich.console import Console
+    from so3lr.cli.prompts import selection_view
+
+    output = io.StringIO()
+    Console(file=output, width=100, force_terminal=True, color_system=None).print(
+        selection_view('Choose molecule', ['[bold]ethanol\x1b[2J\nα.xyz']))
+    assert '\x1b' not in output.getvalue()
+    assert '[bold]ethanol\\x1b[2J\\x0aα.xyz' in output.getvalue()

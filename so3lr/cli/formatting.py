@@ -2,9 +2,16 @@
 import math
 
 
-def terminal_text(value, ascii_only=False):
-    """Use plain equivalents for UI glyphs on non-Unicode terminal streams."""
-    text = str(value)
+def terminal_text(value, ascii_only=False, *, allow_newlines=False):
+    """Escape terminal controls, then fold UI glyphs for ASCII-only streams.
+
+    Newlines are data by default, including in paths and diagnostic messages.
+    Only layout text constructed by the application should opt into preserving
+    them. ESC, carriage returns and other C0/C1 controls are always escaped.
+    """
+    text = ''.join(char if allow_newlines and char == '\n' else
+                   f'\\x{ord(char):02x}' if ord(char) < 32 or 127 <= ord(char) < 160 else char
+                   for char in str(value))
     if not ascii_only:
         return text
     for glyph, replacement in (('←/→', 'left/right'), ('↑/↓', 'up/down'),
