@@ -23,8 +23,8 @@ box the engine takes the first of so3lr's three ways that can compute it:
   thinner than that; its neighbour list is built on the CPU at every call.
 
 ``engine``: auto (that order), flash (raise where flash cannot run), or standard (never flash),
-as for ``so3lr md`` and ``so3lr eval``: auto also falls back where flash does not import or
-fails to start.
+as for ``so3lr md`` and ``so3lr eval``: auto also falls back, for good, where flash does not
+import or fails (to start, or to lay out a new box).
 """
 from __future__ import annotations
 
@@ -36,8 +36,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from so3lr.jaxmd_utils import OVERFLOW_EXTRA_LR, OVERFLOW_EXTRA_SR
+
 _UNSET = object()
-OVERFLOW_EXTRA_SR, OVERFLOW_EXTRA_LR = 2, 8     # as so3lr md's (so3lr.cli.so3lr_md, a heavier import)
 
 
 def _coordinates(positions, lengths, dtype):
@@ -56,7 +57,7 @@ class So3lrEngine:
     charge (e); multiplicity: 2S + 1; lr_cutoff: the long-range cutoff (A); dispersion_damping:
     the long-range damping of the dispersion (A); precision: float32 or float64 throughout, or
     mixed, a float32 model around float64 positions and sums (None: mixed with x64, float32
-    without; mixed and float64 need x64); kspace_electrostatics: ewald or pme for periodic
+    without; mixed and float64 need x64); kspace_electrostatics: ewald, pme or p3m for periodic
     electrostatics in k-space (None: in real space up to lr_cutoff), with kspace_smearing and
     kspace_spacing in A (None: so3lr's defaults); engine: auto, flash or standard (above);
     skin: the neighbour lists' skin (A; they are updated at every call either way);
@@ -186,34 +187,36 @@ class So3lrEngine:
 
     # ---- flash ----------------------------------------------------------------------
     def _call_flash(self, positions, box, key):
-        """Energy and forces on flash; None where flash failed to start (built, or built again
-        for a moving box) under auto: the way is then chosen again without it, as ``so3lr md``
-        falls back."""
+        """Energy and forces on flash; None where flash failed under auto (to start, to lay
+        out a new box, ...): flash is then off for this engine and the way is chosen again
+        without it, as ``so3lr md`` falls back."""
         from so3lr.flash.check import NPT_BOX_MARGIN
         from so3lr.flash.md import SinglePoints
-        if self._flash is not None and not self._flash.box_margin and key != self._flash_box:
+        if (self._flash is not None and not self._flash.box_margin and key != self._flash_box
+                and None not in (key, self._flash_box)):
             # the box moves (a barostat): built again once, with NPT's margin, so later boxes
-            # within it compile nothing (a fixed box keeps every cell the margin would cost)
+            # within it compile nothing (a fixed box keeps every cell the margin would cost;
+            # free space lays out its own box)
             self._flash = None
             gc.collect()
-        starting, failed = self._flash is None, None
+        failed = None
         try:
-            if starting:
+            if self._flash is None:
                 margin = 0.0 if self._flash_box is _UNSET else NPT_BOX_MARGIN
                 self._flash = SinglePoints(self._flash_settings, task="ase", matmul_precision=self.matmul_precision,
                                            box_margin=margin)
                 self._flash_box = key
             energy, forces, _ = self._flash(self._ase_atoms(positions, box), self.charge, self.multiplicity - 1.0)
         except Exception as exc:
-            if not starting or self.engine == "flash":
+            if self.engine == "flash":
                 raise
-            failed = f"it failed to start ({type(exc).__name__}: {exc})"
+            failed = f"it failed ({type(exc).__name__}: {exc})"
         if failed is None:
             return energy, forces
         # out of the except block, so the traceback no longer holds the failed engine
         self._flash, self._flash_refusal = None, failed
         gc.collect()
-        warnings.warn(f"So3lrEngine: flash {failed}; running without it", stacklevel=3)
+        warnings.warn(f"So3lrEngine: running without flash, as {failed}", stacklevel=3)
         self.backend = self._route(positions, box)
         return None
 
@@ -235,11 +238,12 @@ class So3lrEngine:
                 raise
             energy, forces, overflow = jax.device_get((energy, forces, overflow))
             if not overflow.any():
+                self._extra[:] = 0
                 return float(energy), np.asarray(forces, np.float64)
             # a list overflowed, or the box shrank below its cells: that list allocated again
             # for this box with more room, as so3lr md does, and the step again (it compiles
             # again: a new list's cell-list functions are static, new objects)
-            self._extra += np.where(overflow, (OVERFLOW_EXTRA_SR, OVERFLOW_EXTRA_LR), 0)
+            self._extra += np.where(overflow, (OVERFLOW_EXTRA_SR, OVERFLOW_EXTRA_LR), 0)  # reset once it runs
             self._allocate(positions, lengths, overflow)
         raise RuntimeError("So3lrEngine: the neighbour lists overflow right after their allocation")
 

@@ -3,6 +3,7 @@ structures (float64, so the ways agree to round-off), the way it takes for each 
 neighbour lists allocated again on overflow, pickling, and the arguments it refuses."""
 import pathlib
 import pickle
+import warnings
 
 import numpy as np
 import numpy.testing as npt
@@ -77,9 +78,10 @@ def test_periodic_matches_calculator_as_positions_and_box_change():
         assert engine.backend == "neighbour-list"
 
 
-def test_pme_matches_calculator():
+@pytest.mark.parametrize("method", ["pme", "p3m"])
+def test_mesh_kspace_matches_calculator(method):
     atoms = _water()
-    kspace = dict(kspace_electrostatics="pme", kspace_smearing=2.0, kspace_spacing=1.0)
+    kspace = dict(kspace_electrostatics=method, kspace_smearing=2.0, kspace_spacing=1.0)
     engine = _engine(atoms, **kspace)
     _assert_close(engine(atoms.positions, _box(atoms)), _reference(atoms, **kspace), energy=1e-6, forces=1e-5)
 
@@ -180,7 +182,7 @@ def test_auto_falls_back_where_flash_fails_to_start(monkeypatch):
     atoms = _molecule()
     engine = _engine(atoms, engine="auto")
     engine._flash_refusal = None            # as on a GPU where the settings, model and device pass
-    with pytest.warns(UserWarning, match="failed to start"):
+    with pytest.warns(UserWarning, match="running without flash, as it failed"):
         result = engine(atoms.positions)
     assert engine.backend == "neighbour-list"
     _assert_close(result, _reference(atoms))
@@ -208,10 +210,24 @@ def test_auto_falls_back_where_flash_fails_to_start_again_for_a_moving_box(monke
     engine(atoms.positions, _box(atoms))
     assert engine.backend == "flash"
     atoms.set_cell(atoms.cell * 0.995, scale_atoms=True)
-    with pytest.warns(UserWarning, match="failed to start"):
+    with pytest.warns(UserWarning, match="running without flash, as it failed"):
         result = engine(atoms.positions, _box(atoms))
     assert engine.backend == "neighbour-list"
     _assert_close(result, _reference(atoms))
+    # flash stays off: the next box is not tried on it again
+    atoms.set_cell(atoms.cell * 0.995, scale_atoms=True)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        engine(atoms.positions, _box(atoms))
+    assert not [w for w in caught if "flash" in str(w.message)]
+    assert engine.backend == "neighbour-list"
+    # engine="flash" raises instead
+    strict = _engine(atoms, engine="flash")
+    strict._flash_refusal = None
+    strict(atoms.positions, _box(atoms))
+    atoms.set_cell(atoms.cell * 0.995, scale_atoms=True)
+    with pytest.raises(RuntimeError, match="out of memory"):
+        strict(atoms.positions, _box(atoms))
 
 
 @GPU
