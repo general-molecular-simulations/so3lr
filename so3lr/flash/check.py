@@ -38,7 +38,7 @@ EVAL_AUTO_ENGINES = 16
 
 # settings flash honours (aliases included)
 HANDLED = {
-    "fixed_atom_indices",  # held in place (nve/nvt/nvt-langevin): md.py resets them after every step
+    "fixed_atom_indices",  # md.py holds them (rules: settings_problem)
     "input_file", "output_file", "log_file", "output_format", "overwrite", "output_atom_indices",
     "output_cartesian_positions", "enforce_cartesian_coordinates", "model", "model_path", "precision",
     "matmul_precision", "lr_cutoff", "dispersion_damping", "total_charge", "num_unpaired_electrons", "spin",

@@ -52,6 +52,7 @@ from so3lr.cli.so3lr_md import (
     format_md_row,
     handle_units,
     init_hdf5_store,
+    load_atom_masks,
     load_state,
     npt_nose_hoover_for,
     npt_start_motion,
@@ -543,20 +544,43 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     if ensemble == "nvt-langevin" and (thermo is None or thermo <= 0):
         raise ValueError(f"--langevin-thermo must be > 0 (received {thermo})")
 
+    # range-checked as perform_md does (check.py declines the mask file and mobile_atom_indices)
+    held = load_atom_masks(None, len(atoms), fixed_atom_indices=s.get("fixed_atom_indices"))[1]
+    held = np.zeros(0, np.int64) if held is None else held.astype(np.int64)
+    R_held = (position if state is None else state.position)[held]
+
+    def hold(free_apply):
+        """fixed_atom_indices: back at their start positions with zero momentum and force after
+        every step (as perform_md's apply_atom_constraints_to_state), so the next step does not
+        kick them and its forces see them in place (e.g. a solute whose mean solvation force is
+        sampled). check.py declines NPT and the relaxation before MD, which would move them."""
+        if not held.size:
+            return free_apply
+
+        def apply(st, **kwargs):
+            st = free_apply(st, **kwargs)
+            return st.set(position=st.position.at[held].set(R_held.astype(st.position.dtype)),
+                          momentum=st.momentum.at[held].set(0.0), force=st.force.at[held].set(0.0))
+        if hasattr(free_apply, "__wrapped__"):     # PySAGES' loop unwraps jax-md's jit (_traced)
+            apply.__wrapped__ = hold(free_apply.__wrapped__)
+        return apply
+
     def integrator():
         """jax-md's (init_fn, apply_fn) on the engine as it is (made again after a rebuild:
-        _run_jitted)."""
+        _run_jitted), holding the fixed atoms."""
         force_fn = _force_fn(eng)
         if ensemble == "nve":
-            return jax_md.simulate.nve(force_fn, shift, md_dt)
-        if ensemble == "nvt":
-            return jax_md.simulate.nvt_nose_hoover(
+            init, apply = jax_md.simulate.nve(force_fn, shift, md_dt)
+        elif ensemble == "nvt":
+            init, apply = jax_md.simulate.nvt_nose_hoover(
                 force_fn, shift, md_dt, kT, chain_length=s.get("nhc_chain_length"),
                 chain_steps=s.get("nhc_steps"), sy_steps=s.get("nhc_sy_steps"),
                 tau=md_dt * s.get("nhc_thermo"))
-        return jax_md.simulate.nvt_langevin(
-            force_fn, shift, md_dt, kT, gamma=1.0 / (md_dt * thermo),
-            center_velocity=s.get("langevin_removecmmotion"))
+        else:
+            init, apply = jax_md.simulate.nvt_langevin(
+                force_fn, shift, md_dt, kT, gamma=1.0 / (md_dt * thermo),
+                center_velocity=s.get("langevin_removecmmotion"))
+        return init, hold(apply)
     # NPT: jax-md's isotropic barostat, or its flexible cell with x and y coupled (semi-isotropic),
     # as perform_md runs them
     npt_fn, npt_box, npt_invariant = npt_nose_hoover_for(coupling) if npt else (None, None, None)
@@ -573,30 +597,6 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         barostat = dict(thermostat, tau=md_dt * s.get("nhc_baro"))
         init_fn, apply_fn = npt_fn(_surrogate, shift, md_dt, pressure=P, kT=kT, barostat_kwargs=barostat,
                                    thermostat_kwargs=thermostat)
-
-    held = s.get("fixed_atom_indices")
-    held = None if held is None or len(held) == 0 else jnp.asarray(np.asarray(held, dtype=np.int64))
-    if held is not None:
-        # fixed_atom_indices: back at their start positions with zero momentum after every step, so
-        # each step's forces see them in place (e.g. a solute whose mean solvation force is sampled).
-        # Langevin acts per atom, so the thermostat of the rest is unchanged; check.py declines NPT and
-        # the relaxation before MD, which would move them
-        R_held = (position if state is None else state.position)[held]
-
-        def hold(free_apply):
-            def apply(st, **kwargs):
-                st = free_apply(st, **kwargs)
-                return st.set(position=st.position.at[held].set(R_held.astype(st.position.dtype)),
-                              momentum=st.momentum.at[held].set(0.0))
-            return apply
-
-        apply_fn = hold(apply_fn)
-        free_integrator = integrator
-
-        def integrator():
-            """The jitted loop (_run_jitted) makes its own steps: they hold the atoms too."""
-            init, apply = free_integrator()
-            return init, hold(apply)
 
     def cartesian(st):
         """Positions in A and the box sides of a state."""
@@ -637,8 +637,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         if state is None:
             state = jax.jit(lambda R, F, m, p: init_fn(key, R, kT=kT, mass=m, momenta=p, F=F))(
                 position, F0, geo["masses"], geo.get("momenta"))
-    if held is not None:
-        state = state.set(momentum=state.momentum.at[held].set(0.0))
+    if held.size:
+        state = state.set(momentum=state.momentum.at[held].set(0.0), force=state.force.at[held].set(0.0))
     if pysages_set_dict is not None:
         # the CVs as perform_md builds them: coordinationnumber counts the edges of a
         # short-range list like perform_md's, the others read only its starting positions

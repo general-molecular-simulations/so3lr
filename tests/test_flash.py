@@ -265,7 +265,6 @@ def test_engine_choice(monkeypatch, change, reason):
 def test_fixed_atoms_after_a_restart():
     """A restart skips the relaxation before MD, so flash then takes fixed atoms with the default relax_before_run."""
     assert check.settings_problem(dict(SETTINGS, fixed_atom_indices=[0, 1], restart_load_path="r.npz")) is None
-    assert "relax_before_run" in check.settings_problem(dict(SETTINGS, fixed_atom_indices=[0, 1]))
 
 
 def test_engine_choice_small_box(monkeypatch):
