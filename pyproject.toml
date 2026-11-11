@@ -29,17 +29,23 @@ classifiers = [
 dependencies = [
     "ase>=3.26,<4",
     "click>=8.2,<9",
-    # Caps only, so existing cluster JAX installs are kept: jaxlib 0.11.1 has
-    # an XLA:CPU regression (jax-ml/jax#40101) that makes the PME/P3M mesh
-    # scatter hang, and flax >=0.12.9 requires jax >=0.11.1. flax <=0.12.0
-    # imports jax's removed mutable_array and fails to import with jax 0.10.x.
+    # Caps and one excluded release only, so existing cluster JAX installs are
+    # kept: jaxlib 0.11.1 has an XLA:CPU regression (jax-ml/jax#40101) that
+    # makes the PME/P3M mesh scatter hang, and flax >=0.12.9 requires jax
+    # >=0.11.1. flax <=0.12.0 imports jax's removed mutable_array and fails to
+    # import with jax 0.10.x.
+    # jax 0.10.2 miscompiles vmapped matrix-vector products on CPU
+    # (jax-ml/jax#39103), which jax-md's periodic displacements are: wrong
+    # energies and forces, silently. The jax-md pin excludes it too; a 0.10.2
+    # GPU install is moved to 0.10.1, so install with [cuda12] for the CUDA
+    # plugin to follow (a 0.10.2 plugin left behind makes jax fall back to CPU).
     "flax>=0.12.1,<0.12.9",
     "glp @ git+https://github.com/fbruenig/glp.git@2294f4f59e940be64c45bf5e4d1bea5cb90809f8",
     "h5py>=3.11,<4",
-    "jax<0.11",
-    "jax-md @ git+https://github.com/kabylda/jax-md.git@a1618449f7f00df5aa3b1e50105dacb5193b2cda",
+    "jax<0.11,!=0.10.2",
+    "jax-md @ git+https://github.com/kabylda/jax-md.git@d27c351ab0187cf9eadd7cf26f2b1cdaf5b059b6",
     "jax-pme @ git+https://github.com/fbruenig/jax-pme.git@de9a3a9dfeb1f5b635a54a8f277c1ec3ecd2bf6d",
-    "jaxlib<0.11",
+    "jaxlib<0.11,!=0.10.2",
     "jraph @ git+https://github.com/google-deepmind/jraph.git@51f5990104f7374492f8f3ea1cbc47feb411c69c",
     "ml-collections>=1.1,<2",
     "numpy>=1.26,<3",
@@ -51,7 +57,8 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda12 = [
-    "jax[cuda12]<0.11; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # the version bounds are the core jax requirement's
+    "jax[cuda12]; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 pysages = [
     "pysages @ git+https://github.com/em819/PySAGES.git@c95297417953021c6a461507b36c47d4dea7660a",

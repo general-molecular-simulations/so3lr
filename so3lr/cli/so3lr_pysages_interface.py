@@ -18,6 +18,7 @@ import jax_md.quantity
 import jax_md.units
 from jax_md.space import transform
 from so3lr.md_settings_validation import load_settings_yaml
+from so3lr.pbc import box_to_diag
 from so3lr.md_settings_validation import expand_indices as _expand_indices
 from jax import jit
 
@@ -335,8 +336,10 @@ def update_so3lr_after_pysages(raw_result, init_fn, rng_key, md_T, dt,
     # Update neighbor lists with the correct box
     if nbrs is not None:
         position = frac_positions if ensemble == 'npt' else final_snapshot.positions
-        nbrs = nbrs.update(position, neighbor=nbrs.idx, box=new_box)
-        nbrs_lr = nbrs_lr.update(position, neighbor=nbrs_lr.idx, box=new_box)
+        # the lengths of a diagonal box, as the MD loop's update_neighbor_lists passes them
+        box = box_to_diag(new_box)
+        nbrs = nbrs.update(position, neighbor=nbrs.idx, box=box)
+        nbrs_lr = nbrs_lr.update(position, neighbor=nbrs_lr.idx, box=box)
 
     # Restore bias forces to avoid a discontinuity at the cycle boundary.
     # The snapshot stores unbiased forces (captured before PySAGES adds bias),

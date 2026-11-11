@@ -1409,7 +1409,8 @@ class TestUpdateAfterPysages:
         # Neighbor list was refreshed with the snapshot positions and new box
         assert nbrs.last_update is not None
         np.testing.assert_allclose(nbrs.last_update['positions'], positions)
-        np.testing.assert_allclose(nbrs.last_update['box'], new_box)
+        # as the lengths of the diagonal box, as the MD loop passes them
+        np.testing.assert_allclose(nbrs.last_update['box'], jnp.diag(new_box))
 
     def test_nvt_bias_restores_force_momentum_and_chain_ke(self):
         """When raw_result.states[0].bias != 0, update_so3lr_after_pysages must
