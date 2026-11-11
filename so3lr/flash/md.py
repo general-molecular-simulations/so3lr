@@ -482,8 +482,10 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
 
     current_cycle, state = 0, None
     # a restarted PySAGES state keeps its snapshot's momenta; held atoms keep zero momenta
-    held = s.get("fixed_atom_indices")
-    com_free_restart = restart_removes_com_motion(s, restart_pysages, held is not None and len(held) > 0)
+    # range-checked as perform_md does (check.py declines the mask file and mobile_atom_indices)
+    held = load_atom_masks(None, len(atoms), fixed_atom_indices=s.get("fixed_atom_indices"))[1]
+    held = np.zeros(0, np.int64) if held is None else held.astype(np.int64)
+    com_free_restart = restart_removes_com_motion(s, restart_pysages, held.size > 0)
     if restart:
         logger.info(f"Loading state from {restart_load_path}.")
         try:
@@ -558,9 +560,6 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     if ensemble == "nvt-langevin" and (thermo is None or thermo <= 0):
         raise ValueError(f"--langevin-thermo must be > 0 (received {thermo})")
 
-    # range-checked as perform_md does (check.py declines the mask file and mobile_atom_indices)
-    held = load_atom_masks(None, len(atoms), fixed_atom_indices=s.get("fixed_atom_indices"))[1]
-    held = np.zeros(0, np.int64) if held is None else held.astype(np.int64)
     R_held = (position if state is None else state.position)[held]
 
     def in_place(st):

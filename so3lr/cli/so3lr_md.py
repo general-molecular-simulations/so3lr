@@ -1153,8 +1153,9 @@ def remove_kspace_net_force(all_settings: Dict) -> bool:
 
 def restart_removes_com_motion(all_settings: Dict, restart_pysages: bool = False,
                                held_atoms: bool = False) -> bool:
-    """Whether a restart zeroes the centre-of-mass motion: not when the run keeps the old
-    behaviour (``kspace_remove_net_force: false``), not for a Langevin run that leaves it
+    """Whether a restart zeroes the centre-of-mass motion (with or without k-space: a box that
+    drifted before is stopped): not when the run keeps the old behaviour
+    (``kspace_remove_net_force: false`` also keeps the restart's motion), not for a Langevin run that leaves it
     thermal (``langevin_removecmmotion: false``), not with atoms held in place (their momenta
     stay zero), and not for a restarted PySAGES state (it keeps its snapshot's momenta)."""
     if restart_pysages or held_atoms:
@@ -1735,8 +1736,13 @@ def remove_restart_com_motion(state):
     if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState):
         # stores velocity; its momentum is a read-only property
         mass = jnp.reshape(jnp.asarray(state.mass, momentum.dtype), (-1, 1))
-        return state.set(velocity=(momentum / mass).astype(state.velocity.dtype))
-    return state.set(momentum=momentum)
+        state = state.set(velocity=(momentum / mass).astype(state.velocity.dtype))
+    else:
+        state = state.set(momentum=momentum)
+    if hasattr(state, 'chain'):      # Nose-Hoover's first half-step reads its cached kinetic energy
+        state = state.set(chain=state.chain.set(kinetic_energy=jax_md.quantity.kinetic_energy(
+            momentum=state.momentum, mass=state.mass)))
+    return state
 
 
 def constrain_md_carry(
