@@ -42,6 +42,7 @@ EVAL_AUTO_ENGINES = 16
 
 # settings flash honours (aliases included)
 HANDLED = {
+    "fixed_atom_indices",  # md.py holds them (rules: settings_problem)
     "input_file", "output_file", "log_file", "output_format", "overwrite", "output_atom_indices",
     "output_cartesian_positions", "enforce_cartesian_coordinates", "model", "model_path", "precision",
     "matmul_precision", "lr_cutoff", "dispersion_damping", "total_charge", "num_unpaired_electrons", "spin",
@@ -59,7 +60,8 @@ HANDLED = {
 }
 # settings that only concern the neighbour-list engine, other commands sharing a settings
 # file (eval, tune-ewald), or act only together with a declined setting below (the
-# constraint mode with fixed atoms, the cylinder parameters with cylinder_restraint_enabled)
+# cylinder parameters with cylinder_restraint_enabled); the fixed atoms' constraint mode acts
+# only in NPT, which flash declines with fixed atoms (settings_problem validates its spelling)
 IRRELEVANT = {
     "buffer_size_multiplier_lr", "buffer_lr", "minimum_cell_size_multiplier", "jit_compile", "datafile",
     "save_to", "targets", "batch_size", "accuracy", "cutoff_lo", "cutoff_hi", "cutoff_it",
@@ -74,7 +76,8 @@ IRRELEVANT = {
 UNSUPPORTED = {
     "cylinder_restraint_enabled": "cylindrical restraint",
     "observables": "observables", "observable": "observables",
-    "atom_mask_path": "fixed atoms", "mobile_atom_indices": "fixed atoms", "fixed_atom_indices": "fixed atoms",
+    "atom_mask_path": "fixed atoms from a mask file (give fixed_atom_indices)",
+    "mobile_atom_indices": "mobile_atom_indices (give fixed_atom_indices)",
     "dispersion_tail_correction": "the dispersion tail correction",
     "kspace_npt_cycles": "re-tuning the PME mesh every so many cycles (kspace_npt_cycles)",
 }
@@ -176,6 +179,18 @@ def settings_problem(settings, task="md"):
                 return f"it has no {UNSUPPORTED[key]}"
         elif key not in HANDLED and key not in IRRELEVANT and not _off(value):
             return f"it does not know the setting {key!r}"
+    mode = s.get("fixed_atom_constraint")
+    if mode is not None and str(mode).strip().lower().replace("-", "_") not in ("cartesian_anchor", "fractional"):
+        return f"it does not know fixed_atom_constraint {mode!r}"   # perform_md raises
+    if not _off(s.get("fixed_atom_indices")):
+        # md.py puts held atoms back after every step of nve / nvt / nvt-langevin; the NPT box moves
+        # them, and flash's minimiser (so3lr opt, the relaxation before MD) does not hold them
+        if task != "md":
+            return f"it holds atoms fixed only in MD, not in {task}"
+        if ens == "npt":
+            return "it holds atoms fixed only in nve, nvt and nvt-langevin (the NPT box moves them)"
+        if s.get("relax_before_run", True) and not s.get("restart_load_path"):
+            return "it holds fixed atoms only without the relaxation before MD (relax_before_run: false)"
     if not _off(s.get("do_enhanced_sampling")):
         # enhanced sampling is an MD setting: opt, eval and ase decline it as they did
         # before flash ran PySAGES, so their engine choice does not change
