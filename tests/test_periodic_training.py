@@ -41,9 +41,8 @@ def _molecule():
 def _load(frames, tmp_path):
     path = tmp_path / 'frames.extxyz'
     write(path, frames)
-    data, stats = AseDataLoaderSparse(input_file=path).load(
+    return AseDataLoaderSparse(input_file=path).load(
         cutoff=CUTOFF, cutoff_lr=LR, calculate_neighbors_lr=True, pick_idx=np.arange(len(frames)))
-    return data, stats
 
 
 def _predict(data, stats, batch_size, kspace=None, k_grid=None):
@@ -92,8 +91,7 @@ def test_molecule_keeps_its_energy_next_to_a_crystal(tmp_path):
 
 
 def _graph(atoms):
-    graph, lr = ASE_to_jraph(atoms, cutoff=CUTOFF, calculate_neighbors_lr=True, cutoff_lr=LR)
-    return graph, lr
+    return ASE_to_jraph(atoms, cutoff=CUTOFF, calculate_neighbors_lr=True, cutoff_lr=LR)
 
 
 @pytest.mark.parametrize('method', ['pme', 'ewald'])

@@ -159,7 +159,8 @@ def dynamically_batch_with_lr(
         yield _finalize_batch(accumulated, n_node, n_edge, n_graph, n_pairs)
 
 
-def _is_periodic_graph(graph):
+def is_periodic_graph(graph):
+    """True when the graph is periodic along at least one axis."""
     pbc = (graph.globals or {}).get('pbc')
     return pbc is not None and bool(np.any(pbc))
 
@@ -174,7 +175,7 @@ def with_uniform_periodic_fields(items):
     offsets leave every distance unchanged; the pbc flags (and the singular cell) keep
     the molecule non-periodic in the model.
     """
-    if not any(item is not None and _is_periodic_graph(item[0]) for item in items):
+    if not any(item is not None and is_periodic_graph(item[0]) for item in items):
         return items
     out = []
     for item in items:
@@ -185,11 +186,11 @@ def with_uniform_periodic_fields(items):
         if 'cell_offset' not in (graph.edges or {}):
             n_edge = int(np.sum(graph.n_edge))
             graph = graph._replace(
-                edges={**(graph.edges or {}), 'cell_offset': np.zeros((n_edge, 3))},
+                edges={**(graph.edges or {}), 'cell_offset': np.zeros((n_edge, 3), np.int64)},
                 globals={**graph.globals, 'cell': np.zeros((len(graph.n_node), 3, 3))},
             )
         if lr.get('cell_offsets_lr') is None:
-            lr = {**lr, 'cell_offsets_lr': np.zeros((len(lr['idx_i_lr']), 3))}
+            lr = {**lr, 'cell_offsets_lr': np.zeros((len(lr['idx_i_lr']), 3), np.int64)}
         out.append((graph, lr))
     return out
 

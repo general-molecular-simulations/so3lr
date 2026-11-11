@@ -6,7 +6,7 @@ from so3lr.mlff import training_utils
 from so3lr.mlff import data
 from so3lr.mlff import jraph_utils
 from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_force_fn_sparse
-from so3lr.mlff.utils.kspace_utils import kspace_grid_shape, setup_kspace_grid
+from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
 from ml_collections import config_dict
 import jraph
 import numpy as np
@@ -89,7 +89,9 @@ def _compute_kspace_constants(config, training_data, tf_record_present, validati
     geometry), and a compiled step needs one shape. A mesh sized for one cell is too
     coarse for a larger one, so the shape is the per-axis maximum over every
     training and validation cell: each cell then gets at least the requested
-    spacing. TFDS data is streamed, so only its first batch is scanned.
+    spacing. jaxpme's shape grows with the length of each cell row only, so it is
+    computed once, for the longest row per axis. TFDS data is streamed, so only its
+    first batch is scanned.
 
     Returns a dict with k_grid, k_smearing, k_grid_disp, k_smearing_disp as jnp arrays,
     or None if kspace is disabled.
@@ -123,7 +125,10 @@ def _compute_kspace_constants(config, training_data, tf_record_present, validati
         )
     else:
         # For ASE/Npz data, training_data and validation_data are lists of (graph, lr_data) tuples.
-        for graph, _ in [*training_data, *validation_data]:
+        for item in [*training_data, *validation_data]:
+            if item is None:  # loaders keep a None where a structure was filtered out
+                continue
+            graph = item[0]
             _validate_kspace_graph_pbc(graph, padded=False)
             cell = graph.globals.get('cell')
             if cell is not None and np.any(cell != 0):
@@ -135,19 +140,12 @@ def _compute_kspace_constants(config, training_data, tf_record_present, validati
 
     logger.info(f'Computing k-space grid for training with method={kspace_method}, '
                 f'smearing={kspace_smearing}, spacing={kspace_spacing}')
-    shapes = {kspace_grid_shape(kspace_method, kspace_spacing, c) for c in cells}
-    mesh_shape = tuple(int(n) for n in np.max(np.array(list(shapes)), axis=0))
-    logger.info(f'{len(cells)} periodic cells, {len(shapes)} distinct mesh shapes; using {mesh_shape}')
-
-    _, k_smearing = setup_kspace_grid(
-        kspace_electrostatics=kspace_method,
-        kspace_smearing=kspace_smearing,
-        kspace_spacing=kspace_spacing,
-        box=jnp.asarray(cells[0]),
-    )
+    longest_rows = np.max(np.linalg.norm(np.asarray(cells), axis=-1), axis=0)  # (3,)
+    mesh_shape = kspace_grid_shape(kspace_method, kspace_spacing, np.diag(longest_rows))
     k_grid = jnp.ones(mesh_shape)  # a pure shape carrier, as jaxpme builds it
-
-    logger.info(f'K-space grid shape: {k_grid.shape}, smearing: {k_smearing}')
+    k_smearing = jnp.array([kspace_smearing])
+    logger.info(f'K-space grid shape: {k_grid.shape} (largest over {len(cells)} periodic cells), '
+                f'smearing: {k_smearing}')
 
     # Electrostatic and dispersion use the same grid and smearing
     return {
@@ -174,7 +172,7 @@ def _check_periodic_lr_cutoff(config, training_data, validation_data, tf_record_
     if cutoff_lr is not None and cutoff_lr <= pair_cutoff:
         return
     for item in [*training_data, *validation_data]:
-        if item is not None and jraph_utils._is_periodic_graph(item[0]):
+        if item is not None and jraph_utils.is_periodic_graph(item[0]):
             raise ValueError(
                 f'The data has periodic structures, but model.cutoff_lr={cutoff_lr} exceeds '
                 f'data.neighbors_lr_cutoff={pair_cutoff}: the long-range terms would be cut '
@@ -186,9 +184,9 @@ def _check_periodic_lr_cutoff(config, training_data, validation_data, tf_record_
 
 def _make_graph_to_batch_fn(config, training_data, tf_record_present, validation_data=()):
     """Build graph_to_batch_fn, optionally binding kspace constants via functools.partial."""
+    _check_periodic_lr_cutoff(config, training_data, validation_data, tf_record_present)
     kspace_constants = _compute_kspace_constants(
-        config, training_data, tf_record_present,
-        () if tf_record_present else validation_data)
+        config, training_data, tf_record_present, validation_data)
     if kspace_constants is not None:
         return functools.partial(
             _graph_to_kspace_batch,
@@ -504,7 +502,6 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)
     adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
 
-    _check_periodic_lr_cutoff(config, training_data, validation_data, tf_record_present)
     _graph_to_batch_fn = _make_graph_to_batch_fn(
         config, training_data, tf_record_present, validation_data=validation_data)
 
@@ -605,6 +602,7 @@ FINETUNE_MODEL_OVERRIDES = ('energy_residual_mlp_widths', 'energy_residual_input
 # fine_tuning.json and left out of the fine-tuned model's hyperparameters, so at
 # inference lr_cutoff and k-space are chosen per run as for any model.
 FINETUNE_LONG_RANGE_KEYS = ('cutoff_lr', 'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing')
+FINETUNE_ALLOWED_MODEL_KEYS = FINETUNE_MODEL_OVERRIDES + FINETUNE_LONG_RANGE_KEYS
 
 # Quantities `training.long_range_anchor_weights` can anchor to the pretrained
 # model's predictions.
@@ -804,7 +802,7 @@ def run_fine_tuning(
         }
         user_model_keys = sorted(
             k for k in config.model.keys()
-            if k not in FINETUNE_MODEL_OVERRIDES + FINETUNE_LONG_RANGE_KEYS
+            if k not in FINETUNE_ALLOWED_MODEL_KEYS
         )
         user_message_normalization = config.model.get('message_normalization', None)
         if user_model_keys:
@@ -814,7 +812,7 @@ def run_fine_tuning(
                 'Dropped keys: %s (only %s can be set when fine-tuning)',
                 start_from_workdir,
                 user_model_keys,
-                list(FINETUNE_MODEL_OVERRIDES + FINETUNE_LONG_RANGE_KEYS),
+                list(FINETUNE_ALLOWED_MODEL_KEYS),
             )
         _apply_finetune_model_overrides(config.model, config_start_from_workdir.model)
 
@@ -1121,7 +1119,6 @@ def run_fine_tuning(
             f"it, or choose a different --workdir."
         )
 
-    _check_periodic_lr_cutoff(config, training_data, validation_data, tf_record_present)
     _graph_to_batch_fn = _make_graph_to_batch_fn(
         config, training_data, tf_record_present, validation_data=validation_data)
 
