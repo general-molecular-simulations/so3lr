@@ -41,7 +41,7 @@ from so3lr.mlff.nn.observable.observable_sparse import (
     dispersion_tail_correction_energy,
 )
 
-from so3lr.jaxmd_utils import nbrs_cutoff, to_jax_md as _to_jax_md
+from so3lr.jaxmd_utils import OVERFLOW_EXTRA_LR, OVERFLOW_EXTRA_SR, nbrs_cutoff, to_jax_md as _to_jax_md
 from so3lr.pbc import box_to_diag, is_fully_periodic, lattice_rows, minimum_image_problem
 from so3lr import kspace_defaults as KS
 from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
@@ -1285,9 +1285,6 @@ def log_nbrs_info(nbrs, label: str = 'SR', box=None):
                     f'cell_size={cell_size.min():.2f} A')
 
 
-# Per-overflow cell-list headroom, added to cell_capacity on each reallocation.
-OVERFLOW_EXTRA_SR = 2
-OVERFLOW_EXTRA_LR = 8
 MAX_OVERFLOW_RETRIES = 4
 
 
