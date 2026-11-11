@@ -290,11 +290,8 @@ def ASE_to_jraph(
     # anchor the charges during energy/force-only fine-tuning). NaN when absent, so
     # frames without them are masked out of the loss.
     partial_charges = mol.arrays.get('partial_charges')
-    if partial_charges is None:
-        partial_charges = np.empty((num_atoms, ))
-        partial_charges[:] = np.nan
-    else:
-        partial_charges = np.array(partial_charges).reshape(num_atoms, )
+    partial_charges = (np.full((num_atoms,), np.nan) if partial_charges is None
+                       else np.array(partial_charges).reshape(num_atoms))
 
     # Initialize monomer-specific information for dimer binding energy calculations,
     # as described in the Methods section of SO3LR paper.

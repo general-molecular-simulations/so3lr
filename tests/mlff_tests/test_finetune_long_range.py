@@ -40,14 +40,14 @@ MODELS_DIR = pathlib.Path(__file__).resolve().parents[2] / 'so3lr' / 'models'
 MODEL = 'so3lr-tauri-s-2606'
 
 
-def _water_inputs(n=3):
+def _water_inputs():
     return dict(
         positions=jnp.array([[0., 0., 0.], [0.96, 0., 0.], [-0.24, 0.93, 0.]]),
         atomic_numbers=jnp.array([8, 1, 1]),
         idx_i=jnp.array([0, 0, 1, 1, 2, 2]), idx_j=jnp.array([1, 2, 0, 2, 0, 1]),
         idx_i_lr=jnp.array([0, 0, 1, 1, 2, 2]), idx_j_lr=jnp.array([1, 2, 0, 2, 0, 1]),
-        batch_segments=jnp.zeros(n, dtype=int),
-        node_mask=jnp.ones(n, dtype=bool),
+        batch_segments=jnp.zeros(3, dtype=int),
+        node_mask=jnp.ones(3, dtype=bool),
         graph_mask=jnp.ones(1, dtype=bool),
         total_charge=jnp.zeros(1), num_unpaired_electrons=jnp.zeros(1),
         theory_mask=jnp.eye(16)[5].reshape(1, -1),
@@ -79,8 +79,7 @@ def _with_residual(net):
     """Pretrained params plus the fresh residual readout, as run_fine_tuning builds them."""
     _, params = _pretrained()
     fresh = net.init(jax.random.PRNGKey(0), _water_inputs())
-    merged, filled = _fill_missing_params(params, fresh)
-    return merged, filled
+    return _fill_missing_params(params, fresh)
 
 
 @pytest.mark.parametrize('residual_inputs', [None, 'all_layers'])
@@ -134,8 +133,7 @@ def test_readout_only_trains_the_readouts_and_freezes_the_long_range_heads():
 
     # The charge, a0 and C6 heads, and the whole backbone, are frozen.
     labels = training_utils.make_annotation_fn(trainable_keys)(merged)['params']
-    for name in ('electrostatic_energy',):
-        assert set(jax.tree_util.tree_leaves(labels['observables_0'][name])) == {'frozen'}
+    assert set(jax.tree_util.tree_leaves(labels['observables_0']['electrostatic_energy'])) == {'frozen'}
     for name in ('observables_2', 'observables_3', 'layers_0'):
         assert set(jax.tree_util.tree_leaves(labels[name])) == {'frozen'}
 
@@ -146,6 +144,12 @@ def test_a_changed_residual_readout_is_refused():
     with pytest.raises(ValueError, match='already has model.energy_residual_mlp_widths'):
         _apply_finetune_model_overrides(
             config_dict.ConfigDict({'energy_residual_mlp_widths': [32]}), model
+        )
+    # A residual saved without energy_residual_inputs was built with the default 'last'.
+    with pytest.raises(ValueError, match='already has model.energy_residual_inputs'):
+        _apply_finetune_model_overrides(
+            config_dict.ConfigDict({'energy_residual_inputs': 'all_layers'}),
+            config_dict.ConfigDict({'energy_residual_mlp_widths': [64]}),
         )
     with pytest.raises(ValueError, match='energy_residual_mlp_widths is not'):
         _apply_finetune_model_overrides(
