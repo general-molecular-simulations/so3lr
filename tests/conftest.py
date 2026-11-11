@@ -177,13 +177,14 @@ def _restore_so3lr_logger():
     when a test phase starts, as well as to root, so a later test that turns
     propagate back on sees each record in caplog twice.
     """
-    logger = logging.getLogger("SO3LR")
-    handlers, level, propagate = list(logger.handlers), logger.level, logger.propagate
+    logger, root = logging.getLogger("SO3LR"), logging.getLogger()
+    # pytest's own capture handlers also sit on root and remove themselves: neither
+    # snapshot nor close them.
+    handlers = [h for h in logger.handlers if h not in root.handlers]
+    level, propagate = logger.level, logger.propagate
     yield
-    root_handlers = logging.getLogger().handlers
     for handler in logger.handlers:
-        # pytest's own capture handlers also sit on root and remove themselves.
-        if handler not in handlers and handler not in root_handlers:
+        if handler not in handlers and handler not in root.handlers:
             handler.close()
     logger.handlers[:] = handlers
     logger.setLevel(level)

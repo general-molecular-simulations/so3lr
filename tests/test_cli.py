@@ -99,7 +99,7 @@ def stubbed_run(monkeypatch):
     monkeypatch.setattr(so3lr_md, 'setup_jax_globals', lambda **kwargs: None)
     monkeypatch.setattr(so3lr_md, 'perform_md', lambda settings, *args, **kwargs: captured.update(settings))
     monkeypatch.setattr(so3lr_cli, 'reserve_gpu', lambda *args, **kwargs: None)
-    # no log file
+    # setup_logger would swap the console handlers and could open a log file.
     monkeypatch.setattr(so3lr_md, 'setup_logger', lambda *args, **kwargs: None)
     return captured
 
