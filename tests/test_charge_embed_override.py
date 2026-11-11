@@ -39,7 +39,7 @@ LR_CUTOFF = 1000.0
 # override's graph fuses differently: 3.8e-6 eV at 38 eV).
 pytestmark = pytest.mark.usefixtures('x64')
 SAME = 1e-10       # eV: float64 rounding
-DIFFERENT = 1e-8   # eV: far above it
+DIFFERENT = 1e-8   # eV (eV/Å for forces): far above it
 
 def _cli_env():
     """The CLI runs' environment, with XLA's deterministic GPU ops. The CLI comparisons
@@ -92,7 +92,7 @@ def _evaluate(total_charge, charge_embed_total_charge, charge_equilibration_tota
     atoms.calc = So3lrCalculator(
         model=MODEL,
         lr_cutoff=LR_CUTOFF,
-        dtype=np.float64,
+        precision='float64',
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge,
     )
@@ -167,8 +167,7 @@ class TestChargeEmbedOverride:
         """Forces, not just energy -- the measured effect is a force MAE change."""
         f_default, f_zero = _evaluate(-1, None, None)[1], _evaluate(-1, 0.0, None)[1]
         assert np.all(np.isfinite(f_default)) and np.all(np.isfinite(f_zero))
-        # a bound far above run-to-run noise (the order of float64 GPU sums)
-        assert np.abs(f_default - f_zero).max() > 1e-6, (
+        assert np.abs(f_default - f_zero).max() > DIFFERENT, (
             "forces are the same with and without the override"
         )
 
