@@ -110,7 +110,11 @@ def test_kspace_mesh_covers_the_largest_cell(method, skew):
                       kspace_grid_shape(method, 1.0, large.cell.array))
     assert k['k_grid'].shape == tuple(want)
     assert k['k_grid'].shape != kspace_grid_shape(method, 1.0, small.cell.array)
-    assert k['k_grid_disp'].shape == k['k_grid'].shape
+    assert k['k_grid_disp'].shape == k['k_grid'].shape  # so3lr train: dispersion on, same grid
+    with config.model.unlocked():
+        config.model.kspace_dispersion = False
+    k = _compute_kspace_constants(config, [_graph(small)], False, validation_data=[_graph(large)])
+    assert k['k_grid_disp'] is None and k['k_smearing_disp'] is None
 
 
 @pytest.mark.parametrize('method', ['pme', 'ewald'])

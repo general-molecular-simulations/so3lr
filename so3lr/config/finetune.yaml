@@ -32,8 +32,12 @@ workdir: null  # Working directory, i.e., for saving the checkpoints and log. Du
 #   energy_residual_inputs: all_layers  # or 'last': only the final-layer features
 #   cutoff_lr: 12.0  # periodic data: equal to data.neighbors_lr_cutoff
 #   kspace_electrostatics: pme  # periodic data: 'pme' or 'ewald'; every structure must then be periodic
-#   kspace_smearing: 2.0
-#   kspace_spacing: 1.0
+#   # Unset, these take the eval/MD defaults (smearing 4.0, spacing 2.0, no k-space dispersion),
+#   # so the model is trained with the long-range terms `so3lr eval/md --kspace-electrostatics pme`
+#   # use. kspace_dispersion: true adds the dispersion tail (then run with --kspace-dispersion pme).
+#   kspace_smearing: 4.0
+#   kspace_spacing: 2.0
+#   kspace_dispersion: false
 neighborlist_format_lr: sparse
 data:
   filepath: null  # Path to the data file. During finetuning, this is set via the CLI command so keep as null.

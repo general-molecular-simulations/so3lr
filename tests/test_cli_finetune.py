@@ -230,7 +230,7 @@ def test_cli_finetune_water_pbc_with_pme(workdir, test_config_water, tmp_path):
     from so3lr.model_registry import resolve_model
 
     config = _write_config(test_config_water, tmp_path, 'pme.yaml', model={
-        'cutoff_lr': 12.0, 'kspace_electrostatics': 'pme', 'kspace_smearing': 2.0, 'kspace_spacing': 1.0})
+        'cutoff_lr': 12.0, 'kspace_electrostatics': 'pme'})
     result = subprocess.run(
         ['so3lr', 'finetune', '--datafile', str(DATAFILE_WATER), '--workdir', str(workdir),
          '--num-train', '13', '--num-valid', '2', '--config', str(config), '--strategy', 'full'],
@@ -239,8 +239,11 @@ def test_cli_finetune_water_pbc_with_pme(workdir, test_config_water, tmp_path):
     _assert_finetuning_succeeded(result, workdir, max_loss=0.2)
     assert 'K-space grid shape' in (result.stdout + result.stderr)
     record = json.loads((workdir / 'fine_tuning.json').read_text())
+    # unset settings take the eval/MD defaults, and are recorded
     assert record['long_range'] == {
-        'cutoff_lr': 12.0, 'kspace_electrostatics': 'pme', 'kspace_smearing': 2.0, 'kspace_spacing': 1.0}
+        'cutoff_lr': 12.0, 'kspace_electrostatics': 'pme', 'kspace_smearing': 4.0,
+        'kspace_spacing': 2.0, 'kspace_dispersion': False}
+    assert 'K-space dispersion grid' not in (result.stdout + result.stderr)
     saved = json.loads((workdir / 'hyperparameters.json').read_text())['model']
     pretrained = load_model_config(resolve_model(None).dir)['model']
     assert saved['cutoff_lr'] == pretrained['cutoff_lr']

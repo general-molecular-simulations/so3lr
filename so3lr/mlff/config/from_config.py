@@ -6,7 +6,10 @@ from so3lr.mlff import training_utils
 from so3lr.mlff import data
 from so3lr.mlff import jraph_utils
 from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_force_fn_sparse
-from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
+from so3lr.mlff.utils.kspace_utils import (
+    DEFAULT_KSPACE_DISPERSION_SMEARING, DEFAULT_KSPACE_DISPERSION_SPACING,
+    DEFAULT_KSPACE_SMEARING, DEFAULT_KSPACE_SPACING, kspace_grid_shape,
+)
 from ml_collections import config_dict
 import jraph
 import numpy as np
@@ -140,19 +143,27 @@ def _compute_kspace_constants(config, training_data, tf_record_present, validati
 
     logger.info(f'Computing k-space grid for training with method={kspace_method}, '
                 f'smearing={kspace_smearing}, spacing={kspace_spacing}')
-    longest_rows = np.max(np.linalg.norm(np.asarray(cells), axis=-1), axis=0)  # (3,)
-    mesh_shape = kspace_grid_shape(kspace_method, kspace_spacing, np.diag(longest_rows))
-    k_grid = jnp.ones(mesh_shape)  # a pure shape carrier, as jaxpme builds it
+    longest_rows = np.diag(np.max(np.linalg.norm(np.asarray(cells), axis=-1), axis=0))
+    # a pure shape carrier, as jaxpme builds it
+    k_grid = jnp.ones(kspace_grid_shape(kspace_method, kspace_spacing, longest_rows))
     k_smearing = jnp.array([kspace_smearing])
     logger.info(f'K-space grid shape: {k_grid.shape} (largest over {len(cells)} periodic cells), '
                 f'smearing: {k_smearing}')
 
-    # Electrostatic and dispersion use the same grid and smearing
+    # Dispersion's reciprocal-space tail: on by default with the electrostatic grid and
+    # smearing (so3lr train); model.kspace_dispersion: false leaves dispersion real-space
+    # only, as eval and MD do without --kspace-dispersion.
+    k_grid_disp, k_smearing_disp = None, None
+    if config.model.get('kspace_dispersion', True):
+        disp_spacing = config.model.get('kspace_dispersion_spacing', kspace_spacing)
+        k_grid_disp = jnp.ones(kspace_grid_shape(kspace_method, disp_spacing, longest_rows))
+        k_smearing_disp = jnp.array([config.model.get('kspace_dispersion_smearing', kspace_smearing)])
+        logger.info(f'K-space dispersion grid shape: {k_grid_disp.shape}, smearing: {k_smearing_disp}')
     return {
         'k_grid': k_grid,
         'k_smearing': k_smearing,
-        'k_grid_disp': k_grid,
-        'k_smearing_disp': k_smearing,
+        'k_grid_disp': k_grid_disp,
+        'k_smearing_disp': k_smearing_disp,
     }
 
 
@@ -603,7 +614,10 @@ FINETUNE_MODEL_OVERRIDES = ('energy_residual_mlp_widths', 'energy_residual_input
 # Coulomb tail), not the architecture. Periodic data needs them. They are recorded in
 # fine_tuning.json and left out of the fine-tuned model's hyperparameters, so at
 # inference lr_cutoff and k-space are chosen per run as for any model.
-FINETUNE_LONG_RANGE_KEYS = ('cutoff_lr', 'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing')
+FINETUNE_LONG_RANGE_KEYS = (
+    'cutoff_lr', 'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing',
+    'kspace_dispersion', 'kspace_dispersion_smearing', 'kspace_dispersion_spacing',
+)
 FINETUNE_ALLOWED_MODEL_KEYS = FINETUNE_MODEL_OVERRIDES + FINETUNE_LONG_RANGE_KEYS
 
 # Quantities `training.long_range_anchor_weights` can anchor to the pretrained
@@ -839,6 +853,15 @@ def run_fine_tuning(
             f"model.kspace_electrostatics must be 'ewald', 'pme' or 'p3m', got "
             f"{long_range_overrides['kspace_electrostatics']!r}."
         )
+    if long_range_overrides.get('kspace_electrostatics', None) is not None:
+        # Unset k-space settings take the values eval and MD use by default, so the
+        # model is trained with the long-range terms it is later run with.
+        long_range_overrides.setdefault('kspace_smearing', DEFAULT_KSPACE_SMEARING)
+        long_range_overrides.setdefault('kspace_spacing', DEFAULT_KSPACE_SPACING)
+        long_range_overrides.setdefault('kspace_dispersion', False)
+        if long_range_overrides['kspace_dispersion']:
+            long_range_overrides.setdefault('kspace_dispersion_smearing', DEFAULT_KSPACE_DISPERSION_SMEARING)
+            long_range_overrides.setdefault('kspace_dispersion_spacing', DEFAULT_KSPACE_DISPERSION_SPACING)
     if long_range_overrides:
         with config.model.unlocked():
             config.model.update(long_range_overrides)
