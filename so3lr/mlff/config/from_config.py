@@ -16,6 +16,8 @@ import logging
 import os
 import jax
 import jax.numpy as jnp
+from flax import traverse_util
+from flax.core.frozen_dict import unfreeze
 
 from ..utils import checkpoint_utils
 from ..utils.param_utils import (
@@ -582,29 +584,11 @@ def _apply_finetune_model_overrides(user_model, checkpoint_model):
 
 def _fill_missing_params(params, fresh):
     """`params` with every entry it lacks taken from `fresh` (a new model's
-    initialisation). Returns the merged tree and the paths that were filled."""
-    filled = []
-
-    def merge(p, f, path):
-        if not isinstance(f, dict) or not isinstance(p, dict):
-            return p
-        out = dict(p)
-        for k, v in f.items():
-            if k not in p:
-                out[k] = v
-                filled.append('/'.join(path + (k,)))
-            else:
-                out[k] = merge(p[k], v, path + (k,))
-        return out
-
-    return merge(_to_dict(params), _to_dict(fresh), ()), filled
-
-
-def _to_dict(tree):
-    """Plain nested dicts (checkpoints may hold FrozenDicts)."""
-    if hasattr(tree, 'items'):
-        return {k: _to_dict(v) for k, v in tree.items()}
-    return tree
+    initialisation). Returns the merged tree and the module paths that were filled."""
+    flat = traverse_util.flatten_dict(unfreeze(params))
+    new = {k: v for k, v in traverse_util.flatten_dict(unfreeze(fresh)).items() if k not in flat}
+    filled = sorted({'/'.join(k[:-1]) for k in new})
+    return traverse_util.unflatten_dict({**flat, **new}), filled
 
 
 def _init_residual_readout(net, params, config, training_data, tf_record_present, graph_to_batch_fn):
@@ -631,24 +615,15 @@ def _init_residual_readout(net, params, config, training_data, tf_record_present
     params, filled = _fill_missing_params(params, fresh)
     if not filled:
         return params
-    n_new = sum(
-        int(np.prod(np.shape(leaf))) for path in filled
-        for leaf in jax.tree_util.tree_leaves(_lookup(params, path))
-    )
     unexpected = [p for p in filled if 'energy_residual' not in p]
     if unexpected:
         raise ValueError(
             f'Initialising the residual readout would also create {unexpected}, which the '
             f'checkpoint lacks. The checkpoint does not match its hyperparameters.'
         )
+    n_new = count_trainable_params(params, trainable_keys=filled)
     logger.info(f'Residual energy readout: initialised {filled} ({n_new:,} new parameters).')
     return params
-
-
-def _lookup(tree, path):
-    for key in path.split('/'):
-        tree = tree[key]
-    return tree
 
 
 def _with_long_range_anchor(graph_to_batch_fn, net, params, anchor_keys):
@@ -673,7 +648,7 @@ def _with_long_range_anchor(graph_to_batch_fn, net, params, anchor_keys):
         batch = graph_to_batch_fn(graph, lr_batch)
         out = teacher(ref_params, **{k: batch[k] for k in input_keys if batch.get(k) is not None})
         for key in anchor_keys:
-            value = out.get(key, out.get(alias.get(key)))
+            value = out.get(training_utils._prediction_key(key, out))
             if value is None:
                 raise ValueError(
                     f'Cannot anchor {key!r}: the pretrained model does not predict it '
@@ -842,19 +817,17 @@ def run_fine_tuning(
     # fine-tuning batch. For data with energies and forces only, which cannot tell
     # short-range from long-range energy, so the long-range heads would otherwise
     # be used as extra fitting knobs. Enters the loss as 'anchor_<key>' targets.
-    anchor_weights = _to_dict(config.training.get('long_range_anchor_weights', None) or {})
+    anchor_weights = dict(config.training.get('long_range_anchor_weights', None) or {})
     unknown = sorted(set(anchor_weights) - set(LONG_RANGE_ANCHOR_KEYS))
     if unknown:
         raise ValueError(
             f'training.long_range_anchor_weights has unknown keys {unknown}; '
             f'choose from {list(LONG_RANGE_ANCHOR_KEYS)}.'
         )
-    loss_weights = _to_dict(config.training.loss_weights)
+    loss_weights = dict(config.training.loss_weights)
     loss_weights.update({training_utils.ANCHOR_PREFIX + k: float(w) for k, w in anchor_weights.items()})
-    if 'partial_charges' in loss_weights or 'partial_charges' in anchor_weights:
-        output_intermediate_quantities = ['partial_charges']
-    else:
-        output_intermediate_quantities = None
+    needs_charges = 'partial_charges' in loss_weights or 'partial_charges' in anchor_weights
+    output_intermediate_quantities = ['partial_charges'] if needs_charges else None
 
     adaptive_robust_loss_targets = list(loss_weights.keys()) if use_adaptive_robust_loss else None
     adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)

@@ -718,16 +718,13 @@ def make_loss_fn(
         outputs_true = {k: v for k, v in batch.items() if k in targets}
         outputs_predict = obs_fn(params, **inputs)
 
-        # Rename ratio-head key if the model emits 'a0_ratios' while the user
-        # weighted 'hirshfeld_ratios' (or vice-versa). Trace-time only: the
-        # dict keys are Python-level so this does not affect the jitted graph.
-        outputs_predict = dict(outputs_predict)
+        # Ratio-head alias ('a0_ratios' vs 'hirshfeld_ratios'): predictions are
+        # resolved per target by _prediction_key; labels are renamed here.
+        # Trace-time only: the dict keys are Python-level.
         for _t in targets:
             _alias = _RATIO_ALIAS.get(_t)
             if _alias is None:
                 continue
-            if _t not in outputs_predict and _alias in outputs_predict:
-                outputs_predict[_t] = outputs_predict.pop(_alias)
             if _t not in outputs_true and _alias in outputs_true:
                 outputs_true[_t] = outputs_true.pop(_alias)
 
@@ -744,9 +741,11 @@ def make_loss_fn(
         metrics = {}
 
         for target in targets:
-            target_mae_fn = property_to_mae[_base_target(target)]
+            base_target = _base_target(target)
+            y_pred = outputs_predict[_prediction_key(target, outputs_predict)]
+            target_mae_fn = property_to_mae[base_target]
             _mae = target_mae_fn(
-                y=outputs_predict[_prediction_key(target, outputs_predict)],
+                y=y_pred,
                 y_label=outputs_true[target],
                 scale=_scales[target],
                 batch_segments=inputs['batch_segments'],
@@ -765,9 +764,9 @@ def make_loss_fn(
                 target_adaptive_alpha = adaptive_alphas[idx]
                 target_adaptive_scale = adaptive_scales[idx]
 
-            target_loss_fn = property_to_loss[_base_target(target)]
+            target_loss_fn = property_to_loss[base_target]
             _l = target_loss_fn(
-                y=outputs_predict[_prediction_key(target, outputs_predict)],
+                y=y_pred,
                 y_label=outputs_true[target],
                 scale=_scales[target],
                 batch_segments=inputs['batch_segments'],
@@ -828,14 +827,11 @@ def make_val_fn(
         outputs_true = {k: v for k, v in batch.items() if k in targets}
         outputs_predict = obs_fn(params, **inputs)
 
-        # Mirror the ratio-head alias rename used in make_loss_fn.
-        outputs_predict = dict(outputs_predict)
+        # Mirror the ratio-head label rename used in make_loss_fn.
         for _t in targets:
             _alias = _RATIO_ALIAS.get(_t)
             if _alias is None:
                 continue
-            if _t not in outputs_predict and _alias in outputs_predict:
-                outputs_predict[_t] = outputs_predict.pop(_alias)
             if _t not in outputs_true and _alias in outputs_true:
                 outputs_true[_t] = outputs_true.pop(_alias)
 
@@ -850,9 +846,11 @@ def make_val_fn(
             adaptive_alphas, adaptive_scales = transform_adaptive_robust_params(alpha_raw, scale_raw)
 
         for target in targets:
-            target_mae_fn = property_to_mae[_base_target(target)]
+            base_target = _base_target(target)
+            y_pred = outputs_predict[_prediction_key(target, outputs_predict)]
+            target_mae_fn = property_to_mae[base_target]
             _mae = target_mae_fn(
-                y=outputs_predict[_prediction_key(target, outputs_predict)],
+                y=y_pred,
                 y_label=outputs_true[target],
                 scale=_scales[target],
                 batch_segments=inputs['batch_segments'],
@@ -870,9 +868,9 @@ def make_val_fn(
                 target_adaptive_alpha = adaptive_alphas[idx]
                 target_adaptive_scale = adaptive_scales[idx]
 
-            target_loss_fn = property_to_loss[_base_target(target)]
+            target_loss_fn = property_to_loss[base_target]
             _mse = target_loss_fn(
-                y=outputs_predict[_prediction_key(target, outputs_predict)],
+                y=y_pred,
                 y_label=outputs_true[target],
                 scale=_scales[target],
                 batch_segments=inputs['batch_segments'],
