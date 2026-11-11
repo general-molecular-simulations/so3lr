@@ -1148,17 +1148,21 @@ def remove_kspace_net_force(all_settings: Dict) -> bool:
     the whole box over a run (AMBER removes it the same way, netfrc)."""
     kspace = (all_settings.get('kspace_electrostatics') is not None
               or all_settings.get('kspace_dispersion') is not None)
-    return bool(kspace and all_settings.get('kspace_remove_net_force', True))
+    return bool(kspace and all_settings.get('kspace_remove_net_force', KS.DEFAULT_KSPACE_REMOVE_NET_FORCE))
 
 
-def restart_removes_com_motion(all_settings: Dict) -> bool:
+def restart_removes_com_motion(all_settings: Dict, restart_pysages: bool = False,
+                               held_atoms: bool = False) -> bool:
     """Whether a restart zeroes the centre-of-mass motion: not when the run keeps the old
-    behaviour (``kspace_remove_net_force: false``), and not for a Langevin run that leaves
-    it thermal (``langevin_removecmmotion: false``)."""
-    if not all_settings.get('kspace_remove_net_force', True):
+    behaviour (``kspace_remove_net_force: false``), not for a Langevin run that leaves it
+    thermal (``langevin_removecmmotion: false``), not with atoms held in place (their momenta
+    stay zero), and not for a restarted PySAGES state (it keeps its snapshot's momenta)."""
+    if restart_pysages or held_atoms:
         return False
-    return not (str(all_settings.get('ensemble')).lower() == 'nvt-langevin'
-                and all_settings.get('langevin_removecmmotion') is False)
+    if not all_settings.get('kspace_remove_net_force', KS.DEFAULT_KSPACE_REMOVE_NET_FORCE):
+        return False
+    ensemble = str(all_settings.get('ensemble')).strip().lower().replace('_', '-')
+    return not (ensemble == 'nvt-langevin' and all_settings.get('langevin_removecmmotion') is False)
 
 
 def process_model(
@@ -1702,12 +1706,12 @@ def apply_atom_constraints_to_state(
 COM_DRIFT_WARN_A_PER_PS = 1e-4  # 0.1 A per ns
 
 
-def restart_com_velocity(momentum, mass):
-    """The centre-of-mass velocity of restarted momenta (zero for a single atom) and the
-    masses as an [n, 1] column, logged: a warning when the box was drifting. Periodic k-space
-    runs before the net force was removed (kspace_remove_net_force) random-walk the total
-    momentum, and with zero-sum forces nothing removes it later (restart_removes_com_motion
-    says when this runs)."""
+def remove_restart_com_momentum(momentum, mass):
+    """Restarted momenta with zero total momentum (m_i v_com off every momentum, the smallest
+    change in kinetic energy that does it; nothing for a single atom), logged: a warning when
+    the box was drifting. Periodic k-space runs before the net force was removed
+    (kspace_remove_net_force) random-walk the total momentum, and with zero-sum forces nothing
+    removes it later (restart_removes_com_motion says when this runs)."""
     momentum = jnp.asarray(momentum)
     m = jnp.broadcast_to(jnp.reshape(jnp.asarray(mass, momentum.dtype), (-1, 1)), (momentum.shape[0], 1))
     v_com = jnp.sum(momentum, axis=0) / jnp.sum(m) * (momentum.shape[0] > 1)
@@ -1722,23 +1726,17 @@ def restart_com_velocity(momentum, mass):
         )
     else:
         logger.info(f'Restart: removed centre-of-mass motion of {speed:.2e} A/ps.')
-    return v_com, m
-
-
-def remove_restart_com_momentum(momentum, mass):
-    """Restarted momenta with zero total momentum: m_i v_com off every momentum, the
-    smallest change in kinetic energy that does it."""
-    v_com, m = restart_com_velocity(momentum, mass)
-    return (momentum - m * v_com).astype(jnp.asarray(momentum).dtype)
+    return (momentum - m * v_com).astype(momentum.dtype)
 
 
 def remove_restart_com_motion(state):
     """The restarted jax-md state without centre-of-mass motion."""
+    momentum = remove_restart_com_momentum(state.momentum, state.mass)
     if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState):
         # stores velocity; its momentum is a read-only property
-        v_com, _ = restart_com_velocity(state.momentum, state.mass)
-        return state.set(velocity=(state.velocity - v_com).astype(state.velocity.dtype))
-    return state.set(momentum=remove_restart_com_momentum(state.momentum, state.mass))
+        mass = jnp.reshape(jnp.asarray(state.mass, momentum.dtype), (-1, 1))
+        return state.set(velocity=(momentum / mass).astype(state.velocity.dtype))
+    return state.set(momentum=momentum)
 
 
 def constrain_md_carry(
@@ -2120,8 +2118,7 @@ def perform_md(
 
     current_cycle = 0
     # a restarted PySAGES state keeps the momenta its snapshot holds
-    com_free_restart = (mobile_mask is None and not restart_pysages
-                        and restart_removes_com_motion(all_settings))
+    com_free_restart = restart_removes_com_motion(all_settings, restart_pysages, mobile_mask is not None)
     # Loading restart
     if restart:
         logger.info(f'Loading state from {restart_load_path}.')

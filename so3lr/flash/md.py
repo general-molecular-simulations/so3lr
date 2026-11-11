@@ -102,13 +102,13 @@ def _pme(settings):
     return el, disp
 
 
-def build_engine(atoms, settings, dtype, box_margin=None, positions=None, remove_net_force=None):
+def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
     """FlashSO3LR for ``atoms`` with the model, charges, PME and memory mode of
     ``settings``; the cell grid laid out for a box ``box_margin`` smaller (default: NPT's
     margin in NPT, else none). Atoms in free space (``check.in_vacuum``): the engine's box
-    laid out for them at ``positions`` (default the atoms'). ``remove_net_force``: the
-    forces minus their mean with PME (default: ``remove_kspace_net_force(settings)``, as MD
-    and opt take them; single points keep the model's forces)."""
+    laid out for them at ``positions`` (default the atoms'). The forces minus their mean
+    with PME as ``remove_kspace_net_force(settings)`` says (MD and opt; SinglePoints turns
+    it off: single points keep the model's forces)."""
     if box_margin is None:
         box_margin = NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0
     precision = "float64" if dtype == jnp.float64 else "float32"
@@ -160,9 +160,7 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None, remove
                           pme_electrostatics=pme_el, pme_dispersion=pme_disp,
                           box_margin=box_margin, devices=devices,
                           size=size, **kw,
-                          kernels=kernels, staged=staged,
-                          remove_net_force=remove_kspace_net_force(settings) if remove_net_force is None
-                          else remove_net_force)
+                          kernels=kernels, staged=staged, remove_net_force=remove_kspace_net_force(settings))
     kw, staged = MODES[mode][:2]
     eng = make(kw, staged, kernels)
     if picked and eng.cuda_kernels is None:
@@ -426,8 +424,9 @@ class SinglePoints:
                 self.engine = self._ef = self._key = None    # until the new engine exists
                 gc.collect()                 # the last engine's arrays, before the next one's
                 self.engine, staged = build_engine(
-                    atoms, dict(self.settings, total_charge=key[1], num_unpaired_electrons=key[2]), self.dtype,
-                    box_margin=self.box_margin, remove_net_force=False)    # the model's forces, as So3lrCalculator's
+                    atoms, dict(self.settings, total_charge=key[1], num_unpaired_electrons=key[2],
+                                kspace_remove_net_force=False), self.dtype,     # the model's forces, as So3lrCalculator's
+                    box_margin=self.box_margin)
                 self._ef = self.engine.energy_forces_staged if staged else self.engine.energy_forces
                 self._key, self._builds = key, 0
             elif box != self._box and not vacuum:
@@ -482,6 +481,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     position = geo["positions"]
 
     current_cycle, state = 0, None
+    # a restarted PySAGES state keeps its snapshot's momenta; held atoms keep zero momenta
+    held = s.get("fixed_atom_indices")
+    com_free_restart = restart_removes_com_motion(s, restart_pysages, held is not None and len(held) > 0)
     if restart:
         logger.info(f"Loading state from {restart_load_path}.")
         try:
@@ -490,7 +492,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                                                     fractional_coordinates=npt, precision=sdt)
             if npt:
                 validate_npt_restart_coupling(state, rbox, coupling)
-            if restart_removes_com_motion(s):
+            if com_free_restart:
                 state = remove_restart_com_motion(state)
             if not vacuum:                   # (structure_problem: a restart in free space has no box)
                 box = jnp.asarray(box_to_diag(rbox), sdt)
@@ -506,7 +508,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                 position = position * box
             geo["masses"] = jnp.asarray(loaded["mass"], sdt)
             geo["momenta"] = jnp.asarray(loaded["momentum"], sdt)
-            if restart_removes_com_motion(s):
+            if com_free_restart:
                 geo["momenta"] = remove_restart_com_momentum(geo["momenta"], geo["masses"])
         if not vacuum:
             atoms = atoms.copy()

@@ -67,10 +67,19 @@ def test_restart_removes_com_motion_settings(settings, expected):
     assert restart_removes_com_motion(settings) is expected
 
 
+def test_restart_keeps_pysages_and_held_atoms_momenta():
+    """A restarted PySAGES state keeps its snapshot's momenta, and held atoms their zero
+    momenta, in both engines."""
+    from so3lr.cli.so3lr_md import restart_removes_com_motion
+    assert restart_removes_com_motion(dict(ensemble='nvt'), restart_pysages=True) is False
+    assert restart_removes_com_motion(dict(ensemble='nvt'), held_atoms=True) is False
+
+
 def test_flash_single_points_keep_the_model_forces(monkeypatch):
     """so3lr eval and the flash ASE calculator return the forces So3lrCalculator does; only
     MD and opt take them without the net force."""
     import so3lr.flash.md as flash_md
+    from so3lr.cli.so3lr_md import remove_kspace_net_force
     seen = {}
 
     class Engine:
@@ -79,8 +88,8 @@ def test_flash_single_points_keep_the_model_forces(monkeypatch):
         def energy_forces(self, R):
             return 0.0, jnp.zeros_like(R)
 
-    def build_engine(atoms, settings, dtype, box_margin=None, positions=None, remove_net_force=None):
-        seen['remove_net_force'] = remove_net_force
+    def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
+        seen['remove_net_force'] = remove_kspace_net_force(settings)
         return Engine(), False
 
     monkeypatch.setattr(flash_md, 'build_engine', build_engine)

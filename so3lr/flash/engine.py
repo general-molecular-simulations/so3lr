@@ -31,8 +31,8 @@ exists), and tiled execution (the per-atom work runs over fixed-size atom tiles)
   dispersion (``pme_electrostatics=(smearing, spacing)``, ``pme_dispersion=...``: the
   mesh as jaxpme builds it for ``--kspace-electrostatics pme`` /
   ``kspace_dispersion: pme``). The mesh is fixed in space, so its forces leave a small
-  net force; with ``remove_net_force`` (default) the forces are returned minus their mean
-  (as AMBER's netfrc), which keeps an MD box from drifting as a whole.
+  net force; with ``remove_net_force`` (MD and opt: ``md.build_engine``) the forces are
+  returned minus their mean (as AMBER's netfrc), which keeps an MD box from drifting as a whole.
 * ``energy_forces_strain`` also returns dE/d(strain) (the isotropic virial, box and
   positions scaled together, as jax-md's NPT takes it; ``diag=True``: per axis, for
   semi-isotropic NPT); the box is an argument of the compiled programs (``set_box``), so a
@@ -1265,7 +1265,7 @@ class FlashSO3LR:
                  keep_layer_inputs=True, keep_attention=False, split_channels=False,
                  split_blocks=False, pme_electrostatics=None, pme_dispersion=None, box_margin=0.0,
                  devices=1, atoms_per_program=None, size=None, kernels=None, sort_atoms=True,
-                 staged=False, remove_net_force=True):
+                 staged=False, remove_net_force=False):
         degrees = [int(d) for d in statics["degrees"]]
         self.nh = int(statics["num_heads"])
         # one head per degree entry, each on its own block of G features (so3lr-tauri-s/m: 4 x 32,
@@ -2011,7 +2011,7 @@ class FlashSO3LR:
             rows = jax.shard_map(rows, mesh=self.device_mesh, in_specs=(rep,) * 4, out_specs=(rep,) * 4,
                                  check_vma=False)
         e, f, over, w = rows(Rs, L, z, elem)
-        return self._without_net_force(e, _unsorted(f, perm), over, w)
+        return e, self._net_free(_unsorted(f, perm)), over, w
 
     @contextlib.contextmanager
     def _atoms(self, z, elem, L=None):
@@ -2024,12 +2024,9 @@ class FlashSO3LR:
         finally:
             self.z, self.elem, self._Lt = keep
 
-    def _without_net_force(self, energy, forces, *rest):
-        """The forces minus their mean with PME (``remove_net_force``); the energy and
-        dE/d(strain) as they are."""
-        if self.net_free:
-            forces = forces - jnp.mean(forces, axis=0, keepdims=True)
-        return (energy, forces, *rest)
+    def _net_free(self, forces):
+        """The forces minus their mean with PME (``remove_net_force``)."""
+        return forces - jnp.mean(forces, axis=0, keepdims=True) if self.net_free else forces
 
     def _energy_forces_rows(self, R):
         n, dt, M = self.n, self.dtype, self.M
@@ -2201,8 +2198,7 @@ class FlashSO3LR:
                 energy, f3, most = self._backward_staged(Rs, st)
                 if not self._recover(R, int(int(jnp.max(cnt)) > self.K or int(most) > self.maxh)):
                     w3 = self._strain(f3[3:], Rs)
-                    return self._without_net_force(energy, _unsorted(jnp.stack(f3[:3], -1), perm),
-                                                   (w3 if diag else w3.sum()))
+                    return energy, self._net_free(_unsorted(jnp.stack(f3[:3], -1), perm)), (w3 if diag else w3.sum())
         raise RuntimeError(f"Flash: overflowed again after {MAX_REBUILDS} rebuilds")
 
     def widen(self):
