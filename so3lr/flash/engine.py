@@ -1412,7 +1412,7 @@ class FlashSO3LR:
         small = [v * (1.0 - self.box_margin) for v in L]
         if box_problem(small, self.rc, self.reach):
             small = L                     # near the smallest box: no room to shrink in this layout
-        problem = box_problem(small, self.rc, self.reach) or grid_problem(small, self.rc, self.reach)
+        problem = grid_problem(small, self.rc, self.reach)
         if problem:
             raise ValueError(problem + (" (an atom far from the rest? free space takes a box around all of them)"
                                         if self.vacuum else ""))

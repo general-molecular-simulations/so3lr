@@ -263,9 +263,12 @@ def cell_grid(L, rc, rc_lr):
 
 
 def grid_problem(L, rc, rc_lr):
-    """Why the engine cannot hold the cell grid (``cell_grid``) of an orthorhombic box of
-    sides L that ``box_problem`` takes (None if it can): fewer than MAX_CELLS cells. The
-    engine raises it when it lays out a box (``_layout``)."""
+    """Why the engine cannot lay out an orthorhombic box of sides L (None if it can):
+    ``box_problem``, then its cell grid (``cell_grid``) must have fewer than MAX_CELLS cells.
+    The engine raises it when it lays out a box (``_layout``)."""
+    problem = box_problem(L, rc, rc_lr)
+    if problem:
+        return problem
     grid = cell_grid(L, rc, rc_lr)
     if grid is not None and math.prod(grid[0]) >= MAX_CELLS:
         return (f"box {[round(v) for v in L]} A too large for the cell grid "
@@ -351,11 +354,11 @@ def _span(atoms):
     return float(vacuum_size(R)) if len(R) else math.nan
 
 
-def structure_problem(settings, atoms, rc, span=None):
+def structure_problem(settings, atoms, rc):
     """Why flash cannot take this structure, or the restart's box (None if it can); rc: the
     model's cutoff (``model_cutoff``). A structure in free space (``in_vacuum``) runs in a
     box the engine lays out around it (``vacuum_box``), whose cell grid one atom far from
-    the rest (a dimer translated apart) makes too large; span: its ``_span``, if known."""
+    the rest (a dimer translated apart) makes too large."""
     rc_lr = float(settings.get("lr_cutoff") or 12.0)
     if in_vacuum(atoms):
         problem = vacuum_problem(settings)
@@ -363,12 +366,14 @@ def structure_problem(settings, atoms, rc, span=None):
             return problem
         if not len(atoms):
             return "it has no atoms"
-        size = _span(atoms) if span is None else span
+        size = _span(atoms)
         if not math.isfinite(size):
             return "its positions are not all finite"
         L, reach = vacuum_box(size, rc, rc_lr)
         problem = grid_problem([L] * 3, rc, reach)
-        return problem and f"its atoms span {size:.0f} A (one far from the rest?), a free-space {problem}"
+        if problem:
+            return f"its atoms span {size:.0f} A (one far from the rest?), a free-space {problem}"
+        return None
     if not atoms.pbc.all() or atoms.cell.rank < 3:
         return "it needs a box periodic in all three directions, or no box"
     cell = np.asarray(atoms.cell[:])
@@ -380,7 +385,7 @@ def structure_problem(settings, atoms, rc, span=None):
         sides = np.diag(box) if box.ndim == 2 else np.broadcast_to(box.reshape(-1), (3,))
     shrink = 1.0 - (NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0)
     L = [float(v) * shrink for v in sides]
-    return box_problem(L, rc, rc_lr) or grid_problem(L, rc, rc_lr)
+    return grid_problem(L, rc, rc_lr)
 
 
 @functools.cache
@@ -432,7 +437,6 @@ def frames_problem(settings, frames):
     before it (the box laid out around the atoms grows with their span)."""
     rc, seen, widest = model_cutoff(settings.get("model_path")), set(), -1.0
     for i, atoms in enumerate(frames):
-        span = None
         if in_vacuum(atoms):
             span = _span(atoms)
             if span <= widest:                           # NaN is checked (and declined)
@@ -443,7 +447,7 @@ def frames_problem(settings, frames):
             if key in seen:
                 continue
             seen.add(key)
-        problem = structure_problem(settings, atoms, rc, span)
+        problem = structure_problem(settings, atoms, rc)
         if problem:
             return problem if len(frames) == 1 else f"structure {i}: {problem}"
     return None
