@@ -1146,8 +1146,7 @@ def remove_kspace_net_force(all_settings: Dict) -> bool:
     Ewald, electrostatics or dispersion) unless ``kspace_remove_net_force: false``.
     PME's mesh is fixed in space, so its forces leave a small net force that drifts
     the whole box over a run (AMBER removes it the same way, netfrc)."""
-    kspace = (all_settings.get('kspace_electrostatics') is not None
-              or all_settings.get('kspace_dispersion') is not None)
+    kspace = bool(all_settings.get('kspace_electrostatics') or all_settings.get('kspace_dispersion'))
     return bool(kspace and all_settings.get('kspace_remove_net_force', KS.DEFAULT_KSPACE_REMOVE_NET_FORCE))
 
 
@@ -1155,15 +1154,15 @@ def restart_removes_com_motion(all_settings: Dict, restart_pysages: bool = False
                                held_atoms: bool = False) -> bool:
     """Whether a restart zeroes the centre-of-mass motion (with or without k-space: a box that
     drifted before is stopped): not when the run keeps the old behaviour
-    (``kspace_remove_net_force: false`` also keeps the restart's motion), not for a Langevin run that leaves it
-    thermal (``langevin_removecmmotion: false``), not with atoms held in place (their momenta
-    stay zero), and not for a restarted PySAGES state (it keeps its snapshot's momenta)."""
+    (``kspace_remove_net_force: false`` also keeps the restart's motion), not for Langevin
+    (its noise keeps the centre of mass thermal: jax-md ignores langevin_removecmmotion), not
+    with atoms held in place (their momenta stay zero), and not for a restarted PySAGES state
+    (it keeps its snapshot's momenta)."""
     if restart_pysages or held_atoms:
         return False
     if not all_settings.get('kspace_remove_net_force', KS.DEFAULT_KSPACE_REMOVE_NET_FORCE):
         return False
-    ensemble = str(all_settings.get('ensemble')).strip().lower().replace('_', '-')
-    return not (ensemble == 'nvt-langevin' and all_settings.get('langevin_removecmmotion') is False)
+    return str(all_settings.get('ensemble')).strip().lower().replace('_', '-') != 'nvt-langevin'
 
 
 def process_model(
@@ -1739,9 +1738,11 @@ def remove_restart_com_motion(state):
         state = state.set(velocity=(momentum / mass).astype(state.velocity.dtype))
     else:
         state = state.set(momentum=momentum)
-    if hasattr(state, 'chain'):      # Nose-Hoover's first half-step reads its cached kinetic energy
-        state = state.set(chain=state.chain.set(kinetic_energy=jax_md.quantity.kinetic_energy(
-            momentum=state.momentum, mass=state.mass)))
+    # Nose-Hoover's first half-step reads its cached kinetic energy (NVT: chain, NPT: thermostat)
+    kinetic = jax_md.quantity.kinetic_energy(momentum=state.momentum, mass=state.mass)
+    for name in ('chain', 'thermostat'):
+        if getattr(state, name, None) is not None:
+            state = state.set(**{name: getattr(state, name).set(kinetic_energy=kinetic)})
     return state
 
 
@@ -2124,7 +2125,8 @@ def perform_md(
 
     current_cycle = 0
     # a restarted PySAGES state keeps the momenta its snapshot holds
-    com_free_restart = restart_removes_com_motion(all_settings, restart_pysages, mobile_mask is not None)
+    com_free_restart = restart_removes_com_motion(
+        all_settings, restart_pysages, mobile_mask is not None and bool(jnp.any(mobile_mask == 0)))
     # Loading restart
     if restart:
         logger.info(f'Loading state from {restart_load_path}.')

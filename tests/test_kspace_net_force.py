@@ -49,6 +49,7 @@ def test_without_net_force_is_identity_with_mean_free_gradient():
     (dict(kspace_electrostatics='pme', kspace_remove_net_force=False), False),
     (dict(), False),
     (dict(kspace_electrostatics=None, kspace_dispersion=None), False),
+    (dict(kspace_electrostatics='', kspace_dispersion=False), False),            # no k-space, as elsewhere
 ])
 def test_remove_kspace_net_force_settings(settings, expected):
     from so3lr.cli.so3lr_md import remove_kspace_net_force
@@ -59,8 +60,8 @@ def test_remove_kspace_net_force_settings(settings, expected):
     (dict(ensemble='nvt'), True),
     (dict(ensemble='npt', kspace_electrostatics='pme'), True),
     (dict(ensemble='nvt', kspace_remove_net_force=False), False),                 # the old behaviour
-    (dict(ensemble='nvt-langevin', langevin_removecmmotion=True), True),
-    (dict(ensemble='nvt-langevin', langevin_removecmmotion=False), False),        # thermal COM motion
+    (dict(ensemble='nvt-langevin'), False),                                     # thermal COM motion
+    (dict(ensemble='nvt_langevin', langevin_removecmmotion=True), False),
 ])
 def test_restart_removes_com_motion_settings(settings, expected):
     from so3lr.cli.so3lr_md import restart_removes_com_motion
