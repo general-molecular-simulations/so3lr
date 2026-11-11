@@ -71,6 +71,10 @@ class StackNetSparse(nn.Module):
             )
             x0 = x  # Save initial embedding for skip connection
 
+        # Node features after the embedding and after every layer, for readouts that
+        # look past the last layer (EnergySparse residual_inputs='all_layers'). XLA
+        # drops the concatenation when no observable reads it.
+        x_layers = [quantities['x']]
         for (n, layer) in enumerate(self.layers):
             if self.use_residual_scalars:
                 # Scale residual stream and blend in initial embedding
@@ -78,6 +82,8 @@ class StackNetSparse(nn.Module):
                 quantities['x'] = resid_lambdas[n] * x_current + x0_lambdas[n] * x0
             updated_quantities = layer(**quantities)
             quantities.update(updated_quantities)
+            x_layers.append(quantities['x'])
+        quantities['x_layers'] = jnp.concatenate(x_layers, axis=-1)
 
         if self.return_representations_bool:
             return {

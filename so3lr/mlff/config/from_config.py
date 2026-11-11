@@ -14,7 +14,10 @@ from typing import Sequence, Optional
 import yaml
 import logging
 import os
+import jax
 import jax.numpy as jnp
+from flax import traverse_util
+from flax.core.frozen_dict import unfreeze
 
 from ..utils import checkpoint_utils
 from ..utils.param_utils import (
@@ -200,6 +203,8 @@ def make_so3krates_sparse_from_config(
         use_spin_embed=model_config.use_spin_embed,
         energy_regression_dim=model_config.energy_regression_dim,
         energy_final_mlp_widths=model_config.get('energy_final_mlp_widths', None),
+        energy_residual_mlp_widths=model_config.get('energy_residual_mlp_widths', None),
+        energy_residual_inputs=model_config.get('energy_residual_inputs', 'last'),
         energy_activation_fn=model_config.energy_activation_fn,
         energy_learn_atomic_type_scales=model_config.energy_learn_atomic_type_scales,
         energy_learn_atomic_type_shifts=model_config.energy_learn_atomic_type_shifts,
@@ -323,7 +328,12 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
 
     opt = make_optimizer_from_config(config)
     if model == 'so3krates':
-        net = make_so3krates_sparse_from_config(config)
+        net = make_so3krates_sparse_from_config(
+            config,
+            output_intermediate_quantities=(
+                ['partial_charges'] if 'partial_charges' in config.training.loss_weights else None
+            ),
+        )
     else:
         raise ValueError(
             f'{model=} is not a valid model.'
@@ -540,6 +550,124 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     logger.info('Training has finished!')
 
 
+# Model keys a finetune config may set: they ADD modules to the checkpoint's
+# architecture without changing any pretrained one. Everything else in a
+# finetune `model:` block is dropped, because the checkpoint defines the model.
+FINETUNE_MODEL_OVERRIDES = ('energy_residual_mlp_widths', 'energy_residual_inputs')
+
+# Quantities `training.long_range_anchor_weights` can anchor to the pretrained
+# model's predictions.
+LONG_RANGE_ANCHOR_KEYS = ('partial_charges', 'a0_ratios', 'hirshfeld_ratios', 'c6_ratios', 'dipole_vec')
+
+
+def _apply_finetune_model_overrides(user_model, checkpoint_model):
+    """Copy the allowed `model:` keys of a finetune config onto the checkpoint's
+    model config. A checkpoint that already has a residual readout (a fine-tuned
+    model fine-tuned again) must be given the same one, or its saved residual
+    weights would not fit."""
+    had_residual = checkpoint_model.get('energy_residual_mlp_widths', None) is not None
+    for key in FINETUNE_MODEL_OVERRIDES:
+        value = user_model.get(key, None)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            value = [int(v) for v in value]
+        existing = checkpoint_model.get(key, None)
+        if existing is None and had_residual and key == 'energy_residual_inputs':
+            existing = 'last'  # the default the checkpoint's residual was built with
+        if existing is not None and existing != value:
+            raise ValueError(
+                f'The checkpoint already has model.{key}={existing!r}; the finetune '
+                f'config asks for {value!r}. Remove the key or set the same value.'
+            )
+        with checkpoint_model.unlocked():
+            checkpoint_model[key] = value
+    if (checkpoint_model.get('energy_residual_inputs', None) is not None
+            and checkpoint_model.get('energy_residual_mlp_widths', None) is None):
+        raise ValueError(
+            'model.energy_residual_inputs is set but model.energy_residual_mlp_widths is not; '
+            'set the widths of the residual readout, e.g. [256, 256].'
+        )
+
+
+def _fill_missing_params(params, fresh):
+    """`params` with every entry it lacks taken from `fresh` (a new model's
+    initialisation). Returns the merged tree and the module paths that were filled."""
+    flat = traverse_util.flatten_dict(unfreeze(params))
+    new = {k: v for k, v in traverse_util.flatten_dict(unfreeze(fresh)).items() if k not in flat}
+    filled = sorted({'/'.join(k[:-1]) for k in new})
+    return traverse_util.unflatten_dict({**flat, **new}), filled
+
+
+def _init_residual_readout(net, params, config, training_data, tf_record_present, graph_to_batch_fn):
+    """Add the (zero-initialised) residual-readout weights to pretrained `params`.
+
+    The pretrained checkpoint has no entry for them, so the model is initialised
+    once on a real batch and only the missing entries are taken from it. The last
+    residual layer starts at zero, so the model's energy is unchanged at step 0.
+    """
+    if tf_record_present:
+        raise NotImplementedError(
+            'model.energy_residual_mlp_widths is not supported with TFDS fine-tuning data yet; '
+            'use an extxyz/npz data file.'
+        )
+    graph_batch, lr_batch = next(jraph_utils.dynamically_batch_with_lr(
+        iter(training_data),
+        n_node=config.training.batch_max_num_nodes,
+        n_edge=config.training.batch_max_num_edges,
+        n_graph=config.training.batch_max_num_graphs,
+        n_pairs=config.training.batch_max_num_pairs,
+    ))
+    batch = jax.tree_util.tree_map(jnp.array, graph_to_batch_fn(graph_batch, lr_batch))
+    fresh = net.init(jax.random.PRNGKey(config.training.model_seed), batch)
+    params, filled = _fill_missing_params(params, fresh)
+    if not filled:
+        return params
+    unexpected = [p for p in filled if 'energy_residual' not in p]
+    if unexpected:
+        raise ValueError(
+            f'Initialising the residual readout would also create {unexpected}, which the '
+            f'checkpoint lacks. The checkpoint does not match its hyperparameters.'
+        )
+    n_new = count_trainable_params(params, trainable_keys=filled)
+    logger.info(f'Residual energy readout: initialised {filled} ({n_new:,} new parameters).')
+    return params
+
+
+def _with_long_range_anchor(graph_to_batch_fn, net, params, anchor_keys):
+    """Wrap `graph_to_batch_fn` so every batch also carries 'anchor_<key>' labels:
+    the pretrained model's prediction of <key> for that batch.
+
+    The teacher is a frozen copy of the starting `params`, evaluated in its own
+    jitted call with the parameters as an argument (closed-over parameters would
+    be baked into the training step as constants). Applies to the training and
+    the validation batches alike.
+    """
+    from so3lr.mlff.nn.stacknet.observable_function_sparse import (
+        get_long_range_anchor_fn_sparse, _OPTIONAL_INPUTS
+    )
+    alias = training_utils._RATIO_ALIAS
+    teacher_keys = sorted(set(anchor_keys) | {alias[k] for k in anchor_keys if k in alias})
+    teacher = jax.jit(get_long_range_anchor_fn_sparse(net, teacher_keys))
+    ref_params = jax.device_put(params)  # updates are functional: these stay the starting weights
+    input_keys = ('positions', 'atomic_numbers', 'idx_i', 'idx_j') + _OPTIONAL_INPUTS
+
+    def graph_to_batch_with_anchor(graph, lr_batch):
+        batch = graph_to_batch_fn(graph, lr_batch)
+        out = teacher(ref_params, **{k: batch[k] for k in input_keys if batch.get(k) is not None})
+        for key in anchor_keys:
+            value = out.get(training_utils._prediction_key(key, out))
+            if value is None:
+                raise ValueError(
+                    f'Cannot anchor {key!r}: the pretrained model does not predict it '
+                    f'(it predicts {sorted(out)}).'
+                )
+            batch[training_utils.ANCHOR_PREFIX + key] = value
+        return batch
+
+    return graph_to_batch_with_anchor
+
+
 def run_fine_tuning(
         config: config_dict.ConfigDict,
         start_from_workdir: str,
@@ -619,16 +747,20 @@ def run_fine_tuning(
     user_message_normalization = None
     user_avg_num_neighbors = config.data.get('avg_num_neighbors', None)
     if 'model' in config and config.model is not None:
-        user_model_keys = sorted(config.model.keys())
+        user_model_keys = sorted(
+            k for k in config.model.keys() if k not in FINETUNE_MODEL_OVERRIDES
+        )
         user_message_normalization = config.model.get('message_normalization', None)
         if user_model_keys:
             logger.warning(
                 'Ignoring user-supplied `model:` block in finetune config; '
                 'the checkpoint at %s defines the model architecture. '
-                'Dropped keys: %s',
+                'Dropped keys: %s (only %s can be set when fine-tuning)',
                 start_from_workdir,
                 user_model_keys,
+                list(FINETUNE_MODEL_OVERRIDES),
             )
+        _apply_finetune_model_overrides(config.model, config_start_from_workdir.model)
 
     # Check that message normalization has not changed from the original model
     # to the fine-tuning model. Fails before any data is loaded.
@@ -688,12 +820,30 @@ def run_fine_tuning(
             "Please enable only one."
         )
 
-    adaptive_robust_loss_targets = list(config.training.loss_weights.keys()) if use_adaptive_robust_loss else None
+    # Long-range anchoring: keep the charges / a0 / C6 ratios (or the dipole) of the
+    # model being fine-tuned close to those of the frozen pretrained model, on every
+    # fine-tuning batch. For data with energies and forces only, which cannot tell
+    # short-range from long-range energy, so the long-range heads would otherwise
+    # be used as extra fitting knobs. Enters the loss as 'anchor_<key>' targets.
+    anchor_weights = dict(config.training.get('long_range_anchor_weights', None) or {})
+    unknown = sorted(set(anchor_weights) - set(LONG_RANGE_ANCHOR_KEYS))
+    if unknown:
+        raise ValueError(
+            f'training.long_range_anchor_weights has unknown keys {unknown}; '
+            f'choose from {list(LONG_RANGE_ANCHOR_KEYS)}.'
+        )
+    loss_weights = dict(config.training.loss_weights)
+    loss_weights.update({training_utils.ANCHOR_PREFIX + k: float(w) for k, w in anchor_weights.items()})
+    needs_charges = 'partial_charges' in loss_weights or 'partial_charges' in anchor_weights
+    output_intermediate_quantities = ['partial_charges'] if needs_charges else None
+
+    adaptive_robust_loss_targets = list(loss_weights.keys()) if use_adaptive_robust_loss else None
     adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)
     adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
 
     # Load the parameters from the model for fine-tuning.
     params = checkpoint_utils.load_params_from_workdir(start_from_workdir)
+    has_residual_readout = config_start_from_workdir.model.get('energy_residual_mlp_widths', None) is not None
 
     # Expand a single-theory-level checkpoint to the multi-head energy readout.
     # Shared with fit()/fit_from_iterator() so the three call sites cannot drift.
@@ -707,6 +857,9 @@ def run_fine_tuning(
     if selection_keys:
         available_modules = sorted(params.get('params', params).keys())
         unmatched = unmatched_param_keys(params, selection_keys)
+        if has_residual_readout:
+            # Created (zero-initialised) below, once a batch is at hand.
+            unmatched = [k for k in unmatched if 'energy_residual' not in k]
         if unmatched:
             logger.warning(
                 'Fine-tuning strategy %r selects %s, which match no parameter in the '
@@ -790,7 +943,10 @@ def run_fine_tuning(
         )
 
     if model == 'so3krates':
-        net = make_so3krates_sparse_from_config(config_start_from_workdir)
+        net = make_so3krates_sparse_from_config(
+            config_start_from_workdir,
+            output_intermediate_quantities=output_intermediate_quantities
+        )
     else:
         raise ValueError(
             f'{model=} is not a valid model.'
@@ -798,7 +954,7 @@ def run_fine_tuning(
 
     loss_fn = training_utils.make_loss_fn(
         get_energy_and_force_fn_sparse(net),
-        weights=config.training.loss_weights,
+        weights=loss_weights,
         use_robust_loss=use_robust_loss,
         robust_loss_alpha=robust_loss_alpha,
         use_adaptive_robust_loss=use_adaptive_robust_loss,
@@ -806,7 +962,7 @@ def run_fine_tuning(
 
     val_fn = training_utils.make_val_fn(
         get_energy_and_force_fn_sparse(net),
-        weights=config.training.loss_weights,
+        weights=loss_weights,
         use_robust_loss=config.training.get('use_robust_loss_validation', use_robust_loss),
         robust_loss_alpha=config.training.get('robust_loss_alpha_validation', robust_loss_alpha),
         use_adaptive_robust_loss=use_adaptive_robust_loss,
@@ -890,6 +1046,26 @@ def run_fine_tuning(
         )
 
     _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)
+
+    if has_residual_readout:
+        params = _init_residual_readout(
+            net, params, config, training_data, tf_record_present, _graph_to_batch_fn
+        )
+        flat = traverse_util.flatten_dict(unfreeze(params))
+        residual = traverse_util.unflatten_dict(
+            {k: v for k, v in flat.items() if any(c.startswith('energy_residual') for c in k)}
+        )
+        if count_trainable_params(residual, trainable_subset_keys, frozen_subset_keys) == 0:
+            logger.warning(
+                'Fine-tuning strategy %r freezes the residual energy readout '
+                '(model.energy_residual_mlp_widths); a new one stays zero. Use '
+                '--strategy readout_only or full to train it.', strategy
+            )
+
+    if anchor_weights:
+        _graph_to_batch_fn = _with_long_range_anchor(
+            _graph_to_batch_fn, net, params, list(anchor_weights)
+        )
 
     if tf_record_present is True:
         training_utils.fit_from_iterator(
