@@ -375,13 +375,6 @@ class TestPMEDirectComparison:
 
 
 class TestASECalculatorKSpaceReporting:
-    @pytest.fixture(autouse=True)
-    def _so3lr_logs_reach_caplog(self, monkeypatch):
-        # setup_logger() (so3lr_md.py) sets propagate=False on "SO3LR" while
-        # caplog listens on the root logger: after any test in this process has
-        # run the CLI/eval path, these records would otherwise never arrive.
-        monkeypatch.setattr(logging.getLogger("SO3LR"), "propagate", True)
-
     def test_logs_atoms_info_override_for_kspace_kwargs(self, monkeypatch, caplog):
         calc = make_stub_ase_calculator()
         atoms = Atoms('H2', positions=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.74)])
