@@ -189,9 +189,10 @@ def _cli_md_energy_and_forces(atoms, settings):
     from so3lr.jaxmd_utils import nbrs_cutoff
     from so3lr.model_registry import DEFAULT_MODEL
 
+    from so3lr.md_settings_validation import resolve_precision
+
     s = settings
-    precision = s.get('precision')
-    dtype = jnp.float64 if precision == 'float64' else jnp.float32
+    model_dtype, dtype = so3lr_md.run_dtypes({'precision': resolve_precision(s)})  # as setup_run
     lr_cutoff = s.get('lr_cutoff')
     kspace_electrostatics = s.get('kspace_electrostatics', None)
     kspace_smearing = s.get('kspace_smearing', KS.DEFAULT_KSPACE_SMEARING)
@@ -203,7 +204,7 @@ def _cli_md_energy_and_forces(atoms, settings):
     cell = so3lr_md.cell_from_atoms_boundary_conditions(
         atoms, lr_cutoff, kspace_electrostatics, kspace_smearing)
     atoms.wrap()
-    geometry = so3lr_md.atoms_to_jnp(atoms, precision=precision)
+    geometry = so3lr_md.atoms_to_jnp(atoms, precision=dtype)
     # 'periodic' is what perform_md picks for a cell when PySAGES is off.
     position, box, displacement, _, fractional_coordinates = so3lr_md.handle_box(
         'periodic', geometry['positions'], cell, precision=dtype)
@@ -211,7 +212,7 @@ def _cli_md_energy_and_forces(atoms, settings):
     model_path = s.get('model_path')
     potential = so3lr_md.load_model(
         model_path if model_path is not None else DEFAULT_MODEL,
-        precision=dtype,
+        precision=model_dtype,
         lr_cutoff=lr_cutoff,
         dispersion_damping=s.get('dispersion_damping'),
         kspace_electrostatics=kspace_electrostatics,
@@ -230,7 +231,7 @@ def _cli_md_energy_and_forces(atoms, settings):
         box=box,
         total_charge=s.get('total_charge'),
         num_unpaired_electrons=s.get('num_unpaired_electrons', 0),
-        precision=precision,  # the string, as perform_md passes it
+        precision=model_dtype,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=s.get('buffer_size_multiplier_lr'),
         buffer_size_multiplier_sr=s.get('buffer_size_multiplier_sr'),
@@ -376,13 +377,6 @@ class TestPMEDirectComparison:
 
 
 class TestASECalculatorKSpaceReporting:
-    @pytest.fixture(autouse=True)
-    def _so3lr_logs_reach_caplog(self, monkeypatch):
-        # setup_logger() (so3lr_md.py) sets propagate=False on "SO3LR" while
-        # caplog listens on the root logger: after any test in this process has
-        # run the CLI/eval path, these records would otherwise never arrive.
-        monkeypatch.setattr(logging.getLogger("SO3LR"), "propagate", True)
-
     def test_logs_atoms_info_override_for_kspace_kwargs(self, monkeypatch, caplog):
         calc = make_stub_ase_calculator()
         atoms = Atoms('H2', positions=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.74)])

@@ -1,5 +1,5 @@
 """Import-light settings helpers shared by the CLI and ``so3lr_md``: loading a
-settings YAML, resolving the ensemble and the MD state's precision, checking the MD counts."""
+settings YAML, resolving the ensemble and the run's precision, checking the MD counts."""
 
 import difflib
 import logging
@@ -9,8 +9,55 @@ from numbers import Integral
 import yaml
 
 ENSEMBLES = ('nve', 'nvt', 'nvt-langevin', 'npt')
-PRECISIONS = ('float32', 'float64')
+PRECISIONS = ('float32', 'float64', 'mixed')
+DEFAULT_PRECISION = 'mixed'
 DEFAULT_PRESSURE = 1.0  # bar
+
+
+def expand_indices(spec):
+    """Expand a YAML index specification into a flat list of ints.
+
+    Supported forms:
+      - int:                       5             -> [5]
+      - list / tuple (any mix):    [0, 1, 2]     -> [0, 1, 2]
+                                   [0, "3-5"]    -> [0, 3, 4, 5]
+      - inclusive range string:    "0-19"        -> [0, 1, ..., 19]
+      - multi-token string:        "0-2, 5, 8-9" -> [0, 1, 2, 5, 8, 9]
+        (tokens separated by commas and/or whitespace; each token is a single
+        index or an inclusive "a-b" range with a <= b)
+      - a NumPy array or integer of the above.
+
+    Ranges "a-b" include BOTH endpoints. Negative indices are not supported.
+    """
+    def expand_token(tok):
+        if isinstance(tok, bool):
+            raise ValueError(f"Invalid index: {tok!r}")
+        if isinstance(tok, Integral):
+            return [int(tok)]
+        if isinstance(tok, str):
+            out = []
+            for piece in tok.replace(',', ' ').split():
+                if '-' in piece:
+                    a, b = piece.split('-')
+                    a, b = int(a), int(b)
+                    if b < a:
+                        raise ValueError(
+                            f"Invalid index range '{piece}': end < start."
+                        )
+                    out.extend(range(a, b + 1))
+                else:
+                    out.append(int(piece))
+            return out
+        raise ValueError(f"Unsupported index token: {tok!r}")
+
+    if hasattr(spec, 'tolist') and not isinstance(spec, str):   # NumPy array or scalar
+        spec = spec.tolist()
+    if isinstance(spec, (list, tuple)):
+        result = []
+        for item in spec:
+            result.extend(expand_token(item))
+        return result
+    return expand_token(spec)
 
 
 def canonical_ensemble(name) -> str:
@@ -25,27 +72,79 @@ def canonical_ensemble(name) -> str:
     return canonical
 
 
+def normalize_npt_coupling(npt_coupling: str) -> str:
+    """Return 'isotropic' or 'semi-isotropic' (spaces/underscores/hyphens accepted).
+
+    Semi-isotropic coupling is experimental. Fully anisotropic coupling is
+    rejected: the integrator would evolve shear, but the neighbour-list,
+    reciprocal-space and dispersion-tail paths assume an orthorhombic cell.
+    """
+    coupling = '-'.join(str(npt_coupling).strip().lower().replace('_', ' ').replace('-', ' ').split())
+    if coupling == 'anisotropic':
+        raise ValueError(
+            "npt_coupling='anisotropic' is experimental and not supported by SO3LR MD: "
+            "the cell would shear, but the neighbour-list, reciprocal-space and "
+            "dispersion-tail paths assume an orthorhombic cell. Use 'isotropic' or "
+            "the experimental 'semi-isotropic' (coupled x/y, independent z)."
+        )
+    if coupling not in ('isotropic', 'semi-isotropic'):
+        raise ValueError(
+            f"Unknown npt_coupling={npt_coupling!r}. Supported values: isotropic, semi-isotropic."
+        )
+    return coupling
+
+
 def canonical_precision(precision) -> str:
-    """The model's precision (float32 if unset); anything but PRECISIONS raises."""
-    p = 'float32' if precision is None else str(precision).strip().lower()
+    """A run's precision (mixed if unset): float32 or float64 throughout, or mixed, a float32
+    model around a float64 MD state (float32 coordinates of a 500 A box round to 6e-5 A).
+    Anything but PRECISIONS raises."""
+    p = DEFAULT_PRECISION if precision is None else str(precision).strip().lower()
     if p not in PRECISIONS:
-        raise ValueError(f"precision must be float32 or float64 (received {precision!r})")
+        raise ValueError(f"precision must be float32, float64 or mixed (received {precision!r})")
     return p
 
 
-def state_precision(precision, settings) -> str:
-    """The MD state's precision (positions, momenta, box, energy sums) on both engines, around a
-    model in ``precision``: ``md_precision`` (float64 if unset; float32 coordinates of a 500 A
-    box round to 6e-5 A), or the older ``flash_mixed`` (false: float32). A float64 model always
-    has a float64 state."""
-    md_precision = settings.get('md_precision')
-    if md_precision is not None:
-        md_precision = canonical_precision(md_precision)  # validated also for a float64 model
-    if precision == 'float64':
-        return 'float64'
-    if md_precision is not None:
-        return md_precision
-    return 'float32' if settings.get('flash_mixed') is False else 'float64'
+def model_precision(precision) -> str:
+    """The model's precision in a run of ``precision``."""
+    return 'float64' if canonical_precision(precision) == 'float64' else 'float32'
+
+
+def state_precision(precision) -> str:
+    """The MD state's precision (positions, momenta, box, energy sums; displacements are formed
+    in it before the model) in a run of ``precision``, on both engines."""
+    return 'float32' if canonical_precision(precision) == 'float32' else 'float64'
+
+
+def resolve_precision(settings) -> str:
+    """The run precision of ``settings``, with the retired forms: ``flash_mixed`` (deprecated)
+    makes a float32 model's run mixed (true) or float32 (false), as it did before precision
+    took mixed; md_precision raises."""
+    if settings.get('md_precision') is not None:
+        raise ValueError("md_precision was replaced by precision: mixed (a float64 MD state around "
+                         "a float32 model, the default) or float32 (float32 throughout)")
+    precision, flash_mixed = canonical_precision(settings.get('precision')), settings.get('flash_mixed')
+    if flash_mixed is None:
+        return precision
+    if not isinstance(flash_mixed, bool):
+        raise ValueError(f"flash_mixed must be true or false (received {flash_mixed!r})")
+    if precision != 'float64':
+        precision = 'mixed' if flash_mixed else 'float32'
+    logging.getLogger("SO3LR").warning(
+        f"flash_mixed is deprecated: this run is precision {precision}; set that instead.")
+    return precision
+
+
+def available_precision(settings) -> str:
+    """resolve_precision for a library caller, which may run without x64 (the CLI turns it on):
+    there an unset precision is float32, and a mixed or float64 one raises."""
+    import jax
+    from so3lr.mlff.calculators.potential import require_x64
+    precision = resolve_precision(settings)  # validates also what an unset precision ignores
+    if (not jax.config.jax_enable_x64 and settings.get('precision') is None
+            and settings.get('flash_mixed') is None):
+        return 'float32'
+    require_x64(state_precision(precision))
+    return precision
 
 
 def resolve_ensemble(settings: dict) -> dict:

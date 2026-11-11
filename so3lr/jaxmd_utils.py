@@ -7,6 +7,11 @@ from jax_md.space import DisplacementOrMetricFn, Box, transform
 
 from so3lr.graph import Graph
 
+# Per-overflow neighbour-list headroom (extra_capacity), added at each reallocation in a
+# row and reset once a step runs (so3lr md and So3lrEngine).
+OVERFLOW_EXTRA_SR = 2
+OVERFLOW_EXTRA_LR = 8
+
 
 def nbrs_cutoff(potential):
     """The longest cutoff the neighbour lists use: the long-range one, or the

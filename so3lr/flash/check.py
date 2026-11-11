@@ -15,6 +15,8 @@ import os
 
 import numpy as np
 
+from so3lr.md_settings_validation import normalize_npt_coupling
+
 # NPT: the cell grid is laid out for a box this much smaller, so the box moves without
 # a compile (and is laid out again if it leaves the margin)
 NPT_BOX_MARGIN = 0.03
@@ -22,10 +24,15 @@ NPT_BOX_MARGIN = 0.03
 # and long-range reach are laid out again; a quarter of the size where that is more
 # (``vacuum_box``), so atoms that keep growing are laid out again a few times only
 VACUUM_PAD = 10.0
+# cells of the engine's grid, at most (its cell_start: 1 GiB): rc-wide cells fill a box up to
+# 645 rc wide (2900 A at 4.5 A), the box free space lays out around atoms that span about
+# 1500 A (1000 A long range) to 2300 A (12 A)
+MAX_CELLS = 1 << 28
 ENGINES = ("auto", "flash", "standard")
 # the AMD GPUs (gfx targets) flash is tested on: the MI355X
 ROCM_TARGETS = ("gfx950",)
 FLASH_MODES = ("auto", "fast", "default", "lean", "leanest", "minimal")     # engine.MODES and auto
+KERNELS = ("auto", "pallas", "cuda")      # flash_kernels: the CUDA kernels where they apply, Pallas, CUDA only
 TASKS = ("md", "opt", "eval", "ase")
 # what so3lr eval can take from the engine
 EVAL_TARGETS = ("energy", "forces")
@@ -35,6 +42,7 @@ EVAL_AUTO_ENGINES = 16
 
 # settings flash honours (aliases included)
 HANDLED = {
+    "fixed_atom_indices",  # md.py holds them (rules: settings_problem)
     "input_file", "output_file", "log_file", "output_format", "overwrite", "output_atom_indices",
     "output_cartesian_positions", "enforce_cartesian_coordinates", "model", "model_path", "precision",
     "matmul_precision", "lr_cutoff", "dispersion_damping", "total_charge", "num_unpaired_electrons", "spin",
@@ -46,24 +54,30 @@ HANDLED = {
     "kspace_smearing", "kspace_spacing", "kspace_interp_nodes", "kspace_dispersion",
     "kspace_dispersion_smearing", "kspace_dispersion_spacing", "kspace_dispersion_interp_nodes",
     "kspace_remove_net_force", "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
-    "engine", "flash_mode", "flash_mixed", "flash_devices", "md_precision",
+    "engine", "flash_mode", "flash_mixed", "flash_devices", "flash_kernels", "md_precision",
+    "do_enhanced_sampling", "pysages_input", "restart_pysages_load_path", "restart_pysages_save_path",
+    "buffer_size_multiplier_sr", "buffer_sr",       # the coordinationnumber CV's neighbour list
 }
 # settings that only concern the neighbour-list engine, other commands sharing a settings
 # file (eval, tune-ewald), or act only together with a declined setting below (the
-# PySAGES files with do_enhanced_sampling, the constraint mode with fixed atoms)
+# cylinder parameters with cylinder_restraint_enabled); the fixed atoms' constraint mode acts
+# only in NPT, which flash declines with fixed atoms (settings_problem validates its spelling)
 IRRELEVANT = {
-    "buffer_size_multiplier_sr", "buffer_sr", "buffer_size_multiplier_lr", "buffer_lr",
-    "minimum_cell_size_multiplier", "jit_compile", "datafile", "save_to", "targets", "batch_size",
-    "accuracy", "cutoff_lo", "cutoff_hi", "cutoff_it", "dispersion_damping_lo", "dispersion_damping_hi",
-    "dispersion_damping_it", "mesh_lo", "mesh_hi", "nodes_lo", "nodes_hi", "ns_lo", "ns_hi", "smear_lo",
-    "smear_hi", "smear_it", "help",
-    "pysages_input", "restart_pysages_load_path", "restart_pysages_save_path", "fixed_atom_constraint",
+    "buffer_size_multiplier_lr", "buffer_lr", "minimum_cell_size_multiplier", "jit_compile", "datafile",
+    "save_to", "targets", "batch_size", "accuracy", "cutoff_lo", "cutoff_hi", "cutoff_it",
+    "dispersion_damping_lo", "dispersion_damping_hi", "dispersion_damping_it", "mesh_lo", "mesh_hi",
+    "nodes_lo", "nodes_hi", "ns_lo", "ns_hi", "smear_lo", "smear_hi", "smear_it", "help",
+    "fixed_atom_constraint",
+    "cylinder_restraint_atom_indices", "cylinder_restraint_axis", "cylinder_restraint_axis_origin",
+    "cylinder_restraint_radius", "cylinder_restraint_force_constant", "cylinder_restraint_axial_min",
+    "cylinder_restraint_axial_max", "cylinder_restraint_axial_force_constant",
 }
 # settings flash does not implement: it declines when one is active
 UNSUPPORTED = {
-    "do_enhanced_sampling": "enhanced sampling",
+    "cylinder_restraint_enabled": "cylindrical restraint",
     "observables": "observables", "observable": "observables",
-    "atom_mask_path": "fixed atoms", "mobile_atom_indices": "fixed atoms", "fixed_atom_indices": "fixed atoms",
+    "atom_mask_path": "fixed atoms from a mask file (give fixed_atom_indices)",
+    "mobile_atom_indices": "mobile_atom_indices (give fixed_atom_indices)",
     "dispersion_tail_correction": "the dispersion tail correction",
     "kspace_npt_cycles": "re-tuning the PME mesh every so many cycles (kspace_npt_cycles)",
 }
@@ -109,13 +123,11 @@ def _off(value):
 
 
 def validate_options(settings):
-    """Raise on an engine, flash_mode, flash_mixed or flash_devices value flash does not take
+    """Raise on an engine, flash_mode, flash_kernels or flash_devices value flash does not take
     (a settings file bypasses the CLI's choices)."""
-    for key, allowed in (("engine", ENGINES), ("flash_mode", FLASH_MODES)):
+    for key, allowed in (("engine", ENGINES), ("flash_mode", FLASH_MODES), ("flash_kernels", KERNELS)):
         if settings.get(key) is not None and settings[key] not in allowed:
             raise ValueError(f"{key} must be one of {', '.join(allowed)} (received {settings[key]!r})")
-    if settings.get("flash_mixed") is not None and not isinstance(settings["flash_mixed"], bool):
-        raise ValueError(f"flash_mixed must be true or false (received {settings['flash_mixed']!r})")
     n = settings.get("flash_devices")
     if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
         raise ValueError(f"flash_devices must be a positive integer (received {n!r})")
@@ -167,8 +179,37 @@ def settings_problem(settings, task="md"):
                 return f"it has no {UNSUPPORTED[key]}"
         elif key not in HANDLED and key not in IRRELEVANT and not _off(value):
             return f"it does not know the setting {key!r}"
-    if ens == "npt" and (s.get("npt_coupling") or "isotropic") != "isotropic":
-        return f"its NPT is isotropic, not {s.get('npt_coupling')}"
+    mode = s.get("fixed_atom_constraint")
+    if mode is not None and str(mode).strip().lower().replace("-", "_") not in ("cartesian_anchor", "fractional"):
+        return f"it does not know fixed_atom_constraint {mode!r}"   # perform_md raises
+    if not _off(s.get("fixed_atom_indices")):
+        # md.py puts held atoms back after every step of nve / nvt / nvt-langevin; the NPT box moves
+        # them, and flash's minimiser (so3lr opt, the relaxation before MD) does not hold them
+        if task != "md":
+            return f"it holds atoms fixed only in MD, not in {task}"
+        if ens == "npt":
+            return "it holds atoms fixed only in nve, nvt and nvt-langevin (the NPT box moves them)"
+        if s.get("relax_before_run", True) and not s.get("restart_load_path"):
+            return "it holds fixed atoms only without the relaxation before MD (relax_before_run: false)"
+    if not _off(s.get("do_enhanced_sampling")):
+        # enhanced sampling is an MD setting: opt, eval and ase decline it as they did
+        # before flash ran PySAGES, so their engine choice does not change
+        if task != "md":
+            return "it has no enhanced sampling"
+        # PySAGES runs the MD step inside its own jitted loop: the jitted fast mode on one
+        # GPU, in nvt or nve (flash's NPT runs each step from Python); and in a periodic box
+        # (vacuum_problem)
+        if ens not in ("nvt", "nve"):
+            return f"its enhanced sampling runs nvt and nve, not {ens}"
+        if (s.get("flash_mode") or "auto") not in ("auto", "fast"):
+            return f"its enhanced sampling runs flash_mode fast, not {s.get('flash_mode')}"
+        if int(s.get("flash_devices") or 1) > 1:
+            return "its enhanced sampling runs on one GPU"
+    if ens == "npt":
+        try:
+            normalize_npt_coupling(s.get("npt_coupling") or "isotropic")    # isotropic or semi-isotropic
+        except ValueError:
+            return f"its NPT is isotropic or semi-isotropic, not {s.get('npt_coupling')}"
     for key, nodes in (("kspace_electrostatics", "kspace_interp_nodes"),
                        ("kspace_dispersion", "kspace_dispersion_interp_nodes")):
         if s.get(key) not in (None, "pme"):
@@ -236,6 +277,20 @@ def cell_grid(L, rc, rc_lr):
     return None
 
 
+def grid_problem(L, rc, rc_lr):
+    """Why the engine cannot lay out an orthorhombic box of sides L (None if it can):
+    ``box_problem``, then its cell grid (``cell_grid``) must have fewer than MAX_CELLS cells.
+    The engine raises it when it lays out a box (``_layout``)."""
+    problem = box_problem(L, rc, rc_lr)
+    if problem:
+        return problem
+    grid = cell_grid(L, rc, rc_lr)
+    if grid is not None and math.prod(grid[0]) >= MAX_CELLS:
+        return (f"box {[round(v) for v in L]} A too large for the cell grid "
+                f"({' x '.join(map(str, grid[0]))} cells, 2^{MAX_CELLS.bit_length() - 1} or more)")
+    return None
+
+
 def box_problem(L, rc, rc_lr):
     """Why the engine cannot take an orthorhombic box of sides L (None if it can): the
     minimum image needs 2 x the cutoffs, and the cell grid (``cell_grid``) must exist."""
@@ -283,6 +338,12 @@ def vacuum_fits(size, L, rc, rc_lr, reach):
 
 def vacuum_problem(settings):
     """Why flash cannot run these settings in free space (None if it can)."""
+    if not _off(settings.get("do_enhanced_sampling")):
+        # PySAGES runs a whole cycle inside its own loop, where perform_md_flash widens the
+        # engine's tables but cannot lay out free space's box again when the atoms outgrow
+        # it, and the coordinationnumber CV's neighbour list needs a periodic box: the
+        # neighbour-list engine runs these, as it did before flash took free space
+        return "its enhanced sampling needs a box"
     if settings.get("ensemble") == "npt":
         return "its NPT needs a box"
     for key in ("kspace_electrostatics", "kspace_dispersion"):
@@ -302,12 +363,32 @@ def _restart_box(settings):
     return box if box is not None and np.any(box) else None
 
 
+def _span(atoms):
+    """The ``vacuum_size`` of atoms, NaN with none (or with a position not finite)."""
+    R = np.asarray(atoms.get_positions(), np.float64)
+    return float(vacuum_size(R)) if len(R) else math.nan
+
+
 def structure_problem(settings, atoms, rc):
     """Why flash cannot take this structure, or the restart's box (None if it can); rc: the
-    model's cutoff (``model_cutoff``). A structure in free space (``in_vacuum``) takes any
-    size: the engine lays out a box for it."""
+    model's cutoff (``model_cutoff``). A structure in free space (``in_vacuum``) runs in a
+    box the engine lays out around it (``vacuum_box``), whose cell grid one atom far from
+    the rest (a dimer translated apart) makes too large."""
+    rc_lr = float(settings.get("lr_cutoff") or 12.0)
     if in_vacuum(atoms):
-        return vacuum_problem(settings)
+        problem = vacuum_problem(settings)
+        if problem:
+            return problem
+        if not len(atoms):
+            return "it has no atoms"
+        size = _span(atoms)
+        if not math.isfinite(size):
+            return "its positions are not all finite"
+        L, reach = vacuum_box(size, rc, rc_lr)
+        problem = grid_problem([L] * 3, rc, reach)
+        if problem:
+            return f"its atoms span {size:.0f} A (one far from the rest?), a free-space {problem}"
+        return None
     if not atoms.pbc.all() or atoms.cell.rank < 3:
         return "it needs a box periodic in all three directions, or no box"
     cell = np.asarray(atoms.cell[:])
@@ -318,7 +399,8 @@ def structure_problem(settings, atoms, rc):
     if box is not None:                                  # a restart starts in its own box
         sides = np.diag(box) if box.ndim == 2 else np.broadcast_to(box.reshape(-1), (3,))
     shrink = 1.0 - (NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0)
-    return box_problem([float(v) * shrink for v in sides], rc, float(settings.get("lr_cutoff") or 12.0))
+    L = [float(v) * shrink for v in sides]
+    return grid_problem(L, rc, rc_lr)
 
 
 @functools.cache
@@ -366,13 +448,20 @@ def model_cutoff(model_path):
 
 def frames_problem(settings, frames):
     """Why flash cannot take one of these structures (None if it can take them all): each
-    distinct box checked once."""
-    rc, seen = model_cutoff(settings.get("model_path")), set()
+    distinct box checked once, and in free space each structure that spans more than those
+    before it (the box laid out around the atoms grows with their span)."""
+    rc, seen, widest = model_cutoff(settings.get("model_path")), set(), -1.0
     for i, atoms in enumerate(frames):
-        key = (tuple(bool(p) for p in atoms.pbc), np.asarray(atoms.cell[:]).tobytes())
-        if key in seen:
-            continue
-        seen.add(key)
+        if in_vacuum(atoms):
+            span = _span(atoms)
+            if span <= widest:                           # NaN is checked (and declined)
+                continue
+            widest = span
+        else:
+            key = (tuple(bool(p) for p in atoms.pbc), np.asarray(atoms.cell[:]).tobytes())
+            if key in seen:
+                continue
+            seen.add(key)
         problem = structure_problem(settings, atoms, rc)
         if problem:
             return problem if len(frames) == 1 else f"structure {i}: {problem}"

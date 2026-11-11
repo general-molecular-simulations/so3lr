@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
+from ..utils.jraph_utils import with_uniform_periodic_fields
 from tqdm import tqdm
 from typing import Optional
 
@@ -133,6 +134,8 @@ class NpzDataLoaderSparse:
             f"max_num_of_pairs={max_num_of_pairs}"
         )
 
+        # Molecules and crystals in one data set must be able to share a batch.
+        loaded_data = with_uniform_periodic_fields(loaded_data)
         return loaded_data, {'max_num_of_nodes': max_num_of_nodes, 'max_num_of_edges': max_num_of_edges, 'max_num_of_pairs': max_num_of_pairs}
 
 

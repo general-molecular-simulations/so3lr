@@ -1,6 +1,4 @@
-import numpy as np
-
-from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse
+from so3lr.mlff.calculators.ase_calculator import AseCalculatorSparse, calculator_precision
 from so3lr.model_registry import resolve_model
 
 
@@ -9,12 +7,16 @@ def make_ase_calculator(
         dispersion_energy_cutoff_lr_damping=2.,
         calculate_stress=False,
         calculate_hessian=False,
-        dtype=np.float32,
+        dtype=None,
         model=None,
         charge_embed_total_charge=None,
         charge_equilibration_total_charge=None,
+        precision=None,
         **kwargs
 ):
+    """precision: float32 or float64 throughout, or mixed, a float32 model around float64
+    positions and results (the default; float32 without x64). dtype: the older spelling of the
+    model's dtype (float64: precision float64)."""
     # ``workdir`` (legacy kwarg) takes precedence over ``model``; either may be a
     # bundled model name or a filesystem path. None -> DEFAULT_MODEL.
     workdir = kwargs.pop('workdir', None)
@@ -30,7 +32,7 @@ def make_ase_calculator(
         # So3lrCalculator(calculate_hessian=True) built a calculator that could
         # not produce a hessian even though 'hessian' is in implemented_properties.
         calculate_hessian=calculate_hessian,
-        dtype=dtype,
+        precision=calculator_precision(precision, dtype),
         head_index=spec.head_index,
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge,

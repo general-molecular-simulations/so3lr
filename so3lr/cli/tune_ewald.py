@@ -31,9 +31,11 @@ from so3lr.mlff.utils.kspace_utils import setup_kspace_grid
 from ase.io import read
 from ase.units import Bohr
 
+from so3lr.model_config import load_model_config
+from so3lr.model_registry import resolve_model
 from so3lr.pbc import lattice_rows, minimum_image_problem
 from so3lr.cli.so3lr_md import load_model, atoms_to_jnp, process_model, dispersion_ratios
-from .so3lr_md import setup_logger
+from .so3lr_md import run_dtypes, setup_logger, setup_run
 
 # Setup logging
 logger = logging.getLogger("SO3LR")
@@ -69,8 +71,9 @@ def get_forces_rs(energy, positions, q, displacement, **params):
     return forces(positions)
 
 
-@jax.jit
-def dispersion_vdw_QDO_energy(hirshfeld_ratios, r, idx_i, idx_j,  atomic_numbers, sigma, cutoff_lr, cutoff_lr_damping, c6_ratios=None):
+@partial(jax.jit, static_argnames=('legacy',))
+def dispersion_vdw_QDO_energy(hirshfeld_ratios, r, idx_i, idx_j,  atomic_numbers, sigma, cutoff_lr, cutoff_lr_damping, c6_ratios=None,
+                              legacy=False):
     input_dtype = hirshfeld_ratios.dtype
 
     # Calculate alpha_ij and C6_ij using mixing rules
@@ -80,6 +83,7 @@ def dispersion_vdw_QDO_energy(hirshfeld_ratios, r, idx_i, idx_j,  atomic_numbers
         idx_j,
         hirshfeld_ratios,
         c6_ratios=c6_ratios,
+        legacy=legacy,
     )
     # Use cubic fit for gamma
     gamma_ij = gamma_cubic_fit(alpha_ij)
@@ -218,7 +222,8 @@ def tune_ewald(
     ns_lo: int = 4,
     ns_hi: int = 10,
     accuracy: float = 2e-2,
-    model_kwargs: dict[str, Any] = {},
+    *,
+    model_kwargs: dict[str, Any],
 ) -> tuple[list[dict], list[float], list[float]]:
     """Ewald candidates (smearing, real-space cutoff, wavelength) with their estimated force
     errors and timings. The wavelengths divide the shortest cell side into ns_lo..ns_hi
@@ -283,8 +288,8 @@ class _WithKernelError:
     """A k-space method's estimates plus the measured error of SO3LR's real-space kernel."""
 
     def __init__(self, charges, cell, positions, displacement: DisplacementFn, nbrs_lr,
-                 nbrs_lr_distances, cutoff_sr: float = 4.5,
-                 electrostatic_energy_scale: float = 1.0):
+                 nbrs_lr_distances, cutoff_sr: float = 4.5, *,
+                 electrostatic_energy_scale: float):
         super().__init__(charges, cell, positions)
         # depends on (smearing, cutoff) only, so it is computed once for all spacings
         self.kernel_error = lru_cache(maxsize=None)(partial(
@@ -320,7 +325,8 @@ def tune_pme(
     mesh_lo: int = 2,
     mesh_hi: int = 6,
     accuracy: float = 2e-2,
-    model_kwargs: dict[str, Any] = {},
+    *,
+    model_kwargs: dict[str, Any],
     kspace_electrostatics: str = "pme",
 ) -> tuple[list[dict], list[float], list[float]]:
     """PME/P3M candidates (smearing, real-space cutoff, interpolation order, mesh spacing)
@@ -389,7 +395,8 @@ def tune_sr(
     cutoff_hi: float = 15.0,
     cutoff_it: float = 2.0,
     accuracy: float = 1.0,
-    model_kwargs: dict[str, Any] = {},
+    *,
+    model_kwargs: dict[str, Any],
 ) -> tuple[list[dict], list[float], list[float]]:
     """Cutoff electrostatics (no k-space): candidate cutoffs with their measured force
     errors and timings."""
@@ -407,8 +414,8 @@ class NativeErrorBounds:
     and that sum against the one over every long-range pair (rspace_lr)."""
 
     def __init__(self, charges, positions, displacement: DisplacementFn, nbrs_lr,
-                 nbrs_lr_distances, cutoff_sr: float = 4.5,
-                 electrostatic_energy_scale: float = 1.0):
+                 nbrs_lr_distances, cutoff_sr: float = 4.5, *,
+                 electrostatic_energy_scale: float):
         # cutoff_sr comes with the other bounds' arguments and is unused: this kernel
         # switches on at 0.45 * cutoff
         self.positions, self.charges, self.displacement = positions, charges, displacement
@@ -445,7 +452,8 @@ def tune_dispersion_sr(
     damp_hi: float = 4.0,
     damp_it: float = 1.0,
     accuracy: float = 0.001,
-    model_kwargs: dict[str, Any] = {},
+    *,
+    model_kwargs: dict[str, Any],
     c6_ratios: jnp.ndarray = None,
 ) -> tuple[list[dict], list[float], list[float]]:
     """Cutoff dispersion: candidate cutoffs and damping widths with their measured force
@@ -472,12 +480,14 @@ class NativeErrorBounds_Dispersion:
 
     def __init__(self, hirshfeld_ratios, positions, displacement: DisplacementFn,
                  nbrs_lr, nbrs_lr_distances, atomic_numbers,
-                 dispersion_energy_scale: float = 1.2, c6_ratios: jnp.ndarray = None):
+                 *, dispersion_energy_scale: float, c6_ratios: jnp.ndarray = None,
+                 legacy: bool = False):
         self.positions, self.hirshfeld_ratios = positions, hirshfeld_ratios
         self.displacement = displacement
         self.nbrs_lr, self.nbrs_lr_distances = nbrs_lr, nbrs_lr_distances
         self.energy = partial(dispersion_vdw_QDO_energy, atomic_numbers=atomic_numbers,
-                              sigma=dispersion_energy_scale, c6_ratios=c6_ratios)
+                              sigma=dispersion_energy_scale, c6_ratios=c6_ratios,
+                              legacy=legacy)
         self.reference = self._forces(nbrs_lr, cutoff_lr=None, cutoff_lr_damping=None)
         # depends on the cutoff only, so it is computed once for all damping widths
         self.truncated = lru_cache(maxsize=None)(self._truncated)
@@ -496,6 +506,17 @@ class NativeErrorBounds_Dispersion:
         switched = self._forces(nbrs, cutoff_lr=cutoff, cutoff_lr_damping=cutoff_lr_damping)
         return _combined(rspace_sr=_rms_difference(switched, truncated),
                          rspace_lr=_rms_difference(truncated, self.reference))
+
+
+def model_pair_settings(model_path) -> dict:
+    """The settings of the model's own pair functions, which the error estimates evaluate
+    (model_path is a name, a path, or None for the default): the electrostatic and
+    dispersion widths, and whether the dispersion uses the legacy so3lr's free-atom
+    tables."""
+    model = load_model_config(resolve_model(model_path).dir)['model']
+    return dict(electrostatic_energy_scale=float(model['electrostatic_energy_scale']),
+                dispersion_energy_scale=float(model['dispersion_energy_scale']),
+                legacy=model.get('legacy_so3lr_bool', False) is True)
 
 
 def cell_is_present(cell) -> bool:
@@ -520,23 +541,15 @@ def tune(
         settings (dict): Dictionary containing the settings for the tuning process.
     """
 
-    # Configure JAX process-globals (x64 + matmul precision). Centralised in
-    # setup_jax_globals so that every entry point sets the same things up
-    # consistently. Previously this only toggled x64 and never set the matmul
-    # precision, so tune-ewald drifted from the MD path on the same hardware.
-    from .so3lr_md import setup_jax_globals
-    setup_jax_globals(
-        precision=settings.get('precision', 'float32'),
-        matmul_precision=settings.get('matmul_precision', 'highest'),
-    )
-
-    # Setup logger
+    # Setup logger (first: setup_run may warn of a deprecated setting)
     log_file = settings.get('log_file')
     setup_logger(log_file)
+    # the run's precision and JAX's globals (x64, matmul precision), as on every entry point
+    settings = setup_run(dict(settings))
 
     # Model parameters
     model_path = settings.get('model_path')
-    precision = settings.get('precision')
+    model_dtype, state_dtype = run_dtypes(settings)
     lr_cutoff = settings.get('lr_cutoff')
     total_charge = settings.get('total_charge')
     dispersion_damping = settings.get('dispersion_damping')
@@ -596,11 +609,11 @@ def tune(
     if problem:
         raise ValueError(f'tune-ewald: {problem}.')
 
-    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=precision)
+    initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=state_dtype)
 
     # We don't want fractional coordinates here
 
-    box = jnp.array(cell)
+    box = jnp.array(cell, dtype=state_dtype)
     if box.shape == (3, 3) and np.all(box[~np.eye(box.shape[0], dtype=bool)] == 0):
         # orthorhombic boxes are reduced to 3 entries
         box = jnp.diag(box)
@@ -617,7 +630,7 @@ def tune(
     # the solver for the method being timed.
     potential = load_model(
         model_path,
-        precision=jnp.float64 if precision == 'float64' else jnp.float32,
+        precision=model_dtype,
         lr_cutoff=lr_cutoff,
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics if kspace_electrostatics != 'cutoff' else None,
@@ -625,14 +638,15 @@ def tune(
         output_intermediate_quantities=['partial_charges'],
     )
 
+    pair = model_pair_settings(model_path)
     model_kwargs = dict(
         cutoff_sr=potential.cutoff,
-        # 4.0 is the default value, TODO load from model_config!
-        electrostatic_energy_scale=4.0
+        electrostatic_energy_scale=pair['electrostatic_energy_scale'],
     )
 
     dispersion_model_kwargs = dict(
-        dispersion_energy_scale=1.2,  # 1.2 is the default value, TODO load from model_config!
+        dispersion_energy_scale=pair['dispersion_energy_scale'],
+        legacy=pair['legacy'],
         atomic_numbers=initial_geometry.get_atomic_numbers()
     )
 
@@ -642,7 +656,7 @@ def tune(
         displacement=displacement,
         box=box,
         total_charge=total_charge,
-        precision=precision,
+        precision=model_dtype,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,

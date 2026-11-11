@@ -109,7 +109,6 @@ def test_fit_early_stopping(tmp_path, caplog, ethanol_frames):
     steps the two epochs provide.
     """
     model = _so3krates()
-    logging.getLogger("SO3LR").propagate = True
     with caplog.at_level(logging.INFO, logger="SO3LR"):
         _fit(tmp_path / 'checkpoints', model, _loss(model), _ethanol(ethanol_frames),
              early_stopping_patience=2, early_stopping_min_delta=1e9)
@@ -144,7 +143,6 @@ def test_fit_reduce_lr_on_plateau(tmp_path, caplog, ethanol_frames):
     ``reduce_lr_patience=2``, so the learning-rate scale is halved at step 30.
     """
     model = _so3krates()
-    logging.getLogger("SO3LR").propagate = True
     with caplog.at_level(logging.INFO, logger="SO3LR"):
         _fit(tmp_path / 'checkpoints', model, _loss(model), _ethanol(ethanol_frames),
              # The optimizer must carry the injectable knob for plateau scaling to engage.
@@ -160,7 +158,6 @@ def test_fit_two_stage_loss(tmp_path, caplog, ethanol_frames):
     epoch and logs the switch. Epochs count from 0, so stage_two_start_epoch=1
     switches at the start of the second (and last) epoch."""
     model = _so3krates()
-    logging.getLogger("SO3LR").propagate = True
     with caplog.at_level(logging.INFO, logger="SO3LR"):
         # Stage one weights energy heavily; stage two flips to forces.
         _fit(tmp_path / 'checkpoints', model, _loss(model, energy=0.99, forces=0.01),
