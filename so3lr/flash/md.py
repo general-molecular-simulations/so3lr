@@ -549,18 +549,28 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     held = np.zeros(0, np.int64) if held is None else held.astype(np.int64)
     R_held = (position if state is None else state.position)[held]
 
+    def in_place(st):
+        """fixed_atom_indices: at their start positions with zero momentum and force (as
+        perform_md's apply_atom_constraints_to_state), so a step does not kick them (e.g. a
+        solute whose mean solvation force is sampled); Nose-Hoover's kinetic energy without
+        them. check.py declines NPT and the relaxation before MD, which would move them."""
+        if not held.size:
+            return st
+        st = st.set(position=st.position.at[held].set(R_held.astype(st.position.dtype)),
+                    momentum=st.momentum.at[held].set(0.0), force=st.force.at[held].set(0.0))
+        if hasattr(st, "chain"):
+            st = st.set(chain=st.chain.set(kinetic_energy=jax_md.quantity.kinetic_energy(
+                momentum=st.momentum, mass=st.mass)))
+        return st
+
     def hold(free_apply):
-        """fixed_atom_indices: back at their start positions with zero momentum and force after
-        every step (as perform_md's apply_atom_constraints_to_state), so the next step does not
-        kick them and its forces see them in place (e.g. a solute whose mean solvation force is
-        sampled). check.py declines NPT and the relaxation before MD, which would move them."""
+        """free_apply with the fixed atoms in place before (PySAGES adds its bias to the force
+        between steps) and after every step."""
         if not held.size:
             return free_apply
 
         def apply(st, **kwargs):
-            st = free_apply(st, **kwargs)
-            return st.set(position=st.position.at[held].set(R_held.astype(st.position.dtype)),
-                          momentum=st.momentum.at[held].set(0.0), force=st.force.at[held].set(0.0))
+            return in_place(free_apply(in_place(st), **kwargs))
         if hasattr(free_apply, "__wrapped__"):     # PySAGES' loop unwraps jax-md's jit (_traced)
             apply.__wrapped__ = hold(free_apply.__wrapped__)
         return apply
@@ -637,8 +647,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         if state is None:
             state = jax.jit(lambda R, F, m, p: init_fn(key, R, kT=kT, mass=m, momenta=p, F=F))(
                 position, F0, geo["masses"], geo.get("momenta"))
-    if held.size:
-        state = state.set(momentum=state.momentum.at[held].set(0.0), force=state.force.at[held].set(0.0))
+    state = in_place(state)
     if pysages_set_dict is not None:
         # the CVs as perform_md builds them: coordinationnumber counts the edges of a
         # short-range list like perform_md's, the others read only its starting positions
@@ -696,7 +705,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                     eng.widen()                     # an earlier step overflowed (or diverged)
                 logger.info(f"Flash: tables widened (row {eng.K}, scratch {eng.maxh}); cycle repeated")
             pysages_result = result
-            st = update_so3lr_after_pysages(result, init_fn, key, kT, md_dt, None, None, ensemble=ensemble)[0]
+            st = in_place(update_so3lr_after_pysages(result, init_fn, key, kT, md_dt, None, None,
+                                                     ensemble=ensemble)[0])
             return st, ef(st.position)[0]
     del position, F0, W0
 

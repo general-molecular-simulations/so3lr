@@ -56,7 +56,8 @@ HANDLED = {
 }
 # settings that only concern the neighbour-list engine, other commands sharing a settings
 # file (eval, tune-ewald), or act only together with a declined setting below (the
-# constraint mode with fixed atoms, the cylinder parameters with cylinder_restraint_enabled)
+# cylinder parameters with cylinder_restraint_enabled); the fixed atoms' constraint mode acts
+# only in NPT, which flash declines with fixed atoms (settings_problem validates its spelling)
 IRRELEVANT = {
     "buffer_size_multiplier_lr", "buffer_lr", "minimum_cell_size_multiplier", "jit_compile", "datafile",
     "save_to", "targets", "batch_size", "accuracy", "cutoff_lo", "cutoff_hi", "cutoff_it",
@@ -174,6 +175,9 @@ def settings_problem(settings, task="md"):
                 return f"it has no {UNSUPPORTED[key]}"
         elif key not in HANDLED and key not in IRRELEVANT and not _off(value):
             return f"it does not know the setting {key!r}"
+    mode = s.get("fixed_atom_constraint")
+    if mode is not None and str(mode).strip().lower().replace("-", "_") not in ("cartesian_anchor", "fractional"):
+        return f"it does not know fixed_atom_constraint {mode!r}"   # perform_md raises
     if not _off(s.get("fixed_atom_indices")):
         # md.py puts held atoms back after every step of nve / nvt / nvt-langevin; the NPT box moves
         # them, and flash's minimiser (so3lr opt, the relaxation before MD) does not hold them
