@@ -105,12 +105,15 @@ def test_unsupported_interpolation_orders_are_refused_up_front(method, nodes, mo
         tune_ewald.tune(settings)
 
 
-@pytest.mark.parametrize("model,scales", [("so3lr-tauri-s-2606", (4.0, 1.0)), ("so3lr-tauri-m-2606", (4.0, 1.0)),
-                                          ("so3lr-tauri-l-2606", (4.0, 1.0)), ("so3lr", (4.0, 1.2)),
-                                          (None, (4.0, 1.0))])
-def test_error_estimates_take_the_models_scales(model, scales):
+@pytest.mark.parametrize("model,disp_scale,legacy", [
+    ("so3lr-tauri-s-2602", 1.2, False), ("so3lr-tauri-m-2602", 1.0, False),
+    ("so3lr-tauri-l-2602", 1.2, False), ("so3lr-tauri-s-2606", 1.0, False),
+    ("so3lr-tauri-m-2606", 1.0, False), ("so3lr-tauri-l-2606", 1.0, False),
+    ("so3lr", 1.2, True)])
+def test_error_estimates_take_the_models_pair_settings(model, disp_scale, legacy):
     """The error estimates evaluate the model's own pair functions, so they take its
-    electrostatic and dispersion scales (the Tauri models' dispersion scale is 1.0, the
-    legacy so3lr's 1.2; None is the default model)."""
-    from so3lr.cli.tune_ewald import model_energy_scales
-    assert model_energy_scales(model) == scales
+    electrostatic and dispersion widths (the dispersion width differs between models,
+    even within one Tauri generation) and the legacy so3lr's free-atom tables."""
+    from so3lr.cli.tune_ewald import model_pair_settings
+    assert model_pair_settings(model) == dict(electrostatic_energy_scale=4.0,
+                                              dispersion_energy_scale=disp_scale, legacy=legacy)
