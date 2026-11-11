@@ -36,7 +36,9 @@ dependencies = [
     # import with jax 0.10.x.
     # jax 0.10.2 miscompiles vmapped matrix-vector products on CPU
     # (jax-ml/jax#39103), which jax-md's periodic displacements are: wrong
-    # energies and forces, silently.
+    # energies and forces, silently. The jax-md pin excludes it too; a 0.10.2
+    # GPU install is moved to 0.10.1, so install with [cuda12] for the CUDA
+    # plugin to follow (a 0.10.2 plugin left behind makes jax fall back to CPU).
     "flax>=0.12.1,<0.12.9",
     "glp @ git+https://github.com/fbruenig/glp.git@2294f4f59e940be64c45bf5e4d1bea5cb90809f8",
     "h5py>=3.11,<4",

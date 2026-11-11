@@ -1276,10 +1276,11 @@ def log_nbrs_info(nbrs, label: str = 'SR', box=None):
     logger.info(f'  {label} ({fmt}): occupancy={actual_occ}, allocated={max_occ} '
                 f'(util: {util:.1f}%, memory: {mem_mb:.0f} MB)')
     if nbrs.cell_list_capacity is not None:
-        # a scalar, or one fractional size per axis in newer jax-md
+        # the smallest cell size jax-md accepts (a scalar, or one per axis in newer
+        # jax-md); with a box it is fractional and each side has floor(1/size) cells
         cell_size = np.asarray(nbrs.cell_size, float)
         if box is not None:
-            cell_size = cell_size * np.asarray(box_to_diag(box))
+            cell_size = np.asarray(box_to_diag(box)) / np.floor(1 / cell_size)
         logger.info(f'  {label} cell list: capacity={nbrs.cell_list_capacity}, '
                     f'cell_size={cell_size.min():.2f} A')
 
