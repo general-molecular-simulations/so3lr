@@ -21,11 +21,23 @@ workdir: null  # Working directory, i.e., for saving the checkpoints and log. Du
 # The labels must treat dispersion like SO3LR does: SO3LR keeps its own dispersion term,
 # so fitting dispersion-free energies (plain DFT without D3/D4/MBD) teaches every
 # recipe to underbind non-covalent complexes.
-# The checkpoint defines the model; a finetune config can only ADD a residual energy
-# readout: a per-atom MLP added to the pretrained one, zero at the start (recipe 2).
+# The checkpoint defines the model; a finetune config's model: block can do only two things.
+# (a) ADD a residual energy readout: a per-atom MLP added to the pretrained one, zero at
+# the start (recipe 2). (b) Choose how the long-range terms are computed during training,
+# which periodic data needs: switch them off where the pair list ends (cutoff_lr equal to
+# data.neighbors_lr_cutoff) and add the Coulomb tail by PME or Ewald. These are kept out
+# of the fine-tuned model's hyperparameters; at inference set lr_cutoff and k-space as usual.
 # model:
 #   energy_residual_mlp_widths: [512, 512]
 #   energy_residual_inputs: all_layers  # or 'last': only the final-layer features
+#   cutoff_lr: 12.0  # periodic data: equal to data.neighbors_lr_cutoff
+#   kspace_electrostatics: pme  # periodic data: 'pme' or 'ewald'; every structure must then be periodic
+#   # Unset, these take the eval/MD defaults (smearing 4.0, spacing 2.0, no k-space dispersion),
+#   # so the model is trained with the long-range terms `so3lr eval/md --kspace-electrostatics pme`
+#   # use. kspace_dispersion: true adds the dispersion tail (then run with --kspace-dispersion pme).
+#   kspace_smearing: 4.0
+#   kspace_spacing: 2.0
+#   kspace_dispersion: false
 neighborlist_format_lr: sparse
 data:
   filepath: null  # Path to the data file. During finetuning, this is set via the CLI command so keep as null.
@@ -38,8 +50,8 @@ data:
   split_seed: 42  # Seed using for splitting the data into training, validation and test.
   neighbors_lr_bool: true  # Calculate long-range neighborhood indices. Required for modules like DispersionEnergy.
   neighbors_lr_cutoff: 100  # Cutoff for calculating the long-range neighborhoods in Angstrom. Is converted to the
-  # data set units internally. Note that it is not required to be equal to the lr_cutoff of the model.
-  # E.g. one can calculate neighbors up to 50 Ang and use no long-range cutoff in the model during training at all.
+  # data set units internally. For molecules it need not equal the model's cutoff_lr: the pair list
+  # holds every pair of a molecule smaller than it. For periodic data it must (see model: above).
   # More details: https://so3lr.github.io/training/finetuning/
   avg_num_neighbors: null  # Average number of neighbors per atom in the data set. If not set, it will be calculated from the data.
   filter:

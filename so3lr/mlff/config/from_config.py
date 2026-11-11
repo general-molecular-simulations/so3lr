@@ -6,8 +6,12 @@ from so3lr.mlff import training_utils
 from so3lr.mlff import data
 from so3lr.mlff import jraph_utils
 from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_force_fn_sparse
-from so3lr.mlff.utils.kspace_utils import setup_kspace_grid
+from so3lr.mlff.utils.kspace_utils import (
+    DEFAULT_KSPACE_DISPERSION_SMEARING, DEFAULT_KSPACE_DISPERSION_SPACING,
+    DEFAULT_KSPACE_SMEARING, DEFAULT_KSPACE_SPACING, kspace_grid_shape,
+)
 from ml_collections import config_dict
+import jraph
 import numpy as np
 from pathlib import Path
 from typing import Sequence, Optional
@@ -48,19 +52,32 @@ def _record_split_metadata(workdir, split_metadata, pending_metadata):
         pending_metadata['data_splits.json'] = content
 
 
-def _validate_kspace_graph_pbc(graph):
-    """Check each graph before entering the jitted reciprocal-space model."""
+def _validate_kspace_graph_pbc(graph, padded=True):
+    """Check each graph before entering the jitted reciprocal-space model.
+
+    With k-space on, every structure's real-space Coulomb is the screened (erfc)
+    part, so a structure without a reciprocal term -- one that is not periodic in
+    all three directions -- would silently lose the rest of its electrostatics.
+    Batch padding graphs (`padded`) are exempt.
+    """
     pbc = graph.globals.get('pbc')
     if pbc is not None:
         flags = np.asarray(pbc, dtype=bool)
         if flags.shape != (len(graph.n_node), 3):
             raise ValueError('K-space training expects PBC flags of shape (num_graphs, 3).')
-        for graph_flags in flags:
-            is_fully_periodic(graph_flags, context='K-space training')
+        real = np.asarray(jraph.get_graph_padding_mask(graph)) if padded else np.ones(len(flags), bool)
+        for graph_flags, is_real in zip(flags, real):
+            if not is_fully_periodic(graph_flags, context='K-space training') and is_real:
+                raise ValueError(
+                    'K-space training needs every structure periodic in all three directions; '
+                    'a structure with pbc=False would get only the screened real-space part of '
+                    'its electrostatics. Put gas-phase structures in a vacuum box (pbc=True, box '
+                    'wider than the structure plus twice data.neighbors_lr_cutoff).'
+                )
 
 
 def _graph_to_kspace_batch(graph, lr_batch, *, kspace_constants):
-    # Check every training and validation batch, not just the first structure
+    # Check every training and validation batch, not just the structures
     # used to choose a reciprocal grid. Later TFDS records can have other PBC.
     _validate_kspace_graph_pbc(graph)
     return jraph_utils.graph_to_batch_fn(
@@ -68,8 +85,16 @@ def _graph_to_kspace_batch(graph, lr_batch, *, kspace_constants):
     )
 
 
-def _compute_kspace_constants(config, training_data, tf_record_present):
-    """Compute k-space grid constants from config and the first periodic cell in training data.
+def _compute_kspace_constants(config, training_data, tf_record_present, validation_data=()):
+    """Compute k-space grid constants from config and the periodic cells in the data.
+
+    The k-grid arrays only carry a mesh shape (each graph's own cell supplies the
+    geometry), and a compiled step needs one shape. A mesh sized for one cell is too
+    coarse for a larger one, so the shape is the per-axis maximum over every
+    training and validation cell: each cell then gets at least the requested
+    spacing. jaxpme's shape grows with the length of each cell row only, so it is
+    computed once, for the longest row per axis. TFDS data is streamed, so only its
+    first batch is scanned.
 
     Returns a dict with k_grid, k_smearing, k_grid_disp, k_smearing_disp as jnp arrays,
     or None if kspace is disabled.
@@ -81,7 +106,7 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
     kspace_smearing = config.model.get('kspace_smearing', 2.0)
     kspace_spacing = config.model.get('kspace_spacing', 1.0)
 
-    # Get a cell from the first periodic structure in training data.
+    cells = []
     if tf_record_present:
         # For TFDS, peek synchronously so a one-batch metadata read does not
         # start the multiprocessing pipeline.
@@ -94,59 +119,87 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
                 _validate_kspace_graph_pbc(graph_batch)
                 cell = graph_batch.globals.get('cell')
                 if cell is not None:
-                    # cell shape: (num_graphs, 3, 3) — take the first non-zero cell
-                    for g in range(cell.shape[0]):
-                        c = cell[g]
-                        if np.any(c != 0):
-                            cell_3x3 = jnp.array(c)
-                            break
-                    else:
-                        continue
+                    cells = [c for c in np.asarray(cell) if np.any(c != 0)]
+                if cells:
                     break
-            else:
-                raise ValueError(
-                    "kspace_electrostatics is enabled but no periodic cell found in training data."
-                )
+        logger.warning(
+            'K-space mesh shape taken from the first TFDS batch only; a larger cell later '
+            'in the data gets a coarser mesh than kspace_spacing.'
+        )
     else:
-        # For ASE/Npz data, training_data is a list of (graph, lr_data) tuples.
-        cell_3x3 = None
-        for graph, _ in training_data:
-            _validate_kspace_graph_pbc(graph)
+        # For ASE/Npz data, training_data and validation_data are lists of (graph, lr_data) tuples.
+        for item in [*training_data, *validation_data]:
+            if item is None:  # loaders keep a None where a structure was filtered out
+                continue
+            graph = item[0]
+            _validate_kspace_graph_pbc(graph, padded=False)
             cell = graph.globals.get('cell')
             if cell is not None and np.any(cell != 0):
-                # cell shape: (1, 3, 3) for a single graph
-                cell_3x3 = jnp.array(cell[0])
-                break
-        if cell_3x3 is None:
-            raise ValueError(
-                "kspace_electrostatics is enabled but no periodic cell found in training data."
-            )
+                cells.append(np.asarray(cell[0]))  # cell shape: (1, 3, 3) for a single graph
+    if not cells:
+        raise ValueError(
+            "kspace_electrostatics is enabled but no periodic cell found in training data."
+        )
 
     logger.info(f'Computing k-space grid for training with method={kspace_method}, '
                 f'smearing={kspace_smearing}, spacing={kspace_spacing}')
-    logger.info(f'Using cell: {cell_3x3}')
+    longest_rows = np.diag(np.max(np.linalg.norm(np.asarray(cells), axis=-1), axis=0))
+    # a pure shape carrier, as jaxpme builds it
+    k_grid = jnp.ones(kspace_grid_shape(kspace_method, kspace_spacing, longest_rows))
+    k_smearing = jnp.array([kspace_smearing])
+    logger.info(f'K-space grid shape: {k_grid.shape} (largest over {len(cells)} periodic cells), '
+                f'smearing: {k_smearing}')
 
-    k_grid, k_smearing = setup_kspace_grid(
-        kspace_electrostatics=kspace_method,
-        kspace_smearing=kspace_smearing,
-        kspace_spacing=kspace_spacing,
-        box=cell_3x3,
-    )
-
-    logger.info(f'K-space grid shape: {k_grid.shape}, smearing: {k_smearing}')
-
-    # Electrostatic and dispersion use the same grid and smearing
+    # Dispersion's reciprocal-space tail: on by default with the electrostatic grid and
+    # smearing (so3lr train); model.kspace_dispersion: false leaves dispersion real-space
+    # only, as eval and MD do without --kspace-dispersion.
+    k_grid_disp, k_smearing_disp = None, None
+    if config.model.get('kspace_dispersion', True):
+        disp_spacing = config.model.get('kspace_dispersion_spacing', kspace_spacing)
+        k_grid_disp = jnp.ones(kspace_grid_shape(kspace_method, disp_spacing, longest_rows))
+        k_smearing_disp = jnp.array([config.model.get('kspace_dispersion_smearing', kspace_smearing)])
+        logger.info(f'K-space dispersion grid shape: {k_grid_disp.shape}, smearing: {k_smearing_disp}')
     return {
         'k_grid': k_grid,
         'k_smearing': k_smearing,
-        'k_grid_disp': k_grid,
-        'k_smearing_disp': k_smearing,
+        'k_grid_disp': k_grid_disp,
+        'k_smearing_disp': k_smearing_disp,
     }
 
 
-def _make_graph_to_batch_fn(config, training_data, tf_record_present):
+def _check_periodic_lr_cutoff(config, training_data, validation_data, tf_record_present):
+    """Refuse periodic data whose long-range pair list stops short of model.cutoff_lr.
+
+    For a molecule the pair list holds every pair whatever its cutoff. For a crystal it
+    stops at data.neighbors_lr_cutoff, so a larger model.cutoff_lr (a pretrained
+    model's is 1000 A) cuts the long-range terms off abruptly there instead of
+    switching them off smoothly as MD and eval at that lr_cutoff do: a different
+    energy, by up to an eV per atom on small inorganic cells.
+    """
+    if tf_record_present or not config.data.get('neighbors_lr_bool', False):
+        return
+    cutoff_lr = config.model.get('cutoff_lr', None)
+    pair_cutoff = config.data.neighbors_lr_cutoff
+    if cutoff_lr is not None and cutoff_lr <= pair_cutoff:
+        return
+    for item in [*training_data, *validation_data]:
+        if item is not None and jraph_utils.is_periodic_graph(item[0]):
+            setting = ('is not set (no switch-off)' if cutoff_lr is None
+                       else f'={cutoff_lr} exceeds data.neighbors_lr_cutoff={pair_cutoff}')
+            raise ValueError(
+                f'The data has periodic structures, but model.cutoff_lr {setting}: the '
+                f'long-range terms would be cut off at {pair_cutoff} A where the pair list '
+                f'ends, instead of switched off smoothly as at inference. Set model.cutoff_lr '
+                f'equal to data.neighbors_lr_cutoff, e.g. both 12 A (a large periodic pair '
+                f'list is costly), and model.kspace_electrostatics: pme for the Coulomb tail.'
+            )
+
+
+def _make_graph_to_batch_fn(config, training_data, tf_record_present, validation_data=()):
     """Build graph_to_batch_fn, optionally binding kspace constants via functools.partial."""
-    kspace_constants = _compute_kspace_constants(config, training_data, tf_record_present)
+    _check_periodic_lr_cutoff(config, training_data, validation_data, tf_record_present)
+    kspace_constants = _compute_kspace_constants(
+        config, training_data, tf_record_present, validation_data)
     if kspace_constants is not None:
         return functools.partial(
             _graph_to_kspace_batch,
@@ -462,7 +515,8 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)
     adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
 
-    _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)
+    _graph_to_batch_fn = _make_graph_to_batch_fn(
+        config, training_data, tf_record_present, validation_data=validation_data)
 
     logger.info('Training is starting!')
     if not tf_record_present:
@@ -554,6 +608,17 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
 # architecture without changing any pretrained one. Everything else in a
 # finetune `model:` block is dropped, because the checkpoint defines the model.
 FINETUNE_MODEL_OVERRIDES = ('energy_residual_mlp_widths', 'energy_residual_inputs')
+
+# `model:` keys a finetune config may set that choose how the long-range terms are
+# computed during training (where they are switched off, whether Ewald/PME adds the
+# Coulomb tail), not the architecture. Periodic data needs them. They are recorded in
+# fine_tuning.json and left out of the fine-tuned model's hyperparameters, so at
+# inference lr_cutoff and k-space are chosen per run as for any model.
+FINETUNE_LONG_RANGE_KEYS = (
+    'cutoff_lr', 'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing',
+    'kspace_dispersion', 'kspace_dispersion_smearing', 'kspace_dispersion_spacing',
+)
+FINETUNE_ALLOWED_MODEL_KEYS = FINETUNE_MODEL_OVERRIDES + FINETUNE_LONG_RANGE_KEYS
 
 # Quantities `training.long_range_anchor_weights` can anchor to the pretrained
 # model's predictions.
@@ -746,9 +811,14 @@ def run_fine_tuning(
     # the avg_num_neighbors warning fired on every single run.
     user_message_normalization = None
     user_avg_num_neighbors = config.data.get('avg_num_neighbors', None)
+    long_range_overrides = {}
     if 'model' in config and config.model is not None:
+        long_range_overrides = {
+            k: config.model[k] for k in FINETUNE_LONG_RANGE_KEYS if config.model.get(k, None) is not None
+        }
         user_model_keys = sorted(
-            k for k in config.model.keys() if k not in FINETUNE_MODEL_OVERRIDES
+            k for k in config.model.keys()
+            if k not in FINETUNE_ALLOWED_MODEL_KEYS
         )
         user_message_normalization = config.model.get('message_normalization', None)
         if user_model_keys:
@@ -758,7 +828,7 @@ def run_fine_tuning(
                 'Dropped keys: %s (only %s can be set when fine-tuning)',
                 start_from_workdir,
                 user_model_keys,
-                list(FINETUNE_MODEL_OVERRIDES),
+                list(FINETUNE_ALLOWED_MODEL_KEYS),
             )
         _apply_finetune_model_overrides(config.model, config_start_from_workdir.model)
 
@@ -774,6 +844,28 @@ def run_fine_tuning(
         )
 
     config.model = config_start_from_workdir.model
+
+    # Long-range settings for training only: the checkpoint's own values go back into
+    # the saved hyperparameters below.
+    checkpoint_long_range = {k: config.model[k] for k in FINETUNE_LONG_RANGE_KEYS if k in config.model}
+    if long_range_overrides.get('kspace_electrostatics', None) not in (None, 'ewald', 'pme', 'p3m'):
+        raise ValueError(
+            f"model.kspace_electrostatics must be 'ewald', 'pme' or 'p3m', got "
+            f"{long_range_overrides['kspace_electrostatics']!r}."
+        )
+    if long_range_overrides.get('kspace_electrostatics', None) is not None:
+        # Unset k-space settings take the values eval and MD use by default, so the
+        # model is trained with the long-range terms it is later run with.
+        long_range_overrides.setdefault('kspace_smearing', DEFAULT_KSPACE_SMEARING)
+        long_range_overrides.setdefault('kspace_spacing', DEFAULT_KSPACE_SPACING)
+        long_range_overrides.setdefault('kspace_dispersion', False)
+        if long_range_overrides['kspace_dispersion']:
+            long_range_overrides.setdefault('kspace_dispersion_smearing', DEFAULT_KSPACE_DISPERSION_SMEARING)
+            long_range_overrides.setdefault('kspace_dispersion_spacing', DEFAULT_KSPACE_DISPERSION_SPACING)
+    if long_range_overrides:
+        with config.model.unlocked():
+            config.model.update(long_range_overrides)
+        logger.info(f'Long-range settings for training: {long_range_overrides}')
 
     # For average number of neighbors message normalization, we have to overwrite the average
     # number of neighbors in case a finetuned model will serve as starting point for another finetuning run.
@@ -801,10 +893,13 @@ def run_fine_tuning(
     # Update the workdir in config with absolute path.
     config.workdir = str(workdir)
 
-    pending_metadata['fine_tuning.json'] = json.dumps({
+    fine_tuning_record = {
         'start_from_workdir': start_from_workdir.as_posix(),
         'strategy': strategy,
-    })
+    }
+    if long_range_overrides:
+        fine_tuning_record['long_range'] = long_range_overrides
+    pending_metadata['fine_tuning.json'] = json.dumps(fine_tuning_record)
 
     # Robust loss configuration. Read before the parameters are counted: the
     # adaptive variant adds learnable parameters to the tree and has to be part
@@ -1022,9 +1117,13 @@ def run_fine_tuning(
     logger.info(f"  num_epochs:              {config.training.num_epochs}")
     logger.info("=" * 60)
 
-    pending_metadata['hyperparameters.json'] = json.dumps(config.to_dict())
+    saved_config = config.to_dict()
+    for key in FINETUNE_LONG_RANGE_KEYS:
+        saved_config['model'].pop(key, None)
+    saved_config['model'].update(checkpoint_long_range)
+    pending_metadata['hyperparameters.json'] = json.dumps(saved_config)
     pending_metadata['hyperparameters.yaml'] = yaml.dump(
-        config.to_dict(), default_flow_style=False
+        saved_config, default_flow_style=False
     )
     publish_metadata = functools.partial(
         _publish_training_metadata, workdir, pending_metadata
@@ -1045,7 +1144,8 @@ def run_fine_tuning(
             f"it, or choose a different --workdir."
         )
 
-    _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)
+    _graph_to_batch_fn = _make_graph_to_batch_fn(
+        config, training_data, tf_record_present, validation_data=validation_data)
 
     if has_residual_readout:
         params = _init_residual_readout(
