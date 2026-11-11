@@ -3045,12 +3045,13 @@ def perform_min(
     cell = cell_from_atoms_boundary_conditions(
         initial_geometry, lr_cutoff, kspace_electrostatics, kspace_smearing,
     )
-    if kspace_electrostatics is not None and cell is None:
-        raise ValueError(
-            f"kspace_electrostatics={kspace_electrostatics!r} requires a periodic "
-            "cell, but the input geometry has none. Either supply a cell, or "
-            "omit kspace_electrostatics."
-        )
+    for key, method in (('kspace_electrostatics', kspace_electrostatics),
+                        ('kspace_dispersion', kspace_dispersion)):
+        if method is not None and cell is None:
+            raise ValueError(
+                f"{key}={method!r} requires a periodic cell, but the input geometry "
+                f"has none. Either supply a cell, or omit {key}."
+            )
 
     if cell is not None:
         shift_displacement = 'periodic'

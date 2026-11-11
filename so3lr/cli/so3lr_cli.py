@@ -1147,6 +1147,7 @@ def run_md_simulation(
 @common_io_options
 @common_model_options
 @kspace_options
+@kspace_dispersion_options
 # Optimization settings
 @click.option('--min-cycles', '--min_cycles', 'min_cycles', default=DEFAULT_MIN_CYCLES, type=int,
               help=f'Number of minimization cycles to perform. [default: {DEFAULT_MIN_CYCLES}]')
@@ -1185,6 +1186,10 @@ def fire_optimization(
     kspace_spacing: float,
     kspace_interp_nodes: int,
     kspace_npt_cycles: Optional[int],
+    kspace_dispersion: Optional[str],
+    kspace_dispersion_smearing: float,
+    kspace_dispersion_spacing: float,
+    kspace_dispersion_interp_nodes: int,
     charge_embed_total_charge: Optional[float],
     charge_equilibration_total_charge: Optional[float],
     help: bool,
@@ -1290,6 +1295,10 @@ def fire_optimization(
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
+        'kspace_dispersion': kspace_dispersion,
+        'kspace_dispersion_smearing': kspace_dispersion_smearing,
+        'kspace_dispersion_spacing': kspace_dispersion_spacing,
+        'kspace_dispersion_interp_nodes': kspace_dispersion_interp_nodes,
         'charge_embed_total_charge': charge_embed_total_charge,
         'charge_equilibration_total_charge': charge_equilibration_total_charge,
         'overwrite': overwrite,
