@@ -229,7 +229,13 @@ SETTINGS = dict(ensemble="nvt", model_path=None, lr_cutoff=12.0)
     (dict(kspace_dispersion="pme", kspace_dispersion_interp_nodes=6), "4 nodes"),
     (dict(observables=["dipole"]), "observables"),
     (dict(observables=[]), None),
-    (dict(fixed_atom_indices=[0, 1]), "fixed atoms"),
+    (dict(fixed_atom_indices=[0, 1]), "relax_before_run"),
+    (dict(fixed_atom_indices=[0, 1], relax_before_run=False), None),
+    (dict(fixed_atom_indices=[0, 1], relax_before_run=False, fixed_atom_constraint="Cartesian-Anchor"), None),
+    (dict(fixed_atom_indices=[0, 1], relax_before_run=False, fixed_atom_constraint="cartesain"),
+     "fixed_atom_constraint"),
+    (dict(ensemble="npt", fixed_atom_indices=[0, 1], relax_before_run=False), "NPT box moves them"),
+    (dict(mobile_atom_indices=[0, 1]), "mobile_atom_indices"),
     (dict(kspace_npt_cycles=10), None),
     (dict(ensemble="npt", kspace_npt_cycles=10), None),
     (dict(ensemble="npt", kspace_npt_cycles=10, kspace_electrostatics="pme"), "kspace_npt_cycles"),
@@ -259,6 +265,11 @@ def test_engine_choice(monkeypatch, change, reason):
     assert (problem is None) if reason is None else (reason in problem), problem
 
 
+def test_fixed_atoms_after_a_restart():
+    """A restart skips the relaxation before MD, so flash then takes fixed atoms with the default relax_before_run."""
+    assert check.settings_problem(dict(SETTINGS, fixed_atom_indices=[0, 1], restart_load_path="r.npz")) is None
+
+
 def test_engine_choice_small_box(monkeypatch):
     monkeypatch.setattr(check, "device_problem", lambda: None)
     assert "narrower than twice the cutoff" in check.flash_problem(SETTINGS, _water((1, 1, 1)))
@@ -273,6 +284,7 @@ def test_engine_choice_small_box(monkeypatch):
     ("eval", dict(targets="energy", kspace_electrostatics="ewald"), "PME but not ewald"),
     ("opt", dict(lr_cutoff=None), "long-range cutoff"),
     ("opt", dict(model_path="so3lr"), None),
+    ("opt", dict(fixed_atom_indices=[0]), "only in MD"),
     # enhanced sampling is an MD setting: the other tasks decline it whatever the MD rules
     ("opt", dict(do_enhanced_sampling=True, ensemble="nvt"), "it has no enhanced sampling"),
     ("opt", dict(do_enhanced_sampling=True, ensemble="npt"), "it has no enhanced sampling"),
@@ -1211,6 +1223,36 @@ def test_npt_start_motion():
     v = npt_start_motion(p, m, "semi_isotropic")["velocities"]
     np.testing.assert_allclose(np.asarray(v), np.asarray(p / m[:, None]))
     assert npt_start_motion(None, m, "semi-isotropic") == dict(velocities=None)
+
+@GPU
+@pytest.mark.parametrize("ensemble", ["nvt-langevin", "nvt"])
+def test_md_holds_fixed_atoms_on_flash(tmp_path, ensemble):
+    """fixed_atom_indices on flash (Langevin and Nose-Hoover): the held atoms end exactly where
+    they started, with zero momentum, while the rest of the box moves."""
+    import h5py
+    import yaml
+    from ase.io import write
+    atoms = _water((3, 3, 3))
+    atoms.wrap()
+    write(tmp_path / "w.xyz", atoms)
+    held = [0, 1, 2, 3, 4, 5]
+    (tmp_path / "s.yaml").write_text(yaml.safe_dump(dict(
+        input_file="w.xyz", output_file="a.hdf5", log_file="a.log", ensemble=ensemble, engine="flash",
+        md_cycles=2, md_steps=10, md_dt=0.5, md_T=300.0, langevin_thermo=200.0, relax_before_run=False,
+        output_cartesian_positions=True, fixed_atom_indices=held, save_buffer=1)))
+    _so3lr(["--settings", "s.yaml"], tmp_path)
+    assert "Engine: flash" in (tmp_path / "a.log").read_text()
+    L = np.diag(atoms.cell[:])
+    with h5py.File(tmp_path / "a.hdf5") as f:
+        x = np.asarray(f["positions"]).reshape(-1, len(atoms), 3)
+        p = np.asarray(f["momenta"]).reshape(-1, len(atoms), 3)
+    d = x - atoms.positions[None]
+    d -= L * np.round(d / L)
+    assert np.abs(d[:, held]).max() < 1e-5, np.abs(d[:, held]).max()
+    assert np.abs(p[:, held]).max() == 0.0
+    free = np.setdiff1d(np.arange(len(atoms)), held)
+    assert np.abs(d[:, free]).max() > 1e-3
+
 
 @GPU
 @pytest.mark.parametrize("model", [None, "so3lr"])

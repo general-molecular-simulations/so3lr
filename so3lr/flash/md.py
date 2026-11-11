@@ -52,6 +52,7 @@ from so3lr.cli.so3lr_md import (
     format_md_row,
     handle_units,
     init_hdf5_store,
+    load_atom_masks,
     load_state,
     npt_nose_hoover_for,
     npt_start_motion,
@@ -570,20 +571,53 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     if ensemble == "nvt-langevin" and (thermo is None or thermo <= 0):
         raise ValueError(f"--langevin-thermo must be > 0 (received {thermo})")
 
+    # range-checked as perform_md does (check.py declines the mask file and mobile_atom_indices)
+    held = load_atom_masks(None, len(atoms), fixed_atom_indices=s.get("fixed_atom_indices"))[1]
+    held = np.zeros(0, np.int64) if held is None else held.astype(np.int64)
+    R_held = (position if state is None else state.position)[held]
+
+    def in_place(st):
+        """fixed_atom_indices: at their start positions with zero momentum and force (as
+        perform_md's apply_atom_constraints_to_state), so a step does not kick them (e.g. a
+        solute whose mean solvation force is sampled); Nose-Hoover's kinetic energy without
+        them. check.py declines NPT and the relaxation before MD, which would move them."""
+        if not held.size:
+            return st
+        st = st.set(position=st.position.at[held].set(R_held.astype(st.position.dtype)),
+                    momentum=st.momentum.at[held].set(0.0), force=st.force.at[held].set(0.0))
+        if hasattr(st, "chain"):
+            st = st.set(chain=st.chain.set(kinetic_energy=jax_md.quantity.kinetic_energy(
+                momentum=st.momentum, mass=st.mass)))
+        return st
+
+    def hold(free_apply):
+        """free_apply with the fixed atoms in place before (PySAGES adds its bias to the force
+        between steps) and after every step."""
+        if not held.size:
+            return free_apply
+
+        def apply(st, **kwargs):
+            return in_place(free_apply(in_place(st), **kwargs))
+        if hasattr(free_apply, "__wrapped__"):     # PySAGES' loop unwraps jax-md's jit (_traced)
+            apply.__wrapped__ = hold(free_apply.__wrapped__)
+        return apply
+
     def integrator():
         """jax-md's (init_fn, apply_fn) on the engine as it is (made again after a rebuild:
-        _run_jitted)."""
+        _run_jitted), holding the fixed atoms."""
         force_fn = _force_fn(eng)
         if ensemble == "nve":
-            return jax_md.simulate.nve(force_fn, shift, md_dt)
-        if ensemble == "nvt":
-            return jax_md.simulate.nvt_nose_hoover(
+            init, apply = jax_md.simulate.nve(force_fn, shift, md_dt)
+        elif ensemble == "nvt":
+            init, apply = jax_md.simulate.nvt_nose_hoover(
                 force_fn, shift, md_dt, kT, chain_length=s.get("nhc_chain_length"),
                 chain_steps=s.get("nhc_steps"), sy_steps=s.get("nhc_sy_steps"),
                 tau=md_dt * s.get("nhc_thermo"))
-        return jax_md.simulate.nvt_langevin(
-            force_fn, shift, md_dt, kT, gamma=1.0 / (md_dt * thermo),
-            center_velocity=s.get("langevin_removecmmotion"))
+        else:
+            init, apply = jax_md.simulate.nvt_langevin(
+                force_fn, shift, md_dt, kT, gamma=1.0 / (md_dt * thermo),
+                center_velocity=s.get("langevin_removecmmotion"))
+        return init, hold(apply)
     # NPT: jax-md's isotropic barostat, or its flexible cell with x and y coupled (semi-isotropic),
     # as perform_md runs them
     npt_fn, npt_box, npt_invariant = npt_nose_hoover_for(coupling) if npt else (None, None, None)
@@ -640,6 +674,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         if state is None:
             state = jax.jit(lambda R, F, m, p: init_fn(key, R, kT=kT, mass=m, momenta=p, F=F))(
                 position, F0, geo["masses"], geo.get("momenta"))
+    state = in_place(state)
     if pysages_set_dict is not None:
         # the CVs as perform_md builds them: coordinationnumber counts the edges of a
         # short-range list like perform_md's, the others read only its starting positions
@@ -697,7 +732,8 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                     eng.widen()                     # an earlier step overflowed (or diverged)
                 logger.info(f"Flash: tables widened (row {eng.K}, scratch {eng.maxh}); cycle repeated")
             pysages_result = result
-            st = update_so3lr_after_pysages(result, init_fn, key, kT, md_dt, None, None, ensemble=ensemble)[0]
+            st = in_place(update_so3lr_after_pysages(result, init_fn, key, kT, md_dt, None, None,
+                                                     ensemble=ensemble)[0])
             return st, ef(st.position)[0]
     del position, F0, W0
 
