@@ -6,15 +6,22 @@ from so3lr.mlff import training_utils
 from so3lr.mlff import data
 from so3lr.mlff import jraph_utils
 from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_force_fn_sparse
-from so3lr.mlff.utils.kspace_utils import setup_kspace_grid
+from so3lr.mlff.utils.kspace_utils import (
+    DEFAULT_KSPACE_DISPERSION_SMEARING, DEFAULT_KSPACE_DISPERSION_SPACING,
+    DEFAULT_KSPACE_SMEARING, DEFAULT_KSPACE_SPACING, kspace_grid_shape,
+)
 from ml_collections import config_dict
+import jraph
 import numpy as np
 from pathlib import Path
 from typing import Sequence, Optional
 import yaml
 import logging
 import os
+import jax
 import jax.numpy as jnp
+from flax import traverse_util
+from flax.core.frozen_dict import unfreeze
 
 from ..utils import checkpoint_utils
 from ..utils.param_utils import (
@@ -45,19 +52,32 @@ def _record_split_metadata(workdir, split_metadata, pending_metadata):
         pending_metadata['data_splits.json'] = content
 
 
-def _validate_kspace_graph_pbc(graph):
-    """Check each graph before entering the jitted reciprocal-space model."""
+def _validate_kspace_graph_pbc(graph, padded=True):
+    """Check each graph before entering the jitted reciprocal-space model.
+
+    With k-space on, every structure's real-space Coulomb is the screened (erfc)
+    part, so a structure without a reciprocal term -- one that is not periodic in
+    all three directions -- would silently lose the rest of its electrostatics.
+    Batch padding graphs (`padded`) are exempt.
+    """
     pbc = graph.globals.get('pbc')
     if pbc is not None:
         flags = np.asarray(pbc, dtype=bool)
         if flags.shape != (len(graph.n_node), 3):
             raise ValueError('K-space training expects PBC flags of shape (num_graphs, 3).')
-        for graph_flags in flags:
-            is_fully_periodic(graph_flags, context='K-space training')
+        real = np.asarray(jraph.get_graph_padding_mask(graph)) if padded else np.ones(len(flags), bool)
+        for graph_flags, is_real in zip(flags, real):
+            if not is_fully_periodic(graph_flags, context='K-space training') and is_real:
+                raise ValueError(
+                    'K-space training needs every structure periodic in all three directions; '
+                    'a structure with pbc=False would get only the screened real-space part of '
+                    'its electrostatics. Put gas-phase structures in a vacuum box (pbc=True, box '
+                    'wider than the structure plus twice data.neighbors_lr_cutoff).'
+                )
 
 
 def _graph_to_kspace_batch(graph, lr_batch, *, kspace_constants):
-    # Check every training and validation batch, not just the first structure
+    # Check every training and validation batch, not just the structures
     # used to choose a reciprocal grid. Later TFDS records can have other PBC.
     _validate_kspace_graph_pbc(graph)
     return jraph_utils.graph_to_batch_fn(
@@ -65,8 +85,16 @@ def _graph_to_kspace_batch(graph, lr_batch, *, kspace_constants):
     )
 
 
-def _compute_kspace_constants(config, training_data, tf_record_present):
-    """Compute k-space grid constants from config and the first periodic cell in training data.
+def _compute_kspace_constants(config, training_data, tf_record_present, validation_data=()):
+    """Compute k-space grid constants from config and the periodic cells in the data.
+
+    The k-grid arrays only carry a mesh shape (each graph's own cell supplies the
+    geometry), and a compiled step needs one shape. A mesh sized for one cell is too
+    coarse for a larger one, so the shape is the per-axis maximum over every
+    training and validation cell: each cell then gets at least the requested
+    spacing. jaxpme's shape grows with the length of each cell row only, so it is
+    computed once, for the longest row per axis. TFDS data is streamed, so only its
+    first batch is scanned.
 
     Returns a dict with k_grid, k_smearing, k_grid_disp, k_smearing_disp as jnp arrays,
     or None if kspace is disabled.
@@ -78,7 +106,7 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
     kspace_smearing = config.model.get('kspace_smearing', 2.0)
     kspace_spacing = config.model.get('kspace_spacing', 1.0)
 
-    # Get a cell from the first periodic structure in training data.
+    cells = []
     if tf_record_present:
         # For TFDS, peek synchronously so a one-batch metadata read does not
         # start the multiprocessing pipeline.
@@ -91,59 +119,87 @@ def _compute_kspace_constants(config, training_data, tf_record_present):
                 _validate_kspace_graph_pbc(graph_batch)
                 cell = graph_batch.globals.get('cell')
                 if cell is not None:
-                    # cell shape: (num_graphs, 3, 3) — take the first non-zero cell
-                    for g in range(cell.shape[0]):
-                        c = cell[g]
-                        if np.any(c != 0):
-                            cell_3x3 = jnp.array(c)
-                            break
-                    else:
-                        continue
+                    cells = [c for c in np.asarray(cell) if np.any(c != 0)]
+                if cells:
                     break
-            else:
-                raise ValueError(
-                    "kspace_electrostatics is enabled but no periodic cell found in training data."
-                )
+        logger.warning(
+            'K-space mesh shape taken from the first TFDS batch only; a larger cell later '
+            'in the data gets a coarser mesh than kspace_spacing.'
+        )
     else:
-        # For ASE/Npz data, training_data is a list of (graph, lr_data) tuples.
-        cell_3x3 = None
-        for graph, _ in training_data:
-            _validate_kspace_graph_pbc(graph)
+        # For ASE/Npz data, training_data and validation_data are lists of (graph, lr_data) tuples.
+        for item in [*training_data, *validation_data]:
+            if item is None:  # loaders keep a None where a structure was filtered out
+                continue
+            graph = item[0]
+            _validate_kspace_graph_pbc(graph, padded=False)
             cell = graph.globals.get('cell')
             if cell is not None and np.any(cell != 0):
-                # cell shape: (1, 3, 3) for a single graph
-                cell_3x3 = jnp.array(cell[0])
-                break
-        if cell_3x3 is None:
-            raise ValueError(
-                "kspace_electrostatics is enabled but no periodic cell found in training data."
-            )
+                cells.append(np.asarray(cell[0]))  # cell shape: (1, 3, 3) for a single graph
+    if not cells:
+        raise ValueError(
+            "kspace_electrostatics is enabled but no periodic cell found in training data."
+        )
 
     logger.info(f'Computing k-space grid for training with method={kspace_method}, '
                 f'smearing={kspace_smearing}, spacing={kspace_spacing}')
-    logger.info(f'Using cell: {cell_3x3}')
+    longest_rows = np.diag(np.max(np.linalg.norm(np.asarray(cells), axis=-1), axis=0))
+    # a pure shape carrier, as jaxpme builds it
+    k_grid = jnp.ones(kspace_grid_shape(kspace_method, kspace_spacing, longest_rows))
+    k_smearing = jnp.array([kspace_smearing])
+    logger.info(f'K-space grid shape: {k_grid.shape} (largest over {len(cells)} periodic cells), '
+                f'smearing: {k_smearing}')
 
-    k_grid, k_smearing = setup_kspace_grid(
-        kspace_electrostatics=kspace_method,
-        kspace_smearing=kspace_smearing,
-        kspace_spacing=kspace_spacing,
-        box=cell_3x3,
-    )
-
-    logger.info(f'K-space grid shape: {k_grid.shape}, smearing: {k_smearing}')
-
-    # Electrostatic and dispersion use the same grid and smearing
+    # Dispersion's reciprocal-space tail: on by default with the electrostatic grid and
+    # smearing (so3lr train); model.kspace_dispersion: false leaves dispersion real-space
+    # only, as eval and MD do without --kspace-dispersion.
+    k_grid_disp, k_smearing_disp = None, None
+    if config.model.get('kspace_dispersion', True):
+        disp_spacing = config.model.get('kspace_dispersion_spacing', kspace_spacing)
+        k_grid_disp = jnp.ones(kspace_grid_shape(kspace_method, disp_spacing, longest_rows))
+        k_smearing_disp = jnp.array([config.model.get('kspace_dispersion_smearing', kspace_smearing)])
+        logger.info(f'K-space dispersion grid shape: {k_grid_disp.shape}, smearing: {k_smearing_disp}')
     return {
         'k_grid': k_grid,
         'k_smearing': k_smearing,
-        'k_grid_disp': k_grid,
-        'k_smearing_disp': k_smearing,
+        'k_grid_disp': k_grid_disp,
+        'k_smearing_disp': k_smearing_disp,
     }
 
 
-def _make_graph_to_batch_fn(config, training_data, tf_record_present):
+def _check_periodic_lr_cutoff(config, training_data, validation_data, tf_record_present):
+    """Refuse periodic data whose long-range pair list stops short of model.cutoff_lr.
+
+    For a molecule the pair list holds every pair whatever its cutoff. For a crystal it
+    stops at data.neighbors_lr_cutoff, so a larger model.cutoff_lr (a pretrained
+    model's is 1000 A) cuts the long-range terms off abruptly there instead of
+    switching them off smoothly as MD and eval at that lr_cutoff do: a different
+    energy, by up to an eV per atom on small inorganic cells.
+    """
+    if tf_record_present or not config.data.get('neighbors_lr_bool', False):
+        return
+    cutoff_lr = config.model.get('cutoff_lr', None)
+    pair_cutoff = config.data.neighbors_lr_cutoff
+    if cutoff_lr is not None and cutoff_lr <= pair_cutoff:
+        return
+    for item in [*training_data, *validation_data]:
+        if item is not None and jraph_utils.is_periodic_graph(item[0]):
+            setting = ('is not set (no switch-off)' if cutoff_lr is None
+                       else f'={cutoff_lr} exceeds data.neighbors_lr_cutoff={pair_cutoff}')
+            raise ValueError(
+                f'The data has periodic structures, but model.cutoff_lr {setting}: the '
+                f'long-range terms would be cut off at {pair_cutoff} A where the pair list '
+                f'ends, instead of switched off smoothly as at inference. Set model.cutoff_lr '
+                f'equal to data.neighbors_lr_cutoff, e.g. both 12 A (a large periodic pair '
+                f'list is costly), and model.kspace_electrostatics: pme for the Coulomb tail.'
+            )
+
+
+def _make_graph_to_batch_fn(config, training_data, tf_record_present, validation_data=()):
     """Build graph_to_batch_fn, optionally binding kspace constants via functools.partial."""
-    kspace_constants = _compute_kspace_constants(config, training_data, tf_record_present)
+    _check_periodic_lr_cutoff(config, training_data, validation_data, tf_record_present)
+    kspace_constants = _compute_kspace_constants(
+        config, training_data, tf_record_present, validation_data)
     if kspace_constants is not None:
         return functools.partial(
             _graph_to_kspace_batch,
@@ -200,6 +256,8 @@ def make_so3krates_sparse_from_config(
         use_spin_embed=model_config.use_spin_embed,
         energy_regression_dim=model_config.energy_regression_dim,
         energy_final_mlp_widths=model_config.get('energy_final_mlp_widths', None),
+        energy_residual_mlp_widths=model_config.get('energy_residual_mlp_widths', None),
+        energy_residual_inputs=model_config.get('energy_residual_inputs', 'last'),
         energy_activation_fn=model_config.energy_activation_fn,
         energy_learn_atomic_type_scales=model_config.energy_learn_atomic_type_scales,
         energy_learn_atomic_type_shifts=model_config.energy_learn_atomic_type_shifts,
@@ -323,7 +381,12 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
 
     opt = make_optimizer_from_config(config)
     if model == 'so3krates':
-        net = make_so3krates_sparse_from_config(config)
+        net = make_so3krates_sparse_from_config(
+            config,
+            output_intermediate_quantities=(
+                ['partial_charges'] if 'partial_charges' in config.training.loss_weights else None
+            ),
+        )
     else:
         raise ValueError(
             f'{model=} is not a valid model.'
@@ -452,7 +515,8 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)
     adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
 
-    _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)
+    _graph_to_batch_fn = _make_graph_to_batch_fn(
+        config, training_data, tf_record_present, validation_data=validation_data)
 
     logger.info('Training is starting!')
     if not tf_record_present:
@@ -540,6 +604,135 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
     logger.info('Training has finished!')
 
 
+# Model keys a finetune config may set: they ADD modules to the checkpoint's
+# architecture without changing any pretrained one. Everything else in a
+# finetune `model:` block is dropped, because the checkpoint defines the model.
+FINETUNE_MODEL_OVERRIDES = ('energy_residual_mlp_widths', 'energy_residual_inputs')
+
+# `model:` keys a finetune config may set that choose how the long-range terms are
+# computed during training (where they are switched off, whether Ewald/PME adds the
+# Coulomb tail), not the architecture. Periodic data needs them. They are recorded in
+# fine_tuning.json and left out of the fine-tuned model's hyperparameters, so at
+# inference lr_cutoff and k-space are chosen per run as for any model.
+FINETUNE_LONG_RANGE_KEYS = (
+    'cutoff_lr', 'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing',
+    'kspace_dispersion', 'kspace_dispersion_smearing', 'kspace_dispersion_spacing',
+)
+FINETUNE_ALLOWED_MODEL_KEYS = FINETUNE_MODEL_OVERRIDES + FINETUNE_LONG_RANGE_KEYS
+
+# Quantities `training.long_range_anchor_weights` can anchor to the pretrained
+# model's predictions.
+LONG_RANGE_ANCHOR_KEYS = ('partial_charges', 'a0_ratios', 'hirshfeld_ratios', 'c6_ratios', 'dipole_vec')
+
+
+def _apply_finetune_model_overrides(user_model, checkpoint_model):
+    """Copy the allowed `model:` keys of a finetune config onto the checkpoint's
+    model config. A checkpoint that already has a residual readout (a fine-tuned
+    model fine-tuned again) must be given the same one, or its saved residual
+    weights would not fit."""
+    had_residual = checkpoint_model.get('energy_residual_mlp_widths', None) is not None
+    for key in FINETUNE_MODEL_OVERRIDES:
+        value = user_model.get(key, None)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            value = [int(v) for v in value]
+        existing = checkpoint_model.get(key, None)
+        if existing is None and had_residual and key == 'energy_residual_inputs':
+            existing = 'last'  # the default the checkpoint's residual was built with
+        if existing is not None and existing != value:
+            raise ValueError(
+                f'The checkpoint already has model.{key}={existing!r}; the finetune '
+                f'config asks for {value!r}. Remove the key or set the same value.'
+            )
+        with checkpoint_model.unlocked():
+            checkpoint_model[key] = value
+    if (checkpoint_model.get('energy_residual_inputs', None) is not None
+            and checkpoint_model.get('energy_residual_mlp_widths', None) is None):
+        raise ValueError(
+            'model.energy_residual_inputs is set but model.energy_residual_mlp_widths is not; '
+            'set the widths of the residual readout, e.g. [256, 256].'
+        )
+
+
+def _fill_missing_params(params, fresh):
+    """`params` with every entry it lacks taken from `fresh` (a new model's
+    initialisation). Returns the merged tree and the module paths that were filled."""
+    flat = traverse_util.flatten_dict(unfreeze(params))
+    new = {k: v for k, v in traverse_util.flatten_dict(unfreeze(fresh)).items() if k not in flat}
+    filled = sorted({'/'.join(k[:-1]) for k in new})
+    return traverse_util.unflatten_dict({**flat, **new}), filled
+
+
+def _init_residual_readout(net, params, config, training_data, tf_record_present, graph_to_batch_fn):
+    """Add the (zero-initialised) residual-readout weights to pretrained `params`.
+
+    The pretrained checkpoint has no entry for them, so the model is initialised
+    once on a real batch and only the missing entries are taken from it. The last
+    residual layer starts at zero, so the model's energy is unchanged at step 0.
+    """
+    if tf_record_present:
+        raise NotImplementedError(
+            'model.energy_residual_mlp_widths is not supported with TFDS fine-tuning data yet; '
+            'use an extxyz/npz data file.'
+        )
+    graph_batch, lr_batch = next(jraph_utils.dynamically_batch_with_lr(
+        iter(training_data),
+        n_node=config.training.batch_max_num_nodes,
+        n_edge=config.training.batch_max_num_edges,
+        n_graph=config.training.batch_max_num_graphs,
+        n_pairs=config.training.batch_max_num_pairs,
+    ))
+    batch = jax.tree_util.tree_map(jnp.array, graph_to_batch_fn(graph_batch, lr_batch))
+    fresh = net.init(jax.random.PRNGKey(config.training.model_seed), batch)
+    params, filled = _fill_missing_params(params, fresh)
+    if not filled:
+        return params
+    unexpected = [p for p in filled if 'energy_residual' not in p]
+    if unexpected:
+        raise ValueError(
+            f'Initialising the residual readout would also create {unexpected}, which the '
+            f'checkpoint lacks. The checkpoint does not match its hyperparameters.'
+        )
+    n_new = count_trainable_params(params, trainable_keys=filled)
+    logger.info(f'Residual energy readout: initialised {filled} ({n_new:,} new parameters).')
+    return params
+
+
+def _with_long_range_anchor(graph_to_batch_fn, net, params, anchor_keys):
+    """Wrap `graph_to_batch_fn` so every batch also carries 'anchor_<key>' labels:
+    the pretrained model's prediction of <key> for that batch.
+
+    The teacher is a frozen copy of the starting `params`, evaluated in its own
+    jitted call with the parameters as an argument (closed-over parameters would
+    be baked into the training step as constants). Applies to the training and
+    the validation batches alike.
+    """
+    from so3lr.mlff.nn.stacknet.observable_function_sparse import (
+        get_long_range_anchor_fn_sparse, _OPTIONAL_INPUTS
+    )
+    alias = training_utils._RATIO_ALIAS
+    teacher_keys = sorted(set(anchor_keys) | {alias[k] for k in anchor_keys if k in alias})
+    teacher = jax.jit(get_long_range_anchor_fn_sparse(net, teacher_keys))
+    ref_params = jax.device_put(params)  # updates are functional: these stay the starting weights
+    input_keys = ('positions', 'atomic_numbers', 'idx_i', 'idx_j') + _OPTIONAL_INPUTS
+
+    def graph_to_batch_with_anchor(graph, lr_batch):
+        batch = graph_to_batch_fn(graph, lr_batch)
+        out = teacher(ref_params, **{k: batch[k] for k in input_keys if batch.get(k) is not None})
+        for key in anchor_keys:
+            value = out.get(training_utils._prediction_key(key, out))
+            if value is None:
+                raise ValueError(
+                    f'Cannot anchor {key!r}: the pretrained model does not predict it '
+                    f'(it predicts {sorted(out)}).'
+                )
+            batch[training_utils.ANCHOR_PREFIX + key] = value
+        return batch
+
+    return graph_to_batch_with_anchor
+
+
 def run_fine_tuning(
         config: config_dict.ConfigDict,
         start_from_workdir: str,
@@ -618,17 +811,26 @@ def run_fine_tuning(
     # the avg_num_neighbors warning fired on every single run.
     user_message_normalization = None
     user_avg_num_neighbors = config.data.get('avg_num_neighbors', None)
+    long_range_overrides = {}
     if 'model' in config and config.model is not None:
-        user_model_keys = sorted(config.model.keys())
+        long_range_overrides = {
+            k: config.model[k] for k in FINETUNE_LONG_RANGE_KEYS if config.model.get(k, None) is not None
+        }
+        user_model_keys = sorted(
+            k for k in config.model.keys()
+            if k not in FINETUNE_ALLOWED_MODEL_KEYS
+        )
         user_message_normalization = config.model.get('message_normalization', None)
         if user_model_keys:
             logger.warning(
                 'Ignoring user-supplied `model:` block in finetune config; '
                 'the checkpoint at %s defines the model architecture. '
-                'Dropped keys: %s',
+                'Dropped keys: %s (only %s can be set when fine-tuning)',
                 start_from_workdir,
                 user_model_keys,
+                list(FINETUNE_ALLOWED_MODEL_KEYS),
             )
+        _apply_finetune_model_overrides(config.model, config_start_from_workdir.model)
 
     # Check that message normalization has not changed from the original model
     # to the fine-tuning model. Fails before any data is loaded.
@@ -642,6 +844,28 @@ def run_fine_tuning(
         )
 
     config.model = config_start_from_workdir.model
+
+    # Long-range settings for training only: the checkpoint's own values go back into
+    # the saved hyperparameters below.
+    checkpoint_long_range = {k: config.model[k] for k in FINETUNE_LONG_RANGE_KEYS if k in config.model}
+    if long_range_overrides.get('kspace_electrostatics', None) not in (None, 'ewald', 'pme', 'p3m'):
+        raise ValueError(
+            f"model.kspace_electrostatics must be 'ewald', 'pme' or 'p3m', got "
+            f"{long_range_overrides['kspace_electrostatics']!r}."
+        )
+    if long_range_overrides.get('kspace_electrostatics', None) is not None:
+        # Unset k-space settings take the values eval and MD use by default, so the
+        # model is trained with the long-range terms it is later run with.
+        long_range_overrides.setdefault('kspace_smearing', DEFAULT_KSPACE_SMEARING)
+        long_range_overrides.setdefault('kspace_spacing', DEFAULT_KSPACE_SPACING)
+        long_range_overrides.setdefault('kspace_dispersion', False)
+        if long_range_overrides['kspace_dispersion']:
+            long_range_overrides.setdefault('kspace_dispersion_smearing', DEFAULT_KSPACE_DISPERSION_SMEARING)
+            long_range_overrides.setdefault('kspace_dispersion_spacing', DEFAULT_KSPACE_DISPERSION_SPACING)
+    if long_range_overrides:
+        with config.model.unlocked():
+            config.model.update(long_range_overrides)
+        logger.info(f'Long-range settings for training: {long_range_overrides}')
 
     # For average number of neighbors message normalization, we have to overwrite the average
     # number of neighbors in case a finetuned model will serve as starting point for another finetuning run.
@@ -669,10 +893,13 @@ def run_fine_tuning(
     # Update the workdir in config with absolute path.
     config.workdir = str(workdir)
 
-    pending_metadata['fine_tuning.json'] = json.dumps({
+    fine_tuning_record = {
         'start_from_workdir': start_from_workdir.as_posix(),
         'strategy': strategy,
-    })
+    }
+    if long_range_overrides:
+        fine_tuning_record['long_range'] = long_range_overrides
+    pending_metadata['fine_tuning.json'] = json.dumps(fine_tuning_record)
 
     # Robust loss configuration. Read before the parameters are counted: the
     # adaptive variant adds learnable parameters to the tree and has to be part
@@ -688,12 +915,30 @@ def run_fine_tuning(
             "Please enable only one."
         )
 
-    adaptive_robust_loss_targets = list(config.training.loss_weights.keys()) if use_adaptive_robust_loss else None
+    # Long-range anchoring: keep the charges / a0 / C6 ratios (or the dipole) of the
+    # model being fine-tuned close to those of the frozen pretrained model, on every
+    # fine-tuning batch. For data with energies and forces only, which cannot tell
+    # short-range from long-range energy, so the long-range heads would otherwise
+    # be used as extra fitting knobs. Enters the loss as 'anchor_<key>' targets.
+    anchor_weights = dict(config.training.get('long_range_anchor_weights', None) or {})
+    unknown = sorted(set(anchor_weights) - set(LONG_RANGE_ANCHOR_KEYS))
+    if unknown:
+        raise ValueError(
+            f'training.long_range_anchor_weights has unknown keys {unknown}; '
+            f'choose from {list(LONG_RANGE_ANCHOR_KEYS)}.'
+        )
+    loss_weights = dict(config.training.loss_weights)
+    loss_weights.update({training_utils.ANCHOR_PREFIX + k: float(w) for k, w in anchor_weights.items()})
+    needs_charges = 'partial_charges' in loss_weights or 'partial_charges' in anchor_weights
+    output_intermediate_quantities = ['partial_charges'] if needs_charges else None
+
+    adaptive_robust_loss_targets = list(loss_weights.keys()) if use_adaptive_robust_loss else None
     adaptive_robust_loss_init_alpha = config.training.get('adaptive_robust_loss_init_alpha', 1.5)
     adaptive_robust_loss_init_scale = config.training.get('adaptive_robust_loss_init_scale', 1.0)
 
     # Load the parameters from the model for fine-tuning.
     params = checkpoint_utils.load_params_from_workdir(start_from_workdir)
+    has_residual_readout = config_start_from_workdir.model.get('energy_residual_mlp_widths', None) is not None
 
     # Expand a single-theory-level checkpoint to the multi-head energy readout.
     # Shared with fit()/fit_from_iterator() so the three call sites cannot drift.
@@ -707,6 +952,9 @@ def run_fine_tuning(
     if selection_keys:
         available_modules = sorted(params.get('params', params).keys())
         unmatched = unmatched_param_keys(params, selection_keys)
+        if has_residual_readout:
+            # Created (zero-initialised) below, once a batch is at hand.
+            unmatched = [k for k in unmatched if 'energy_residual' not in k]
         if unmatched:
             logger.warning(
                 'Fine-tuning strategy %r selects %s, which match no parameter in the '
@@ -790,7 +1038,10 @@ def run_fine_tuning(
         )
 
     if model == 'so3krates':
-        net = make_so3krates_sparse_from_config(config_start_from_workdir)
+        net = make_so3krates_sparse_from_config(
+            config_start_from_workdir,
+            output_intermediate_quantities=output_intermediate_quantities
+        )
     else:
         raise ValueError(
             f'{model=} is not a valid model.'
@@ -798,7 +1049,7 @@ def run_fine_tuning(
 
     loss_fn = training_utils.make_loss_fn(
         get_energy_and_force_fn_sparse(net),
-        weights=config.training.loss_weights,
+        weights=loss_weights,
         use_robust_loss=use_robust_loss,
         robust_loss_alpha=robust_loss_alpha,
         use_adaptive_robust_loss=use_adaptive_robust_loss,
@@ -806,7 +1057,7 @@ def run_fine_tuning(
 
     val_fn = training_utils.make_val_fn(
         get_energy_and_force_fn_sparse(net),
-        weights=config.training.loss_weights,
+        weights=loss_weights,
         use_robust_loss=config.training.get('use_robust_loss_validation', use_robust_loss),
         robust_loss_alpha=config.training.get('robust_loss_alpha_validation', robust_loss_alpha),
         use_adaptive_robust_loss=use_adaptive_robust_loss,
@@ -866,9 +1117,13 @@ def run_fine_tuning(
     logger.info(f"  num_epochs:              {config.training.num_epochs}")
     logger.info("=" * 60)
 
-    pending_metadata['hyperparameters.json'] = json.dumps(config.to_dict())
+    saved_config = config.to_dict()
+    for key in FINETUNE_LONG_RANGE_KEYS:
+        saved_config['model'].pop(key, None)
+    saved_config['model'].update(checkpoint_long_range)
+    pending_metadata['hyperparameters.json'] = json.dumps(saved_config)
     pending_metadata['hyperparameters.yaml'] = yaml.dump(
-        config.to_dict(), default_flow_style=False
+        saved_config, default_flow_style=False
     )
     publish_metadata = functools.partial(
         _publish_training_metadata, workdir, pending_metadata
@@ -889,7 +1144,28 @@ def run_fine_tuning(
             f"it, or choose a different --workdir."
         )
 
-    _graph_to_batch_fn = _make_graph_to_batch_fn(config, training_data, tf_record_present)
+    _graph_to_batch_fn = _make_graph_to_batch_fn(
+        config, training_data, tf_record_present, validation_data=validation_data)
+
+    if has_residual_readout:
+        params = _init_residual_readout(
+            net, params, config, training_data, tf_record_present, _graph_to_batch_fn
+        )
+        flat = traverse_util.flatten_dict(unfreeze(params))
+        residual = traverse_util.unflatten_dict(
+            {k: v for k, v in flat.items() if any(c.startswith('energy_residual') for c in k)}
+        )
+        if count_trainable_params(residual, trainable_subset_keys, frozen_subset_keys) == 0:
+            logger.warning(
+                'Fine-tuning strategy %r freezes the residual energy readout '
+                '(model.energy_residual_mlp_widths); a new one stays zero. Use '
+                '--strategy readout_only or full to train it.', strategy
+            )
+
+    if anchor_weights:
+        _graph_to_batch_fn = _with_long_range_anchor(
+            _graph_to_batch_fn, net, params, list(anchor_weights)
+        )
 
     if tf_record_present is True:
         training_utils.fit_from_iterator(

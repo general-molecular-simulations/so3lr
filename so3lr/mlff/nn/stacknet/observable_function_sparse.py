@@ -26,6 +26,22 @@ def _model_inputs(positions, atomic_numbers, idx_i, idx_j, **kwargs):
     return inputs
 
 
+# Per-atom outputs forwarded next to energy, forces and dipole: the ratio heads
+# ('a0_ratios' for so3lr-tauri-s/m/l, 'hirshfeld_ratios' for legacy so3lr, mapped
+# onto each other by make_loss_fn's _RATIO_ALIAS) and the partial charges, which
+# the model only emits when built with output_intermediate_quantities=['partial_charges'].
+_NODE_OUTPUTS = ('a0_ratios', 'hirshfeld_ratios', 'c6_ratios', 'partial_charges')
+
+
+def _masked_outputs(model_output, inputs, keys):
+    """The `keys` of `model_output` that the model emits, zeroed on padding."""
+    masks = {'dipole_vec': inputs['graph_mask'][:, None]}
+    return {
+        k: safe_scale(model_output[k], masks.get(k, inputs['node_mask']))
+        for k in keys if k in model_output
+    }
+
+
 def get_observable_fn_sparse(model):
     """All observables of `model` (a StackNetSparse) as a function of (params, **inputs)."""
     def observable_fn(params, positions, atomic_numbers, idx_i, idx_j, **kwargs):
@@ -37,7 +53,7 @@ def get_observable_fn_sparse(model):
 def get_energy_and_force_fn_sparse(model):
     def energy_and_force_and_dipole_and_hirsh_fn(params, positions, atomic_numbers, idx_i, idx_j, **kwargs):
         inputs = _model_inputs(positions, atomic_numbers, idx_i, idx_j, **kwargs)
-        graph_mask, node_mask = inputs['graph_mask'], inputs['node_mask']
+        graph_mask = inputs['graph_mask']
 
         def energy_fn(positions):
             # The whole model output is the aux, so dipole_vec and the ratio heads
@@ -48,23 +64,26 @@ def get_energy_and_force_fn_sparse(model):
 
         (_, (energy, model_output)), forces = jax.value_and_grad(energy_fn, has_aux=True)(positions)
 
-        result = dict(
+        return dict(
             energy=energy,
-            forces=forces
+            forces=forces,
+            **_masked_outputs(model_output, inputs, ('dipole_vec',) + _NODE_OUTPUTS),
         )
 
-        if 'dipole_vec' in model_output:
-            dipole_vec = model_output['dipole_vec']  # (num_graphs)
-            dipole_vec = safe_scale(dipole_vec, graph_mask[:, None])  # (num_graphs)
-            result['dipole_vec'] = dipole_vec
-
-        # Per-atom ratio heads: 'a0_ratios' (so3lr-tauri-s/m/l) or 'hirshfeld_ratios'
-        # (legacy so3lr) for the same quantity, and 'c6_ratios'. Forward whichever
-        # the model has; make_loss_fn's _RATIO_ALIAS maps between the two names.
-        for ratio_key in ('a0_ratios', 'hirshfeld_ratios', 'c6_ratios'):
-            if ratio_key in model_output:
-                result[ratio_key] = safe_scale(model_output[ratio_key], node_mask)
-
-        return result
-
     return energy_and_force_and_dipole_and_hirsh_fn
+
+
+def get_long_range_anchor_fn_sparse(model, keys):
+    """Forward-only long-range quantities of `model` as a function of (params, **inputs).
+
+    Used as the frozen teacher when anchoring the long-range heads during
+    fine-tuning: partial charges and the a0/C6 ratio heads need no positional
+    derivative, so this skips the force pass that get_energy_and_force_fn_sparse
+    does. `model` must emit 'partial_charges' (output_intermediate_quantities) if
+    it is among `keys`.
+    """
+    def anchor_fn(params, positions, atomic_numbers, idx_i, idx_j, **kwargs):
+        inputs = _model_inputs(positions, atomic_numbers, idx_i, idx_j, **kwargs)
+        return _masked_outputs(model.apply(params, inputs), inputs, keys)
+
+    return anchor_fn

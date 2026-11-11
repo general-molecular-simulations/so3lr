@@ -89,18 +89,27 @@ def test_md_settings_template_matches_the_yaml_defaults():
     assert {k: (template[k], v) for k, v in YAML_DEFAULTS.items() if template[k] != v} == {}
 
 
-def test_unknown_settings_key_warns_and_the_run_goes_on(tmp_path, monkeypatch):
-    """A misspelt settings key (md_t for md_T) is a warning naming the likely key,
-    not an error: one typo must not abort a queued multi-hour job (AGENTS.md).
-    In-process with perform_md stubbed, so no model is built."""
+@pytest.fixture
+def stubbed_run(monkeypatch):
+    """The settings perform_md receives from an in-process CLI run, with perform_md stubbed
+    (no model is built) and no JAX, GPU or log-file setup."""
     from so3lr.cli import so3lr_cli, so3lr_md
 
-    captured, warnings = {}, []
+    captured = {}
     monkeypatch.setattr(so3lr_md, 'setup_jax_globals', lambda **kwargs: None)
     monkeypatch.setattr(so3lr_md, 'perform_md', lambda settings, *args, **kwargs: captured.update(settings))
     monkeypatch.setattr(so3lr_cli, 'reserve_gpu', lambda *args, **kwargs: None)
     # setup_logger would leave the SO3LR logger non-propagating for later tests.
     monkeypatch.setattr(so3lr_md, 'setup_logger', lambda *args, **kwargs: None)
+    return captured
+
+
+def test_unknown_settings_key_warns_and_the_run_goes_on(tmp_path, stubbed_run):
+    """A misspelt settings key (md_t for md_T) is a warning naming the likely key,
+    not an error: one typo must not abort a queued multi-hour job (AGENTS.md)."""
+    from so3lr.cli import so3lr_cli
+
+    captured, warnings = stubbed_run, []
 
     yaml_path = tmp_path / 'typo.yaml'
     yaml_path.write_text(
@@ -123,6 +132,19 @@ def test_unknown_settings_key_warns_and_the_run_goes_on(tmp_path, monkeypatch):
     assert re.search(r"'md_t'.*Did you mean: .*\bmd_T\b", unknown[0]), unknown[0]
     # ignored, not applied: md_T keeps its default
     assert captured['md_T'] == YAML_DEFAULTS['md_T']
+
+
+@pytest.mark.parametrize("args, precision", [
+    ([], 'mixed'), (['--precision', 'float32'], 'float32'), (['--precision', 'float64'], 'float64'),
+    (['--no-flash-mixed'], 'float32'), (['--precision', 'float32', '--flash-mixed'], 'mixed')])
+def test_the_run_gets_the_precision(tmp_path, stubbed_run, args, precision):
+    """--precision is the run's (default mixed); the deprecated --flash-mixed/--no-flash-mixed
+    still makes a float32 model's run mixed/float32."""
+    result = CliRunner().invoke(cli, [
+        'nvt', '--input', str(PROJECT_ROOT / 'tests' / 'test_data' / 'acetone.xyz'),
+        '--output', str(tmp_path / 'out.hdf5'), '--no-relax', '--engine', 'standard', *args])
+    assert result.exit_code == 0, result.output
+    assert stubbed_run['precision'] == precision and stubbed_run['flash_mixed'] is None
 
 
 def test_cli_import_does_not_load_jax():
