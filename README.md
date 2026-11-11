@@ -1,12 +1,12 @@
 ![workflow-test-ci](https://github.com/general-molecular-simulations/so3lr/actions/workflows/CI.yml/badge.svg)
 [![docs](https://img.shields.io/badge/docs-so3lr.github.io-4a9d4a)](https://so3lr.github.io/)
-[![examples-link](https://img.shields.io/badge/example-notebooks-F37726)](./examples)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb)
 [![cite-link](https://img.shields.io/badge/how_to-cite-000000)](#citation)
-[![preprint-link](https://img.shields.io/badge/paper-JACS-FFCE34)](https://doi.org/10.1021/jacs.5c09558)
+[![preprint-link](https://img.shields.io/badge/preprint-arXiv-B31B1B)](https://doi.org/10.48550/arXiv.2611.06237)
+[![paper-link](https://img.shields.io/badge/paper-JACS-FFCE34)](https://doi.org/10.1021/jacs.5c09558)
 [![data](https://zenodo.org/badge/DOI/10.5281/zenodo.22920714.svg)](https://doi.org/10.5281/zenodo.22920714)
 
-![Logo](./so3lr/logo.png)
+<p align="center"><img src="./so3lr/logo.png" alt="SO3LR Tauri" width="750"></p>
 
 ## About
 
@@ -85,7 +85,8 @@ condensed-phase systems; for gas-phase simulations, we suggest using
 ## Models
 
 The models are bundled with the package and selected by name. The SO3LR Tauri
-models cover H to At (Z = 1–85).
+models cover H to At (Z = 1–85) and are described in the
+[SO3LR Tauri preprint](https://doi.org/10.48550/arXiv.2611.06237).
 
 - `so3lr-tauri-m` (default): start here; the model we use for biomolecular MD.
 - `so3lr-tauri-l`: the most accurate, recommended for reactions; 3.7× slower
@@ -131,6 +132,15 @@ for development environments and tests.
 If you use SO3LR, please cite the papers below:
 
 ```bibtex
+@article{kabylda2026so3lr,
+  title = {{SO3LR Tauri: Generally Applicable Force Fields for Reactive (Bio)Molecular Simulations Covering the Periodic Table}},
+  author = {Kabylda, Adil and Br{\"{u}}nig, Florian N. and Gallegos, Miguel and Frank, J. Thorben and Moerman, Evgeny and Unke, Oliver T. and Chmiela, Stefan and M{\"{u}}ller, Klaus-Robert and Tkatchenko, Alexandre},
+  journal = {arXiv preprint arXiv:2611.06237},
+  year = {2026},
+  doi = {10.48550/arXiv.2611.06237},
+  url = {https://arxiv.org/abs/2611.06237},
+}
+
 @article{kabylda2025molecular,
   title={Molecular Simulations with a Pretrained Neural Network and Universal Pairwise Force Fields},
   author={Kabylda, Adil and Frank, J Thorben and Su{\'a}rez-Dou, Sergio and Khabibrakhmanov, Almaz and Medrano Sandonas, Leonardo and Unke, Oliver T and Chmiela, Stefan and M{\"u}ller, Klaus-Robert and Tkatchenko, Alexandre},

@@ -636,6 +636,7 @@ property_to_mae = {
     'hirshfeld_ratios': node_mae_loss,
     'a0_ratios': node_mae_loss,
     'c6_ratios': node_mae_loss,
+    'partial_charges': node_mae_loss,
 }
 
 property_to_loss = {
@@ -646,6 +647,7 @@ property_to_loss = {
     'hirshfeld_ratios': node_mse_loss,
     'a0_ratios': node_mse_loss,
     'c6_ratios': node_mse_loss,
+    'partial_charges': node_mse_loss,
 }
 
 # Ratio-head alias: legacy SO3LR emits 'hirshfeld_ratios'; the new so3lr-tauri-s/m/l
@@ -653,6 +655,26 @@ property_to_loss = {
 # is always keyed 'hirshfeld_ratios'. We accept either spelling in loss_weights
 # and remap at the loss-fn entry point so users do not see a KeyError.
 _RATIO_ALIAS = {'hirshfeld_ratios': 'a0_ratios', 'a0_ratios': 'hirshfeld_ratios'}
+
+# Anchor targets ('anchor_<quantity>'): <quantity> as predicted by the model being
+# fine-tuned, labelled by a frozen copy of the pretrained model. The labels are put
+# into each batch under the target name by run_fine_tuning, and the loss is the
+# one of <quantity>. Used to keep the long-range heads (partial charges, a0/C6
+# ratios) at their pretrained predictions when the fine-tuning data has no labels
+# for them.
+ANCHOR_PREFIX = 'anchor_'
+
+
+def _base_target(target: str) -> str:
+    return target[len(ANCHOR_PREFIX):] if target.startswith(ANCHOR_PREFIX) else target
+
+
+def _prediction_key(target: str, outputs_predict: Dict) -> str:
+    """The model-output key a target is scored on (trace-time only)."""
+    key = _base_target(target)
+    if key not in outputs_predict and _RATIO_ALIAS.get(key) in outputs_predict:
+        key = _RATIO_ALIAS[key]
+    return key
 
 def make_loss_fn(
     obs_fn: Callable, weights: Dict, scales: Dict = None,
@@ -696,16 +718,13 @@ def make_loss_fn(
         outputs_true = {k: v for k, v in batch.items() if k in targets}
         outputs_predict = obs_fn(params, **inputs)
 
-        # Rename ratio-head key if the model emits 'a0_ratios' while the user
-        # weighted 'hirshfeld_ratios' (or vice-versa). Trace-time only: the
-        # dict keys are Python-level so this does not affect the jitted graph.
-        outputs_predict = dict(outputs_predict)
+        # Ratio-head alias ('a0_ratios' vs 'hirshfeld_ratios'): predictions are
+        # resolved per target by _prediction_key; labels are renamed here.
+        # Trace-time only: the dict keys are Python-level.
         for _t in targets:
             _alias = _RATIO_ALIAS.get(_t)
             if _alias is None:
                 continue
-            if _t not in outputs_predict and _alias in outputs_predict:
-                outputs_predict[_t] = outputs_predict.pop(_alias)
             if _t not in outputs_true and _alias in outputs_true:
                 outputs_true[_t] = outputs_true.pop(_alias)
 
@@ -722,9 +741,11 @@ def make_loss_fn(
         metrics = {}
 
         for target in targets:
-            target_mae_fn = property_to_mae[target]
+            base_target = _base_target(target)
+            y_pred = outputs_predict[_prediction_key(target, outputs_predict)]
+            target_mae_fn = property_to_mae[base_target]
             _mae = target_mae_fn(
-                y=outputs_predict[target],
+                y=y_pred,
                 y_label=outputs_true[target],
                 scale=_scales[target],
                 batch_segments=inputs['batch_segments'],
@@ -743,9 +764,9 @@ def make_loss_fn(
                 target_adaptive_alpha = adaptive_alphas[idx]
                 target_adaptive_scale = adaptive_scales[idx]
 
-            target_loss_fn = property_to_loss[target]
+            target_loss_fn = property_to_loss[base_target]
             _l = target_loss_fn(
-                y=outputs_predict[target],
+                y=y_pred,
                 y_label=outputs_true[target],
                 scale=_scales[target],
                 batch_segments=inputs['batch_segments'],
@@ -806,14 +827,11 @@ def make_val_fn(
         outputs_true = {k: v for k, v in batch.items() if k in targets}
         outputs_predict = obs_fn(params, **inputs)
 
-        # Mirror the ratio-head alias rename used in make_loss_fn.
-        outputs_predict = dict(outputs_predict)
+        # Mirror the ratio-head label rename used in make_loss_fn.
         for _t in targets:
             _alias = _RATIO_ALIAS.get(_t)
             if _alias is None:
                 continue
-            if _t not in outputs_predict and _alias in outputs_predict:
-                outputs_predict[_t] = outputs_predict.pop(_alias)
             if _t not in outputs_true and _alias in outputs_true:
                 outputs_true[_t] = outputs_true.pop(_alias)
 
@@ -828,9 +846,11 @@ def make_val_fn(
             adaptive_alphas, adaptive_scales = transform_adaptive_robust_params(alpha_raw, scale_raw)
 
         for target in targets:
-            target_mae_fn = property_to_mae[target]
+            base_target = _base_target(target)
+            y_pred = outputs_predict[_prediction_key(target, outputs_predict)]
+            target_mae_fn = property_to_mae[base_target]
             _mae = target_mae_fn(
-                y=outputs_predict[target],
+                y=y_pred,
                 y_label=outputs_true[target],
                 scale=_scales[target],
                 batch_segments=inputs['batch_segments'],
@@ -848,9 +868,9 @@ def make_val_fn(
                 target_adaptive_alpha = adaptive_alphas[idx]
                 target_adaptive_scale = adaptive_scales[idx]
 
-            target_loss_fn = property_to_loss[target]
+            target_loss_fn = property_to_loss[base_target]
             _mse = target_loss_fn(
-                y=outputs_predict[target],
+                y=y_pred,
                 y_label=outputs_true[target],
                 scale=_scales[target],
                 batch_segments=inputs['batch_segments'],

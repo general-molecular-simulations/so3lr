@@ -223,6 +223,18 @@ class EnergySparse(BaseSubModule):
     # initialise fresh. When None, falls back to the single `regression_dim`
     # layer (or no hidden layer), preserving the original architecture exactly.
     final_mlp_widths: Optional[Sequence[int]] = None
+    # Optional residual energy readout, for fine-tuning with a frozen backbone. A
+    # second per-atom MLP whose output is ADDED to the pretrained readout. Its last
+    # layer is always zero-initialised, so attaching it to a pretrained model leaves
+    # the energy unchanged at step 0. `final_mlp_widths` cannot do this: it inserts
+    # fresh layers between the loaded 'energy_dense_regression' and
+    # 'energy_dense_final', which changes the energy before training starts.
+    residual_mlp_widths: Optional[Sequence[int]] = None
+    # Input of the residual readout: 'last' = the final node features x;
+    # 'all_layers' = x after the embedding and after every message-passing layer,
+    # concatenated. A frozen backbone's last layer may have discarded information
+    # the new data needs; the earlier layers are free to read.
+    residual_inputs: str = 'last'
     activation_fn: Callable[[Any], Any] = lambda u: u
     learn_atomic_type_scales: bool = False
     learn_atomic_type_shifts: bool = False
@@ -341,6 +353,30 @@ class EnergySparse(BaseSubModule):
             )(x) # (num_nodes, num_levels_of_theory)
 
         atomic_energy = atomic_energy * atomic_scales
+
+        if self.residual_mlp_widths is not None:
+            if self.residual_inputs == 'last':
+                y = x
+            elif self.residual_inputs == 'all_layers':
+                y = inputs['x_layers']  # (num_nodes, (num_layers + 1) * num_features)
+            else:
+                raise ValueError(
+                    f"residual_inputs must be 'last' or 'all_layers', got {self.residual_inputs!r}."
+                )
+            for i, width in enumerate(self.residual_mlp_widths):
+                y = nn.Dense(
+                    width,
+                    kernel_init=nn.initializers.lecun_normal(),
+                    name=f'energy_residual_dense_{i}'
+                )(y)  # (num_nodes, width)
+                y = self.activation_fn(y)  # (num_nodes, width)
+            atomic_energy += nn.Dense(
+                num_theory_levels,
+                kernel_init=nn.initializers.zeros_init(),
+                use_bias=False,
+                name='energy_residual_dense_final'
+            )(y)  # (num_nodes, num_levels_of_theory)
+
         atomic_energy += energy_offset  # (num_nodes, num_levels_of_theory)
 
         atomic_energy = jnp.where(
