@@ -1172,9 +1172,10 @@ def test_npt_start_motion():
     assert npt_start_motion(None, m, "semi-isotropic") == dict(velocities=None)
 
 @GPU
-def test_md_holds_fixed_atoms_on_flash(tmp_path):
-    """fixed_atom_indices on flash (nvt-langevin): the held atoms end exactly where they started,
-    with zero momentum, while the rest of the box moves."""
+@pytest.mark.parametrize("ensemble", ["nvt-langevin", "nvt"])
+def test_md_holds_fixed_atoms_on_flash(tmp_path, ensemble):
+    """fixed_atom_indices on flash (Langevin and Nose-Hoover): the held atoms end exactly where
+    they started, with zero momentum, while the rest of the box moves."""
     import h5py
     import yaml
     from ase.io import write
@@ -1183,7 +1184,7 @@ def test_md_holds_fixed_atoms_on_flash(tmp_path):
     write(tmp_path / "w.xyz", atoms)
     held = [0, 1, 2, 3, 4, 5]
     (tmp_path / "s.yaml").write_text(yaml.safe_dump(dict(
-        input_file="w.xyz", output_file="a.hdf5", log_file="a.log", ensemble="nvt-langevin", engine="flash",
+        input_file="w.xyz", output_file="a.hdf5", log_file="a.log", ensemble=ensemble, engine="flash",
         md_cycles=2, md_steps=10, md_dt=0.5, md_T=300.0, langevin_thermo=200.0, relax_before_run=False,
         output_cartesian_positions=True, fixed_atom_indices=held, save_buffer=1)))
     _so3lr(["--settings", "s.yaml"], tmp_path)
