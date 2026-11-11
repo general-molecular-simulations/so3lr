@@ -173,12 +173,14 @@ def _check_periodic_lr_cutoff(config, training_data, validation_data, tf_record_
         return
     for item in [*training_data, *validation_data]:
         if item is not None and jraph_utils.is_periodic_graph(item[0]):
+            setting = ('is not set (no switch-off)' if cutoff_lr is None
+                       else f'={cutoff_lr} exceeds data.neighbors_lr_cutoff={pair_cutoff}')
             raise ValueError(
-                f'The data has periodic structures, but model.cutoff_lr={cutoff_lr} exceeds '
-                f'data.neighbors_lr_cutoff={pair_cutoff}: the long-range terms would be cut '
-                f'off at {pair_cutoff} A instead of switched off smoothly as at inference. '
-                f'Set model.cutoff_lr: {pair_cutoff} (and model.kspace_electrostatics: pme for '
-                f'the Coulomb tail beyond it).'
+                f'The data has periodic structures, but model.cutoff_lr {setting}: the '
+                f'long-range terms would be cut off at {pair_cutoff} A where the pair list '
+                f'ends, instead of switched off smoothly as at inference. Set model.cutoff_lr '
+                f'equal to data.neighbors_lr_cutoff, e.g. both 12 A (a large periodic pair '
+                f'list is costly), and model.kspace_electrostatics: pme for the Coulomb tail.'
             )
 
 

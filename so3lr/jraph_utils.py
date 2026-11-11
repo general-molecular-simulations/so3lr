@@ -8,11 +8,13 @@ def jraph_to_ase_atoms(graph):
     """ Convert graph to ase.atoms object. """
 
     cell = graph.globals.get('cell')
-    if cell is not None:
+    # A molecule batched with crystals carries a zero cell (see
+    # mlff.utils.jraph_utils.with_uniform_periodic_fields): it stays non-periodic.
+    if cell is not None and np.any(np.asarray(cell[0]) != 0):
         cell = cell[0]  # (1, 3, 3) -> (3, 3)
         pbc = True
     else:
-        pbc = False
+        cell, pbc = None, False
 
     positions = graph.nodes['positions']
     numbers = graph.nodes['atomic_numbers']

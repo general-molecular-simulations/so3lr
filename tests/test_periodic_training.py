@@ -95,8 +95,14 @@ def _graph(atoms):
 
 
 @pytest.mark.parametrize('method', ['pme', 'ewald'])
-def test_kspace_mesh_covers_the_largest_cell(method):
+@pytest.mark.parametrize('skew', [0.0, 0.4])
+def test_kspace_mesh_covers_the_largest_cell(method, skew):
+    """The mesh is the per-axis maximum of the cells' own meshes, also for a triclinic cell."""
     small, large = _crystal(), _crystal().repeat((2, 1, 1))
+    if skew:
+        cell = large.cell.array.copy()
+        cell[1] += skew * cell[0]
+        large.set_cell(cell, scale_atoms=True)
     config = config_dict.ConfigDict({'model': {
         'kspace_electrostatics': method, 'kspace_smearing': 2.0, 'kspace_spacing': 1.0}})
     k = _compute_kspace_constants(config, [_graph(small)], False, validation_data=[_graph(large)])
