@@ -328,7 +328,12 @@ def run_training(config: config_dict.ConfigDict, model: str = 'so3krates'):
 
     opt = make_optimizer_from_config(config)
     if model == 'so3krates':
-        net = make_so3krates_sparse_from_config(config)
+        net = make_so3krates_sparse_from_config(
+            config,
+            output_intermediate_quantities=(
+                ['partial_charges'] if 'partial_charges' in config.training.loss_weights else None
+            ),
+        )
     else:
         raise ValueError(
             f'{model=} is not a valid model.'
@@ -560,6 +565,7 @@ def _apply_finetune_model_overrides(user_model, checkpoint_model):
     model config. A checkpoint that already has a residual readout (a fine-tuned
     model fine-tuned again) must be given the same one, or its saved residual
     weights would not fit."""
+    had_residual = checkpoint_model.get('energy_residual_mlp_widths', None) is not None
     for key in FINETUNE_MODEL_OVERRIDES:
         value = user_model.get(key, None)
         if value is None:
@@ -567,6 +573,8 @@ def _apply_finetune_model_overrides(user_model, checkpoint_model):
         if isinstance(value, (list, tuple)):
             value = [int(v) for v in value]
         existing = checkpoint_model.get(key, None)
+        if existing is None and had_residual and key == 'energy_residual_inputs':
+            existing = 'last'  # the default the checkpoint's residual was built with
         if existing is not None and existing != value:
             raise ValueError(
                 f'The checkpoint already has model.{key}={existing!r}; the finetune '
@@ -641,7 +649,7 @@ def _with_long_range_anchor(graph_to_batch_fn, net, params, anchor_keys):
     alias = training_utils._RATIO_ALIAS
     teacher_keys = sorted(set(anchor_keys) | {alias[k] for k in anchor_keys if k in alias})
     teacher = jax.jit(get_long_range_anchor_fn_sparse(net, teacher_keys))
-    ref_params = jax.tree_util.tree_map(jnp.array, params)  # a copy, never updated
+    ref_params = jax.device_put(params)  # updates are functional: these stay the starting weights
     input_keys = ('positions', 'atomic_numbers', 'idx_i', 'idx_j') + _OPTIONAL_INPUTS
 
     def graph_to_batch_with_anchor(graph, lr_batch):
@@ -654,7 +662,7 @@ def _with_long_range_anchor(graph_to_batch_fn, net, params, anchor_keys):
                     f'Cannot anchor {key!r}: the pretrained model does not predict it '
                     f'(it predicts {sorted(out)}).'
                 )
-            batch[training_utils.ANCHOR_PREFIX + key] = np.asarray(value)
+            batch[training_utils.ANCHOR_PREFIX + key] = value
         return batch
 
     return graph_to_batch_with_anchor
@@ -1043,6 +1051,16 @@ def run_fine_tuning(
         params = _init_residual_readout(
             net, params, config, training_data, tf_record_present, _graph_to_batch_fn
         )
+        flat = traverse_util.flatten_dict(unfreeze(params))
+        residual = traverse_util.unflatten_dict(
+            {k: v for k, v in flat.items() if any(c.startswith('energy_residual') for c in k)}
+        )
+        if count_trainable_params(residual, trainable_subset_keys, frozen_subset_keys) == 0:
+            logger.warning(
+                'Fine-tuning strategy %r freezes the residual energy readout '
+                '(model.energy_residual_mlp_widths); a new one stays zero. Use '
+                '--strategy readout_only or full to train it.', strategy
+            )
 
     if anchor_weights:
         _graph_to_batch_fn = _with_long_range_anchor(

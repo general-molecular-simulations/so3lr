@@ -145,6 +145,12 @@ def test_a_changed_residual_readout_is_refused():
         _apply_finetune_model_overrides(
             config_dict.ConfigDict({'energy_residual_mlp_widths': [32]}), model
         )
+    # A residual saved without energy_residual_inputs was built with the default 'last'.
+    with pytest.raises(ValueError, match='already has model.energy_residual_inputs'):
+        _apply_finetune_model_overrides(
+            config_dict.ConfigDict({'energy_residual_inputs': 'all_layers'}),
+            config_dict.ConfigDict({'energy_residual_mlp_widths': [64]}),
+        )
     with pytest.raises(ValueError, match='energy_residual_mlp_widths is not'):
         _apply_finetune_model_overrides(
             config_dict.ConfigDict({'energy_residual_inputs': 'all_layers'}),
