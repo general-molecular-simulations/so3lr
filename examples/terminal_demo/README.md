@@ -118,6 +118,9 @@ velocities and DHA's padded periodic box have explicit keep/change choices;
 the original files are never edited. Water64 remains available through manual
 file selection, but its small periodic cell needs adjusted real-space/PME
 settings and is no longer a featured preset.
+All periodic CLI MD modes require a positive, axis-aligned orthorhombic cell;
+NPT additionally requires periodic boundaries in all three axes. Setup checks
+the cell before saving a run.
 
 Setup is organized as **1/3 Structure**, **2/3 Dynamics**, and **3/3 Review and
 start**. Select ensemble, model, timestep, duration and output directory.

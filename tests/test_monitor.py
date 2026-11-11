@@ -789,3 +789,82 @@ def test_optimization_marker_clears_when_md_begins(tmp_path):
     assert 'Optimization' not in text
     assert 'Temperature [K]' in text and 'Total energy [eV]' in text
     assert 'Segment 0/200 steps' in text and 'step counter 1,000' in text
+
+
+def test_deeply_nested_json_is_skipped_and_later_records_still_load(tmp_path):
+    path = tmp_path / 'nested.events.jsonl'
+    nested = '[' * 10_000 + '0' + ']' * 10_000 + '\n'
+    path.write_text(nested + ''.join(json.dumps(item) + '\n' for item in samples(2)))
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    assert reader.state.malformed == 1
+    assert reader.state.sample_count == 3
+    with path.open('a') as stream:
+        stream.write(json.dumps(event(20, 'run_completed')) + '\n')
+    reader.poll()
+    assert reader.state.status == 'Completed' and reader.state.malformed == 1
+
+
+@pytest.mark.parametrize('key,values', [
+    ('energy_eV', [-39.10001, -39.10002]),
+    ('conserved_energy_eV', [-39.100000001, -39.100000002]),
+    ('temperature_K', [300.001, 300.002]),
+    ('energy_eV', [1e-100, 2e-100]),
+])
+@pytest.mark.parametrize('width', [32, 80])
+def test_axis_labels_resolve_small_recorded_variations(key, values, width):
+    rows = [{'time_ps': index, key: value} for index, value in enumerate(values)]
+    plot = monitor._plot(rows, key, 'Property', 'unit', width)
+    labels = [plot.renderables[index].plain.split('│')[0].strip() for index in (1, 4, 7)]
+    assert len(set(labels)) == 3
+    numeric = list(map(float, labels))
+    assert numeric[0] > numeric[1] > numeric[2]
+    assert all(len(row.plain) <= width for row in plot.renderables[1:10])
+
+
+class StrictAsciiOutput(io.StringIO):
+    encoding = 'ascii'
+
+    def write(self, value):
+        value.encode('ascii')
+        return super().write(value)
+
+
+@pytest.mark.parametrize('operation,height', [('md', 24), ('optimization', 10)])
+def test_ascii_paged_views_never_add_a_unicode_ellipsis(tmp_path, operation, height):
+    from rich.console import Console
+    folder = tmp_path / ('long-molecular-run-' * 8)
+    folder.mkdir()
+    path = folder / 'run.events.jsonl'
+    write(path, samples(2))
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    if operation == 'optimization':
+        reader.state.info.update(operation=operation, opt_step=20, opt_total_steps=100,
+                                 opt_force_max_eVA=0.03, opt_force_target_eVA=0.01)
+    output = StrictAsciiOutput()
+    Console(file=output, width=80, height=height, color_system=None).print(
+        monitor.render_monitor([reader], width=80, height=height, ascii_only=True))
+    assert output.getvalue().isascii()
+    assert 'q:' in output.getvalue()
+    assert len(output.getvalue().splitlines()) <= height
+
+
+@pytest.mark.parametrize('height', [1, 3, 6, 10, 12])
+@pytest.mark.parametrize('status', ['Running', 'Completed', 'Failed'])
+def test_short_optimization_views_keep_controls_and_outcome(tmp_path, height, status):
+    path = tmp_path / 'optimization.events.jsonl'
+    write(path, [event(0, 'run_started', settings={'model': 'so3lr-tauri-m-2606', 'precision': 'mixed'}),
+                 event(1, 'info', operation='optimization', opt_step=20, opt_total_steps=100,
+                       opt_energy_eV=-39, opt_force_max_eVA=0.03, opt_force_target_eVA=0.01),
+                 event(2, 'phase', name='Relaxing')])
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    reader.state.status = status
+    if status == 'Failed':
+        reader.state.message = 'Model evaluation failed'
+    text = render(reader, height=height)
+    assert len(text.splitlines()) <= height
+    assert text.splitlines()[-1].startswith('q:')
+    if height >= 3:
+        assert monitor.optimization_status(reader.state.info, status) in text

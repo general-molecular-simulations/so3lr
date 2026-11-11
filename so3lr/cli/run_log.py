@@ -53,6 +53,10 @@ def resolved_settings(settings, info, operation, cwd):
     else:
         allowed = known_yaml_keys() - _NON_SIMULATION_KEYS
         source = dict(YAML_DEFAULTS, **source)
+        if source.get('do_enhanced_sampling', False):
+            # check_enhanced_sampling reads this cwd-relative default when the
+            # key is omitted. Materialize it before rebasing replay paths.
+            source.setdefault('pysages_input', './pysages_input.yaml')
     result = {}
     for key, value in source.items():
         if key not in allowed:

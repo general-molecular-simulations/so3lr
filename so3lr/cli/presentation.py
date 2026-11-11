@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 from .telemetry import EventJournal
 from .run_log import RunLog
-from .formatting import precision_label, throughput_label, optimization_status
+from .formatting import precision_label, throughput_label, optimization_status, terminal_text
 
 
 @dataclass(frozen=True)
@@ -126,12 +126,13 @@ class _Activity:
         # calm during long compilations and is visible at our 2 Hz refresh.
         frames = '+×✧✦✧×' if self.unicode else '+x*x+'
         marker = frames[int(max(0, now - self.started) * len(frames) / 5) % len(frames)]
-        text = Text(marker, style='yellow', no_wrap=True, overflow='ellipsis')
-        text.append(f' {self.phase}', style='default')
+        text = Text(marker, style='yellow', no_wrap=True,
+                    overflow='ellipsis' if self.unicode else 'crop')
+        text.append(terminal_text(f' {self.phase}', not self.unicode), style='default')
         timing = f' · {_seconds(now - self.started)} elapsed'
         if now - self.reported >= 2:
             timing += f' · last update {_seconds(now - self.reported)} ago'
-        text.append(timing, style='dim default')
+        text.append(terminal_text(timing, not self.unicode), style='dim default')
         yield text
 
 
@@ -207,13 +208,23 @@ class _Reporter:
         self.live = Live(get_renderable=self._live_view, console=self.console,
                          auto_refresh=self._heartbeat, refresh_per_second=2,
                          transient=False, redirect_stdout=False, redirect_stderr=False)
-        self.live.start(refresh=True)
+        try:
+            self.live.start(refresh=True)
+        except BaseException:
+            # Construction has not returned to run_display yet. Restore any
+            # cursor/live state acquired before a failed first refresh.
+            self.close()
+            raise
         self._last_refresh = time.monotonic()
 
     def _text(self, text, style=''):
         from rich.text import Text
         # Text treats paths and user messages literally, including [brackets].
-        return Text(str(text), style=style)
+        return Text(self._label(text), style=style)
+
+    def _label(self, text):
+        ascii_only = self.console.encoding.lower().replace('-', '') not in ('utf8', 'utf16', 'utf32')
+        return terminal_text(text, ascii_only)
 
     def _snapshot(self):
         from rich.console import Group
@@ -292,7 +303,7 @@ class _Reporter:
         style = 'red' if self.status == 'failed' else 'green' if self.status == 'complete' else 'yellow'
         phase = self._text(self.phase_name, style)
         if self.detail:
-            phase.append(f'  {self.detail}')
+            phase.append(self._label(f'  {self.detail}'))
         rows.append(phase)
         if self.info.get('operation') == 'optimization':
             step, total = (_finite(self.info.get(key)) for key in ('opt_step', 'opt_total_steps'))
@@ -301,7 +312,7 @@ class _Reporter:
                 width = min(24, max(8, self.console.width - 40))
                 filled = round(width * ratio)
                 bar = self._text('━' * filled, style)
-                bar.append('─' * (width - filled), style='dim')
+                bar.append(self._label('─' * (width - filled)), style='dim')
                 bar.append(f'  {int(step):,}/{int(total):,} optimization steps')
                 rows.append(bar)
             energy, force, target = (_finite(self.info.get(key)) for key in
@@ -321,7 +332,7 @@ class _Reporter:
             width = min(24, max(8, self.console.width - 40))
             filled = round(width * ratio)
             bar = self._text('━' * filled, style)
-            bar.append('─' * (width - filled), style='dim')
+            bar.append(self._label('─' * (width - filled)), style='dim')
             bar.append(f'  {ratio:.0%}  {completed:,}/{self.total_steps:,} steps')
             rows.append(bar)
             if self.start_step:
@@ -542,9 +553,13 @@ class _RunReporter:
         # enabled continues to mean terminal rendering, not journal availability.
         self.enabled = renderer.enabled
         self.journal = EventJournal(settings)
-        self.run_log = RunLog(settings, self.journal)
-        if self.enabled:
-            self.renderer.attach_journal(self.journal.path, self.journal.run_id)
+        try:
+            self.run_log = RunLog(settings, self.journal)
+            if self.enabled:
+                self.renderer.attach_journal(self.journal.path, self.journal.run_id)
+        except BaseException:
+            self.journal.close()
+            raise
         self.last_error = ''
         self.status = 'running'
         self._phase = None
@@ -571,6 +586,7 @@ class _RunReporter:
 
     def logger_ready(self, log_file):
         self.run_log.logger_ready(log_file)
+        self.journal.flush_initial_warning()
 
     def start_md(self, start_step, total_steps, dt_fs):
         # Relaxation can share this reporter; MD must replace its operation
@@ -662,7 +678,15 @@ def run_display(settings):
     if current is not None:
         yield current
         return
-    reporter = _RunReporter(settings, _Reporter(settings) if _rich_enabled() else _null)
+    renderer = _Reporter(settings) if _rich_enabled() else _null
+    try:
+        reporter = _RunReporter(settings, renderer)
+    except BaseException:
+        # A journal may block on a remote filesystem and be interrupted after
+        # Live has already hidden the cursor. Own that renderer immediately.
+        if renderer.enabled:
+            renderer.close()
+        raise
     token = _active.set(reporter)
     try:
         yield reporter

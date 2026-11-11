@@ -1253,9 +1253,14 @@ def format_md_row(step, KE, PE, H, T, time_per_step, npt_state=None, box=None, *
     """One MD log row, tab-separated like the header in perform_md. For NPT pass
     the state and box: a flexible-cell (semi-isotropic) state adds its
     pressure-tensor diagonal, then the box lengths follow. An optional metrics
-    dict receives host-side cell data and the pressure already evaluated for
-    this row, so the offline monitor needs no additional model evaluations."""
-    cols = [f'{step}', f'{KE + PE:.3f}', f'{KE:.3f}', f'{PE:.3f}', f'{(H or 0.0):.3f}', f'{T:.1f}']
+    dict receives the total energy, host-side cell data and pressure already
+    evaluated for this row, so the monitor needs no extra model evaluations."""
+    energy = KE + PE
+    cols = [f'{step}', f'{energy:.3f}', f'{KE:.3f}', f'{PE:.3f}', f'{(H or 0.0):.3f}', f'{T:.1f}']
+    if metrics is not None:
+        # Preserve the row's dtype-rounded sum. Adding converted host floats
+        # instead would silently change float32 total energies in the journal.
+        metrics['energy'] = float(energy)
     if npt_state is not None:
         if isinstance(npt_state, jax_md.simulate.NPTNoseHooverFlexState):
             pressure_tensor = jax_md.simulate.pressure_tensor_flex(npt_state)
@@ -2419,7 +2424,7 @@ def perform_md(
     reporter.start_md(current_cycle * md_steps, md_cycles * md_steps, md_dt_ps * 1000.0)
     reporter.progress(current_cycle * md_steps, temperature=current_T,
                       potential_energy=PE, time_per_step=None,
-                      kinetic_energy=float(KE), energy=float(KE) + float(PE),
+                      kinetic_energy=float(KE),
                       conserved_energy=None if ensemble == 'nvt-langevin' or H is None else float(H),
                       **cell_metrics)
 
@@ -2737,7 +2742,7 @@ def perform_md(
             reporter.progress(current_cycle * md_steps, temperature=current_T,
                               potential_energy=PE,
                               time_per_step=time_per_step if cycle_md > 1 else None,
-                              kinetic_energy=float(KE), energy=float(KE) + float(PE),
+                              kinetic_energy=float(KE),
                               conserved_energy=None if ensemble == 'nvt-langevin' or H is None else float(H),
                               **cell_metrics)
 

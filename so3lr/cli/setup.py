@@ -97,6 +97,8 @@ def inspect_structure(path, frame_index=None):
                 first = atoms
         if first is None or len(first) == 0:
             raise ValueError('The chosen frame does not exist or contains no atoms.')
+    except KeyError as exc:
+        raise ValueError(f'Unrecognized element or property in the XYZ structure: {exc}') from exc
     except (IndexError, AssertionError) as exc:
         raise ValueError('The structure is not a readable single-frame XYZ file.') from exc
     finally:
@@ -107,8 +109,13 @@ def inspect_structure(path, frame_index=None):
     if not np.isfinite(cell).all():
         raise ValueError('Cell vectors must contain only finite numbers.')
     periodic = is_fully_periodic(first.pbc, context='SO3LR MD setup')
-    npt_ok = (periodic and bool(np.all(np.diag(cell) > 0))
-              and bool(np.allclose(cell, np.diag(np.diag(cell)), atol=1e-8, rtol=0)))
+    if periodic and (np.any(np.diag(cell) <= 0)
+                     or np.any(cell != np.diag(np.diag(cell)))):
+        # Both CLI engines require positive, axis-aligned orthorhombic cells
+        # for every ensemble. Match check_cell's exact off-diagonal check;
+        # accepting tiny tilts here would still fail after saving and launching.
+        raise ValueError('Periodic MD requires a positive, axis-aligned orthorhombic cell.')
+    npt_ok = periodic
     height = None
     if periodic:
         height = float(np.min(cell_heights(cell))) if np.linalg.matrix_rank(cell) == 3 else 0.0
@@ -162,9 +169,14 @@ def export_run(directory, structure, settings):
     written = []
     try:
         input_path = directory / 'structure.extxyz'
-        written.append(input_path)
         if structure.frame_count == 1 and structure.keep_input_momenta and not structure.isolated:
-            shutil.copyfile(structure.path, input_path)
+            # Another process may have populated the new directory after mkdir.
+            # Reserve each file exclusively and claim cleanup ownership only
+            # after creation succeeds, including when ASE rewrites a frame.
+            with input_path.open('xb') as handle:
+                written.append(input_path)
+                with structure.path.open('rb') as source:
+                    shutil.copyfileobj(source, handle)
             copied_digest = _digest(input_path)
         else:
             from ase.io import read, write
@@ -174,7 +186,9 @@ def export_run(directory, structure, settings):
             if structure.isolated:
                 atoms.set_pbc(False)
                 atoms.set_cell([0, 0, 0])
-            write(input_path, atoms, format='extxyz')
+            with input_path.open('x', encoding='utf-8') as handle:
+                written.append(input_path)
+                write(handle, atoms, format='extxyz')
             copied_digest = _digest(structure.path)
         if copied_digest != structure.digest:
             raise ValueError('The structure changed while saving. Go back and review it again.')
@@ -319,6 +333,8 @@ def _pick_frame(console, path, old):
     try:
         for _ in frames:
             count += 1
+    except KeyError as exc:
+        raise ValueError(f'Unrecognized element or property in the XYZ structure: {exc}') from exc
     finally:
         frames.close()
     if count <= 1:

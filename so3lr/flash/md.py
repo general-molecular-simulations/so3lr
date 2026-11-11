@@ -760,7 +760,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     reporter.start_md(current_cycle * md_steps, md_cycles * md_steps, md_dt_ps * 1000.0)
     reporter.progress(current_cycle * md_steps, temperature=initial_temp,
                       potential_energy=initial_pe, time_per_step=None,
-                      kinetic_energy=initial_ke, energy=initial_ke + initial_pe,
+                      kinetic_energy=initial_ke,
                       conserved_energy=None if ensemble == 'nvt-langevin' else initial_h,
                       **cell_metrics)
     positions, momenta, boxes, obs = [], [], [], {}
@@ -786,7 +786,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         # Its first timing includes compilation and is not a throughput sample.
         reporter.progress(current_cycle * md_steps, temperature=temp, potential_energy=pe,
                           time_per_step=per_step if cycle > 0 else None,
-                          kinetic_energy=ke, energy=ke + pe,
+                          kinetic_energy=ke,
                           conserved_energy=None if ensemble == 'nvt-langevin' else h,
                           **cell_metrics)
         if ensemble != "nvt-langevin" and not drift_warned and np.isfinite(h) and h != 0.0:

@@ -2,6 +2,18 @@
 import math
 
 
+def terminal_text(value, ascii_only=False):
+    """Use plain equivalents for UI glyphs on non-Unicode terminal streams."""
+    text = str(value)
+    if not ascii_only:
+        return text
+    for glyph, replacement in (('←/→', 'left/right'), ('↑/↓', 'up/down'),
+                               ('Å³', 'A^3'), ('Å', 'A'), ('≤', '<='),
+                               ('━', '-'), ('─', '-'), ('·', '|'), ('≈', '~')):
+        text = text.replace(glyph, replacement)
+    return text.encode('ascii', errors='backslashreplace').decode('ascii')
+
+
 def precision_label(value):
     """Explain the resolved mixed precision used by both MD engines."""
     label = str(value)

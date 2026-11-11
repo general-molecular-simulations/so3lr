@@ -129,6 +129,40 @@ def test_npt_requires_full_periodicity_and_a_positive_orthorhombic_cell(tmp_path
         setup.inspect_structure(periodic)
 
 
+@pytest.mark.parametrize('cell', [
+    '30 0 0 1 30 0 0 0 30',  # a tilted cell cannot run even in NVT/NVE
+    '30 0 0 1e-12 30 0 0 0 30',  # runtime rejects every nonzero off-diagonal
+    '-30 0 0 0 30 0 0 0 30',
+    '0 0 0 0 30 0 0 0 30',
+])
+def test_all_periodic_setup_rejects_unsupported_cells_before_ensemble_selection(tmp_path, cell):
+    source = tmp_path / 'invalid-cell.xyz'
+    source.write_text(f'2\nLattice="{cell}" pbc="T T T"\nH 0 0 0\nH 0 0 0.74\n')
+    with pytest.raises(ValueError, match='Periodic MD requires a positive, axis-aligned orthorhombic cell'):
+        setup.inspect_structure(source)
+
+
+@pytest.mark.parametrize(('content', 'message'), [
+    ('2\nLattice="30 0 0 1 30 0 0 0 30" pbc="T T T"\nH 0 0 0\nH 0 0 .74\n',
+     'Periodic MD requires a positive'),
+    ('1\n\nNotAnElement 0 0 0\n', 'Unrecognized element or property'),
+])
+def test_invalid_structure_retries_before_dynamics(tmp_path, structure_file, monkeypatch, content, message):
+    monkeypatch.setattr(setup, '_interactive', lambda: True)
+    invalid = tmp_path / 'invalid.xyz'
+    invalid.write_text(content)
+    with pytest.raises(ValueError, match=message):
+        setup.inspect_structure(invalid)
+    path_choice = str(len(setup.available_presets()) + 2)
+    destination = tmp_path / 'valid-run'
+    text = '\n'.join([path_choice, str(invalid)]) + '\n' + answers(structure_file, destination)
+    result = CliRunner().invoke(wizard, input=text)
+    assert result.exit_code == 0, result.output
+    assert message in result.output
+    assert result.output.count('2/3 · Dynamics') == 1
+    assert (destination / 'structure.extxyz').read_bytes() == structure_file.read_bytes()
+
+
 def test_npt_choice_on_vacuum_retries_the_ensemble(tmp_path, structure_file, monkeypatch):
     monkeypatch.setattr(setup, '_interactive', lambda: True)
     text = answers(structure_file, tmp_path / 'nvt')
@@ -166,6 +200,34 @@ def test_export_refuses_existing_directory_and_changed_input(tmp_path, structure
     with pytest.raises(ValueError, match='changed during setup'):
         setup.export_run(tmp_path / 'changed', inspected, {})
     assert not (tmp_path / 'changed').exists()
+
+
+@pytest.mark.parametrize('rewrite', [False, True])
+@pytest.mark.parametrize('symlink', [False, True])
+def test_export_preserves_structure_created_concurrently(tmp_path, structure_file, monkeypatch, rewrite, symlink):
+    inspected = replace(setup.inspect_structure(structure_file), keep_input_momenta=not rewrite)
+    destination = tmp_path / 'racing-run'
+    unrelated = tmp_path / 'unrelated.xyz'
+    unrelated.write_text('another process owns this content')
+    original_mkdir = Path.mkdir
+
+    def racing_mkdir(path, *args, **kwargs):
+        original_mkdir(path, *args, **kwargs)
+        if path == destination:
+            target = path / 'structure.extxyz'
+            if symlink:
+                target.symlink_to(unrelated)
+            else:
+                target.write_bytes(unrelated.read_bytes())
+
+    monkeypatch.setattr(Path, 'mkdir', racing_mkdir)
+    with pytest.raises(FileExistsError):
+        setup.export_run(destination, inspected, {})
+    assert unrelated.read_text() == 'another process owns this content'
+    assert (destination / 'structure.extxyz').read_bytes() == unrelated.read_bytes()
+    assert (destination / 'structure.extxyz').is_symlink() is symlink
+    assert not (destination / 'settings.yaml').exists()
+    assert not (destination / 'run.sh').exists()
 
 
 def test_launcher_handles_spaces_and_shell_metacharacters(tmp_path, structure_file):

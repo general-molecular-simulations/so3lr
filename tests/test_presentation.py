@@ -361,7 +361,7 @@ def test_activity_updates_time_without_advancing_simulation(monkeypatch, unicode
     assert '\x1b' not in text
     assert all(not ('\u2800' <= char <= '\u28ff') for char in text)
     if not unicode:
-        assert all(ord(char) < 128 for char in ''.join(line[0] for line in text.splitlines()))
+        assert text.isascii()
 
 
 class FakeKeyboard:
@@ -565,3 +565,109 @@ def test_narrow_render_keeps_labels_and_long_paths(monkeypatch):
         text = render(reporter, width=32)
         assert 'Input' in text and 'steps' in text
         assert all(len(line) <= 32 for line in text.splitlines())
+
+
+@pytest.mark.parametrize('error', [KeyboardInterrupt(), RuntimeError('journal initialization failed')])
+def test_initialization_failure_restores_started_terminal(monkeypatch, error):
+    output = Terminal()
+    monkeypatch.setattr(sys, 'stderr', output)
+    ui.configure(display='rich')
+    original, created = ui._Reporter, []
+
+    def renderer(settings):
+        item = original(settings)
+        created.append(item)
+        return item
+
+    def fail(settings):
+        raise error
+
+    monkeypatch.setattr(ui, '_Reporter', renderer)
+    monkeypatch.setattr(ui, 'EventJournal', fail)
+    with pytest.raises(type(error)) as captured:
+        with ui.run_display({}):
+            pytest.fail('Initialization must not yield an active run')
+    assert captured.value is error
+    assert created[0]._closed and not created[0].live.is_started
+    assert '\x1b[?25l' in output.getvalue() and '\x1b[?25h' in output.getvalue()
+    assert not ui.get_reporter().enabled
+
+
+def test_interrupted_run_log_initialization_closes_its_journal(monkeypatch):
+    output = Terminal()
+    monkeypatch.setattr(sys, 'stderr', output)
+    ui.configure(display='rich')
+    original, journals = ui.EventJournal, []
+
+    def journal(settings):
+        item = original(settings)
+        journals.append(item)
+        return item
+
+    def fail(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ui, 'EventJournal', journal)
+    monkeypatch.setattr(ui, 'RunLog', fail)
+    with pytest.raises(KeyboardInterrupt):
+        with ui.run_display({}):
+            pass
+    assert journals and not journals[0].active
+    assert '\x1b[?25h' in output.getvalue()
+
+
+def test_initial_live_start_failure_restores_cursor(monkeypatch):
+    from rich.live import Live
+    output = Terminal()
+    monkeypatch.setattr(sys, 'stderr', output)
+    ui.configure(display='rich')
+    original, displays = Live.start, []
+
+    def start(display, *args, **kwargs):
+        original(display, *args, **kwargs)
+        displays.append(display)
+        raise RuntimeError('first refresh failed')
+
+    monkeypatch.setattr(Live, 'start', start)
+    with pytest.raises(RuntimeError, match='first refresh failed'):
+        with ui.run_display({}):
+            pass
+    assert displays and not displays[0].is_started
+    assert '\x1b[?25h' in output.getvalue()
+
+
+class AsciiTerminal(Terminal):
+    encoding = 'ascii'
+
+    def write(self, value):
+        value.encode('ascii')
+        return super().write(value)
+
+
+@pytest.mark.parametrize('operation', ['md', 'optimization'])
+def test_ascii_terminal_handles_startup_progress_and_outcome(monkeypatch, operation):
+    output = AsciiTerminal()
+    monkeypatch.setattr(sys, 'stderr', output)
+    ui.configure(display='rich')
+    with ui.run_display({'input_file': 'molecule-α.xyz', 'ensemble': 'nvt', 'md_T': 300,
+                         'md_cycles': 5, 'md_steps': 10, 'md_dt': 0.0005}) as reporter:
+        if operation == 'optimization':
+            reporter.update_info(operation=operation, opt_step=10, opt_total_steps=20,
+                                 opt_energy_eV=-39, opt_force_max_eVA=0.03, opt_force_target_eVA=0.01)
+        else:
+            reporter.start_md(0, 50, 0.5)
+            reporter._refresh(force=True)
+            reporter.progress(10, temperature=301, potential_energy=-39, energy=-38, time_per_step=0.1)
+            reporter.renderer._graphs_hidden = True
+        reporter._refresh(force=True)
+    assert output.getvalue().isascii()
+    assert 'SO3LR TAURI' in output.getvalue() and 'Complete' in output.getvalue()
+    assert '\\u2500' not in output.getvalue() and '\\u2501' not in output.getvalue()
+
+
+def test_ascii_activity_truncates_without_adding_unicode():
+    from rich.console import Console
+    output = AsciiTerminal()
+    console = Console(file=output, width=20, color_system=None)
+    console.print(ui._Activity('Compiling a long molecular force field', 0, 0, unicode=False))
+    assert output.getvalue().isascii()

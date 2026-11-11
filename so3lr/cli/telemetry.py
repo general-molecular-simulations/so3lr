@@ -12,6 +12,7 @@ from numbers import Integral, Real
 import os
 from pathlib import Path
 import socket
+import sys
 import time
 import uuid
 
@@ -55,6 +56,8 @@ class EventJournal:
         self.seq = 0
         self._stream = None
         self._warned = False
+        self._initializing = True
+        self._pending_initial_error = None
         self._started_at = time.monotonic()
         try:
             base = Path(settings.get('log_file') or settings.get('output_file') or 'so3lr').expanduser()
@@ -82,6 +85,19 @@ class EventJournal:
             })
         except Exception as exc:
             self._disable(exc)
+        except BaseException:
+            # The caller cannot close an object whose constructor never
+            # returned. Release a partially opened journal without swallowing
+            # the original interrupt or exit signal.
+            stream, self._stream = self._stream, None
+            if stream is not None:
+                try:
+                    stream.close()
+                except BaseException:
+                    pass
+            raise
+        finally:
+            self._initializing = False
 
     @property
     def active(self):
@@ -94,15 +110,30 @@ class EventJournal:
                 stream.close()
             except Exception:
                 pass
-        if not self._warned:
-            self._warned = True
-            # This marker prevents the reporting handler from journaling its
-            # own failure notification. Logging must not fail the calculation.
-            try:
-                _LOGGER.warning('Run telemetry disabled: %s', exc,
-                                extra={'telemetry_internal': True})
-            except Exception:
-                pass
+        if self._initializing:
+            # The SO3LR logger can still own a previous invocation's handlers.
+            # Wait until this invocation installs its file and warning counter.
+            self._pending_initial_error = exc
+        else:
+            self._warn(exc)
+
+    def _warn(self, exc):
+        if self._warned:
+            return
+        self._warned = True
+        # This marker prevents the reporting handler from journaling its
+        # own failure notification. Logging must not fail the calculation.
+        try:
+            _LOGGER.warning('Run telemetry disabled: %s', exc,
+                            extra={'telemetry_internal': True})
+        except Exception:
+            pass
+
+    def flush_initial_warning(self):
+        """Report a startup failure after this invocation's logger is ready."""
+        error, self._pending_initial_error = self._pending_initial_error, None
+        if error is not None:
+            self._warn(error)
 
     def emit(self, event_type, data):
         if self._stream is None:
@@ -131,3 +162,12 @@ class EventJournal:
                 stream.close()
             except Exception as exc:
                 self._disable(exc)
+        if self._pending_initial_error is not None and not self._warned:
+            # Startup can be interrupted before setup_logger. Preserve the
+            # diagnostic without ever writing into a previous run's file.
+            error, self._pending_initial_error = self._pending_initial_error, None
+            self._warned = True
+            try:
+                sys.stderr.write(f'WARNING: Run telemetry disabled: {error}\n')
+            except Exception:
+                pass

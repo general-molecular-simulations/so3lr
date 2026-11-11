@@ -249,6 +249,30 @@ def test_explicit_null_does_not_silently_restore_a_nonnull_md_default(tmp_path):
     assert 'None' not in snapshot.read_text()
 
 
+def test_enhanced_sampling_default_input_replays_from_another_directory(tmp_path, monkeypatch):
+    source = settings(tmp_path)
+    source['do_enhanced_sampling'] = True
+    original_cv = tmp_path / 'pysages_input.yaml'
+    original_cv.write_text('method: umbrella\n')
+    snapshot = tmp_path / 'resolved.yaml'
+    snapshot.write_text(yaml.safe_dump(resolved_settings(source, {}, 'md', tmp_path)))
+    other = tmp_path / 'other'
+    other.mkdir()
+    (other / 'pysages_input.yaml').write_text('method: different\n')
+    monkeypatch.chdir(other)
+    replay = load_md_settings(snapshot)
+    assert replay['pysages_input'] == str(original_cv)
+    assert Path(replay['pysages_input']).read_text() == 'method: umbrella\n'
+
+
+@pytest.mark.parametrize('enabled', [False, None])
+def test_ordinary_md_does_not_gain_a_pysages_input_default(tmp_path, enabled):
+    source = settings(tmp_path)
+    if enabled is not None:
+        source['do_enhanced_sampling'] = enabled
+    assert 'pysages_input' not in resolved_settings(source, {}, 'md', tmp_path)
+
+
 def test_import_is_numerical_backend_free():
     project = Path(__file__).resolve().parents[1]
     result = subprocess.run([sys.executable, '-c',

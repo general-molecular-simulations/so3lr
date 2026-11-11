@@ -16,9 +16,11 @@ def plain_run(monkeypatch, tmp_path):
     # handlers. Keep this module's failure notifications isolated and captured.
     monkeypatch.setattr(telemetry._LOGGER, 'handlers', [])
     monkeypatch.setattr(telemetry._LOGGER, 'propagate', True)
-    monkeypatch.setattr(telemetry._LOGGER, 'level', logging.INFO)
+    previous_level = telemetry._LOGGER.level
+    telemetry._LOGGER.setLevel(logging.INFO)
     ui.configure(display='plain')
     yield
+    telemetry._LOGGER.setLevel(previous_level)
     ui.reset()
 
 
@@ -126,7 +128,7 @@ def test_nested_context_does_not_mix_or_duplicate_invocations(tmp_path):
     assert len(list(tmp_path.glob('same.*.events.jsonl'))) == 2
 
 
-def test_id_collision_never_overwrites_existing_file(tmp_path, monkeypatch, caplog):
+def test_id_collision_never_overwrites_existing_file(tmp_path, monkeypatch, capsys):
     class FixedID:
         hex = 'fixed'
     monkeypatch.setattr(telemetry.uuid, 'uuid4', FixedID)
@@ -136,10 +138,10 @@ def test_id_collision_never_overwrites_existing_file(tmp_path, monkeypatch, capl
         reporter.phase('Running')
     assert not reporter.journal.active
     assert existing.read_text() == 'keep this\n'
-    assert sum('Run telemetry disabled' in record.message for record in caplog.records) == 1
+    assert capsys.readouterr().err.count('Run telemetry disabled') == 1
 
 
-def test_failed_initialization_warns_once_and_calculation_continues(tmp_path, caplog):
+def test_failed_initialization_warns_once_and_calculation_continues(tmp_path, capsys):
     blocked = tmp_path / 'not-a-directory'
     blocked.write_text('existing file')
     completed = []
@@ -149,7 +151,90 @@ def test_failed_initialization_warns_once_and_calculation_continues(tmp_path, ca
         completed.append(True)
     assert completed == [True]
     assert not reporter.journal.active
-    assert sum('Run telemetry disabled' in record.message for record in caplog.records) == 1
+    assert capsys.readouterr().err.count('Run telemetry disabled') == 1
+
+
+def test_startup_failure_warns_in_new_run_log_once_and_is_counted(tmp_path, monkeypatch, capsys):
+    logger = telemetry._LOGGER
+    previous_log = tmp_path / 'completed.log'
+    previous_log.write_text('=== END RUN previous ===\n')
+    previous_bytes = previous_log.read_bytes()
+    old_handler = logging.FileHandler(previous_log)
+    new_log = tmp_path / 'current.log'
+    monkeypatch.setattr(logger, 'handlers', [old_handler])
+    monkeypatch.setattr(logger, 'propagate', False)
+    original_open = Path.open
+    def fail_journal(path, *args, **kwargs):
+        if str(path).endswith('.events.jsonl'):
+            raise PermissionError('synthetic journal permission failure')
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', fail_journal)
+    new_handler = None
+    try:
+        with ui.run_display({'log_file': new_log}) as reporter:
+            assert previous_log.read_bytes() == previous_bytes
+            assert capsys.readouterr().err == ''
+            logger.removeHandler(old_handler)
+            old_handler.close()
+            new_handler = logging.FileHandler(new_log)
+            logger.addHandler(ui.make_console_handler())
+            logger.addHandler(new_handler)
+            reporter.logger_ready(new_log)
+            reporter.logger_ready(new_log)  # nested MD driver initializes again
+            reporter.start_md(0, 2, .5)
+            reporter.progress(2)
+        text = new_log.read_text()
+        assert previous_log.read_bytes() == previous_bytes
+        assert text.count('Run telemetry disabled') == 1
+        assert 'Warnings: 1; errors: 0 (log records)' in text
+        assert 'Execution: completed' in text
+        assert capsys.readouterr().err.count('Run telemetry disabled') == 1
+    finally:
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+            handler.close()
+        old_handler.close()
+
+
+def test_unconfigured_startup_failure_goes_to_stderr_without_touching_old_log(tmp_path, monkeypatch, capsys):
+    blocked = tmp_path / 'not-a-directory'
+    blocked.write_text('existing file')
+    previous_log = tmp_path / 'completed.log'
+    previous_log.write_text('=== END RUN previous ===\n')
+    before = previous_log.read_bytes()
+    handler = logging.FileHandler(previous_log)
+    monkeypatch.setattr(telemetry._LOGGER, 'handlers', [handler])
+    try:
+        journal = telemetry.EventJournal({'log_file': blocked / 'new.log'})
+        assert previous_log.read_bytes() == before
+        assert capsys.readouterr().err == ''
+        journal.close()
+        journal.close()
+        assert capsys.readouterr().err.count('Run telemetry disabled') == 1
+        assert previous_log.read_bytes() == before
+    finally:
+        handler.close()
+
+
+@pytest.mark.parametrize('interrupted_operation', ['write', 'flush'])
+def test_interrupted_constructor_closes_its_own_stream(tmp_path, monkeypatch, interrupted_operation):
+    interruption = KeyboardInterrupt()
+    class InterruptedStream:
+        closed = False
+        def write(self, value):
+            if interrupted_operation == 'write':
+                raise interruption
+        def flush(self):
+            if interrupted_operation == 'flush':
+                raise interruption
+        def close(self):
+            self.closed = True
+    stream = InterruptedStream()
+    monkeypatch.setattr(Path, 'open', lambda *args, **kwargs: stream)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        telemetry.EventJournal({'log_file': tmp_path / 'run.log'})
+    assert caught.value is interruption
+    assert stream.closed
 
 
 def test_failed_write_disables_journal_once_without_recursive_events(tmp_path, caplog):

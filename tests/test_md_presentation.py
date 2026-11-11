@@ -159,6 +159,41 @@ def test_cell_metrics_preserve_log_format_and_use_lattice_rows():
     assert values['volume'] == pytest.approx(1320.)
 
 
+def test_float32_energy_metric_uses_the_existing_log_sum():
+    ke, pe = jnp.float32(100.1), jnp.float32(-100000.1)
+    values = {}
+    row = so3lr_md.format_md_row(50, ke, pe, ke + pe, 300., .01, metrics=values)
+    assert row.split('\t')[1] == '-99900.000'
+    assert f'{float(ke) + float(pe):.3f}' == '-99900.002'  # previous journal value
+    assert values['energy'] == float(ke + pe)
+    assert f'{values["energy"]:.3f}' == row.split('\t')[1]
+
+
+def test_float32_driver_energy_matches_log_rows(driver, monkeypatch):
+    run, module, settings, recorder = driver
+    settings['precision'] = 'float32'
+    original_energy = _energy
+    # A constant energy offset keeps the harmonic forces/integrator unchanged
+    # while making the float32 sum round differently from host float addition.
+    def shifted_energy(position, **kwargs):
+        return original_energy(position, **kwargs) - jnp.asarray(100000.1, position.dtype)
+    monkeypatch.setitem(globals(), '_energy', shifted_energy)
+    run(settings)
+    rows = []
+    for line in Path(settings['log_file']).read_text().splitlines():
+        fields = line.split(' - INFO - ')[-1].split('\t')
+        if len(fields) == 7 and fields[0].isdigit():
+            rows.append(fields)
+    assert len(rows) == len(recorder.samples) == 4
+    for row, (step, values) in zip(rows, recorder.samples):
+        assert int(row[0]) == step
+        assert row[1] == f'{values["energy"]:.3f}'
+        assert values['energy'] == values['conserved_energy']
+    if module is so3lr_md:
+        assert any(abs(values['energy'] - (values['kinetic_energy'] + float(values['potential_energy']))) > .0005
+                   for _, values in recorder.samples)
+
+
 @pytest.mark.parametrize('box,volume,box_column', [
     (10., 1000., '10.000'),
     (np.array(10.), 1000., '10.000'),

@@ -15,7 +15,7 @@ import shlex
 import sys
 import time
 
-from .formatting import optimization_status, precision_label, throughput_label
+from .formatting import optimization_status, precision_label, throughput_label, terminal_text
 
 
 ENERGIES = {
@@ -356,7 +356,7 @@ class JournalReader:
                 continue
             try:
                 event = json.loads(line)
-            except (ValueError, UnicodeDecodeError):
+            except (ValueError, UnicodeDecodeError, RecursionError):
                 self.state.malformed += 1
                 continue
             self.state.consume(event)
@@ -411,10 +411,18 @@ def _plot_scale(samples, key, target=None, reference=None, label_budget=24):
         low, high = min(low, guide), max(high, guide)
     padding = (high - low) * 0.07 if high > low else max(abs(low) * 0.001, 0.001)
     low, high = low - padding, high + padding
-    ylabels = [f'{value:.{decimals}f}' for value in (high, (high + low) / 2, low)]
-    if max(map(len, ylabels)) > label_budget:
-        for digits in range(16, 0, -1):
-            compact = [f'{value:.{digits}g}' for value in (high, (high + low) / 2, low)]
+    ticks = (high, high / 2 + low / 2, low)
+    # Numeric readouts keep their usual precision, but an axis must reveal the
+    # variation it magnifies. Increase tick precision before using scientific
+    # notation when fixed decimals would make distinct ticks look identical.
+    tick_decimals = decimals
+    ylabels = [f'{value:.{tick_decimals}f}' for value in ticks]
+    while len(set(ylabels)) < len(set(ticks)) and tick_decimals < 16:
+        tick_decimals += 1
+        ylabels = [f'{value:.{tick_decimals}f}' for value in ticks]
+    if max(map(len, ylabels)) > label_budget or len(set(ylabels)) < len(set(ticks)):
+        for digits in range(17, 0, -1):
+            compact = [f'{value:.{digits}g}' for value in ticks]
             if max(map(len, compact)) <= label_budget:
                 ylabels = compact
                 break
@@ -559,61 +567,78 @@ def _controls(state, attached=False, paged=False, multiple=False):
     return ('↑/↓: plot page · ' if paged else '') + 'j/k or ←/→: run · e: energy · ' + close
 
 
-def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=False):
+def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=False, height=None):
     """Show recorded optimization measurements without inventing MD samples."""
     from rich.console import Group
     from rich.text import Text as RichText
 
     def Text(value='', style=''):
         value = _literal(value)
-        if ascii_only:
-            value = value.replace('←/→', 'left/right').replace('·', '|').replace('Å', 'A')
-            value = value.encode('ascii', errors='backslashreplace').decode('ascii')
-        return RichText(value, style=style, no_wrap=compact, overflow='ellipsis' if compact else 'fold')
+        value = terminal_text(value, ascii_only)
+        return RichText(value, style=style, no_wrap=compact,
+                        overflow=('crop' if ascii_only else 'ellipsis') if compact else 'fold')
 
     state = reader.state
     style = 'red' if state.status == 'Failed' else 'green' if state.status == 'Completed' else 'yellow'
-    rows = [Text('SO3LR TAURI  optimization', 'bold yellow'),
-            Text(f'Run {selected + 1}/{count} · {reader.path.parent.name}'),
-            Text(f'Last reported state: {state.status}', style),
-            Text('Optimization · latest recorded cycle', 'dim')]
+    rows, priorities = [], []
+
+    def add(value, style='', priority=20):
+        rows.append(Text(value, style))
+        priorities.append(priority)
+
+    add('SO3LR TAURI  optimization', 'bold yellow', 3)
+    add(f'Run {selected + 1}/{count} · {reader.path.parent.name}', priority=9)
+    add(f'Last reported state: {state.status}', style, 4)
+    add('Optimization · latest recorded cycle', 'dim', 13)
     model = state.info.get('model', state.settings.get('model', state.settings.get('model_path')))
     precision = state.info.get('precision', state.settings.get('precision'))
     if model is not None:
-        rows.append(Text(f'Model      {model}'))
+        add(f'Model      {model}', priority=11)
     if precision is not None:
-        rows.append(Text(f'Precision  {precision_label(precision)}', 'dim'))
+        add(f'Precision  {precision_label(precision)}', 'dim', 12)
     if state.phase:
-        rows.append(Text(f'Phase      {state.phase}' + (f' · {state.detail}' if state.detail else ''), 'dim'))
+        add(f'Phase      {state.phase}' + (f' · {state.detail}' if state.detail else ''), 'dim', 10)
     step, total = (_finite(state.info.get(key)) for key in ('opt_step', 'opt_total_steps'))
     if step is not None:
         progress = f'{int(step):,}/{int(total):,} steps' if total is not None else f'{int(step):,} steps'
-        rows.append(Text('Progress   ' + progress))
+        add('Progress   ' + progress, priority=5)
     energy, force, target = (_finite(state.info.get(key))
                              for key in ('opt_energy_eV', 'opt_force_max_eVA', 'opt_force_target_eVA'))
     if energy is not None:
-        rows.append(Text(f'Potential energy  {energy:.6f} eV', 'yellow'))
+        add(f'Potential energy  {energy:.6f} eV', 'yellow', 8)
     if force is not None:
-        rows.append(Text(f'Maximum force     {force:.6g} eV/Å', 'yellow'))
+        add(f'Maximum force     {force:.6g} eV/Å', 'yellow', 6)
     if target is not None:
-        rows.append(Text(f'Force target      {target:.6g} eV/Å', 'dim'))
+        add(f'Force target      {target:.6g} eV/Å', 'dim', 7)
     criterion = optimization_status(state.info, state.status)
-    rows.append(Text(criterion, 'green' if criterion == 'Force criterion met' else 'dim'))
+    add(criterion, 'green' if criterion == 'Force criterion met' else 'dim', 1)
     if step is None:
-        rows.append(Text('Waiting for the first recorded optimization cycle.', 'dim'))
+        add('Waiting for the first recorded optimization cycle.', 'dim', 2)
     if state.message:
-        rows.append(Text(state.message, style))
+        add(state.message, style, 2 if state.status == 'Failed' else 14)
     if state.diagnostic:
         kind, message = state.diagnostic
-        rows.append(Text(f'{kind.upper()}: {message}', 'red' if kind == 'error' else 'yellow'))
+        add(f'{kind.upper()}: {message}', 'red' if kind == 'error' else 'yellow', 2)
     if reader.error:
-        rows.append(Text('Read error: ' + reader.error, 'yellow'))
+        add('Read error: ' + reader.error, 'yellow', 2)
     if not compact:
         for key, label in (('output_file', 'Structure path'), ('log_file', 'Log path')):
             if state.settings.get(key):
-                rows.append(Text(f'{label}  {state.settings[key]}', 'dim'))
-        rows.append(Text(f'Journal  {reader.path}', 'dim'))
-    rows.append(Text(_controls(state, multiple=count > 1), 'dim'))
+                add(f'{label}  {state.settings[key]}', 'dim')
+        add(f'Journal  {reader.path}', 'dim')
+    controls = _controls(state, multiple=count > 1)
+    if compact:
+        # Quit comes first, so horizontal truncation cannot hide the escape
+        # route on very narrow terminals either.
+        controls = 'q: close viewer' if state.status in ('Completed', 'Failed') else 'q: detach'
+        if count > 1:
+            controls += ' · ←/→: run · o: overview'
+    add(controls, 'dim', 0)
+    if compact and height is not None and len(rows) > height:
+        # Every compact Text is exactly one row. Keep controls and the honest
+        # outcome before optional metadata, while preserving their display order.
+        keep = sorted(sorted(range(len(rows)), key=lambda i: (priorities[i], i))[:max(1, int(height))])
+        rows = [rows[index] for index in keep]
     return Group(*rows)
 
 
@@ -624,10 +649,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     from rich.text import Text as RichText
 
     def Text(value='', style=''):
-        if ascii_only:
-            value = str(value).replace('←/→', 'left/right').replace('·', '|')
-            value = value.encode('ascii', errors='backslashreplace').decode('ascii')
-        return RichText(value, style=style)
+        return RichText(terminal_text(value, ascii_only), style=style)
 
     now = now or datetime.now(timezone.utc)
     rows = [Text('SO3LR TAURI  live MD' if attached else 'SO3LR TAURI  monitor', style='bold yellow')]
@@ -724,10 +746,8 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
     from rich.text import Text as RichText
 
     def Text(value='', style=''):
-        if ascii_only:
-            value = str(value).replace('←/→', 'left/right').replace('↑/↓', 'up/down').replace('·', '|')
-            value = value.encode('ascii', errors='backslashreplace').decode('ascii')
-        return RichText(value, style=style, no_wrap=True, overflow='ellipsis')
+        return RichText(terminal_text(value, ascii_only), style=style, no_wrap=True,
+                        overflow='crop' if ascii_only else 'ellipsis')
 
     def line_count(renderable):
         return len(console.render_lines(renderable, options, pad=False))
@@ -843,7 +863,8 @@ class _MonitorView:
         if height is not None and self.readers and len(console.render_lines(full, options, pad=False)) > height:
             reader = self.readers[kwargs['selected'] % len(self.readers)]
             if reader.state.info.get('operation') == 'optimization':
-                yield _render_optimization(reader, kwargs['selected'], len(self.readers), kwargs['ascii_only'], compact=True)
+                yield _render_optimization(reader, kwargs['selected'], len(self.readers), kwargs['ascii_only'],
+                                           compact=True, height=height)
             else:
                 yield _paged_monitor(console, options, self.readers, page=page, **kwargs)
         else:
