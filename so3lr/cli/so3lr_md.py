@@ -41,7 +41,7 @@ from so3lr.mlff.nn.observable.observable_sparse import (
     dispersion_tail_correction_energy,
 )
 
-from so3lr.jaxmd_utils import nbrs_cutoff, to_jax_md as _to_jax_md
+from so3lr.jaxmd_utils import OVERFLOW_EXTRA_LR, OVERFLOW_EXTRA_SR, nbrs_cutoff, to_jax_md as _to_jax_md
 from so3lr.pbc import box_to_diag, is_fully_periodic, lattice_rows, minimum_image_problem
 from so3lr import kspace_defaults as KS
 from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
@@ -1301,17 +1301,15 @@ def log_nbrs_info(nbrs, label: str = 'SR', box=None):
     logger.info(f'  {label} ({fmt}): occupancy={actual_occ}, allocated={max_occ} '
                 f'(util: {util:.1f}%, memory: {mem_mb:.0f} MB)')
     if nbrs.cell_list_capacity is not None:
-        cell_size_ang = nbrs.cell_size
-        if box is not None and cell_size_ang is not None:
-            box_diag = jnp.diag(box) if box.ndim == 2 else box
-            cell_size_ang = float(nbrs.cell_size * jnp.min(box_diag))
+        # the smallest cell size jax-md accepts (a scalar, or one per axis in newer
+        # jax-md); with a box it is fractional and each side has floor(1/size) cells
+        cell_size = np.asarray(nbrs.cell_size, float)
+        if box is not None:
+            cell_size = np.asarray(box_to_diag(box)) / np.floor(1 / cell_size)
         logger.info(f'  {label} cell list: capacity={nbrs.cell_list_capacity}, '
-                    f'cell_size={cell_size_ang:.2f} A')
+                    f'cell_size={cell_size.min():.2f} A')
 
 
-# Per-overflow cell-list headroom, added to cell_capacity on each reallocation.
-OVERFLOW_EXTRA_SR = 2
-OVERFLOW_EXTRA_LR = 8
 MAX_OVERFLOW_RETRIES = 4
 
 
@@ -1327,7 +1325,10 @@ def check_overflow(
 ) -> Tuple[jax_md.partition.NeighborList, jax_md.partition.NeighborList, bool, bool]:
     """
 
-    Check if the neighbor lists have overflowed and reallocate them if needed.
+    Check if the neighbor lists have overflowed, or their cells have become
+    smaller than the cutoff (an NPT box that shrank: the cell list then misses
+    pairs), and reallocate them for the current box if needed. Either way the
+    caller repeats the cycle.
 
     Args:
         neighbor_fn (callable): Function that creates the short range neighbor list.
@@ -1345,14 +1346,18 @@ def check_overflow(
     sr_overflow = False
     lr_overflow = False
     box_diag = box_to_diag(box)
-    if nbrs.did_buffer_overflow:
+    def why(lists):
+        return ('cells became smaller than the cutoff (the box shrank)'
+                if lists.cell_size_too_small else 'overflowed')
+
+    if nbrs.did_buffer_overflow or nbrs.cell_size_too_small:
         sr_overflow = True
-        logger.info(f'Neighbor list overflowed, reallocating (SR extra_capacity={sr_extra}).')
+        logger.info(f'Neighbor list {why(nbrs)}, reallocating (SR extra_capacity={sr_extra}).')
         nbrs = neighbor_fn.allocate(state.position, box=box_diag, extra_capacity=sr_extra)
         log_nbrs_info(nbrs, 'SR', box=box)
-    if nbrs_lr.did_buffer_overflow:
+    if nbrs_lr.did_buffer_overflow or nbrs_lr.cell_size_too_small:
         lr_overflow = True
-        logger.info(f'Long-range neighbor list overflowed, reallocating (LR extra_capacity={lr_extra}).')
+        logger.info(f'Long-range neighbor list {why(nbrs_lr)}, reallocating (LR extra_capacity={lr_extra}).')
         nbrs_lr = neighbor_fn_lr.allocate(state.position, box=box_diag, extra_capacity=lr_extra)
         log_nbrs_info(nbrs_lr, 'LR', box=box)
     return nbrs, nbrs_lr, sr_overflow, lr_overflow
@@ -3052,6 +3057,12 @@ def perform_min(
     kspace_smearing = all_settings.get('kspace_smearing', KS.DEFAULT_KSPACE_SMEARING)
     kspace_spacing = all_settings.get('kspace_spacing', KS.DEFAULT_KSPACE_SPACING)
     kspace_interp_nodes = all_settings.get('kspace_interp_nodes', KS.DEFAULT_KSPACE_INTERP_NODES)
+    # Dispersion k-space settings, as in perform_md: the relaxation must minimise the
+    # same energy the MD that follows samples
+    kspace_dispersion = all_settings.get('kspace_dispersion', None)
+    kspace_dispersion_smearing = all_settings.get('kspace_dispersion_smearing', KS.DEFAULT_KSPACE_DISPERSION_SMEARING)
+    kspace_dispersion_spacing = all_settings.get('kspace_dispersion_spacing', KS.DEFAULT_KSPACE_DISPERSION_SPACING)
+    kspace_dispersion_interp_nodes = all_settings.get('kspace_dispersion_interp_nodes', KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES)
     charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
     charge_equilibration_total_charge = all_settings.get('charge_equilibration_total_charge', None)
 
@@ -3107,12 +3118,13 @@ def perform_min(
     cell = cell_from_atoms_boundary_conditions(
         initial_geometry, lr_cutoff, kspace_electrostatics, kspace_smearing,
     )
-    if kspace_electrostatics is not None and cell is None:
-        raise ValueError(
-            f"kspace_electrostatics={kspace_electrostatics!r} requires a periodic "
-            "cell, but the input geometry has none. Either supply a cell, or "
-            "omit kspace_electrostatics."
-        )
+    for key, method in (('kspace_electrostatics', kspace_electrostatics),
+                        ('kspace_dispersion', kspace_dispersion)):
+        if method is not None and cell is None:
+            raise ValueError(
+                f"{key}={method!r} requires a periodic cell, but the input geometry "
+                f"has none. Either supply a cell, or omit {key}."
+            )
 
     if cell is not None:
         shift_displacement = 'periodic'
@@ -3146,6 +3158,8 @@ def perform_min(
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics,
         kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge,
     )
@@ -3172,11 +3186,18 @@ def perform_min(
         kspace_smearing=kspace_smearing,
         box=box
     )
+    k_grid_disp, k_smearing_disp = setup_kspace_grid(
+        kspace_electrostatics=kspace_dispersion,
+        kspace_spacing=kspace_dispersion_spacing,
+        kspace_smearing=kspace_dispersion_smearing,
+        box=box
+    )
 
     if cell is not None:
         check_box_for_neighbour_lists(box, nbrs_cutoff(potential), 'Input cell')
 
-    energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False, k_grid=k_grid, k_smearing=k_smearing))
+    energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False, k_grid=k_grid, k_smearing=k_smearing,
+                                k_grid_disp=k_grid_disp, k_smearing_disp=k_smearing_disp))
     force_fn = jax.jit(jax_md.quantity.force(energy_fn))
 
     # Allocating the neighbor lists
@@ -3656,6 +3677,8 @@ def load_state(
 
     _new_vals = {}
     for _f in dataclasses.fields(state):
+        if not _f.metadata.get('pytree_node', True):
+            continue    # static metadata (e.g. jax-md's fix_center_of_mass), not an array
         _v = getattr(state, _f.name)
         if _v is None:
             _new_vals[_f.name] = None

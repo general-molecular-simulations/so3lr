@@ -18,12 +18,13 @@ loads the released checkpoint with the override set, and would raise if the
 parameter tree changed.
 """
 import functools
-import pathlib
+import os
 
 import numpy as np
 import pytest
 
 from ase import Atoms
+from subprocess_env import so3lr_subprocess_env
 
 # so3lr-tauri-s is small and ships with use_charge_embed=True, so the embedding is
 # actually present and the override has something to act on.
@@ -32,6 +33,22 @@ MODEL = 'so3lr-tauri-s'
 # Finite cluster: the long-range cutoff must be large or the electrostatics are
 # truncated nonsense (see the lr_cutoff note in the PR description).
 LR_CUTOFF = 1000.0
+
+# float64 throughout (conftest's x64), so "the same" can be 1e-10 eV whatever ran before:
+# in float32 two separately compiled calculators can differ in the last bit (on a GPU the
+# override's graph fuses differently: 3.8e-6 eV at 38 eV).
+pytestmark = pytest.mark.usefixtures('x64')
+SAME = 1e-10       # eV: float64 rounding
+DIFFERENT = 1e-8   # eV (eV/Å for forces): far above it
+
+def _cli_env():
+    """The CLI runs' environment, with XLA's deterministic GPU ops. The CLI comparisons
+    are exact, and on a GPU XLA does not sum in the same order every run: two runs of one
+    setting differ by ~1e-16, which fails an equality and passes an inequality by noise
+    alone. No effect on CPU."""
+    flags = (os.environ.get('XLA_FLAGS', '') + ' --xla_gpu_deterministic_ops=true').strip()
+    return so3lr_subprocess_env({'XLA_FLAGS': flags})
+
 
 # Same fragment as _charged_fragment(), for the CLI subprocess runs.
 _CLI_INPUT_XYZ = (
@@ -72,11 +89,10 @@ def _evaluate(total_charge, charge_embed_total_charge, charge_equilibration_tota
 
     atoms = _charged_fragment()
     atoms.info['charge'] = total_charge
-    # Default float32: x64 is not enabled in this module, and the differences
-    # under test are eV-sized, so requesting float64 would only be truncated.
     atoms.calc = So3lrCalculator(
         model=MODEL,
         lr_cutoff=LR_CUTOFF,
+        precision='float64',
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge,
     )
@@ -106,14 +122,14 @@ def energies():
 
 class TestChargeEmbedOverride:
     def test_passthrough_is_exact(self, energies):
-        """override == true charge is a no-op, to the last bit.
+        """override == true charge is a no-op, to float64 rounding.
 
         The override replaces Q with `jnp.full_like(Q, value)`, so passing the
-        value the graph already carries must reproduce the unpatched result
-        exactly -- not merely closely. Any drift here means the plumbing is
-        perturbing the model rather than just relabelling its input.
+        value the graph already carries must reproduce the unpatched result.
+        Any drift beyond rounding means the plumbing is perturbing the model
+        rather than just relabelling its input.
         """
-        assert energies['passthrough'] == energies['baseline'], (
+        assert abs(energies['passthrough'] - energies['baseline']) < SAME, (
             f"charge_embed_total_charge=-1.0 gave {energies['passthrough']!r} but the "
             f"unmodified path gave {energies['baseline']!r}; the override is not a "
             f"faithful passthrough."
@@ -121,7 +137,7 @@ class TestChargeEmbedOverride:
 
     def test_override_reaches_the_embedding(self, energies):
         """Zeroing the embedded charge must actually change the energy."""
-        assert abs(energies['embed_zero'] - energies['baseline']) > 1e-8, (
+        assert abs(energies['embed_zero'] - energies['baseline']) > DIFFERENT, (
             "charge_embed_total_charge=0.0 produced the same energy as embedding the "
             "true charge, so the override never reached ChargeEmbedSparse."
         )
@@ -133,7 +149,7 @@ class TestChargeEmbedOverride:
         Q=-1 system would be identical to declaring the system neutral. It must not
         be -- equilibration still has to distribute the -1.
         """
-        assert abs(energies['embed_zero'] - energies['neutral']) > 1e-8, (
+        assert abs(energies['embed_zero'] - energies['neutral']) > DIFFERENT, (
             f"embed 0 / equilibrate -1 gave {energies['embed_zero']!r}, identical to a "
             f"fully neutral system ({energies['neutral']!r}). The override leaked into "
             f"charge equilibration, which it must never do."
@@ -151,8 +167,8 @@ class TestChargeEmbedOverride:
         """Forces, not just energy -- the measured effect is a force MAE change."""
         f_default, f_zero = _evaluate(-1, None, None)[1], _evaluate(-1, 0.0, None)[1]
         assert np.all(np.isfinite(f_default)) and np.all(np.isfinite(f_zero))
-        assert not np.array_equal(f_default, f_zero), (
-            "forces are identical with and without the override"
+        assert np.abs(f_default - f_zero).max() > DIFFERENT, (
+            "forces are the same with and without the override"
         )
 
 
@@ -202,18 +218,19 @@ class TestChargeEquilibrationOverride:
         }
 
     def test_passthrough_is_exact(self):
-        """equilibration override == true charge is a bitwise no-op."""
-        assert _energy(-1, None, -1.0) == _energy(-1, None, None)
+        """equilibration override == true charge is a no-op, to float64 rounding."""
+        assert abs(_energy(-1, None, -1.0) - _energy(-1, None, None)) < SAME
 
     def test_override_changes_the_energy(self, four):
-        assert four['D'] != four['A'], (
+        assert abs(four['D'] - four['A']) > DIFFERENT, (
             'charge_equilibration_total_charge=0.0 did not change the energy, so it '
             'never reached PartialChargesSparse'
         )
 
     def test_all_four_combinations_are_distinct(self, four):
         """The two knobs are independent, not two names for one switch."""
-        assert len(set(four.values())) == 4, (
+        values = sorted(four.values())
+        assert min(b - a for a, b in zip(values, values[1:])) > DIFFERENT, (
             f'expected four distinct energies, got {four}. The two overrides are not '
             f'acting independently.'
         )
@@ -225,7 +242,7 @@ class TestChargeEquilibrationOverride:
         embedding 0 must reproduce `total_charge = 0` outright.
         """
         neutral = _energy(0, None, None)
-        assert abs(four['C'] - neutral) < 1e-10, (
+        assert abs(four['C'] - neutral) < SAME, (
             f"embed 0 / equil 0 gave {four['C']!r} but a genuinely neutral system "
             f"gave {neutral!r}; the equilibration override is not equivalent to "
             f"setting the total charge."
@@ -251,10 +268,6 @@ class TestChargeEmbedOverrideCLI:
     @staticmethod
     def _run_nvt(tmp_path, tag, extra_yaml='', extra_argv=()):
         import subprocess
-        import sys
-
-        sys.path.insert(0, str(pathlib.Path(__file__).parent))
-        from subprocess_env import so3lr_subprocess_env
 
         # One directory per run: the CLI deliberately refuses to overwrite an
         # existing trajectory, so runs must not share a working directory.
@@ -270,13 +283,13 @@ class TestChargeEmbedOverrideCLI:
             f"total_charge: -1\n"
             f"ensemble: nvt\n"
             f"md_dt: 0.5\nmd_cycles: 1\nmd_steps: 1\nmd_T: 300.0\n"
-            f"relax_before_run: false\nsave_buffer: 1\nseed: 42\n"
+            f"relax_before_run: false\nsave_buffer: 1\nseed: 42\nengine: standard\n"
             f"{extra_yaml}\n"
         )
         result = subprocess.run(
             ['so3lr', '--settings', f'{tag}.yaml', *extra_argv],
             cwd=tmp_path, capture_output=True, text=True,
-            env=so3lr_subprocess_env(), timeout=600,
+            env=_cli_env(), timeout=600,
         )
         assert result.returncode == 0, (
             f"so3lr --settings {tag}.yaml failed ({result.returncode})\n"
@@ -323,10 +336,6 @@ class TestChargeEmbedOverrideCLI:
         other model flag behaves here too.
         """
         import subprocess
-        import sys
-
-        sys.path.insert(0, str(pathlib.Path(__file__).parent))
-        from subprocess_env import so3lr_subprocess_env
         import h5py
 
         tmp_path.mkdir(parents=True, exist_ok=True)
@@ -339,10 +348,10 @@ class TestChargeEmbedOverrideCLI:
                 '--lr-cutoff', str(LR_CUTOFF), '--total-charge', '-1',
                 '--dt', '0.5', '--md-cycles', '1', '--md-steps', '1',
                 '--temperature', '300.0', '--no-relax', '--seed', '42',
-                '--save-buffer', '1', *extra_argv,
+                '--save-buffer', '1', '--engine', 'standard', *extra_argv,
             ],
             cwd=tmp_path, capture_output=True, text=True,
-            env=so3lr_subprocess_env(), timeout=600,
+            env=_cli_env(), timeout=600,
         )
         assert result.returncode == 0, (
             f"so3lr nvt failed ({result.returncode})\n"
@@ -365,10 +374,12 @@ class TestChargeEmbedOverrideCLI:
         for tag, line in (('absent', '# key absent'), ('null', 'charge_embed_total_charge: null')):
             monkeypatch.setattr(so3lr_md, 'perform_md',
                                 lambda settings, *args, tag=tag, **kwargs: captured.setdefault(tag, settings))
+            # engine standard: on a GPU, auto would run this structure (no box) on flash,
+            # not through the stubbed perform_md
             (tmp_path / f'{tag}.yaml').write_text(
                 f"input_file: {tmp_path / 'input.xyz'}\noutput_file: {tmp_path / tag}.hdf5\n"
                 f"log_file: {tmp_path / tag}.log\nmodel: {MODEL}\nlr_cutoff: {LR_CUTOFF}\n"
-                f"total_charge: -1\nensemble: nvt\nrelax_before_run: false\n{line}\n"
+                f"total_charge: -1\nensemble: nvt\nrelax_before_run: false\nengine: standard\n{line}\n"
             )
             result = CliRunner().invoke(so3lr_cli.cli, ['--settings', str(tmp_path / f'{tag}.yaml')])
             assert result.exit_code == 0, result.output
