@@ -58,8 +58,12 @@ pysages = [
 ]
 tfds = [
     "importlib-resources>=6,<8",
-    "tensorflow>=2.20,<2.22; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "tensorflow-cpu>=2.20,<2.22; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
+    # TensorBoard 2.20 imports pkg_resources, removed in patched setuptools.
+    # TensorFlow 2.21 no longer installs TensorBoard, so keep it explicit.
+    "setuptools>=84.1",
+    "tensorboard>=2.21,<2.22",
+    "tensorflow>=2.21,<2.22; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "tensorflow-cpu>=2.21,<2.22; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
     "tensorflow-datasets>=4.9,<5",
 ]
 wandb = [

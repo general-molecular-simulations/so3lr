@@ -143,6 +143,35 @@ jobs:
             ${{ matrix.run_short }}
           fi
 
+  dependency-compat:
+    name: "dependency-compat-py${{ matrix.python-version }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.11.26"
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install the locked optional tools
+        run: uv sync --locked --group dev --group notebooks --extra tfds --extra wandb
+
+      - name: Exercise dependency compatibility
+        env:
+          SO3LR_REQUIRE_OPTIONAL_DEPS: "1"
+          WANDB_MODE: "disabled"
+        run: |
+          uv run --no-sync python -c "import tensorflow, tensorflow_datasets, ipykernel, jupyterlab, notebook, tornado, nbconvert, tensorboard, wandb"
+          uv run --no-sync pytest tests/test_dependency_compat.py -v --tb=short
+
   package:
     name: "package-py${{ matrix.python-version }}"
     runs-on: ubuntu-latest
