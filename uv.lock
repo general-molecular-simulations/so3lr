@@ -3037,7 +3037,7 @@ requires-dist = [
     { name = "h5py", specifier = ">=3.11,<4" },
     { name = "importlib-resources", marker = "extra == 'tfds'", specifier = ">=6,<8" },
     { name = "jax", specifier = "!=0.10.2,<0.11" },
-    { name = "jax", extras = ["cuda12"], marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'cuda12'", specifier = "!=0.10.2,<0.11" },
+    { name = "jax", extras = ["cuda12"], marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'cuda12'" },
     { name = "jax-md", git = "https://github.com/kabylda/jax-md.git?rev=d27c351ab0187cf9eadd7cf26f2b1cdaf5b059b6" },
     { name = "jax-pme", git = "https://github.com/fbruenig/jax-pme.git?rev=de9a3a9dfeb1f5b635a54a8f277c1ec3ecd2bf6d" },
     { name = "jaxlib", specifier = "!=0.10.2,<0.11" },

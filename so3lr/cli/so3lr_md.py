@@ -1277,11 +1277,11 @@ def log_nbrs_info(nbrs, label: str = 'SR', box=None):
                 f'(util: {util:.1f}%, memory: {mem_mb:.0f} MB)')
     if nbrs.cell_list_capacity is not None:
         # a scalar, or one fractional size per axis in newer jax-md
-        cell_size = np.asarray(np.nan if nbrs.cell_size is None else nbrs.cell_size, float)
+        cell_size = np.asarray(nbrs.cell_size, float)
         if box is not None:
-            cell_size = cell_size * np.asarray(box_to_diag(box), float)
+            cell_size = cell_size * np.asarray(box_to_diag(box))
         logger.info(f'  {label} cell list: capacity={nbrs.cell_list_capacity}, '
-                    f'cell_size={float(np.min(cell_size)):.2f} A')
+                    f'cell_size={cell_size.min():.2f} A')
 
 
 # Per-overflow cell-list headroom, added to cell_capacity on each reallocation.
@@ -3567,8 +3567,8 @@ def load_state(
 
     _new_vals = {}
     for _f in dataclasses.fields(state):
-        if _f.metadata.get('static', False):
-            continue    # pytree metadata (e.g. jax-md's fix_center_of_mass), not an array
+        if not _f.metadata.get('pytree_node', True):
+            continue    # static metadata (e.g. jax-md's fix_center_of_mass), not an array
         _v = getattr(state, _f.name)
         if _v is None:
             _new_vals[_f.name] = None
