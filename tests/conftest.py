@@ -8,6 +8,8 @@ Adds a --shard i/n option that splits a run into duration-balanced slices, used
 by CI to keep any single job well under the runner's practical wall-clock and
 memory ceiling.
 """
+import logging
+
 import jax
 import pytest
 
@@ -163,6 +165,30 @@ def pytest_collection_modifyitems(config, items):
         # module's tests stay together.
         order = {id(item): i for i, item in enumerate(items)}
         items[:] = sorted(selected, key=lambda item: order[id(item)])
+
+
+@pytest.fixture(autouse=True)
+def _restore_so3lr_logger():
+    """Give every test the "SO3LR" logger it found.
+
+    The CLI's setup_logger() (so3lr/cli/so3lr_md.py) swaps in its own handlers
+    and sets propagate=False, and in-process CliRunner tests leave that behind.
+    pytest attaches its capture handler to every logger that is non-propagating
+    when a test phase starts, as well as to root, so a later test that turns
+    propagate back on sees each record in caplog twice.
+    """
+    logger, root = logging.getLogger("SO3LR"), logging.getLogger()
+    # pytest's own capture handlers also sit on root and remove themselves: neither
+    # snapshot nor close them.
+    handlers = [h for h in logger.handlers if h not in root.handlers]
+    level, propagate = logger.level, logger.propagate
+    yield
+    for handler in logger.handlers:
+        if handler not in handlers and handler not in root.handlers:
+            handler.close()
+    logger.handlers[:] = handlers
+    logger.setLevel(level)
+    logger.propagate = propagate
 
 
 @pytest.fixture(scope="module")
