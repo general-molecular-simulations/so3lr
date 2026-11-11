@@ -220,3 +220,35 @@ def test_with_solar_potential(name: str, x64):
 
     with npt.assert_raises(AssertionError):
         npt.assert_allclose(target_predictions['forces'], np.zeros_like(forces))
+
+
+def test_check_overflow_reallocates_when_the_box_shrinks_below_the_cells():
+    """An NPT box that shrinks below the cell list's cells: jax-md flags it (the
+    cell list would miss pairs) and check_overflow allocates again, as on an
+    overflow, so the list holds every pair within the cutoff of the new box."""
+    from types import SimpleNamespace
+    from jax_md import partition
+    from so3lr.cli.so3lr_md import check_overflow
+
+    L, cutoff, n = 50.0, 12.0, 400               # 4 cells per side; 47.5 A fits 3
+    R = jax.random.uniform(jax.random.PRNGKey(0), (n, 3))
+    box = jnp.full(3, L)
+    displacement, _ = space.periodic_general(jnp.diag(box), fractional_coordinates=True)
+    neighbor_fn = partition.neighbor_list(displacement, jnp.diag(box), cutoff, fractional_coordinates=True,
+                                          format=partition.Sparse)
+    nbrs = neighbor_fn.allocate(R, box=box)
+    shrunk = 0.95 * box
+    nbrs = nbrs.update(R, box=shrunk)
+    assert nbrs.cell_size_too_small and not nbrs.did_buffer_overflow
+
+    nbrs, _, sr_overflow, _ = check_overflow(neighbor_fn, neighbor_fn, nbrs, nbrs, SimpleNamespace(position=R), shrunk)
+    assert sr_overflow and not nbrs.cell_size_too_small
+
+    def within(i, j):
+        d = np.asarray(R)[i] - np.asarray(R)[j]
+        return np.linalg.norm((d - np.round(d)) * np.asarray(shrunk), axis=-1) < cutoff
+
+    i, j = np.asarray(nbrs.idx)
+    listed = within(i[i < n], j[i < n]).sum()
+    a, b = np.nonzero(~np.eye(n, dtype=bool))
+    assert listed == within(a, b).sum()
