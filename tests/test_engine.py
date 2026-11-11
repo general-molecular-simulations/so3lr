@@ -92,13 +92,27 @@ def _skewed(atoms):
     return atoms
 
 
-# thin: 12.4 A < 2 x (6 + 1) A
-@pytest.mark.parametrize("skin,skew", [(1.0, False), (0.0, True)], ids=["thin", "triclinic"])
-def test_thin_and_triclinic_cells_take_exact_images(skin, skew):
+# thin: 12.4 A < 2 x (6 + 1) A; the triclinic one charged, its charge and spin through atoms.info
+@pytest.mark.parametrize("skin,skew,charge,multiplicity", [(1.0, False, 0, 1), (0.0, True, 1, 2)],
+                         ids=["thin", "triclinic"])
+def test_thin_and_triclinic_cells_take_exact_images(skin, skew, charge, multiplicity):
     atoms = _skewed(_water()) if skew else _water()
-    engine = _engine(atoms, skin=skin)
-    _assert_close(engine(atoms.positions, _box(atoms)), _reference(atoms, neighbor_backend="exact"))
+    engine = _engine(atoms, skin=skin, charge=charge, multiplicity=multiplicity)
+    _assert_close(engine(atoms.positions, _box(atoms)),
+                  _reference(atoms, charge, multiplicity, neighbor_backend="exact"))
     assert engine.backend == "exact"
+
+
+def test_one_engine_goes_between_free_space_and_a_box():
+    atoms = _water()
+    cluster = atoms.copy()
+    cluster.pbc = False
+    cluster.set_cell(np.zeros(3))
+    engine, calc = _engine(atoms), _calculator()
+    for periodic in (False, True, False):
+        _assert_close(engine(atoms.positions, _box(atoms) if periodic else None),
+                      _reference(atoms if periodic else cluster, calc=calc))
+        assert engine.backend == "neighbour-list"
 
 
 def test_overflowing_lists_are_allocated_again():
@@ -155,7 +169,7 @@ def test_engine_flash_raises_where_flash_cannot_run():
 
 def test_auto_falls_back_where_flash_fails_to_start(monkeypatch):
     import so3lr.flash.check as flash_check
-    import so3lr.flash.md as flash_md
+    flash_md = pytest.importorskip("so3lr.flash.md")
 
     def fails(*args, **kwargs):
         raise RuntimeError("out of memory")
@@ -167,6 +181,34 @@ def test_auto_falls_back_where_flash_fails_to_start(monkeypatch):
     engine._flash_refusal = None            # as on a GPU where the settings, model and device pass
     with pytest.warns(UserWarning, match="failed to start"):
         result = engine(atoms.positions)
+    assert engine.backend == "neighbour-list"
+    _assert_close(result, _reference(atoms))
+
+
+class _FlashWithoutRoomForTheMargin:
+    """Flash that runs a fixed box, but fails to start again with NPT's margin."""
+    def __init__(self, settings, task, matmul_precision, box_margin):
+        if box_margin:
+            raise RuntimeError("out of memory")
+        self.box_margin = box_margin
+
+    def __call__(self, atoms, charge, spin):
+        return 0.0, np.zeros((len(atoms), 3)), True
+
+
+def test_auto_falls_back_where_flash_fails_to_start_again_for_a_moving_box(monkeypatch):
+    import so3lr.flash.check as flash_check
+    flash_md = pytest.importorskip("so3lr.flash.md")
+    monkeypatch.setattr(flash_md, "SinglePoints", _FlashWithoutRoomForTheMargin)
+    monkeypatch.setattr(flash_check, "structure_problem", lambda *args: None)
+    atoms = _water()
+    engine = _engine(atoms, engine="auto")
+    engine._flash_refusal = None
+    engine(atoms.positions, _box(atoms))
+    assert engine.backend == "flash"
+    atoms.set_cell(atoms.cell * 0.995, scale_atoms=True)
+    with pytest.warns(UserWarning, match="failed to start"):
+        result = engine(atoms.positions, _box(atoms))
     assert engine.backend == "neighbour-list"
     _assert_close(result, _reference(atoms))
 

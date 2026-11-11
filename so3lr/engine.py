@@ -37,6 +37,7 @@ import jax.numpy as jnp
 import numpy as np
 
 _UNSET = object()
+OVERFLOW_EXTRA_SR, OVERFLOW_EXTRA_LR = 2, 8     # as so3lr md's (so3lr.cli.so3lr_md, a heavier import)
 
 
 def _coordinates(positions, lengths, dtype):
@@ -83,8 +84,8 @@ class So3lrEngine:
         check_atomic_numbers_supported(self.numbers, supported_atomic_numbers_for_model(model),
                                        context=f"SO3LR model {model}")
         validate_options(dict(engine=engine))
-        if kspace_electrostatics not in (None, "ewald", "pme"):
-            raise ValueError(f"kspace_electrostatics must be None, ewald or pme (received {kspace_electrostatics!r})")
+        if kspace_electrostatics not in (None, "ewald", "pme", "p3m"):
+            raise ValueError(f"kspace_electrostatics must be None, ewald, pme or p3m (received {kspace_electrostatics!r})")
         if kspace_electrostatics is None and (kspace_smearing is not None or kspace_spacing is not None):
             raise ValueError("kspace_smearing and kspace_spacing need kspace_electrostatics")
         self._kspace = {}               # the k-space settings, as so3lr's settings and calculator name them
@@ -101,21 +102,23 @@ class So3lrEngine:
         self.model_dtype = np.dtype(model_precision(self.precision))
         self.dtype = np.dtype(state_precision(self.precision))
         self.matmul_precision = matmul_precision
+        self._model_cutoff = model_cutoff(model)
         # the lists are built at both cutoffs (and the skin), so the larger one counts
-        self._list_cutoff = max(model_cutoff(model), self.lr_cutoff) + self.skin
+        self._list_cutoff = max(self._model_cutoff, self.lr_cutoff) + self.skin
         self._flash_settings = dict(model_path=model, lr_cutoff=self.lr_cutoff,
                                     dispersion_damping=self.dispersion_damping, precision=self.precision,
                                     engine=engine, **self._kspace)
         self.backend = None                 # the way the last call took: flash, neighbour-list or exact
-        self._last_box, self._last_way = _UNSET, None
+        self._last_box = _UNSET             # the box the way was chosen for
         self._flash_refusal = _UNSET        # why flash cannot run whatever the box (None: it can)
         self._flash = self._atoms = self._calc = self._step = self._step_periodic = None
         self._flash_box = _UNSET            # the box flash was built for
-        self._nbrs = self._nbrs_lr = None
+        self._neighbor_fn = self._neighbor_fn_lr = self._nbrs = self._nbrs_lr = None
+        self._extra = np.zeros(2, int)      # the lists' extra capacity, grown at each overflow
         self._k_box, self._k_args = None, {}
 
     def __reduce__(self):
-        return functools.partial(So3lrEngine, **self._kwargs), (self.numbers,)
+        return functools.partial(type(self), **self._kwargs), (self.numbers,)
 
     def __call__(self, positions, box=None):
         """(energy in eV, forces in eV/A as an [N, 3] float64 array) at positions (A, [N, 3]) in
@@ -125,15 +128,15 @@ class So3lrEngine:
             box = np.asarray(box, np.float64).reshape(3, 3)
             if not box.any():
                 box = None                  # ASE's cell for a molecule: free space
-            elif abs(np.linalg.det(box)) < 1e-6:
-                raise ValueError(f"So3lrEngine: the box spans no volume (lattice vectors {box.tolist()})")
         key = None if box is None else box.tobytes()
         if key != self._last_box:           # under a barostat every call: only the last box kept
-            self._last_box, self._last_way = key, self._route(positions, box)
-        self.backend = self._last_way
+            if box is not None and abs(np.linalg.det(box)) < 1e-6:
+                raise ValueError(f"So3lrEngine: the box spans no volume (lattice vectors {box.tolist()})")
+            self.backend = self._route(positions, box)
+            self._last_box = key
         with jax.default_matmul_precision(self.matmul_precision):
             if self.backend == "flash":
-                result = self._call_flash(positions, box)
+                result = self._call_flash(positions, box, key)
                 if result is not None:
                     return result
             if self.backend == "exact":
@@ -153,7 +156,7 @@ class So3lrEngine:
     def _flash_problem(self, positions, box):
         """Why flash cannot take this box (None if it can): the settings, model, device and
         import checked once, the structure for each box."""
-        from so3lr.flash.check import flash_problem, model_cutoff, structure_problem
+        from so3lr.flash.check import flash_problem, structure_problem
         if self._flash_refusal is _UNSET:
             problem = flash_problem(self._flash_settings, [], task="ase")
             if problem is None:
@@ -163,7 +166,7 @@ class So3lrEngine:
                     problem = f"it does not import here ({type(exc).__name__}: {exc})"
             self._flash_refusal = problem
         return self._flash_refusal or structure_problem(
-            self._flash_settings, self._ase_atoms(positions, box), model_cutoff(self.model))
+            self._flash_settings, self._ase_atoms(positions, box), self._model_cutoff)
 
     def _minimum_image_works(self, box):
         from so3lr.pbc import minimum_image_problem
@@ -182,27 +185,27 @@ class So3lrEngine:
         return self._atoms
 
     # ---- flash ----------------------------------------------------------------------
-    def _call_flash(self, positions, box):
-        """Energy and forces on flash; None where flash failed to start under auto (the way
-        is then chosen again without it, as ``so3lr md`` falls back)."""
+    def _call_flash(self, positions, box, key):
+        """Energy and forces on flash; None where flash failed to start (built, or built again
+        for a moving box) under auto: the way is then chosen again without it, as ``so3lr md``
+        falls back."""
         from so3lr.flash.check import NPT_BOX_MARGIN
         from so3lr.flash.md import SinglePoints
-        key = None if box is None else box.tobytes()
-        first = self._flash_box is _UNSET
         if self._flash is not None and not self._flash.box_margin and key != self._flash_box:
             # the box moves (a barostat): built again once, with NPT's margin, so later boxes
             # within it compile nothing (a fixed box keeps every cell the margin would cost)
             self._flash = None
             gc.collect()
-        failed = None
+        starting, failed = self._flash is None, None
         try:
-            if self._flash is None:
+            if starting:
+                margin = 0.0 if self._flash_box is _UNSET else NPT_BOX_MARGIN
                 self._flash = SinglePoints(self._flash_settings, task="ase", matmul_precision=self.matmul_precision,
-                                           box_margin=0.0 if first else NPT_BOX_MARGIN)
+                                           box_margin=margin)
                 self._flash_box = key
             energy, forces, _ = self._flash(self._ase_atoms(positions, box), self.charge, self.multiplicity - 1.0)
         except Exception as exc:
-            if not first or self.engine == "flash":
+            if not starting or self.engine == "flash":
                 raise
             failed = f"it failed to start ({type(exc).__name__}: {exc})"
         if failed is None:
@@ -211,14 +214,14 @@ class So3lrEngine:
         self._flash, self._flash_refusal = None, failed
         gc.collect()
         warnings.warn(f"So3lrEngine: flash {failed}; running without it", stacklevel=3)
-        self.backend = self._last_way = self._route(positions, box)
+        self.backend = self._route(positions, box)
         return None
 
     # ---- neighbour lists ------------------------------------------------------------
     def _call_lists(self, positions, box):
         lengths = None if box is None else box.diagonal().copy()
         kwargs = self._k_grid(lengths) if self._kspace and lengths is not None else {}
-        if self._step is None or self._step_periodic != (lengths is not None):
+        if self._step_periodic != (lengths is not None):
             self._build_lists(lengths)
             self._nbrs = None
         if self._nbrs is None:
@@ -234,7 +237,9 @@ class So3lrEngine:
             if not overflow.any():
                 return float(energy), np.asarray(forces, np.float64)
             # a list overflowed, or the box shrank below its cells: that list allocated again
-            # for this box, and the step again (it compiles only for list sizes it has not seen)
+            # for this box with more room, as so3lr md does, and the step again (it compiles
+            # again: a new list's cell-list functions are static, new objects)
+            self._extra += np.where(overflow, (OVERFLOW_EXTRA_SR, OVERFLOW_EXTRA_LR), 0)
             self._allocate(positions, lengths, overflow)
         raise RuntimeError("So3lrEngine: the neighbour lists overflow right after their allocation")
 
@@ -276,9 +281,9 @@ class So3lrEngine:
         """Allocate the short- and long-range lists where ``which`` says, for these positions."""
         R, box = _coordinates(positions, lengths, self.dtype)
         if which[0]:
-            self._nbrs = self._neighbor_fn.allocate(R, **box)
+            self._nbrs = self._neighbor_fn.allocate(R, extra_capacity=int(self._extra[0]), **box)
         if which[1]:
-            self._nbrs_lr = self._neighbor_fn_lr.allocate(R, **box)
+            self._nbrs_lr = self._neighbor_fn_lr.allocate(R, extra_capacity=int(self._extra[1]), **box)
 
     def _k_grid(self, lengths):
         """The k-space grid for this box, set up again only when the box changes."""
