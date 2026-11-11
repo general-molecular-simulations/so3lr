@@ -1,0 +1,27 @@
+# A short terminal demonstration: 9 gas-phase ethanol atoms, 10,000 steps = 5 ps.
+# run.sh copies this file and ethanol.xyz into a fresh output directory.
+input_file: ethanol.xyz
+output_file: ethanol_nvt.xyz
+log_file: ethanol_nvt.log
+restart_save_path: ethanol_restart.npz
+overwrite: false
+
+model: so3lr-tauri-m-2606
+engine: standard
+precision: mixed
+lr_cutoff: 100.0
+total_charge: 0
+spin: 0
+
+ensemble: nvt
+temperature: 300
+dt: 0.5
+md_cycles: 100
+md_steps: 100
+save_buffer: 5
+seed: 52
+
+# The bundled ASE molecular geometry is adequate for this brief UI demo.
+# Skipping initial relaxation avoids a second compilation; this is not an
+# equilibrated production simulation or a recommended production protocol.
+relax_before_run: false

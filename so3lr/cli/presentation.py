@@ -1,0 +1,711 @@
+"""Terminal presentation for CLI runs, independent of the numerical backends.
+
+The existing text log is preserved alongside an offline event journal. This
+module reports values already produced by a runner; it never reads model state
+or changes a setting. Rich is loaded only for an actual terminal display.
+"""
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import logging
+import math
+import os
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+from .telemetry import EventJournal
+from .run_log import RunLog
+from .formatting import precision_label, throughput_label, optimization_status
+
+
+@dataclass(frozen=True)
+class _Configuration:
+    display: str = 'auto'
+    verbose: bool = False
+    quiet: bool = False
+    no_color: bool = False
+
+
+_configuration = _Configuration()
+_active = ContextVar('so3lr_terminal_reporter', default=None)
+
+
+def configure(display='auto', verbose=False, quiet=False, no_color=False):
+    """Configure the next CLI display without importing JAX or Rich."""
+    if display not in ('auto', 'rich', 'plain'):
+        raise ValueError("display must be 'auto', 'rich', or 'plain'")
+    global _configuration
+    _configuration = _Configuration(display, verbose, quiet, no_color)
+
+
+def reset():
+    """Restore CLI defaults; active displays are owned by their context manager."""
+    global _configuration
+    _configuration = _Configuration()
+
+
+def _rich_enabled():
+    if _configuration.quiet or _configuration.display == 'plain':
+        return False
+    if _configuration.display == 'rich':
+        return True
+    return bool(getattr(sys.stderr, 'isatty', lambda: False)()) and os.environ.get('TERM') != 'dumb'
+
+
+class _NullReporter:
+    enabled = False
+
+    def phase(self, name, detail=''):
+        pass
+
+    def update_info(self, **kwargs):
+        pass
+
+    def start_md(self, start_step, total_steps, dt_fs):
+        pass
+
+    def progress(self, step, temperature=None, potential_energy=None, time_per_step=None, **optional):
+        pass
+
+    def checkpoint(self, step, path):
+        pass
+
+    def finish(self):
+        pass
+
+    def fail(self, message):
+        pass
+
+    def record_log(self, record):
+        pass
+
+    def logger_ready(self, log_file):
+        pass
+
+
+_null = _NullReporter()
+
+
+def get_reporter():
+    """Return the current display, or a harmless reporter for library callers."""
+    return _active.get() or _null
+
+
+def _seconds(value):
+    value = max(0, int(value))
+    hours, remainder = divmod(value, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f'{hours:d}:{minutes:02d}:{seconds:02d}' if hours else f'{minutes:02d}:{seconds:02d}'
+
+
+def _finite(value):
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+@dataclass(frozen=True)
+class _Activity:
+    """Animate wall time from immutable host snapshots, never simulation state."""
+    phase: str
+    started: float
+    reported: float
+    unicode: bool = True
+
+    def __rich_console__(self, console, options):
+        from rich.text import Text
+        now = time.monotonic()
+        # Tauri pulse grows and recedes in place. A five-second cycle remains
+        # calm during long compilations and is visible at our 2 Hz refresh.
+        frames = '+×✧✦✧×' if self.unicode else '+x*x+'
+        marker = frames[int(max(0, now - self.started) * len(frames) / 5) % len(frames)]
+        text = Text(marker, style='yellow', no_wrap=True, overflow='ellipsis')
+        text.append(f' {self.phase}', style='default')
+        timing = f' · {_seconds(now - self.started)} elapsed'
+        if now - self.reported >= 2:
+            timing += f' · last update {_seconds(now - self.reported)} ago'
+        text.append(timing, style='dim default')
+        yield text
+
+
+class _Reporter:
+    enabled = True
+
+    def __init__(self, settings):
+        from rich.console import Console
+        from rich.live import Live
+        from .monitor import RunState
+
+        self.config = _configuration
+        self.settings = settings
+        self._state = RunState(Path(settings.get('log_file') or settings.get('output_file') or 'so3lr'))
+        self._state.settings = settings
+        self._state.status = 'Started'
+        self._reader = SimpleNamespace(state=self._state, path=self._state.path, error='')
+        self._event_sequence = 0
+        self._keyboard = None
+        self._graphs_hidden = False
+        self._plot_page, self._energy_index = 0, 1  # Total energy is the initial graph.
+        self.console = Console(
+            file=sys.stderr,
+            force_terminal=True if self.config.display == 'rich' else None,
+            no_color=self.config.no_color or 'NO_COLOR' in os.environ,
+            markup=False, highlight=False,
+        )
+        self.info = {}
+        self.requested = set()
+        for key in ('model', 'precision', 'engine'):
+            if settings.get(key) is not None:
+                self.info[key] = settings[key]
+                self.requested.add(key)
+        if 'model' not in self.info and settings.get('model_path'):
+            self.info['model'] = settings['model_path']
+            self.requested.add('model')
+        if settings.get('input_file'):
+            self.info['input'] = settings['input_file']
+        ensemble = str(settings.get('ensemble', '')).upper()
+        temperature = _finite(settings.get('md_T'))
+        if ensemble:
+            self.info['dynamics'] = ensemble
+            if temperature is not None and ensemble != 'NVE':
+                self.info['dynamics'] += f' · {temperature:g} K target'
+        cycles, steps, dt_ps = (_finite(settings.get(key))
+                                for key in ('md_cycles', 'md_steps', 'md_dt'))
+        if cycles is not None and steps is not None:
+            count = int(cycles * steps)
+            self.info['plan'] = f'{count:,} steps'
+            if dt_ps is not None:
+                self.info['plan'] += f' · {dt_ps * 1000:g} fs · {count * dt_ps:g} ps'
+        self.phase_name, self.detail = 'Loading', 'Initializing runtime'
+        self._seen_phases = {(self.phase_name, self.detail)}
+        self.start_step = self.total_steps = self.step = 0
+        self.dt_fs = None
+        self.started_at = None
+        self.temperature = self.potential_energy = self.time_per_step = None
+        self.saved = None
+        self.artifacts = []
+        self.status = 'running'
+        self.last_error = ''
+        self._last_refresh = float('-inf')
+        self._closed = False
+        self._opened_at = self._reported_at = time.monotonic()
+        try:
+            self._heartbeat = os.isatty(sys.stderr.fileno())
+        except (AttributeError, OSError, ValueError):
+            self._heartbeat = False
+        self._live_snapshot = self._snapshot()
+        # The refresh thread sees immutable text plus a wall clock. Graph data
+        # is rendered only at existing host reporting points, preserving the
+        # numerical path and avoiding concurrent reads of mutable accumulators.
+        self.live = Live(get_renderable=self._live_view, console=self.console,
+                         auto_refresh=self._heartbeat, refresh_per_second=2,
+                         transient=False, redirect_stdout=False, redirect_stderr=False)
+        self.live.start(refresh=True)
+        self._last_refresh = time.monotonic()
+
+    def _text(self, text, style=''):
+        from rich.text import Text
+        # Text treats paths and user messages literally, including [brackets].
+        return Text(str(text), style=style)
+
+    def _snapshot(self):
+        from rich.console import Group
+        from rich.text import Text
+        view = self._render()
+        if not self._heartbeat:
+            return view, None
+        rows = []
+        for segments in self.console.render_lines(view, self.console.options, pad=False):
+            row = Text(no_wrap=True, overflow='crop')
+            for segment in segments:
+                if not segment.control:
+                    row.append(segment.text, segment.style)
+            rows.append(row)
+        activity = None
+        if self.status == 'running':
+            unicode = self.console.encoding.lower().replace('-', '') in ('utf8', 'utf16', 'utf32')
+            activity = _Activity(self.phase_name, self._opened_at, self._reported_at, unicode)
+        return Group(*rows), activity
+
+    def _live_view(self):
+        from rich.console import Group
+        frame, activity = self._live_snapshot
+        return Group(frame, activity) if activity is not None else frame
+
+    def _render(self):
+        from rich.console import Group
+        from rich.table import Table
+        from .. import __version__
+
+        if self._state.samples and not self._graphs_hidden:
+            from .monitor import ENERGIES, render_monitor
+            completed = max(0, min(self.step - self.start_step, self.total_steps))
+            ratio = completed / self.total_steps if self.total_steps else 0
+            progress = f'{ratio:.0%} · {completed:,}/{self.total_steps:,} steps'
+            segment_time = (f'{completed * self.dt_fs / 1000:.3f} / '
+                            f'{self.total_steps * self.dt_fs / 1000:.3f} ps this run') if self.dt_fs is not None else ''
+            timing = f'Elapsed {_seconds(time.monotonic() - self.started_at)}'
+            if self.status == 'running':
+                timing += (f' · ETA {_seconds((self.total_steps - completed) * self.time_per_step)}'
+                           if completed and self.time_per_step is not None and self.time_per_step > 0
+                           else ' · ETA estimating')
+            self._state.info['_attached_progress'] = progress + f' · step counter {self.step:,}'
+            self._state.info['_attached_time'] = segment_time
+            self._state.info['_attached_compact_progress'] = progress + (' · ' + segment_time if segment_time else '')
+            self._state.info['_attached_timing'] = timing
+            self._state.info['_attached_keyboard'] = self._keyboard is not None
+            return render_monitor([self._reader], energy=list(ENERGIES)[self._energy_index],
+                                  width=self.console.width, height=self.console.height - int(self._heartbeat),
+                                  ascii_only=self.console.encoding.lower().replace('-', '') not in ('utf8', 'utf16', 'utf32'),
+                                  page=self._plot_page, attached=True)
+
+        title = self._text('SO3LR TAURI', 'bold yellow')
+        title.append(f'  v{__version__}', style='dim')
+        rows = [title]
+        metadata = Table.grid(padding=(0, 2))
+        metadata.add_column(style='dim', no_wrap=True)
+        metadata.add_column(overflow='fold')
+        labels = (('input', 'Input'), ('model', 'Model'), ('engine', 'Engine'),
+                  ('kernels', 'Kernels'), ('precision', 'Precision'),
+                  ('atoms', 'Atoms'), ('devices', 'Device'),
+                  ('dynamics', 'Dynamics'), ('plan', 'Run'))
+        for key, label in labels:
+            if key not in self.info:
+                continue
+            value = self.info[key]
+            if isinstance(value, (list, tuple)):
+                value = ', '.join(str(item) for item in value)
+            value = str(value)
+            if key == 'precision':
+                value = precision_label(value)
+            if key in self.requested:
+                value += ' (requested)'
+            metadata.add_row(self._text(label), self._text(value))
+        rows.extend((metadata, self._text('')))
+        style = 'red' if self.status == 'failed' else 'green' if self.status == 'complete' else 'yellow'
+        phase = self._text(self.phase_name, style)
+        if self.detail:
+            phase.append(f'  {self.detail}')
+        rows.append(phase)
+        if self.info.get('operation') == 'optimization':
+            step, total = (_finite(self.info.get(key)) for key in ('opt_step', 'opt_total_steps'))
+            if step is not None and total is not None and total > 0:
+                ratio = max(0.0, min(1.0, step / total))
+                width = min(24, max(8, self.console.width - 40))
+                filled = round(width * ratio)
+                bar = self._text('━' * filled, style)
+                bar.append('─' * (width - filled), style='dim')
+                bar.append(f'  {int(step):,}/{int(total):,} optimization steps')
+                rows.append(bar)
+            energy, force, target = (_finite(self.info.get(key)) for key in
+                                    ('opt_energy_eV', 'opt_force_max_eVA', 'opt_force_target_eVA'))
+            if energy is not None:
+                rows.append(self._text(f'Potential energy  {energy:.6f} eV'))
+            if force is not None:
+                detail = f'Maximum force     {force:.6f} eV/Å'
+                if target is not None:
+                    detail += f' · target ≤ {target:g} eV/Å'
+                rows.append(self._text(detail))
+                outcome = optimization_status(self.info, self.status)
+                rows.append(self._text(outcome, 'green' if outcome == 'Force criterion met' else 'yellow'))
+        if self.started_at is not None:
+            completed = max(0, min(self.step - self.start_step, self.total_steps))
+            ratio = completed / self.total_steps if self.total_steps else 0
+            width = min(24, max(8, self.console.width - 40))
+            filled = round(width * ratio)
+            bar = self._text('━' * filled, style)
+            bar.append('─' * (width - filled), style='dim')
+            bar.append(f'  {ratio:.0%}  {completed:,}/{self.total_steps:,} steps')
+            rows.append(bar)
+            if self.start_step:
+                rows.append(self._text(f'Restart counter {self.start_step:,} · step counter {self.step:,}', 'dim'))
+            if self.dt_fs is not None:
+                rows.append(self._text(f'{completed * self.dt_fs / 1000:.3f} / '
+                                       f'{self.total_steps * self.dt_fs / 1000:.3f} ps this run', 'dim'))
+            elapsed = time.monotonic() - self.started_at
+            timing = f'Elapsed {_seconds(elapsed)}'
+            # No ETA is invented during compilation or at the restored step.
+            if completed and self.time_per_step is not None and self.time_per_step > 0:
+                if self.status == 'running':
+                    timing += f' · ETA {_seconds((self.total_steps - completed) * self.time_per_step)}'
+                rate = throughput_label(self.time_per_step, self.dt_fs, self.info.get('atoms'))
+                if rate:
+                    timing += f' · {rate}'
+            elif self.status == 'running':
+                timing += ' · ETA estimating'
+            rows.append(self._text(timing, 'dim'))
+            metrics = []
+            if self.temperature is not None:
+                metrics.append(f'T {self.temperature:.1f} K')
+            if self.potential_energy is not None:
+                metrics.append(f'Epot {self.potential_energy:,.6f} eV')
+            if metrics:
+                rows.append(self._text(' · '.join(metrics)))
+        if self.saved is not None:
+            step, path = self.saved
+            rows.append(self._text(f'Saved restart · step {step:,} · {path}', 'dim'))
+        for label, path in self.artifacts:
+            rows.append(self._text(f'{label} · {path}', 'dim'))
+        if self.info.get('operation') == 'optimization' and self.status != 'running':
+            from .monitor import _controls
+            rows.append(self._text(_controls(self._state, attached=True), 'dim'))
+        if self._graphs_hidden and self.status == 'running' and self._keyboard is not None:
+            rows.append(self._text('q: show plots · Ctrl+C: interrupt MD', 'dim'))
+        elif self._graphs_hidden and self.status != 'running':
+            from .monitor import _controls
+            rows.append(self._text(_controls(self._state, attached=True), 'dim'))
+        return Group(*rows)
+
+    def attach_journal(self, path, run_id):
+        self._state.run_id = run_id
+        if path is not None:
+            self._state.path = self._reader.path = Path(path)
+
+    def _observe(self, kind, data):
+        self._event_sequence += 1
+        self._state.consume({'schema': 1, 'run_id': self._state.run_id or 'attached',
+                             'seq': self._event_sequence, 'type': kind, 'data': data,
+                             'timestamp': datetime.now(timezone.utc).isoformat()})
+
+    def _start_keyboard(self):
+        # This is the simulation's terminal, not a separate show process.
+        # Read controls only at host reporting boundaries and retain ISIG so
+        # Ctrl+C keeps its ordinary interruption behavior during compiled work.
+        if self._keyboard is not None:
+            return
+        from .monitor import _Keyboard
+        try:
+            if not getattr(sys.stdin, 'isatty', lambda: False)() or not getattr(sys.stderr, 'isatty', lambda: False)():
+                return
+            sys.stdin.fileno()
+            self._keyboard = _Keyboard().__enter__()
+        except Exception:
+            # Some stream wrappers claim TTY support but lack usable termios.
+            # Optional input controls must not prevent the calculation.
+            self._keyboard = None
+
+    def _stop_keyboard(self):
+        keyboard, self._keyboard = self._keyboard, None
+        if keyboard is not None:
+            try:
+                keyboard.__exit__(None, None, None)
+            except (OSError, ValueError):
+                pass
+
+    def _poll_keyboard(self):
+        if self._keyboard is None:
+            return False
+        try:
+            key = self._keyboard.read(timeout=0)
+        except (OSError, ValueError):
+            self._stop_keyboard()
+            return False
+        if key in ('e', 'E'):
+            from .monitor import ENERGIES
+            self._energy_index = (self._energy_index + 1) % len(ENERGIES)
+        elif key in ('up', 'down'):
+            self._plot_page += 1 if key == 'down' else -1
+        elif key in ('q', 'Q'):
+            # Keep input active while the compact status is visible so the
+            # same key can restore the graphs, including samples gathered
+            # while hidden. Terminal ownership ends with the MD invocation.
+            self._graphs_hidden = not self._graphs_hidden
+        else:
+            return False
+        return True
+
+    def _refresh(self, force=False):
+        if self._closed:
+            return
+        force = self._poll_keyboard() or force
+        now = time.monotonic()
+        if force or now - self._last_refresh >= 0.25:
+            self._live_snapshot = self._snapshot()
+            self.live.update(self._live_view(), refresh=True)
+            self._last_refresh = now
+
+    def phase(self, name, detail=''):
+        if self.status != 'running':
+            return
+        phase = (str(name), str(detail))
+        if phase == (self.phase_name, self.detail):
+            return
+        self.phase_name, self.detail = phase
+        self._reported_at = time.monotonic()
+        self._state.phase, self._state.detail = phase
+        # Show the first potentially blocking preparation stage immediately;
+        # repeated Running/Saving transitions share the normal refresh budget.
+        first_preparation = phase not in self._seen_phases and name in ('Loading', 'Compiling', 'Relaxing')
+        self._seen_phases.add(phase)
+        self._refresh(force=first_preparation)
+
+    def update_info(self, **kwargs):
+        self._reported_at = time.monotonic()
+        self.info.update({key: value for key, value in kwargs.items() if value is not None})
+        self.requested.difference_update(kwargs)
+        self._state.info.update({key: value for key, value in kwargs.items() if value is not None})
+        self._refresh()
+
+    def start_md(self, start_step, total_steps, dt_fs):
+        """Begin this invocation's work; total_steps excludes restored steps."""
+        self.start_step = self.step = int(start_step)
+        self.total_steps = max(0, int(total_steps))
+        self.dt_fs = _finite(dt_fs)
+        self.started_at = time.monotonic()
+        self.time_per_step = self.temperature = self.potential_energy = None
+        self._observe('md_started', {'start_step': self.start_step, 'total_steps': self.total_steps, 'dt_fs': self.dt_fs})
+        self._start_keyboard()
+        self.phase('Simulating')
+
+    def progress(self, step, temperature=None, potential_energy=None, time_per_step=None, **optional):
+        self._reported_at = time.monotonic()
+        self.step = int(step)
+        self.temperature = _finite(temperature)
+        self.potential_energy = _finite(potential_energy)
+        self.time_per_step = _finite(time_per_step)
+        data = optional.pop('_sample', None)
+        if data is None:
+            segment_step = self.step - self.start_step
+            data = {'step': self.step, 'segment_step': segment_step,
+                    'time_ps': segment_step * self.dt_fs / 1000 if self.dt_fs is not None else None,
+                    'temperature_K': self.temperature, 'potential_energy_eV': self.potential_energy,
+                    'seconds_per_step': self.time_per_step}
+            for argument, field in (('energy', 'energy_eV'), ('conserved_energy', 'conserved_energy_eV'), ('volume', 'volume_A3')):
+                if argument in optional:
+                    data[field] = _finite(optional[argument])
+        self._observe('sample', data)
+        self._refresh(force=self._state.sample_count == 1)
+
+    def checkpoint(self, step, path):
+        """Called only after a restart write has completed successfully."""
+        self.saved = (int(step), str(path))
+        self._observe('checkpoint', {'step': int(step), 'path': str(path)})
+        self._refresh()
+
+    def finish(self):
+        if self.status != 'running':
+            return
+        self.status = 'complete'
+        self.phase_name, self.detail = 'Complete', ''
+        self._observe('run_completed', {'message': 'Run completed successfully.'})
+        output_label = 'Optimization trajectory' if self.info.get('operation') == 'optimization' else 'Trajectory'
+        for key, label in (('output_file', output_label), ('log_file', 'Log')):
+            path = self.settings.get(key)
+            if path:
+                try:
+                    if os.path.isfile(path):
+                        self.artifacts.append((label, str(path)))
+                except (OSError, TypeError, ValueError):
+                    pass
+        self._refresh(force=True)
+
+    def fail(self, message):
+        if self.status == 'failed':
+            return
+        self.status = 'failed'
+        self.phase_name, self.detail = 'Stopped', str(message)
+        self._observe('run_failed', {'message': str(message)})
+        self._refresh(force=True)
+
+    def close(self):
+        try:
+            if not self._closed:
+                self.live.stop()
+                self._closed = True
+        finally:
+            self._stop_keyboard()
+
+    def log_record(self, record, message):
+        if record.levelno < logging.WARNING and not self.config.verbose:
+            return
+        if record.levelno >= logging.ERROR:
+            self.last_error = record.getMessage()
+        if record.levelno >= logging.WARNING:
+            self._observe('error' if record.levelno >= logging.ERROR else 'warning', {'message': record.getMessage()})
+        style = 'red' if record.levelno >= logging.ERROR else 'yellow' if record.levelno >= logging.WARNING else 'dim'
+        label = f'{record.levelname}: ' if record.levelno >= logging.WARNING else ''
+        self.console.print(self._text(label + message, style))
+
+
+class _RunReporter:
+    """Fan out host events to the journal and an optional terminal renderer."""
+
+    def __init__(self, settings, renderer):
+        self.renderer = renderer
+        # enabled continues to mean terminal rendering, not journal availability.
+        self.enabled = renderer.enabled
+        self.journal = EventJournal(settings)
+        self.run_log = RunLog(settings, self.journal)
+        if self.enabled:
+            self.renderer.attach_journal(self.journal.path, self.journal.run_id)
+        self.last_error = ''
+        self.status = 'running'
+        self._phase = None
+        self._start_step = None
+        self._dt_fs = None
+
+    def __getattr__(self, name):
+        # Keep the renderer's inspection surface (live/render/artifacts) usable.
+        return getattr(self.renderer, name)
+
+    def phase(self, name, detail=''):
+        phase = (str(name), str(detail))
+        if self.status != 'running' or phase == self._phase:
+            return
+        self._phase = phase
+        self.journal.emit('phase', {'name': phase[0], 'detail': phase[1]})
+        self.run_log.phase(phase[0])
+        self.renderer.phase(*phase)
+
+    def update_info(self, **kwargs):
+        self.journal.emit('info', kwargs)
+        self.run_log.update_info(kwargs)
+        self.renderer.update_info(**kwargs)
+
+    def logger_ready(self, log_file):
+        self.run_log.logger_ready(log_file)
+
+    def start_md(self, start_step, total_steps, dt_fs):
+        # Relaxation can share this reporter; MD must replace its operation
+        # marker in both the journal and attached display before new samples.
+        self.update_info(operation='md')
+        self._start_step, self._dt_fs = int(start_step), _finite(dt_fs)
+        self.journal.emit('md_started', {'start_step': self._start_step,
+                                       'total_steps': int(total_steps), 'dt_fs': self._dt_fs})
+        self.run_log.start_md(self._start_step, int(total_steps), self._dt_fs)
+        self.renderer.start_md(start_step, total_steps, dt_fs)
+
+    def progress(self, step, temperature=None, potential_energy=None, time_per_step=None, **optional):
+        step = int(step)
+        segment_step = step - self._start_step if self._start_step is not None else None
+        data = {
+            'step': step,
+            'segment_step': segment_step,
+            'time_ps': (segment_step * self._dt_fs / 1000.0
+                        if segment_step is not None and self._dt_fs is not None else None),
+            'temperature_K': _finite(temperature),
+            'potential_energy_eV': _finite(potential_energy),
+            'seconds_per_step': _finite(time_per_step),
+        }
+        for argument, field in (('kinetic_energy', 'kinetic_energy_eV'), ('energy', 'energy_eV'),
+                                ('conserved_energy', 'conserved_energy_eV'), ('volume', 'volume_A3')):
+            if argument in optional:
+                data[field] = _finite(optional[argument])
+        for argument, field in (('box', 'box_A'), ('pressure_diagonal', 'pressure_diagonal_eVA3')):
+            if argument in optional:
+                data[field] = optional[argument]
+        self.journal.emit('sample', data)
+        self.run_log.progress(data)
+        self.renderer.progress(step, temperature=temperature, potential_energy=potential_energy,
+                               time_per_step=time_per_step, _sample=data, **optional)
+
+    def checkpoint(self, step, path):
+        self.journal.emit('checkpoint', {'step': int(step), 'path': str(path)})
+        self.run_log.checkpoint(step, path)
+        self.renderer.checkpoint(step, path)
+
+    def record_log(self, record):
+        if record.levelno < logging.WARNING or getattr(record, 'telemetry_internal', False):
+            return
+        try:
+            message = record.getMessage()
+        except Exception:
+            # The normal handler owns malformed logging records; observation
+            # must not turn its handled formatting error into a run failure.
+            return
+        if record.levelno >= logging.ERROR:
+            self.last_error = message
+        self.journal.emit('error' if record.levelno >= logging.ERROR else 'warning',
+                          {'message': message, 'logger': record.name, 'level': record.levelname})
+
+    def log_record(self, record, message):
+        self.renderer.log_record(record, message)
+
+    def finish(self):
+        if self.status != 'running':
+            return
+        self.status = 'complete'
+        self.run_log.finish('complete')
+        self.journal.emit('run_completed', {'message': 'Run completed successfully.'})
+        if self.enabled and self.journal.active:
+            self.renderer.artifacts.append(('Metrics', str(self.journal.path)))
+        self.renderer.finish()
+
+    def fail(self, message):
+        if self.status != 'running':
+            return
+        self.status = 'failed'
+        self.run_log.finish('failed', str(message))
+        self.journal.emit('run_failed', {'message': str(message)})
+        self.renderer.fail(message)
+
+    def close(self):
+        try:
+            if self.enabled:
+                self.renderer.close()
+        finally:
+            self.run_log.close()
+            self.journal.close()
+
+
+@contextmanager
+def run_display(settings):
+    """Own one CLI journal/display and restore both, including on Ctrl+C."""
+    current = _active.get()
+    if current is not None:
+        yield current
+        return
+    reporter = _RunReporter(settings, _Reporter(settings) if _rich_enabled() else _null)
+    token = _active.set(reporter)
+    try:
+        yield reporter
+    except BaseException as exc:
+        if isinstance(exc, SystemExit) and exc.code in (None, 0):
+            reporter.finish()
+        else:
+            message = 'Interrupted' if isinstance(exc, KeyboardInterrupt) else str(exc)
+            reporter.fail(getattr(reporter, 'last_error', '') or message or type(exc).__name__)
+            if reporter.enabled:
+                try:
+                    exc._so3lr_reported = True
+                except (AttributeError, TypeError):
+                    pass
+        raise
+    else:
+        reporter.finish()
+    finally:
+        try:
+            reporter.close()
+        finally:
+            _active.reset(token)
+
+
+class _ConsoleHandler(logging.StreamHandler):
+    def emit(self, record):
+        if getattr(record, 'file_only', False):
+            return
+        reporter = get_reporter()
+        reporter.record_log(record)
+        if _configuration.quiet and record.levelno < logging.WARNING:
+            return
+        if not reporter.enabled:
+            return super().emit(record)
+        try:
+            reporter.log_record(record, self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+def make_console_handler(level=logging.INFO):
+    """Message-only stderr logging unless the active run owns a Rich display."""
+    handler = _ConsoleHandler()
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    return handler

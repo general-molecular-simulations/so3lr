@@ -1,0 +1,791 @@
+"""The monitor is an offline observer with bounded, incremental journal reads."""
+from datetime import datetime, timezone
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+from so3lr.cli import monitor
+
+
+def event(seq, kind, **data):
+    return {'schema': 1, 'run_id': 'run-example', 'seq': seq,
+            'timestamp': '2026-01-01T00:00:00Z', 'elapsed_s': float(seq),
+            'type': kind, 'data': data}
+
+
+def write(path, events):
+    path.write_text(''.join(json.dumps(item) + '\n' for item in events))
+
+
+def samples(count=20):
+    return [event(0, 'run_started', settings={
+        'model': 'so3lr-tauri-m-2606', 'ensemble': 'nvt', 'md_T': 300,
+        'input_file': '[red]ethanol.xyz', 'output_file': '[red]trajectory.xyz',
+        'log_file': 'run.log', 'precision': 'mixed',
+    }), event(1, 'info', atoms=9, engine='standard'),
+        event(2, 'md_started', start_step=1000, total_steps=count * 100, dt_fs=0.5),
+        *[event(index + 3, 'sample', step=1000 + index * 100, segment_step=index * 100,
+                time_ps=index * 0.05, temperature_K=280 + index,
+                potential_energy_eV=-39 + index * 0.002,
+                energy_eV=-38.8 + index * 0.001,
+                conserved_energy_eV=-38.7 + index * 1e-6)
+          for index in range(count + 1)]]
+
+
+def render(reader, width=80, **kwargs):
+    from rich.console import Console
+    output = io.StringIO()
+    console = Console(file=output, width=width, color_system=None)
+    console.print(monitor.render_monitor([reader], width=width, **kwargs))
+    return output.getvalue()
+
+
+def test_partial_appends_malformed_lines_and_incremental_offset(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    first = json.dumps(event(0, 'run_started', settings={})).encode() + b'\n'
+    second = json.dumps(event(1, 'sample', step=0, time_ps=0, temperature_K=300)).encode() + b'\n'
+    path.write_bytes(first + b'not json\n' + second[:17])
+    reader = monitor.JournalReader(path)
+    read = reader.poll()
+    assert read == path.stat().st_size
+    assert reader.state.malformed == 1 and reader.state.sample_count == 0
+    offset = reader.offset
+    assert reader.poll() == 0 and reader.offset == offset
+    with path.open('ab') as stream:
+        stream.write(second[17:])
+    assert reader.poll() == len(second) - 17
+    assert reader.state.sample_count == 1 and reader.pending == b''
+    assert reader.poll() == 0 and reader.state.sample_count == 1
+
+
+def test_unknown_schema_bad_data_and_duplicates_are_skipped(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    unsupported = event(1, 'sample', step=0, time_ps=0)
+    unsupported['schema'] = 2
+    valid = event(2, 'sample', step=0, time_ps=0)
+    write(path, [[], event(0, 'run_started', settings={}), unsupported,
+                 valid, valid, event(3, 'sample', step='bad', time_ps=1)])
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    assert reader.state.unsupported == 1
+    assert reader.state.malformed == 2
+    assert reader.state.sample_count == 1
+
+
+def test_large_partial_line_is_discarded_without_unbounded_buffer(tmp_path, monkeypatch):
+    monkeypatch.setattr(monitor, 'MAX_LINE_BYTES', 64)
+    path = tmp_path / 'run.events.jsonl'
+    path.write_bytes(b'x' * 100)
+    reader = monitor.JournalReader(path)
+    reader.poll()
+    assert reader.pending == b'' and reader.discarding
+    with path.open('ab') as stream:
+        stream.write(b'x' * 100 + b'\n')
+    reader.poll()
+    assert reader.pending == b'' and not reader.discarding
+    assert reader.state.malformed == 1
+
+
+def test_reader_handles_replacement_and_truncation(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    assert reader.state.sample_count == 21
+    write(path, [event(0, 'run_started', settings={})])
+    reader.poll()
+    assert reader.state.sample_count == 0
+    replacement = tmp_path / 'replacement'
+    write(replacement, [event(0, 'run_failed', message='replaced')])
+    replacement.replace(path)
+    reader.poll()
+    assert reader.state.status == 'Failed'
+
+
+def test_bounded_history_retains_actual_extrema_and_endpoints(tmp_path):
+    state = monitor.RunState(tmp_path / 'large.events.jsonl')
+    for index in range(10_000):
+        value = 1e6 if index == 200 else -1e6 if index == 201 else index % 300
+        volume = 1e7 if index == 202 else 1 if index == 203 else 1000 + index % 250
+        state.consume(event(index, 'sample', step=index, time_ps=index / 1000,
+                            temperature_K=value, potential_energy_eV=-value, volume_A3=volume))
+        assert len(state.samples) <= monitor.MAX_HISTORY
+    assert state.sample_count == 10_000
+    assert state.samples[0]['step'] == 0
+    assert state.samples[-1]['step'] == 9999
+    assert min(row['temperature_K'] for row in state.samples) == -1e6
+    assert max(row['temperature_K'] for row in state.samples) == 1e6
+    assert min(row['volume_A3'] for row in state.samples) == 1
+    assert max(row['volume_A3'] for row in state.samples) == 1e7
+
+
+def test_explicit_status_is_not_inferred_from_age_or_completed_steps(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    text = render(reader, now=datetime(2026, 11, 11, tzinfo=timezone.utc))
+    assert 'Last reported state: Running' in text
+    assert 'Completed' not in text and 'Failed' not in text
+    reader.state.consume(event(100, 'error', message='warning-like diagnostic'))
+    assert reader.state.status == 'Running'
+    assert 'ERROR: warning-like diagnostic' in render(reader)
+    assert reader.state.unsupported == 0
+    reader.state.consume(event(101, 'run_completed'))
+    assert 'Last reported state: Completed' in render(reader)
+    assert reader.state.phase == 'Complete'
+    assert reader.state.detail == ''
+
+
+def test_plot_connects_samples_without_changing_numeric_readout():
+    from rich.console import Console
+    output = io.StringIO()
+    rows = [{'time_ps': 0, 'temperature_K': 100},
+            {'time_ps': 1, 'temperature_K': 300}]
+    Console(file=output, width=40, color_system=None).print(
+        monitor._plot(rows, 'temperature_K', 'Temperature', 'K', 40, ascii_only=True))
+    assert output.getvalue().count('*') > 10
+    assert '300.0' in output.getvalue()
+    assert rows == [{'time_ps': 0, 'temperature_K': 100}, {'time_ps': 1, 'temperature_K': 300}]
+
+
+def test_target_guide_uses_a_solid_terminal_row_with_exact_caption():
+    # Solid guides use character-row resolution; the caption retains the
+    # exact value when two nearby targets occupy the same terminal row.
+    samples = [{'time_ps': 0, 'temperature_K': 0},
+               {'time_ps': 0, 'temperature_K': 1}]
+    low, high, pixels = -0.07, 1.07, 28
+    targets = [high - pixel / (pixels - 1) * (high - low) for pixel in (8, 11)]
+    top = monitor._plot(samples, 'temperature_K', 'Temperature', 'K', 40, target=targets[0])
+    bottom = monitor._plot(samples, 'temperature_K', 'Temperature', 'K', 40, target=targets[1])
+    # Heading is followed by plot rows; pixel8 and pixel11 both occupy row2.
+    top_row, bottom_row = top.renderables[3].plain, bottom.renderables[3].plain
+    assert '────' in top_row and top_row == bottom_row
+    assert f'Thermostat target {targets[0]:g} K' in top.renderables[-1].plain
+    assert f'Thermostat target {targets[1]:g} K' in bottom.renderables[-1].plain
+    ascii_plot = monitor._plot(samples, 'temperature_K', 'Temperature', 'K', 40,
+                               target=targets[1], ascii_only=True)
+    assert '-' in ascii_plot.renderables[3].plain
+
+
+def test_render_uses_segment_time_literal_paths_and_distinct_energy_fields(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    for field, title in monitor.ENERGIES.items():
+        text = render(reader, energy=field)
+        assert title in text
+        assert '[red]trajectory.xyz' in text
+        assert 'current segment' in text
+        assert 'step counter 3,000' in text
+        assert 'Segment 2,000/2,000 steps' in text
+        assert all(len(line) <= 80 for line in text.splitlines())
+    assert 'Saved checkpoint' not in render(reader)
+    reader.state.consume(event(200, 'checkpoint', step=3000, path='[red]restart.npz'))
+    assert '[red]restart.npz' in render(reader)
+
+
+@pytest.mark.parametrize('width', [80, 100, 120])
+@pytest.mark.parametrize('constrained', [False, True])
+def test_colored_chart_rows_never_wrap_away_from_their_axes(tmp_path, monkeypatch, width, constrained):
+    from rich.console import Console
+    from rich.cells import cell_len
+
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples(100))
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    monkeypatch.setenv('TERM', 'dumb' if constrained else 'xterm-256color')
+    # In Rich 15, force_terminal + TERM=dumb may constrain a requested 100/120
+    # column console to 80 unless height is also explicit. Exercise the actual
+    # Console options instead of assuming the constructor width was honored.
+    console = Console(record=True, width=width, file=io.StringIO(),
+                      force_terminal=True, color_system='truecolor', no_color=False)
+    console.print(monitor.render_monitor([reader], width=width))
+    lines = console.export_text(clear=False).splitlines()
+    chart_rows = [line for line in lines if '│' in line]
+    assert len(chart_rows) == 14
+    assert all(line.count('│') == 1 for line in chart_rows)
+    temperature_line = next(index for index, line in enumerate(lines) if 'Temperature [K]' in line)
+    energy_line = next(index for index, line in enumerate(lines) if 'Total energy [eV]' in line)
+    assert energy_line > temperature_line + 7
+    assert all('│' in line for line in lines if any('\u2800' <= char <= '\u28ff' for char in line))
+    assert all(cell_len(line) <= console.width for line in lines)
+    assert not any(line.strip() == '5' for line in lines)
+
+
+def test_ascii_plot_and_no_missing_property_substitution(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples(1))
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    for row in reader.state.samples:
+        row.pop('conserved_energy_eV', None)
+    text = render(reader, energy='conserved_energy_eV', ascii_only=True)
+    assert text.isascii()
+    assert 'No samples for this property yet.' in text
+    assert 'Conserved energy' in text
+
+
+def test_compact_view_has_controls_in_24_rows(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    text = render(reader, height=24)
+    assert len(text.splitlines()) <= 24
+    assert 'q: detach' in text
+
+
+def test_cycle_throughput_and_checkpoint_age_are_explicit(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    reader.state.samples[-1]['seconds_per_step'] = 0.0014
+    reader.state.consume(event(200, 'checkpoint', step=3000, path='restart.npz'))
+    now = datetime(2026, 1, 1, 0, 0, 12, tzinfo=timezone.utc)
+    text = render(reader, now=now)
+    assert 'Cycle throughput 30.857 ns/day · 1.56e-04 s/atom/step' in text
+    assert '(excludes startup/I/O)' in text
+    assert 'mixed (float32 model; float64 dynamics)' in text
+    assert 'restart.npz · age 12s' in text
+    compact = render(reader, now=now, height=24)
+    assert 'Cycle 30.857 ns/day · 1.56e-04 s/atom/step' in compact
+    assert 'Checkpoint step 3000 · age 12s' in compact
+    assert len(compact.splitlines()) <= 24
+
+
+def test_throughput_omits_unknown_atom_normalization(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    reader.state.samples[-1]['seconds_per_step'] = 0.0014
+    reader.state.info.pop('atoms')
+    for height in (None, 24):
+        text = render(reader, height=height)
+        assert '30.857 ns/day' in text
+        assert 's/atom/step' not in text
+
+
+@pytest.mark.parametrize('width', [80, 100, 120])
+def test_npt_volume_is_below_temperature_and_energy(tmp_path, width):
+    path = tmp_path / 'npt.events.jsonl'
+    events = samples()
+    events[0]['data']['settings']['ensemble'] = 'npt'
+    for item in events:
+        if item['type'] == 'sample':
+            item['data']['volume_A3'] = 1000 + item['data']['time_ps'] * 2
+    write(path, events)
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    assert reader.state.samples[-1]['volume_A3'] == 1002
+    for height in (None, 80):
+        text = render(reader, width=width, height=height)
+        assert text.index('Temperature [K]') < text.index('Total energy [eV]') < text.index('Volume [Å³]')
+        assert 'Volume [Å³]  1002.000' in text
+        assert sum('│' in line for line in text.splitlines()) == 21
+        assert all(len(line) <= width for line in text.splitlines())
+    ascii_text = render(reader, width=width, ascii_only=True)
+    assert 'Volume [A^3]' in ascii_text and ascii_text.isascii()
+
+
+def test_npt_missing_volume_is_explicit_and_nvt_does_not_add_a_volume_plot(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    assert 'Volume [' not in render(reader)
+    reader.state.settings['ensemble'] = 'NPT'
+    text = render(reader)
+    assert 'Volume [Å³]\nNo samples for this property yet.' in text
+    assert 'Volume [Å³]  0' not in text
+
+
+@pytest.mark.parametrize('height', [18, 24])
+def test_short_npt_terminal_pages_preserve_complete_plots_and_quit(tmp_path, height):
+    path = tmp_path / 'run.events.jsonl'
+    events = samples()
+    events[0]['data']['settings']['ensemble'] = 'npt'
+    for item in events:
+        if item['type'] == 'sample':
+            item['data']['volume_A3'] = 1000 + item['data']['time_ps']
+    write(path, events)
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    pages = [render(reader, height=height, page=page) for page in range(3)]
+    combined = '\n'.join(pages)
+    for title in ('Temperature [K]', 'Total energy [eV]', 'Volume [Å³]'):
+        assert title in combined
+    for text in pages:
+        assert len(text.splitlines()) <= height
+        assert '↑/↓: plot page' in text and 'q: detach' in text
+        chart_count = sum(title in text for title in ('Temperature [K]', 'Total energy [eV]', 'Volume [Å³]'))
+        assert sum('│' in line for line in text.splitlines()) == chart_count * (4 if height == 18 else 3)
+        assert text.count('Time [ps] (current segment)') == chart_count
+    if height == 24:
+        assert 'Temperature [K]' in pages[0] and 'Total energy [eV]' in pages[0]
+        assert 'Plot page 1/2' in pages[0]
+        assert 'Volume [Å³]' in pages[1] and 'Plot page 2/2' in pages[1]
+
+
+def test_very_short_terminal_keeps_exit_and_explains_missing_plots(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    text = render(reader, height=10)
+    assert len(text.splitlines()) <= 10
+    assert 'Enlarge terminal' in text and 'q: detach' in text
+
+
+def test_discovery_is_bounded_and_does_not_follow_directory_links(tmp_path):
+    root = tmp_path / 'runs'
+    root.mkdir()
+    top = root / 'top.events.jsonl'
+    write(top, [])
+    deep = root / 'a' / 'b'
+    deep.mkdir(parents=True)
+    write(deep / 'deep.events.jsonl', [])
+    external = tmp_path / 'external'
+    external.mkdir()
+    write(external / 'external.events.jsonl', [])
+    (root / 'linked').symlink_to(external, target_is_directory=True)
+    assert monitor.discover_journals(root, max_depth=0) == [top]
+    assert len(monitor.discover_journals(root)) == 2
+    assert len(monitor.discover_journals(root, max_files=1)) == 1
+
+
+def test_non_tty_show_is_one_plain_snapshot(tmp_path, monkeypatch):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples(1))
+    output = io.StringIO()
+    monkeypatch.setattr(sys, 'stdout', output)
+    monkeypatch.setattr(monitor.time, 'sleep', lambda *_: pytest.fail('Should not wait'))
+    monitor.show(path)
+    assert '\x1b' not in output.getvalue()
+    assert 'Temperature' in output.getvalue()
+
+
+def test_show_existing_parent_folder_opens_all_run_overview(tmp_path, monkeypatch):
+    for name in ('ala4', 'dha'):
+        folder = tmp_path / name
+        folder.mkdir()
+        write(folder / 'run.events.jsonl', samples(1))
+    output = io.StringIO()
+    monkeypatch.setattr(sys, 'stdout', output)
+    monitor.show(tmp_path, once=True)
+    text = output.getvalue()
+    assert 'Run overview' in text and '2 runs' in text
+    assert 'ala4' in text and 'dha' in text
+    assert 'Total E [eV]' in text
+    assert '\x1b' not in text
+
+
+def test_show_cycles_overview_and_runs_and_returns_directly(tmp_path, monkeypatch):
+    from rich.console import Console
+    import rich.live
+
+    paths = [tmp_path / 'alpha.events.jsonl', tmp_path / 'beta.events.jsonl']
+    for path in paths:
+        write(path, samples(1))
+    monkeypatch.setattr(monitor, 'discover_journals', lambda *_: paths)
+    monkeypatch.setenv('TERM', 'xterm')
+    class Terminal(io.StringIO):
+        def isatty(self):
+            return True
+    monkeypatch.setattr(sys, 'stdout', Terminal())
+    monkeypatch.setattr(sys, 'stdin', Terminal())
+    frames = []
+    class Live:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def update(self, view, **kwargs):
+            output = io.StringIO()
+            Console(file=output, width=100).print(view)
+            frames.append(output.getvalue())
+    class Keyboard:
+        def __enter__(self):
+            self.keys = iter(['next', 'e', 'next', 'next', 'previous', 'o', 'q'])
+            return self
+        def __exit__(self, *args):
+            pass
+        def read(self, *_):
+            return next(self.keys)
+    monkeypatch.setattr(rich.live, 'Live', Live)
+    monkeypatch.setattr(monitor, '_Keyboard', Keyboard)
+    monitor.show(tmp_path)
+    assert len(frames) == 7
+    assert 'Run overview' in frames[0]
+    assert 'Run 1/2' in frames[1] and 'Total energy' in frames[1]
+    assert 'Conserved energy' in frames[2]
+    assert 'Run 2/2' in frames[3]
+    assert 'Run overview' in frames[4]
+    assert 'Run 2/2' in frames[5]
+    assert 'Run overview' in frames[6]
+
+
+def test_once_is_ansi_free_even_in_a_terminal(tmp_path, monkeypatch):
+    class Terminal(io.StringIO):
+        def isatty(self):
+            return True
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples(1))
+    output = Terminal()
+    monkeypatch.setattr(sys, 'stdout', output)
+    monitor.show(path, once=True)
+    assert '\x1b' not in output.getvalue()
+
+
+@pytest.mark.parametrize('interval', [0, -1, float('nan'), float('inf')])
+def test_bad_intervals_are_rejected(tmp_path, interval):
+    with pytest.raises(ValueError, match='positive'):
+        monitor.show(tmp_path, interval=interval)
+
+
+def test_time_axis_includes_intermediate_numbered_ticks():
+    ticks = monitor._time_ticks(0, 5, 60)
+    assert [label for _, label in ticks] == ['0', '1.25', '2.5', '3.75', '5']
+    assert [position for position, _ in ticks] == [0, 15, 30, 44, 59]
+    for ascii_only in (False, True):
+        plot = monitor._plot([{'time_ps': 0, 'temperature_K': 300},
+                              {'time_ps': 5, 'temperature_K': 301}],
+                             'temperature_K', 'Temperature', 'K', 80, ascii_only=ascii_only)
+        axis, labels = plot.renderables[-3:-1]
+        assert axis.plain.count('+' if ascii_only else '┬') == (6 if ascii_only else 5)
+        assert labels.plain.split() == ['0', '1.25', '2.5', '3.75', '5']
+
+
+@pytest.mark.parametrize('columns', [8, 12, 20, 30])
+@pytest.mark.parametrize('right', [0.000003, 5, 123456789])
+def test_time_ticks_adapt_without_overlapping_labels(columns, right):
+    ticks = monitor._time_ticks(0, right, columns)
+    previous_end = -2
+    for position, label in ticks:
+        start = max(0, min(columns - len(label), position - len(label) // 2))
+        assert start > previous_end + 1
+        assert start + len(label) <= columns
+        previous_end = start + len(label) - 1
+    assert ticks[0][1] == '0'
+    assert len(ticks) <= 5
+
+
+def test_time_zero_axis_has_no_invented_elapsed_time():
+    plot = monitor._plot([{'time_ps': 0, 'energy_eV': -39}], 'energy_eV', 'Total energy', 'eV', 80)
+    assert plot.renderables[-2].plain.split() == ['0']
+    assert monitor._time_ticks(0, 0, 60) == [(0, '0')]
+
+
+def test_total_energy_reference_uses_elapsed_time_not_half_the_sample_count(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    entries = [event(0, 'run_started', settings={}),
+               *[event(index + 1, 'sample', step=index, time_ps=time_ps, energy_eV=value,
+                       potential_energy_eV=value, conserved_energy_eV=value)
+                 for index, (time_ps, value) in enumerate([(0, 100), (1, 100), (2, 100), (8, -10), (10, -20)])]]
+    write(path, entries)
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    assert reader.state.energy_mean.reference() == (-15, False)
+    text = render(reader, energy='energy_eV')
+    assert 'Reference · latter half: -15.000 eV' in text
+    assert 'Target ' not in text
+    assert 'Reference · latter half: -15.000 eV' in render(reader, energy='potential_energy_eV')
+    assert 'Reference · latter half: -15.000000 eV' in render(reader, energy='conserved_energy_eV')
+    assert 'Reference | latter half: -15.000 eV' in render(reader, energy='energy_eV', ascii_only=True)
+
+
+def test_energy_mean_survives_plot_decimation_without_extrema_bias(tmp_path):
+    state = monitor.RunState(tmp_path / 'long.events.jsonl')
+    values = [20 if index % 7 == 0 else 0 for index in range(5003)]
+    for index, value in enumerate(values):
+        state.consume(event(index, 'sample', step=index, time_ps=index,
+                            energy_eV=value, potential_energy_eV=value - 100,
+                            conserved_energy_eV=value - 90, temperature_K=value + 280,
+                            volume_A3=value + 1000))
+    reference, approximate = state.energy_mean.reference()
+    expected = sum(values[2501:]) / len(values[2501:])
+    retained = [row['energy_eV'] for row in state.samples if row['time_ps'] >= 2501]
+    assert len(state.samples) <= monitor.MAX_HISTORY < len(values)
+    assert abs(sum(retained) / len(retained) - expected) > 0.05
+    assert abs(reference - expected) < 0.02
+    assert approximate
+    assert len(state.energy_mean.bins) <= monitor.MAX_MEAN_BINS
+    assert not state.energy_mean.exact
+    assert sum(item.count for item in state.energy_mean.bins.values()) == len(values)
+    assert sum(item.total for item in state.energy_mean.bins.values()) == sum(values)
+    for key, offset in (('potential_energy_eV', -100), ('conserved_energy_eV', -90),
+                        ('temperature_K', 280), ('volume_A3', 1000)):
+        value, estimated = state.reference(key)
+        assert estimated and abs(value - (expected + offset)) < 0.02
+        assert len(state.property_means[key].bins) <= monitor.MAX_MEAN_BINS
+    plot = monitor._state_plot(state, 'energy_eV', 'Total energy', 'eV', 80, None, False)
+    assert '≈' in plot.renderables[-1].plain and '(binned)' in plot.renderables[-1].plain
+
+
+def test_whole_time_bins_still_give_exact_sample_mean(monkeypatch):
+    monkeypatch.setattr(monitor, 'MAX_MEAN_BINS', 8)
+    mean = monitor._LatterHalfMean()
+    for index in range(32):
+        mean.add(index, float(index))
+    # The midpoint15.5 lies between bins12..15 and16..19.
+    assert mean.reference() == (23.5, False)
+    assert len(mean.bins) <= 8
+
+
+def test_reference_resets_per_md_segment_and_omits_missing_latter_half(tmp_path):
+    state = monitor.RunState(tmp_path / 'run.events.jsonl')
+    state.consume(event(0, 'sample', step=0, time_ps=0, energy_eV=-39, temperature_K=300))
+    state.consume(event(1, 'sample', step=1, time_ps=1))
+    assert state.energy_mean.reference() == (None, False)
+    assert state.reference('temperature_K') == (None, False)
+    state.consume(event(2, 'md_started', start_step=100, total_steps=20, dt_fs=0.5))
+    assert state.energy_mean.reference() == (None, False)
+    assert state.reference('temperature_K') == (None, False)
+    state.consume(event(3, 'sample', step=100, time_ps=0, energy_eV=-10))
+    assert state.energy_mean.reference() == (-10, False)
+
+
+def test_attached_total_energy_reference_and_checkpoint_fit_short_terminal(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    reader.state.samples[-1]['seconds_per_step'] = 0.0014
+    reader.state.info.update(_attached_keyboard=True,
+                             _attached_compact_progress='50% · 1,000/2,000 steps · 0.500 / 1.000 ps this run',
+                             _attached_timing='Elapsed 00:01 · ETA 00:01')
+    reader.state.consume(event(200, 'checkpoint', step=3000, path='restart.npz'))
+    text = render(reader, energy='energy_eV', height=24, attached=True)
+    assert 'Temperature [K]' in text and 'Total energy [eV]' in text
+    assert 'Reference · latter half' in text
+    assert 'Checkpoint' in text and 'q: hide plots' in text
+    assert 's/atom/step' in text and 'Elapsed' in text
+    assert len(text.splitlines()) <= 24
+
+
+@pytest.mark.parametrize('height', [None, 24])
+def test_completed_attached_display_reopens_with_show_and_has_no_stale_controls(tmp_path, height):
+    directory = tmp_path / 'run with spaces'
+    directory.mkdir()
+    path = directory / 'run.events.jsonl'
+    write(path, [*samples(), event(200, 'run_completed')])
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    reader.state.info['_attached_keyboard'] = True
+    text = render(reader, height=height, attached=True)
+    assert 'View saved graphs: so3lr show' in text
+    assert 'q:' not in text and 'Ctrl+C:' not in text and 'e: energy' not in text
+    assert 'watch' not in text
+    assert "'" + str(directory) + "'" in text.replace('\n', '')
+    if height is not None:
+        assert len(text.splitlines()) <= height
+
+
+def test_import_does_not_load_model_backends():
+    result = subprocess.run([sys.executable, '-c',
+        "import sys; import so3lr.cli.monitor; "
+        "assert not any(m.split('.')[0] in ('jax', 'flax', 'jax_md') for m in sys.modules)"],
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX terminal restoration')
+def test_keyboard_restores_terminal_on_failure(monkeypatch):
+    import termios
+    import tty
+    saved, restored = object(), []
+    monkeypatch.setattr(sys, 'stdin', type('Input', (), {'fileno': lambda self: 42})())
+    monkeypatch.setattr(termios, 'tcgetattr', lambda fd: saved)
+    monkeypatch.setattr(tty, 'setcbreak', lambda fd: None)
+    monkeypatch.setattr(termios, 'tcsetattr', lambda fd, when, state: restored.append((fd, state)))
+    with pytest.raises(RuntimeError):
+        with monitor._Keyboard():
+            raise RuntimeError('reader failed')
+    assert restored == [(42, saved)]
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX keyboard byte stream')
+@pytest.mark.parametrize('chunks, expected', [
+    ([b'\x1b[Ceq'], ['next', 'e', 'q']),
+    ([b'\x1b', b'[', b'Dq'], ['', '', 'previous', 'q']),
+])
+def test_keyboard_preserves_batched_keys_and_split_arrows(monkeypatch, chunks, expected):
+    import select
+    chunks = list(chunks)
+    keyboard = monitor._Keyboard()
+    keyboard.fd, keyboard.pending = 42, ''
+    monkeypatch.setattr(select, 'select', lambda *args: ([42], [], []) if chunks else ([], [], []))
+    monkeypatch.setattr(os, 'read', lambda *args: chunks.pop(0))
+    assert [keyboard.read(timeout=0) for _ in expected] == expected
+    assert keyboard.pending == ''
+
+
+def test_solid_guide_preserves_trace_and_never_colors_guide_as_data():
+    rows = [{'time_ps': 0, 'energy_eV': 0}, {'time_ps': 1, 'energy_eV': 1}]
+    bare = monitor._plot(rows, 'energy_eV', 'Total energy', 'eV', 60)
+    guided = monitor._plot(rows, 'energy_eV', 'Total energy', 'eV', 60, reference=0.5)
+    # Bounds are unchanged; 0.5 maps to pixel14 (the third dot of row3).
+    base = bare.renderables[4].plain.split('│')[1]
+    guide = guided.renderables[4]
+    trace = guide.plain.split('│')[1]
+    crosses = False
+    for index, (old, new) in enumerate(zip(base, trace)):
+        if old != ' ':
+            assert new == old
+            crosses = True
+        else:
+            assert new == '─'
+            offset = guide.plain.index('│') + 1 + index
+            assert not any(span.start <= offset < span.end and 'yellow' in str(span.style)
+                           for span in guide.spans)
+    assert crosses
+    assert any('dim' == str(span.style) for span in guide.spans)
+    assert any('yellow not dim' == str(span.style) for span in guide.spans)
+    ascii_plot = monitor._plot(rows, 'energy_eV', 'Total energy', 'eV', 60, reference=0.5, ascii_only=True)
+    assert '---' in ascii_plot.renderables[4].plain
+    assert '*' in ascii_plot.renderables[4].plain
+
+
+@pytest.mark.parametrize('width', [32, 60, 80, 100, 120])
+@pytest.mark.parametrize('ascii_only', [False, True])
+@pytest.mark.parametrize('height', [None, 20, 23, 24])
+def test_all_stacked_plot_axes_align_with_wide_values_and_missing_tail(tmp_path, width, ascii_only, height):
+    path = tmp_path / 'wide.events.jsonl'
+    entries = samples()
+    entries[0]['data']['settings']['ensemble'] = 'npt'
+    for item in entries:
+        if item['type'] == 'sample':
+            data = item['data']
+            data['volume_A3'] = 12345678901.123 + data['time_ps']
+            data['conserved_energy_eV'] = -123456789.123456 + data['time_ps'] * 0.0001
+            if data['time_ps'] > 0.8:
+                data['temperature_K'] = None
+    write(path, entries)
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    views = [render(reader, width=width, height=height, page=page, ascii_only=ascii_only,
+                    energy='conserved_energy_eV') for page in range(3 if height else 1)]
+    positions, right_edges, time_labels = set(), set(), set()
+    for text in views:
+        lines = text.splitlines()
+        for index, line in enumerate(lines):
+            axis = '|' if ascii_only else '│'
+            if axis in line and line.index(axis) > 0:
+                prefix = line.partition(axis)[0].strip()
+                try:
+                    if prefix:
+                        float(prefix)
+                except ValueError:
+                    continue
+                positions.add(line.index(axis))
+                right_edges.add(len(line))
+            if line.startswith('Time [ps]'):
+                time_labels.add(lines[index - 1])
+        if height is not None:
+            assert len(lines) <= height
+            assert 'q' in lines[-1]
+    assert len(positions) == 1
+    assert right_edges == {width}
+    assert len(time_labels) == 1  # All fields share the full recorded time span.
+
+
+def test_nve_temperature_reference_is_observed_not_a_thermostat_target(tmp_path):
+    path = tmp_path / 'nve.events.jsonl'
+    entries = samples()
+    entries[0]['data']['settings']['ensemble'] = 'nve'
+    write(path, entries)
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    text = render(reader)
+    assert 'Total energy [eV]' in text
+    assert 'Thermostat target' not in text
+    assert 'Reference · latter half: 295.0 K' in text
+    assert 'Reference · latter half: -38.785 eV' in text
+
+
+def test_langevin_target_and_unavailable_conserved_energy_are_explicit(tmp_path):
+    path = tmp_path / 'langevin.events.jsonl'
+    entries = samples()
+    entries[0]['data']['settings']['ensemble'] = 'nvt-langevin'
+    for item in entries:
+        if item['type'] == 'sample':
+            item['data']['conserved_energy_eV'] = None
+    write(path, entries)
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    text = render(reader, energy='conserved_energy_eV')
+    assert 'Thermostat target 300 K' in text
+    assert 'Not defined for Langevin dynamics (stochastic thermostat).' in text
+    assert 'Conserved energy [eV]  0' not in text
+    assert 'Reference · latter half:' not in text
+
+
+def test_loading_and_failed_short_view_show_recorded_details_without_fake_samples(tmp_path):
+    path = tmp_path / 'loading.events.jsonl'
+    write(path, [event(0, 'run_started', settings={'model': 'so3lr-tauri-m-2606'}),
+                 event(1, 'phase', name='Compiling', detail='Warming up the first MD cycle')])
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    text = render(reader, height=20)
+    assert 'Compiling' in text
+    assert 'Warming up the first MD cycle' in text
+    assert '│' not in text and 'Reference' not in text
+    reader.state.consume(event(2, 'run_failed', message='Structure has no atoms'))
+    failed = render(reader, height=20)
+    assert 'Structure has no atoms' in failed
+    assert 'q: close viewer' in failed
+    assert 'job continues' not in failed
+
+
+@pytest.mark.parametrize('height', [None, 20, 24])
+@pytest.mark.parametrize('ascii_only', [False, True])
+def test_optimization_view_shows_recorded_force_criterion_without_md_graphs(tmp_path, height, ascii_only):
+    path = tmp_path / 'opt.events.jsonl'
+    write(path, [event(0, 'run_started', settings={'model': 'so3lr-tauri-m-2606', 'precision': 'mixed',
+                                                'output_file': '[literal]optimized.xyz'}),
+                 event(1, 'info', operation='optimization', opt_step=200, opt_total_steps=200,
+                       opt_energy_eV=-39.12, opt_force_max_eVA=0.03, opt_force_target_eVA=0.01),
+                 event(2, 'phase', name='Complete'), event(3, 'run_completed')])
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    text = render(reader, height=height, ascii_only=ascii_only)
+    assert 'Optimization' in text and 'latest recorded cycle' in text
+    assert '200/200 steps' in text
+    assert '-39.120000 eV' in text
+    assert '0.03 eV/' in text and '0.01 eV/' in text
+    assert 'Step budget reached; force criterion not met' in text
+    assert 'Temperature' not in text and 'Time [ps]' not in text and 'MD samples' not in text
+    assert 'q: close viewer' in text and 'e: energy' not in text
+    if height is not None:
+        assert len(text.splitlines()) <= height
+    if ascii_only:
+        assert text.isascii()
+    reader.state.info['opt_force_max_eVA'] = 0.005
+    assert 'Force criterion met' in render(reader, height=height)
+
+
+def test_optimization_marker_clears_when_md_begins(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, [event(0, 'run_started', settings={}),
+                 event(1, 'info', operation='optimization', opt_step=5)])
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    assert 'Optimization' in render(reader)
+    reader.state.consume(event(2, 'info', operation='md'))
+    reader.state.consume(event(3, 'md_started', start_step=1000, total_steps=200, dt_fs=0.5))
+    reader.state.consume(event(4, 'sample', step=1000, segment_step=0, time_ps=0, temperature_K=290, energy_eV=-39))
+    text = render(reader)
+    assert 'Optimization' not in text
+    assert 'Temperature [K]' in text and 'Total energy [eV]' in text
+    assert 'Segment 0/200 steps' in text and 'step counter 1,000' in text

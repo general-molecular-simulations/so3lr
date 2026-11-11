@@ -8,7 +8,7 @@ from unittest import mock
 import pytest
 from click.testing import CliRunner
 
-from so3lr.cli.so3lr_cli import cli, main, known_yaml_keys, BASIC_HELP_STRING, YAML_DEFAULTS
+from so3lr.cli.so3lr_cli import cli, main, known_yaml_keys, YAML_DEFAULTS
 from so3lr.md_settings_validation import DEFAULT_PRESSURE, load_settings_yaml, resolve_ensemble
 
 
@@ -33,11 +33,10 @@ class TestTopLevelCLI:
         assert result.exit_code == 0
 
     def test_help_lists_main_subcommands(self):
-        """Main subcommands should appear in the basic help string."""
+        """Registered main subcommands should appear in generated help."""
+        result = CliRunner().invoke(cli, ['--help'])
         for cmd in HELP_LISTED_COMMANDS:
-            assert f"so3lr {cmd}" in BASIC_HELP_STRING, (
-                f"Subcommand '{cmd}' missing from BASIC_HELP_STRING"
-            )
+            assert re.search(rf'^\s+{re.escape(cmd)}\s+', result.output, re.MULTILINE)
 
     def test_no_args_shows_help(self):
         runner = CliRunner()
@@ -70,8 +69,9 @@ class TestSubcommandHelp:
 def test_help_names_each_ensemble_correctly(ensemble):
     """Each `so3lr <ensemble>` line of the help names its own ensemble and no other
     (`so3lr nve` was once described as NVT)."""
-    line = next((ln for ln in BASIC_HELP_STRING.splitlines()
-                 if ln.strip().startswith(f"so3lr {ensemble}")), None)
+    output = CliRunner().invoke(cli, ['--help']).output
+    line = next((ln for ln in output.splitlines()
+                 if ln.strip().startswith(f"{ensemble} ")), None)
     assert line is not None, f"'so3lr {ensemble}' line not found in BASIC_HELP_STRING"
     for other in ("NVE", "NVT", "NPT"):
         assert (other in line) == (other == ensemble.upper()), line

@@ -63,6 +63,7 @@ from ..md_observables import is_per_atom_observable
 from ..md_settings_validation import (
     DEFAULT_PRECISION, model_precision, normalize_npt_coupling, resolve_ensemble, resolve_precision,
     state_precision, validate_md_counts)
+from .presentation import get_reporter, make_console_handler
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -281,13 +282,9 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
     file_formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-    # Create formatter for console output - just the message, no prefix
-    console_formatter = logging.Formatter('%(message)s')
-
-    # Add the console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(console_level)
-    console_handler.setFormatter(console_formatter)
+    # The terminal renderer is independent of the durable file format below.
+    # Outside an active CLI display this remains a plain stderr handler.
+    console_handler = make_console_handler(console_level)
     logger.addHandler(console_handler)
 
     # Add the file handler if a log file is specified
@@ -310,6 +307,12 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
 
     # Prevent propagation to the root logger to avoid duplicate messages
     logger.propagate = False
+
+    # The active invocation can write its durable identity only after its own
+    # file handler is installed (a previous CLI invocation may have left one).
+    ready = getattr(get_reporter(), 'logger_ready', None)
+    if ready is not None:
+        ready(log_file)
 
     return logger
 
@@ -1246,18 +1249,35 @@ def validate_npt_restart_coupling(state, box, npt_coupling: str) -> None:
             )
 
 
-def format_md_row(step, KE, PE, H, T, time_per_step, npt_state=None, box=None):
+def format_md_row(step, KE, PE, H, T, time_per_step, npt_state=None, box=None, *, metrics=None):
     """One MD log row, tab-separated like the header in perform_md. For NPT pass
     the state and box: a flexible-cell (semi-isotropic) state adds its
-    pressure-tensor diagonal, then the box lengths follow."""
+    pressure-tensor diagonal, then the box lengths follow. An optional metrics
+    dict receives host-side cell data and the pressure already evaluated for
+    this row, so the offline monitor needs no additional model evaluations."""
     cols = [f'{step}', f'{KE + PE:.3f}', f'{KE:.3f}', f'{PE:.3f}', f'{(H or 0.0):.3f}', f'{T:.1f}']
     if npt_state is not None:
         if isinstance(npt_state, jax_md.simulate.NPTNoseHooverFlexState):
-            P = jax_md.simulate.pressure_tensor_flex(npt_state) / units.metal_unit_system()['pressure']
+            pressure_tensor = jax_md.simulate.pressure_tensor_flex(npt_state)
+            P = pressure_tensor / units.metal_unit_system()['pressure']
             cols.append('({:.1f},{:.1f},{:.1f})'.format(*(float(P[i, i]) for i in range(3))))
-        L = box_to_diag(box)
+            if metrics is not None:
+                metrics['pressure_diagonal'] = np.diag(np.asarray(pressure_tensor)).tolist()
+        L = np.atleast_1d(np.asarray(box_to_diag(box)))
         cols.append(f'{L[0]:.3f}' if len(L) == 1 else f'({L[0]:.3f},{L[1]:.3f},{L[2]:.3f})')
     cols.append(f'{time_per_step:.2e}')
+    if metrics is not None and box is not None:
+        cell = np.asarray(box)
+        if cell.ndim == 0 or cell.size == 1:
+            cell = np.eye(3) * float(cell.reshape(-1)[0])
+        elif cell.ndim == 1:
+            cell = np.diag(cell)
+        else:
+            cell = cell.T  # JAX-MD columns -> ASE lattice rows.
+        if cell.shape == (3, 3) and np.all(np.isfinite(cell)):
+            volume = abs(float(np.linalg.det(cell)))
+            if volume > 0:
+                metrics.update(box=cell.tolist(), volume=volume)
     return '\t'.join(cols)
 
 
@@ -1544,6 +1564,7 @@ def validate_and_log_input(initial_geometry, input_file_path,
     if positions is None or len(positions) == 0:
         raise ValueError(f"Input geometry file {input_file_path} has no atomic positions.")
 
+    get_reporter().update_info(atoms=n_atoms)
     if not verbose:
         return
 
@@ -1741,6 +1762,14 @@ def save_restart_checkpoints(
         save_pysages_state(pysages_result, restart_pysages_save_path)
 
 
+def checkpoint_output_path(restart_save_path, restart_pysages_save_path=None):
+    """The actual reported filename, including save_state's implicit .npz suffix."""
+    if restart_save_path is None:
+        return restart_pysages_save_path
+    path = str(restart_save_path)
+    return path if path.endswith('.npz') else path + '.npz'
+
+
 def _validate_md_output_write_policy(
     *,
     output_file: Optional[Union[str, Path]],
@@ -1801,6 +1830,9 @@ def perform_md(
     log_file = all_settings.get('log_file')
     setup_logger(log_file)
     setup_run(all_settings)  # before any array: direct Python callers may bypass run()
+    reporter = get_reporter()
+    reporter.phase('Loading', 'Preparing the MD state')
+    reporter.update_info(engine='standard', device_count=1, kernels='JAX', precision=all_settings['precision'])
 
     # Extract settings with defaults
     input_file = all_settings.get('input_file')
@@ -2042,6 +2074,7 @@ def perform_md(
     current_cycle = 0
     # Loading restart
     if restart:
+        reporter.phase('Loading', 'Restoring the checkpoint')
         logger.info(f'Loading state from {restart_load_path}.')
         try:
             state, box, current_cycle = load_state(
@@ -2091,8 +2124,10 @@ def perform_md(
 
     # Loading the model. A bundled name (so3lr-tauri-s/m/l/so3lr) or a custom path; None
     # falls back to the default model. load_model resolves names and paths alike.
-    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    from so3lr.model_registry import DEFAULT_MODEL, available_models, model_aliases
     selected_model = model_path if model_path is not None else DEFAULT_MODEL
+    reporter.update_info(model=model_aliases().get(str(selected_model), str(selected_model)))
+    reporter.phase('Loading', 'Loading the force field')
     if selected_model in available_models():
         logger.info(f"Using bundled SO3LR model: {selected_model}")
     else:
@@ -2112,6 +2147,7 @@ def perform_md(
     )
 
     # Setting up the model
+    reporter.phase('Compiling', 'Preparing the force field and initial MD state')
     neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = process_model(
         potential=potential,
         species=initial_geometry_dict['species'],
@@ -2354,6 +2390,8 @@ def perform_md(
 
     # Running the MD
     logger.info('Starting MD simulation...')
+    if ensemble == 'nvt-langevin':
+        logger.info('For NVT-Langevin, H is the total energy E, not a conserved quantity.')
     if ensemble == 'npt':
         # One \t per column, as in format_md_row.
         p_col = '\tP [bar] (xx,yy,zz)' if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState) else ''
@@ -2375,8 +2413,15 @@ def perform_md(
         md_P,
         k_grid_disp=k_grid_disp
     )
+    cell_metrics = {}
     logger.info(format_md_row(current_cycle * md_steps, KE, PE, H, current_T, 0.0,
-                              state if ensemble == 'npt' else None, box))
+                              state if ensemble == 'npt' else None, box, metrics=cell_metrics))
+    reporter.start_md(current_cycle * md_steps, md_cycles * md_steps, md_dt_ps * 1000.0)
+    reporter.progress(current_cycle * md_steps, temperature=current_T,
+                      potential_energy=PE, time_per_step=None,
+                      kinetic_energy=float(KE), energy=float(KE) + float(PE),
+                      conserved_energy=None if ensemble == 'nvt-langevin' or H is None else float(H),
+                      **cell_metrics)
 
     # --- Conserved-quantity drift watchdog --------------------------------
     # For NVE the conserved quantity is the total energy E = KE+PE; for the
@@ -2520,6 +2565,7 @@ def perform_md(
             reference_is_cartesian,
         )
 
+    reporter.phase('Compiling', 'Warming up the first MD cycle')
     while cycle_md < md_cycles:
         old_time = time.time()
         if do_enhanced_sampling:
@@ -2682,8 +2728,18 @@ def perform_md(
                                 f"to change the equilibration window; some drift early in the run is normal.)")
                             drift_warned = True
 
+            cell_metrics = {}
             logger.info(format_md_row(current_cycle * md_steps, KE, PE, H, current_T, time_per_step,
-                                      state if ensemble == 'npt' else None, box))
+                                      state if ensemble == 'npt' else None, box, metrics=cell_metrics))
+            reporter.phase('Running')
+            # Only accepted cycles advance the display. The first accepted cycle
+            # can include compilation/reallocation and must not drive the ETA.
+            reporter.progress(current_cycle * md_steps, temperature=current_T,
+                              potential_energy=PE,
+                              time_per_step=time_per_step if cycle_md > 1 else None,
+                              kinetic_energy=float(KE), energy=float(KE) + float(PE),
+                              conserved_energy=None if ensemble == 'nvt-langevin' or H is None else float(H),
+                              **cell_metrics)
 
             out_pos = output_position_array(
                 state.position, box, fractional_coordinates, output_cartesian_positions
@@ -2700,6 +2756,7 @@ def perform_md(
                     obs_dict[key].append(obs_data[1][key])
 
             if len(positions) >= save_buffer:
+                reporter.phase('Saving', 'Writing output files')
                 # Write frames first, then checkpoint: a failed write must
                 # not leave the restart file ahead of the trajectory.
                 if output_format == 'hdf5':
@@ -2744,9 +2801,13 @@ def perform_md(
                         ),
                     )
                     last_checkpoint_cycle = current_cycle
+                    reporter.checkpoint(current_cycle * md_steps,
+                                        checkpoint_output_path(restart_save_path, restart_pysages_save_path))
+                reporter.phase('Running')
 
     # A frame-major HDF5 layout and extxyz both support arbitrary batch sizes,
     # so flush the final short buffer instead of dropping or padding it.
+    reporter.phase('Saving', 'Finalizing output files')
     if positions:
         if output_format == 'hdf5':
             positions, momenta, boxes, obs_dict = write_to_hdf5(
@@ -2794,6 +2855,8 @@ def perform_md(
                 restart_pysages_save_path if do_enhanced_sampling else None
             ),
         )
+        reporter.checkpoint(current_cycle * md_steps,
+                            checkpoint_output_path(restart_save_path, restart_pysages_save_path))
 
     logger.info('Results saved to: ' + output_file)
     # The first cycle is excluded from timing (it includes JIT compilation /
@@ -2846,6 +2909,7 @@ def run_on_flash(settings: Dict, atoms, task: str, start: Callable):
     validate_options(settings)
     engine = settings.get('engine') or 'auto'
     if engine == 'standard':
+        get_reporter().update_info(engine='standard', device_count=1, kernels='JAX')
         logger.info("Engine: neighbour-list potential (--engine standard)")
         return False, None
     problem = flash_problem(settings, atoms, task=task)
@@ -2856,6 +2920,7 @@ def run_on_flash(settings: Dict, atoms, task: str, start: Callable):
             problem = f"it does not import here ({type(exc).__name__}: {exc})"
     if problem is None:
         logger.info(f"Engine: flash ({'--engine flash' if engine == 'flash' else 'auto'})")
+        get_reporter().update_info(engine='flash')
         try:
             return True, start(flash_md)
         except flash_md.FlashUnavailable as exc:
@@ -2866,6 +2931,7 @@ def run_on_flash(settings: Dict, atoms, task: str, start: Callable):
     if engine == 'flash':
         raise ValueError(f"--engine flash: {problem}")
     logger.info(f"Engine: neighbour-list potential (flash cannot: {problem})")
+    get_reporter().update_info(engine='standard', device_count=1, kernels='JAX')
     return False, None
 
 
@@ -2941,6 +3007,8 @@ def perform_min(
     """
     setup_logger(all_settings.get('log_file'))  # first: setup_run may warn of a deprecated setting
     all_settings = setup_run(dict(all_settings))  # so3lr opt does not go through run()
+    reporter = get_reporter()
+    reporter.phase('Loading', 'Preparing geometry relaxation')
 
     # Extract settings with defaults
     output_file = all_settings.get('output_file')
@@ -3057,8 +3125,11 @@ def perform_min(
 
     # Loading the model. A bundled name (so3lr-tauri-s/m/l/so3lr) or a custom path; None
     # falls back to the default model. load_model resolves names and paths alike.
-    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    from so3lr.model_registry import DEFAULT_MODEL, available_models, model_aliases
     selected_model = model_path if model_path is not None else DEFAULT_MODEL
+    reporter.update_info(model=model_aliases().get(str(selected_model), str(selected_model)),
+                         precision=all_settings['precision'], engine='standard', device_count=1, kernels='JAX')
+    reporter.phase('Loading', 'Loading the force field')
     if selected_model in available_models():
         logger.info(f"Using bundled SO3LR model: {selected_model}")
     else:
@@ -3075,6 +3146,7 @@ def perform_min(
     )
 
     # Setting up the model
+    reporter.phase('Compiling', 'Preparing geometry relaxation')
     neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = process_model(
         potential=potential,
         species=initial_geometry_dict['species'],
@@ -3123,6 +3195,7 @@ def perform_min(
         neighbor_lr=nbrs_lr.idx
     )
 
+    reporter.phase('Relaxing', 'FIRE geometry optimization')
     logger.info('Starting minimization...')
     logger.info('Step\tE [eV]\tF_max [eV/Å]')
 
@@ -3140,7 +3213,13 @@ def perform_min(
         box=box
     )
     f_max = np.abs(F).max()
-    logger.info('{}\t {:.3f}\t {:.3f}'.format(0, E, f_max))
+    energy = float(E)
+    logger.info('{}\t {:.3f}\t {:.3f}'.format(0, energy, f_max))
+    reporter.update_info(operation='optimization', opt_step=0,
+                         opt_total_steps=min_cycles * min_steps,
+                         opt_energy_eV=energy, opt_force_max_eVA=float(f_max),
+                         **({'opt_force_target_eVA': float(force_convergence)}
+                            if force_convergence is not None else {}))
 
     # If tracking trajectory, store all positions
     minimization_trajectory = []
@@ -3175,7 +3254,10 @@ def perform_min(
         )
 
         f_max = np.abs(F).max()
-        logger.info('{}\t {:.3f}\t {:.3f}'.format(i*min_steps, E, f_max))
+        energy = float(E)
+        logger.info('{}\t {:.3f}\t {:.3f}'.format(i*min_steps, energy, f_max))
+        reporter.update_info(opt_step=i * min_steps, opt_energy_eV=energy,
+                             opt_force_max_eVA=float(f_max))
 
         # Save the current positions to the trajectory
         minimization_trajectory.append(np.array(min_state.position))
@@ -3196,7 +3278,7 @@ def perform_min(
                 f"FIRE minimization hit the min_cycles ceiling "
                 f"({min_cycles} cycles * {min_steps} steps = "
                 f"{min_cycles*min_steps} total steps) without reaching "
-                f"force_convergence={force_convergence:.3f} eV/Å "
+                f"force_convergence={force_convergence:.3g} eV/Å "
                 f"(last Fmax = {f_max:.3f} eV/Å). Saving best-so-far "
                 f"positions. Increase --min-cycles or relax --force-conv "
                 f"if tighter convergence is required.")
@@ -3204,11 +3286,13 @@ def perform_min(
     # Save optimization result and return optimized geometry
     positions = minimization_trajectory
     if output_format in ('extxyz', 'hdf5'):
+        reporter.phase('Saving', 'Writing the relaxed structure')
         write_to_extxyz(
             output_file, initial_geometry, boxes=box, momenta=None,
             positions=positions, fractional_coordinates=fractional_coordinates,
             append=False, overwrite=overwrite,
         )
+        reporter.update_info(optimization_output_file=str(output_file))
     
     logger.info(f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
 
@@ -3620,6 +3704,7 @@ def run(
 
     setup_logger(settings.get('log_file'))  # first: setup_run may warn of a deprecated setting
     setup_run(settings)
+    get_reporter().phase('Loading', 'Reading the input structure')
     input_file_path = settings.get('input_file')
     if input_file_path is not None:
         try:
