@@ -108,10 +108,11 @@ def test_one_engine_goes_between_free_space_and_a_box():
     cluster = atoms.copy()
     cluster.pbc = False
     cluster.set_cell(np.zeros(3))
-    engine, calc = _engine(atoms), _calculator()
+    # one calculator for each: a So3lrCalculator keeps the neighbour list of its first system
+    references = {False: _reference(cluster), True: _reference(atoms)}
+    engine = _engine(atoms)
     for periodic in (False, True, False):
-        _assert_close(engine(atoms.positions, _box(atoms) if periodic else None),
-                      _reference(atoms if periodic else cluster, calc=calc))
+        _assert_close(engine(atoms.positions, _box(atoms) if periodic else None), references[periodic])
         assert engine.backend == "neighbour-list"
 
 
@@ -146,7 +147,7 @@ def test_pickles_as_its_arguments():
 
 @pytest.mark.parametrize("kwargs,match", [
     (dict(engine="fast"), "engine must be one of"),
-    (dict(kspace_electrostatics="p3m"), "kspace_electrostatics must be"),
+    (dict(kspace_electrostatics="spme"), "kspace_electrostatics must be"),
     (dict(kspace_smearing=2.0), "need kspace_electrostatics"),
 ])
 def test_refuses_bad_arguments(kwargs, match):
