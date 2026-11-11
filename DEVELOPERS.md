@@ -43,23 +43,6 @@ lockfile diff with the change that needed it. Git dependencies must be pinned to
 40-character commits; `[tool.uv].override-dependencies` pins GLP's transitive
 `comms` dependency, which GLP itself names by branch.
 
-Security updates should use targeted `uv lock --upgrade-package PACKAGE`
-commands to preserve the numerical stack and Git revisions. Dependabot checks
-the uv project weekly and groups security updates into one pull request. Run
-the dependency compatibility checks with all of their optional tools installed:
-
-```sh
-uv sync --locked --group dev --group notebooks --extra tfds --extra wandb
-uv run --no-sync pytest tests/test_dependency_compat.py
-```
-
-The `tfds` extra uses TensorFlow and TensorBoard 2.21 with patched setuptools.
-TensorBoard is explicit because TensorFlow 2.21 no longer installs it;
-TensorBoard 2.20 imports `pkg_resources`, which recent setuptools removes.
-TensorFlow 2.21 also requires h5py below 3.15, so data-loader checks are part of
-validating this stack. After an update, rerun `uv sync --locked` in existing
-environments to install the patched packages.
-
 ## Adding Features or Fixes
 1. Create a new branch for your feature or bugfix.
 2. Make your changes with clear commit messages.
