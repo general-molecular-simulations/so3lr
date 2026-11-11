@@ -41,29 +41,28 @@ from so3lr.mlff.nn.observable.observable_sparse import (
     dispersion_tail_correction_energy,
 )
 
-from so3lr.jaxmd_utils import nbrs_cutoff, to_jax_md as _to_jax_md
-from so3lr.pbc import is_fully_periodic, lattice_rows, minimum_image_problem
+from so3lr.jaxmd_utils import OVERFLOW_EXTRA_LR, OVERFLOW_EXTRA_SR, nbrs_cutoff, to_jax_md as _to_jax_md
+from so3lr.pbc import box_to_diag, is_fully_periodic, lattice_rows, minimum_image_problem
 from so3lr import kspace_defaults as KS
 from so3lr.mlff.utils.kspace_utils import setup_kspace_grid as _setup_kspace_grid
 
 
-# Optional PySAGES integration
-try:
-    import pysages
-    from .so3lr_pysages_interface import (
-        create_pysages_interface_fns, update_so3lr_after_pysages,
-        save_pysages_state, parse_pysages_input, get_pysages_method,
-        load_pysages_state
-    )
-    HAS_PYSAGES = True
-except ImportError:
-    HAS_PYSAGES = False
+# PySAGES integration (optional: the interface module guards its PySAGES imports)
+from .so3lr_pysages_interface import (
+    check_enhanced_sampling, check_pysages_restart_ensemble, create_pysages_interface_fns,
+    cv_log_size, discard_cv_rows, get_pysages_method, load_pysages_restart,
+    reset_pysages_runner, run_pysages_cycle, save_pysages_state, update_so3lr_after_pysages,
+    warn_restart_method_mismatch,
+)
+from so3lr.restraints import build_cylinder_restraint, cylindrical_restraint_energy, parse_cylinder_settings
 
 import h5py
 from collections import namedtuple
 
 from ..md_observables import is_per_atom_observable
-from ..md_settings_validation import canonical_precision, resolve_ensemble, state_precision, validate_md_counts
+from ..md_settings_validation import (
+    DEFAULT_PRECISION, model_precision, normalize_npt_coupling, resolve_ensemble, resolve_precision,
+    state_precision, validate_md_counts)
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -315,62 +314,58 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
     return logger
 
 
-# Track whether setup_jax_globals has already configured the process so a
-# second call from a different entry point doesn't log "Matmul precision: ..."
-# twice and so we can tell if a caller's --precision/--matmul-precision is
-# being silently ignored because something configured JAX before us.
+# Whether setup_jax_globals has configured the process: a second call from another entry
+# point logs nothing and warns if its matmul_precision would be ignored.
 _JAX_GLOBALS_CONFIGURED: Dict[str, Any] = {}
 
 
 def run_dtypes(settings):
-    """(the model's dtype, the MD state's) for a run's settings, on both engines (see
-    md_settings_validation.state_precision); without x64 both are float32."""
-    precision = canonical_precision(settings.get('precision'))
-    model = jnp.float64 if precision == 'float64' else jnp.float32
-    if not jax.config.jax_enable_x64:
-        return model, model
-    return model, (jnp.float64 if state_precision(precision, settings) == 'float64' else jnp.float32)
+    """(the model's dtype, the MD state's) for settings set up by setup_run, on both engines."""
+    precision = settings.get('precision')
+    return (jnp.float64 if model_precision(precision) == 'float64' else jnp.float32,
+            jnp.float64 if state_precision(precision) == 'float64' else jnp.float32)
 
 
-def setup_jax_globals(precision: str = 'float32', matmul_precision: str = 'highest') -> None:
+def setup_run(settings):
+    """Resolve settings' precision to the run's once (resolve_precision, so the deprecated
+    flash_mixed it folds in is read and warned about once) and configure JAX for it
+    (setup_jax_globals, before any array is built); returns the settings."""
+    settings['precision'], settings['flash_mixed'] = resolve_precision(settings), None
+    setup_jax_globals(precision=settings['precision'],
+                      matmul_precision=settings.get('matmul_precision', 'highest'))
+    return settings
+
+
+def setup_jax_globals(precision: str = DEFAULT_PRECISION, matmul_precision: str = 'highest') -> None:
     """Configure JAX process-globals that every SO3LR entry point depends on.
 
-    Must be called before any JAX op runs. Idempotent — subsequent calls with
-    identical arguments are silent; with different arguments they warn and
-    keep the first-call values (changing matmul_precision after the first
-    JIT'd function may silently re-trace).
+    Must be called before any JAX op runs. Every call turns jax_enable_x64 on (again);
+    a later call with a different matmul_precision warns and keeps the first-call value
+    (changing it after the first JIT'd function may silently re-trace).
 
     Args:
-        precision: 'float32' or 'float64'. Drives jax_enable_x64 (always on,
-            since x64 is required for high_precision_sum / mixed-precision
-            integrator ops; the precision setting controls array dtype, not
-            kernel availability).
+        precision: the run's (float32, float64 or mixed), only logged: x64 is always on,
+            since high_precision_sum and mixed-precision integrator ops need it; the
+            precision controls the arrays' dtypes, not kernel availability.
         matmul_precision: 'default' / 'high' / 'highest'. 'highest' forces
             full float32 matmuls (no TF32 fallback) which avoids drift on
             GPUs at the cost of throughput.
     """
-    if _JAX_GLOBALS_CONFIGURED:
-        prev_mp = _JAX_GLOBALS_CONFIGURED.get('matmul_precision')
-        prev_p = _JAX_GLOBALS_CONFIGURED.get('precision')
-        if prev_mp != matmul_precision or prev_p != precision:
-            logger.warning(
-                f"setup_jax_globals called again with different values "
-                f"(precision: {prev_p} -> {precision}, "
-                f"matmul_precision: {prev_mp} -> {matmul_precision}); "
-                f"keeping the original. Set both globals in your first call."
-            )
-        return
-
-    # Always enable x64 so that high_precision_sum and mixed-precision
-    # integrator ops work correctly. The 'precision' setting controls
+    # Always enable x64 (also after a caller turned it off again) so that high_precision_sum
+    # and mixed-precision integrator ops work correctly. The 'precision' setting controls
     # which dtype arrays are created in, not whether x64 is available.
     jax.config.update("jax_enable_x64", True)
-
+    if _JAX_GLOBALS_CONFIGURED:
+        prev_mp = _JAX_GLOBALS_CONFIGURED.get('matmul_precision')
+        if prev_mp != matmul_precision:
+            logger.warning(
+                f"setup_jax_globals called again with matmul_precision {matmul_precision} "
+                f"(was {prev_mp}); keeping the original. Set it in your first call."
+            )
+        return
     # Reduces drift for x32 precision simulations. Must be set before any
     # JIT compilation that touches matmuls.
     jax.config.update("jax_default_matmul_precision", matmul_precision)
-
-    _JAX_GLOBALS_CONFIGURED['precision'] = precision
     _JAX_GLOBALS_CONFIGURED['matmul_precision'] = matmul_precision
     logger.info(
         f"JAX globals set: precision={precision}, "
@@ -1210,40 +1205,6 @@ def process_model(
     return neighbor_fn, neighbor_fn_lr, energy_or_obs_fn
 
 
-def box_to_diag(box):
-    """Return orthorhombic lengths from a box vector or diagonal matrix.
-
-    This is intentionally not a conversion for general cells. Fully flexible
-    cells are rejected by :func:`normalize_npt_coupling` before they can reach
-    any caller of this helper.
-    """
-    if box is not None and hasattr(box, 'ndim') and box.ndim == 2:
-        return jnp.diag(box)
-    return box
-
-
-def normalize_npt_coupling(npt_coupling: str) -> str:
-    """Return 'isotropic' or 'semi-isotropic' (spaces/underscores/hyphens accepted).
-
-    Semi-isotropic coupling is experimental. Fully anisotropic coupling is
-    rejected: the integrator would evolve shear, but the neighbour-list,
-    reciprocal-space and dispersion-tail paths assume an orthorhombic cell.
-    """
-    coupling = '-'.join(str(npt_coupling).strip().lower().replace('_', ' ').replace('-', ' ').split())
-    if coupling == 'anisotropic':
-        raise ValueError(
-            "npt_coupling='anisotropic' is experimental and not supported by SO3LR MD: "
-            "the cell would shear, but the neighbour-list, reciprocal-space and "
-            "dispersion-tail paths assume an orthorhombic cell. Use 'isotropic' or "
-            "the experimental 'semi-isotropic' (coupled x/y, independent z)."
-        )
-    if coupling not in ('isotropic', 'semi-isotropic'):
-        raise ValueError(
-            f"Unknown npt_coupling={npt_coupling!r}. Supported values: isotropic, semi-isotropic."
-        )
-    return coupling
-
-
 def validate_orthorhombic_restart_box(box, label: str = 'box') -> None:
     """Reject a sheared checkpoint cell (e.g. from a legacy anisotropic run)."""
     m = np.asarray(box)
@@ -1315,17 +1276,15 @@ def log_nbrs_info(nbrs, label: str = 'SR', box=None):
     logger.info(f'  {label} ({fmt}): occupancy={actual_occ}, allocated={max_occ} '
                 f'(util: {util:.1f}%, memory: {mem_mb:.0f} MB)')
     if nbrs.cell_list_capacity is not None:
-        cell_size_ang = nbrs.cell_size
-        if box is not None and cell_size_ang is not None:
-            box_diag = jnp.diag(box) if box.ndim == 2 else box
-            cell_size_ang = float(nbrs.cell_size * jnp.min(box_diag))
+        # the smallest cell size jax-md accepts (a scalar, or one per axis in newer
+        # jax-md); with a box it is fractional and each side has floor(1/size) cells
+        cell_size = np.asarray(nbrs.cell_size, float)
+        if box is not None:
+            cell_size = np.asarray(box_to_diag(box)) / np.floor(1 / cell_size)
         logger.info(f'  {label} cell list: capacity={nbrs.cell_list_capacity}, '
-                    f'cell_size={cell_size_ang:.2f} A')
+                    f'cell_size={cell_size.min():.2f} A')
 
 
-# Per-overflow cell-list headroom, added to cell_capacity on each reallocation.
-OVERFLOW_EXTRA_SR = 2
-OVERFLOW_EXTRA_LR = 8
 MAX_OVERFLOW_RETRIES = 4
 
 
@@ -1341,7 +1300,10 @@ def check_overflow(
 ) -> Tuple[jax_md.partition.NeighborList, jax_md.partition.NeighborList, bool, bool]:
     """
 
-    Check if the neighbor lists have overflowed and reallocate them if needed.
+    Check if the neighbor lists have overflowed, or their cells have become
+    smaller than the cutoff (an NPT box that shrank: the cell list then misses
+    pairs), and reallocate them for the current box if needed. Either way the
+    caller repeats the cycle.
 
     Args:
         neighbor_fn (callable): Function that creates the short range neighbor list.
@@ -1359,14 +1321,18 @@ def check_overflow(
     sr_overflow = False
     lr_overflow = False
     box_diag = box_to_diag(box)
-    if nbrs.did_buffer_overflow:
+    def why(lists):
+        return ('cells became smaller than the cutoff (the box shrank)'
+                if lists.cell_size_too_small else 'overflowed')
+
+    if nbrs.did_buffer_overflow or nbrs.cell_size_too_small:
         sr_overflow = True
-        logger.info(f'Neighbor list overflowed, reallocating (SR extra_capacity={sr_extra}).')
+        logger.info(f'Neighbor list {why(nbrs)}, reallocating (SR extra_capacity={sr_extra}).')
         nbrs = neighbor_fn.allocate(state.position, box=box_diag, extra_capacity=sr_extra)
         log_nbrs_info(nbrs, 'SR', box=box)
-    if nbrs_lr.did_buffer_overflow:
+    if nbrs_lr.did_buffer_overflow or nbrs_lr.cell_size_too_small:
         lr_overflow = True
-        logger.info(f'Long-range neighbor list overflowed, reallocating (LR extra_capacity={lr_extra}).')
+        logger.info(f'Long-range neighbor list {why(nbrs_lr)}, reallocating (LR extra_capacity={lr_extra}).')
         nbrs_lr = neighbor_fn_lr.allocate(state.position, box=box_diag, extra_capacity=lr_extra)
         log_nbrs_info(nbrs_lr, 'LR', box=box)
     return nbrs, nbrs_lr, sr_overflow, lr_overflow
@@ -1423,6 +1389,26 @@ def compute_quantities(
     current_T = jax_md.quantity.temperature(momentum=state.momentum, mass=state.mass) / unit['temperature']
     return KE, PE, H, current_T
 
+def npt_nose_hoover_for(npt_coupling):
+    """jax-md's Nose-Hoover NPT for a coupling, as both MD engines (perform_md and flash) run
+    it: (the simulator, the box of a state, the conserved quantity). Isotropic: one strain
+    for the cell; semi-isotropic: the flexible cell, x and y coupled, z on its own."""
+    if normalize_npt_coupling(npt_coupling) == 'isotropic':  # also guards direct Python callers
+        return (jax_md.simulate.npt_nose_hoover, jax_md.simulate.npt_box,
+                jax_md.simulate.npt_nose_hoover_invariant)
+    return (partial(jax_md.simulate.npt_nose_hoover_flex, coupling='semi-isotropic'),
+            jax_md.simulate.npt_box_flex, jax_md.simulate.npt_nose_hoover_flex_invariant)
+
+
+def npt_start_motion(momenta, masses, npt_coupling):
+    """The NPT init_fn's keyword for the starting momenta (None: drawn at kT): the isotropic
+    state takes momenta, the flexible cell's (semi-isotropic) velocities (it has no momenta
+    argument: momenta= would reach the energy function and the velocities be drawn)."""
+    if normalize_npt_coupling(npt_coupling) == 'isotropic':
+        return dict(momenta=momenta)
+    return dict(velocities=None if momenta is None else momenta / jnp.reshape(masses, (-1, 1)))
+
+
 def create_npt_nhc_fn(
     energy_fn,
     shift,
@@ -1433,34 +1419,17 @@ def create_npt_nhc_fn(
     barostat_kwargs,
     npt_coupling='isotropic'
 ):
-    npt_coupling = normalize_npt_coupling(npt_coupling)  # also guards direct Python callers
-    if npt_coupling == 'isotropic':
-        init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
-            energy_fn,
-            shift,
-            dt=dt,
-            kT=T,
-            pressure=P,
-            barostat_kwargs=barostat_kwargs,
-            thermostat_kwargs=nhc_kwargs
-        )
-        init_fn = jax.jit(init_fn)
-        step_md_fn = create_md_fn(jax.jit(apply_fn), jax_md.simulate.npt_box, kT=T, pressure=P)
-    else:
-        init_fn, apply_fn = jax_md.simulate.npt_nose_hoover_flex(
-            energy_fn,
-            shift,
-            dt=dt,
-            kT=T,
-            pressure=P,
-            coupling=npt_coupling,
-            barostat_kwargs=barostat_kwargs,
-            thermostat_kwargs=nhc_kwargs
-        )
-        init_fn = jax.jit(init_fn)
-        step_md_fn = create_md_fn(jax.jit(apply_fn), jax_md.simulate.npt_box_flex, kT=T, pressure=P)
-
-    return init_fn, step_md_fn
+    simulate_fn, box_from_state, _ = npt_nose_hoover_for(npt_coupling)
+    init_fn, apply_fn = simulate_fn(
+        energy_fn,
+        shift,
+        dt=dt,
+        kT=T,
+        pressure=P,
+        barostat_kwargs=barostat_kwargs,
+        thermostat_kwargs=nhc_kwargs
+    )
+    return jax.jit(init_fn), create_md_fn(jax.jit(apply_fn), box_from_state, kT=T, pressure=P)
 
 def create_md_fn(
     apply_fn: callable,
@@ -1833,16 +1802,10 @@ def perform_md(
                                     already available. Defaults to None.
     """
     all_settings = resolve_ensemble(all_settings)  # also for direct Python callers
-    all_settings['precision'] = canonical_precision(all_settings.get('precision'))
-    # Direct Python callers do not necessarily enter through run(). Configure
-    # precision before constructing any arrays, as perform_min already does.
-    setup_jax_globals(
-        precision=all_settings.get('precision', 'float32'),
-        matmul_precision=all_settings.get('matmul_precision', 'highest'),
-    )
-    # Setup logger
+    # Setup logger (first: setup_run may warn of a deprecated setting)
     log_file = all_settings.get('log_file')
     setup_logger(log_file)
+    setup_run(all_settings)  # before any array: direct Python callers may bypass run()
 
     # Extract settings with defaults
     input_file = all_settings.get('input_file')
@@ -1864,7 +1827,6 @@ def perform_md(
 
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = all_settings.get('precision')
     lr_cutoff = all_settings.get('lr_cutoff')
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
@@ -1966,46 +1928,22 @@ def perform_md(
             f"are the only supported modes."
         )
 
+    # Cylindrical / funnel restraint (optional). Confines the mass-weighted COM of
+    # the listed atoms to a flat-bottom cylinder (radius) with optional axial bounds.
+    # Scalar settings are validated here; baked constants (mass weights, normalized
+    # axis, origin) are built later, once the box/coordinate system and atom count are
+    # known (build_cylinder_restraint, after load_atom_masks below).
+    cyl_settings = parse_cylinder_settings(all_settings)
+
     # Enhanced sampling (PySAGES)
     do_enhanced_sampling = all_settings.get('do_enhanced_sampling', False)
-    pysages_input_path = all_settings.get('pysages_input', './pysages_input.yaml')
     restart_pysages_save_path = all_settings.get('restart_pysages_save_path')
     restart_pysages_load_path = all_settings.get('restart_pysages_load_path')
     enforce_cartesian_coordinates = all_settings.get('enforce_cartesian_coordinates', False)
 
     validate_md_counts(all_settings)
 
-    restart_pysages = do_enhanced_sampling and restart_pysages_load_path is not None
-    if restart_pysages and not restart:
-        raise ValueError(
-            "restart_pysages_load_path needs an SO3LR restart (restart_load_path; "
-            "restart=True when calling perform_md directly): the PySAGES state "
-            "continues the dynamics it was saved with."
-        )
-    if restart_pysages_load_path is not None and not do_enhanced_sampling:
-        logger.warning("restart_pysages_load_path is ignored: do_enhanced_sampling is off.")
-
-    if do_enhanced_sampling and not HAS_PYSAGES:
-        raise ImportError(
-            "PySAGES is required for enhanced sampling but is not installed. "
-            "Install it with: pip install so3lr[pysages]"
-        )
-
-    # Methods that only add a fixed bias potential (no histogram accumulation
-    # or adaptive forces) work correctly with any ensemble.
-    PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS = {'harmonic', 'unbiased'}
-
-    if do_enhanced_sampling:
-        pysages_set_dict = parse_pysages_input(pysages_input_path)
-        pysages_method_name = pysages_set_dict['method'].lower()
-        if (pysages_method_name not in PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS
-                and ensemble not in ('nvt',)):
-            raise ValueError(
-                f"Enhanced sampling method '{pysages_method_name}' currently only "
-                f"supports the NVT ensemble (Nose-Hoover thermostat), but "
-                f"'{ensemble}' was selected. Methods that support all ensembles: "
-                f"{', '.join(sorted(PYSAGES_ENSEMBLE_UNRESTRICTED_METHODS))}."
-            )
+    pysages_set_dict, restart_pysages = check_enhanced_sampling(all_settings, ensemble, restart)
 
     # Handling of restart
     if restart_save_path is not None:
@@ -2077,8 +2015,10 @@ def perform_md(
     else:
         shift_displacement = 'free'
 
-    # the MD state's dtype; the model runs in `precision`
-    dtype = run_dtypes(all_settings)[1]
+    # the model's dtype and the MD state's
+    model_dtype, dtype = run_dtypes(all_settings)
+    logger.info(f"Precision: {all_settings['precision']} (model {np.dtype(model_dtype).name}, "
+                f"MD state {np.dtype(dtype).name})")
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
@@ -2095,6 +2035,11 @@ def perform_md(
             f'Fixed atoms: {len(fixed_atom_indices)}; mobile atoms: {len(mobile_atom_indices)}; '
             f'constraint={fixed_atom_constraint}'
         )
+
+    # Baked constants for the cylindrical / funnel restraint, now that the box,
+    # coordinate system, and atom count are known.
+    cyl_restraint = (None if cyl_settings is None else build_cylinder_restraint(
+        cyl_settings, initial_geometry_dict['masses'], box, dtype))
 
     save_buffer = min(md_cycles, save_buffer)
     hdf5_store = None
@@ -2115,12 +2060,7 @@ def perform_md(
                 validate_npt_restart_coupling(state, box, npt_coupling)
             position = state.position
         except RestartInNewEnsembleError as e:
-            if restart_pysages and not e.reset_only:
-                raise ValueError(
-                    f"restart_pysages_load_path cannot continue in another ensemble "
-                    f"({e.loaded_state.get('ensemble')} -> {ensemble}): the PySAGES state "
-                    f"continues the dynamics it was saved with."
-                ) from e
+            check_pysages_restart_ensemble(e, restart_pysages, ensemble)
             logger.warning(e)
             position = e.loaded_state['position']
             initial_geometry_dict['masses'] = e.loaded_state['mass']
@@ -2150,53 +2090,7 @@ def perform_md(
             raise RuntimeError(f"Failed to load restart state from {restart_load_path}: {str(e)}")
 
         if restart_pysages:
-            restart_data_pysages = load_pysages_state(restart_pysages_load_path)
-            # Match the dtypes of the pickled PySAGES result to the run precision,
-            # exactly as load_state() does for the .npz state above. The PySAGES
-            # snapshot is pickled at whatever dtype the *originating* run carried
-            # (a fresh run keeps e.g. the Nose-Hoover chain `tau` at float32 even
-            # under x64, because jax-md hardcodes `tau = f32(tau)` in its
-            # integrator factories). On restart that pickled snapshot seeds the
-            # fori_loop carry's snapshot slot, while the jax-md state comes from
-            # load_state() normalized to `dtype`. If the two disagree, the loop
-            # carry input (snapshot float32) != output (re-snapshot of the
-            # float64 state) and jax.lax.scan rejects it:
-            #   loop_carry[...].chain_data['tau']: float32 vs float64
-            #
-            # The PySAGES Result is a plain class (not a registered pytree), so
-            # we normalize its pytree-valued `snapshots` attribute (a list of
-            # registered NamedTuples) rather than the Result itself -- a
-            # tree_map over the Result would treat it as a single opaque leaf
-            # and do nothing.
-            #
-            # IMPORTANT: only `snapshots` is normalized, NOT `states`. The
-            # method `states` (e.g. ABFState: Fsum/Wp/force/bias) are the
-            # sampler's internal accumulators, which are *not* part of the
-            # integrator carry that `_match_float_dtypes` pins to the run
-            # precision. PySAGES always computes them at its float64 working
-            # precision (the method view promotes the snapshot to float64 via
-            # `_as_default_float`), and a fresh run carries them at float64
-            # regardless of the integrator dtype. Casting them down to float32
-            # here both (a) silently degrades the accumulated mean force to
-            # float32 for the continued run, and (b) breaks ABF's out-of-bounds
-            # `cond` in `estimate_force`: the `average_force` branch derives its
-            # dtype from `Fsum` (now float32) while the `restraints_force`
-            # branch stays at the float64 of the restraint bounds baked into
-            # `method`, so `lax.cond` rejects the mismatched branches with
-            #   "true_fun output float64[1] vs false_fun output float32[1]".
-            # Leaving `states` at their pickled (float64) dtype matches exactly
-            # what a fresh run produces.
-            def _to_run_precision(x):
-                if hasattr(x, 'dtype') and jnp.issubdtype(
-                    jnp.asarray(x).dtype, jnp.floating
-                ):
-                    return jnp.asarray(x).astype(dtype)
-                return x
-
-            if restart_data_pysages.snapshots is not None:
-                restart_data_pysages.snapshots = jax.tree_util.tree_map(
-                    _to_run_precision, restart_data_pysages.snapshots
-                )
+            restart_data_pysages = load_pysages_restart(restart_pysages_load_path, dtype)
 
     patched_potential_kwargs = intermediate_quantity_kwargs(observables)
 
@@ -2210,7 +2104,7 @@ def perform_md(
         logger.info(f"Using custom MLFF potential from: {selected_model}")
     potential = load_model(
         selected_model,
-        precision=jnp.float64 if precision == 'float64' else jnp.float32,
+        precision=model_dtype,
         lr_cutoff=lr_cutoff,
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics,
@@ -2230,7 +2124,7 @@ def perform_md(
         box=box,
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
-        precision=precision,
+        precision=model_dtype,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
@@ -2335,6 +2229,36 @@ def perform_md(
         energy_fn = jax.jit(energy_fn_with_tail)
         logger.info('Dispersion tail correction enabled for NPT.')
 
+    # --- Cylindrical / funnel restraint ---
+    # Flat-bottom potential on the mass-weighted COM of the restrained atoms:
+    #   E_cyl = 0.5*k_r*relu(r_perp - R_cyl)^2  (+ optional axial-band terms)
+    # Wraps energy_fn exactly like the dispersion tail correction above so the force,
+    # virial, and NPT box-derivative all come from autodiff. Composes with every
+    # ensemble and every PySAGES method (the restraint lives in the potential; a
+    # method only ever adds its own bias force on top).
+    if cyl_restraint is not None:
+        _cyl_base_energy_fn = energy_fn
+
+        def energy_fn_with_cylinder(R, **kwargs):
+            E = _cyl_base_energy_fn(R, **kwargs)
+            box_kw = kwargs.get('box', None)
+            pert = kwargs.get('perturbation', None)
+            if box_kw is not None and pert is not None:  # NPT box scaling (mirror tail corr)
+                box_kw = box_kw * pert
+            # Convert to Cartesian if the integrator carries fractional coordinates, with
+            # jax-md's `transform`: its derivative passes the gradient through unchanged (as
+            # the model's displacements do), so the restraint's force on fractional positions
+            # stays in real space. The plain product of positions_to_cartesian would scale it
+            # by the box (a restraint box-length times too strong).
+            if fractional_coordinates and box_kw is not None:
+                R_cart = jax_md.space.transform(box_kw, R)
+            else:
+                R_cart = R
+            return E + cylindrical_restraint_energy(R_cart, box=box_kw, **cyl_restraint)
+
+        energy_fn = jax.jit(energy_fn_with_cylinder)
+        logger.info('Cylindrical / funnel restraint enabled.')
+
     # Apply units
     # Unit boundary: handle_units takes (dt in ps, T in K, P in bar) and returns
     # the same quantities in jax-md natural units. After this block md_dt is
@@ -2408,6 +2332,9 @@ def perform_md(
     rng_key = jax.random.PRNGKey(seed)
 
     if not restart:
+        momenta = initial_geometry_dict.get('momenta')
+        motion = (npt_start_motion(momenta, initial_geometry_dict['masses'], npt_coupling)
+                  if ensemble == 'npt' else dict(momenta=momenta))
         state = init_fn(
             rng_key,
             position,
@@ -2416,9 +2343,9 @@ def perform_md(
             neighbor_lr=nbrs_lr.idx,
             kT=md_T,
             mass=initial_geometry_dict['masses'],
-            momenta=initial_geometry_dict.get('momenta'),
             k_grid=k_grid,
-            k_grid_disp=k_grid_disp
+            k_grid_disp=k_grid_disp,
+            **motion
         )
 
     # Setup additional observables
@@ -2495,15 +2422,20 @@ def perform_md(
 
     # PySAGES setup (pysages_set_dict was already parsed during validation)
     if do_enhanced_sampling:
+        # PySAGES caches its compiled run loop, with the step of the run that built it,
+        # for the process: a second run in one process must not step with the first's
+        reset_pysages_runner()
         method = get_pysages_method(
             pysages_set_dict,
             nbrs=nbrs,
             species=initial_geometry_dict['species'],
-            box=box
+            box=box,
+            input_atoms=initial_geometry
         )
         if restart_pysages:
             logger.info('Restarting from previous PySAGES run.')
             pysages_result = restart_data_pysages
+            warn_restart_method_mismatch(method, pysages_result.method)
         else:
             pysages_result = None
 
@@ -2522,9 +2454,9 @@ def perform_md(
         else:
             num_atoms = len(output_atom_indices)
 
-        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(precision))
+        trajectory_box = np.asarray(lattice_rows(box), dtype=np.dtype(model_dtype))
         if not np.any(trajectory_box):
-            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(precision))
+            _cell_a0 = np.zeros((3, 3), dtype=np.dtype(model_dtype))
         elif trajectory_box.ndim == 1 and trajectory_box.shape == (3,):
             _cell_a0 = np.diag(trajectory_box)
         else:
@@ -2559,7 +2491,7 @@ def perform_md(
             cell_a0=_cell_a0,
             input_file=input_file,
             model_path=model_path,
-            dtype=np.dtype(precision),  # trajectories in the model's precision
+            dtype=np.dtype(model_dtype),  # trajectories in the model's precision
             fractional_coordinates=(
                 fractional_coordinates and not output_cartesian_positions
             ),
@@ -2602,15 +2534,10 @@ def perform_md(
                 k_grid=k_grid, k_grid_disp=k_grid_disp
             )
 
-            if pysages_result:
-                candidate_result = jax.block_until_ready(
-                    pysages.run(pysages_result, generate_context, md_steps,
-                                context_args={})
-                )
-            else:
-                candidate_result = jax.block_until_ready(
-                    pysages.run(method, generate_context, md_steps)
-                )
+            cv_log_start = cv_log_size()
+            candidate_result = run_pysages_cycle(
+                method, pysages_result, generate_context, md_steps
+            )
 
             new_state, nbrs, nbrs_lr, new_box, k_grid, k_grid_disp = jax.block_until_ready(
                 update_so3lr_after_pysages(
@@ -2658,6 +2585,9 @@ def perform_md(
             if lr_overflow:
                 lr_overflow_extra += OVERFLOW_EXTRA_LR
             overflow_retries += 1
+            if do_enhanced_sampling:
+                discard_cv_rows(cv_log_start, f"{md_steps} steps from step {current_cycle * md_steps}, "
+                                f"attempt {overflow_retries}: discarded (neighbour lists overflowed)")
             if overflow_retries > MAX_OVERFLOW_RETRIES:
                 raise RuntimeError(
                     f"Neighbor-list overflow did not stabilize after "
@@ -2763,10 +2693,10 @@ def perform_md(
             out_pos = output_position_array(
                 state.position, box, fractional_coordinates, output_cartesian_positions
             )
-            positions.append(np.asarray(out_pos, precision))
-            momenta.append(np.asarray(state.momentum, precision))
+            positions.append(np.asarray(out_pos, model_dtype))
+            momenta.append(np.asarray(state.momentum, model_dtype))
             if box is not None:
-                boxes.append(np.asarray(lattice_rows(box), precision))
+                boxes.append(np.asarray(lattice_rows(box), model_dtype))
 
             # Calculate observables
             if len(observables)>0:
@@ -3014,14 +2944,8 @@ def perform_min(
     Returns:
         Union[jnp.ndarray, List[jnp.ndarray]]: Optimized structure or trajectory.
     """
-    all_settings = dict(all_settings, precision=canonical_precision(all_settings.get('precision')))
-    # Configure JAX process-globals (x64, matmul precision). Idempotent if
-    # already called by run(); needed here for `so3lr opt`, which previously
-    # silently ignored --precision float64 because it never went through run().
-    setup_jax_globals(
-        precision=all_settings.get('precision', 'float32'),
-        matmul_precision=all_settings.get('matmul_precision', 'highest'),
-    )
+    setup_logger(all_settings.get('log_file'))  # first: setup_run may warn of a deprecated setting
+    all_settings = setup_run(dict(all_settings))  # so3lr opt does not go through run()
 
     # Extract settings with defaults
     output_file = all_settings.get('output_file')
@@ -3047,7 +2971,6 @@ def perform_min(
 
     # Model parameters
     model_path = all_settings.get('model_path')
-    precision = all_settings.get('precision')
     lr_cutoff = all_settings.get('lr_cutoff')
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
@@ -3061,6 +2984,12 @@ def perform_min(
     kspace_smearing = all_settings.get('kspace_smearing', KS.DEFAULT_KSPACE_SMEARING)
     kspace_spacing = all_settings.get('kspace_spacing', KS.DEFAULT_KSPACE_SPACING)
     kspace_interp_nodes = all_settings.get('kspace_interp_nodes', KS.DEFAULT_KSPACE_INTERP_NODES)
+    # Dispersion k-space settings, as in perform_md: the relaxation must minimise the
+    # same energy the MD that follows samples
+    kspace_dispersion = all_settings.get('kspace_dispersion', None)
+    kspace_dispersion_smearing = all_settings.get('kspace_dispersion_smearing', KS.DEFAULT_KSPACE_DISPERSION_SMEARING)
+    kspace_dispersion_spacing = all_settings.get('kspace_dispersion_spacing', KS.DEFAULT_KSPACE_DISPERSION_SPACING)
+    kspace_dispersion_interp_nodes = all_settings.get('kspace_dispersion_interp_nodes', KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES)
     charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
     charge_equilibration_total_charge = all_settings.get('charge_equilibration_total_charge', None)
 
@@ -3116,12 +3045,13 @@ def perform_min(
     cell = cell_from_atoms_boundary_conditions(
         initial_geometry, lr_cutoff, kspace_electrostatics, kspace_smearing,
     )
-    if kspace_electrostatics is not None and cell is None:
-        raise ValueError(
-            f"kspace_electrostatics={kspace_electrostatics!r} requires a periodic "
-            "cell, but the input geometry has none. Either supply a cell, or "
-            "omit kspace_electrostatics."
-        )
+    for key, method in (('kspace_electrostatics', kspace_electrostatics),
+                        ('kspace_dispersion', kspace_dispersion)):
+        if method is not None and cell is None:
+            raise ValueError(
+                f"{key}={method!r} requires a periodic cell, but the input geometry "
+                f"has none. Either supply a cell, or omit {key}."
+            )
 
     if cell is not None:
         shift_displacement = 'periodic'
@@ -3129,8 +3059,10 @@ def perform_min(
     else:
         shift_displacement = 'free'
 
-    # the MD state's dtype; the model runs in `precision`
-    dtype = run_dtypes(all_settings)[1]
+    # the model's dtype and the MD state's
+    model_dtype, dtype = run_dtypes(all_settings)
+    logger.info(f"Precision: {all_settings['precision']} (model {np.dtype(model_dtype).name}, "
+                f"MD state {np.dtype(dtype).name})")
     initial_geometry_dict = atoms_to_jnp(initial_geometry, precision=dtype)
     (position, box, displacement, shift, fractional_coordinates) = handle_box(
         shift_displacement, initial_geometry_dict['positions'], cell, precision=dtype)
@@ -3145,11 +3077,13 @@ def perform_min(
         logger.info(f"Using custom MLFF potential from: {selected_model}")
     potential = load_model(
         selected_model,
-        precision=jnp.float64 if precision == 'float64' else jnp.float32,
+        precision=model_dtype,
         lr_cutoff=lr_cutoff,
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics,
         kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge,
     )
@@ -3162,7 +3096,7 @@ def perform_min(
         box=box,
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
-        precision=precision,
+        precision=model_dtype,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
@@ -3175,11 +3109,18 @@ def perform_min(
         kspace_smearing=kspace_smearing,
         box=box
     )
+    k_grid_disp, k_smearing_disp = setup_kspace_grid(
+        kspace_electrostatics=kspace_dispersion,
+        kspace_spacing=kspace_dispersion_spacing,
+        kspace_smearing=kspace_dispersion_smearing,
+        box=box
+    )
 
     if cell is not None:
         check_box_for_neighbour_lists(box, nbrs_cutoff(potential), 'Input cell')
 
-    energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False, k_grid=k_grid, k_smearing=k_smearing))
+    energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False, k_grid=k_grid, k_smearing=k_smearing,
+                                k_grid_disp=k_grid_disp, k_smearing_disp=k_smearing_disp))
     force_fn = jax.jit(jax_md.quantity.force(energy_fn))
 
     # Allocating the neighbor lists
@@ -3647,6 +3588,8 @@ def load_state(
 
     _new_vals = {}
     for _f in dataclasses.fields(state):
+        if not _f.metadata.get('pytree_node', True):
+            continue    # static metadata (e.g. jax-md's fix_center_of_mass), not an array
         _v = getattr(state, _f.name)
         if _v is None:
             _new_vals[_f.name] = None
@@ -3695,14 +3638,11 @@ def run(
     """
 
     settings = resolve_ensemble(settings)  # before the optional relaxation
-    settings['precision'] = canonical_precision(settings.get('precision'))
     relax_before_run = settings.get('relax_before_run', True)
     validate_md_counts(settings)
 
-    setup_jax_globals(
-        precision=settings.get('precision', 'float32'),
-        matmul_precision=settings.get('matmul_precision', 'highest'),
-    )
+    setup_logger(settings.get('log_file'))  # first: setup_run may warn of a deprecated setting
+    setup_run(settings)
     input_file_path = settings.get('input_file')
     if input_file_path is not None:
         try:
