@@ -3,13 +3,16 @@
 
 Without a GPU: PME's mesh part and its strain derivative against jaxpme, the real-space
 tables against so3lr_dev's pair functions, the reasons the engine choice gives (every
-settings key and model hyperparameter classified), the box free space runs in, and
+settings key and model hyperparameter classified), the box free space runs in,
 ``so3lr nvt`` logging the engine it picked and, falling back to the neighbour-list
-potential, why. With one: ``python -m so3lr.flash.verify`` on 12,288 waters (energy,
-forces, dE/d(strain), with and without PME); ``so3lr opt``, ``so3lr eval``, MD and the ASE
-calculator against the neighbour-list potential, periodic and with no box (12 and 1000 A
-cutoffs). With two or more: the same on several GPUs as on one, and MD on two.
+potential, why, and the MD driver around a stand-in for the engine (PySAGES runs as
+perform_md's, the repeat of a cycle that overflowed). With one: ``python -m
+so3lr.flash.verify`` on 12,288 waters (energy, forces, dE/d(strain), with and without
+PME); ``so3lr opt``, ``so3lr eval``, MD and the ASE calculator against the neighbour-list
+potential, periodic and with no box (12 and 1000 A cutoffs); PySAGES on flash against the
+neighbour-list engine. With two or more: the same on several GPUs as on one, and MD on two.
 """
+import functools
 import itertools
 import json
 import pathlib
@@ -57,7 +60,7 @@ def test_pme_electrostatics_matches_jaxpme(smearing, spacing, chunk):
     pbc = jnp.array([True, True, True])
 
     def e_ref(R, q, s=1.0):
-        # box and positions scaled by s together, as jax-md's NPT strain
+        # box and positions scaled by s together, as jax-md's NPT strain (s per axis or one)
         cell = jnp.diag(jnp.asarray(L)) * s
         recip = jaxpme.kspace.get_reciprocal(cell)
         kgrid = jaxpme.kspace.get_kgrid_mesh(jnp.diag(jnp.asarray(L)), mesh_spacing=jnp.array([spacing]))
@@ -70,7 +73,9 @@ def test_pme_electrostatics_matches_jaxpme(smearing, spacing, chunk):
     Rj, qj = jnp.asarray(R), jnp.asarray(q)
     assert tuple(jaxpme.kspace.get_kgrid_mesh(jnp.diag(jnp.asarray(L)), mesh_spacing=jnp.array([spacing])).shape) == mesh
     gR, gq = jax.grad(lambda R, q: e_ref(R, q).sum(), argnums=(0, 1))(Rj, qj)
-    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(1.0)
+    # per axis: side a and positions along a scaled by s_a (semi-isotropic NPT); the sum is
+    # the isotropic strain derivative
+    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(jnp.ones(3))
     e, g, f, w = E.pme_electrostatics(tuple(Rj[:, a] for a in range(3)), qj, list(L), mesh, smearing, KE,
                                       jnp.float64, chunk)
     _check("energy", e, e_ref(Rj, qj))
@@ -102,7 +107,7 @@ def test_pme_dispersion_matches_jaxpme():
 
     Rj, qj = jnp.asarray(R), jnp.asarray(qd)
     gR, gq = jax.grad(lambda R, q: e_ref(R, q).sum(), argnums=(0, 1))(Rj, qj)
-    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(1.0)
+    w_ref = jax.grad(lambda s: e_ref(Rj, qj, s).sum())(jnp.ones(3))
     e, g, f, w = E.pme_dispersion(tuple(Rj[:, a] for a in range(3)), qj, list(L), mesh, smearing, Bohr,
                                   Hartree, jnp.float64, 70)
     _check("energy", e, e_ref(Rj, qj))
@@ -215,7 +220,9 @@ SETTINGS = dict(ensemble="nvt", model_path=None, lr_cutoff=12.0)
 @pytest.mark.parametrize("change,reason", [
     (dict(), None),
     (dict(ensemble="npt"), None),
-    (dict(ensemble="npt", npt_coupling="semi-isotropic"), "isotropic"),
+    (dict(ensemble="npt", npt_coupling="semi-isotropic"), None),
+    (dict(ensemble="npt", npt_coupling="semi_isotropic"), None),
+    (dict(ensemble="npt", npt_coupling="anisotropic"), "not anisotropic"),
     (dict(ensemble="npt", dispersion_tail_correction=True), "tail correction"),
     (dict(kspace_electrostatics="pme"), None),
     (dict(kspace_electrostatics="ewald"), "PME but not ewald"),
@@ -227,6 +234,15 @@ SETTINGS = dict(ensemble="nvt", model_path=None, lr_cutoff=12.0)
     (dict(ensemble="npt", kspace_npt_cycles=10), None),
     (dict(ensemble="npt", kspace_npt_cycles=10, kspace_electrostatics="pme"), "kspace_npt_cycles"),
     (dict(fixed_atom_constraint="cartesian_anchor", pysages_input="p.yaml"), None),
+    (dict(cylinder_restraint_enabled=True, cylinder_restraint_radius=5.0), "cylindrical restraint"),
+    (dict(cylinder_restraint_enabled=False, cylinder_restraint_axis=[0.0, 0.0, 1.0]), None),
+    (dict(do_enhanced_sampling=True), None),
+    (dict(do_enhanced_sampling=True, ensemble="nve", flash_mode="fast"), None),
+    (dict(do_enhanced_sampling=True, ensemble="npt"), "enhanced sampling runs nvt and nve, not npt"),
+    (dict(do_enhanced_sampling=True, ensemble="nvt-langevin"), "enhanced sampling runs nvt and nve"),
+    (dict(do_enhanced_sampling=True, flash_mode="lean"), "enhanced sampling runs flash_mode fast"),
+    (dict(do_enhanced_sampling=True, flash_devices=2), "enhanced sampling runs on one GPU"),
+    (dict(do_enhanced_sampling=False, ensemble="npt"), None),
     (dict(buffer_size_multiplier_sr=1.5), None),
     (dict(some_new_setting=True), "does not know the setting 'some_new_setting'"),
     (dict(some_new_setting=None), None),
@@ -257,10 +273,15 @@ def test_engine_choice_small_box(monkeypatch):
     ("eval", dict(targets="energy", kspace_electrostatics="ewald"), "PME but not ewald"),
     ("opt", dict(lr_cutoff=None), "long-range cutoff"),
     ("opt", dict(model_path="so3lr"), None),
+    # enhanced sampling is an MD setting: the other tasks decline it whatever the MD rules
+    ("opt", dict(do_enhanced_sampling=True, ensemble="nvt"), "it has no enhanced sampling"),
+    ("opt", dict(do_enhanced_sampling=True, ensemble="npt"), "it has no enhanced sampling"),
+    ("eval", dict(targets="energy", do_enhanced_sampling=True), "it has no enhanced sampling"),
+    ("opt", dict(do_enhanced_sampling=False, pysages_input="p.yaml"), None),
 ])
 def test_engine_choice_other_tasks(monkeypatch, task, change, reason):
     """so3lr opt, so3lr eval and the ASE calculator take what MD takes, with no ensemble;
-    eval only for energies and forces."""
+    eval only for energies and forces; none of them enhanced sampling."""
     monkeypatch.setattr(check, "device_problem", lambda: None)
     problem = check.flash_problem(dict(dict(model_path=None, lr_cutoff=12.0), **change), _water((3, 3, 3)), task=task)
     assert (problem is None) if reason is None else (reason in problem), problem
@@ -376,13 +397,14 @@ def _acetone():
     ("md", dict(ensemble="npt"), "NPT needs a box"),
     ("md", dict(kspace_electrostatics="pme"), "k-space (kspace_electrostatics) needs a box"),
     ("md", dict(kspace_dispersion="pme"), "k-space (kspace_dispersion) needs a box"),
+    ("md", dict(do_enhanced_sampling=True), "its enhanced sampling needs a box"),
     ("opt", dict(lr_cutoff=1000.0), None),
     ("eval", dict(targets="energy,forces", lr_cutoff=1000.0), None),
     ("ase", dict(model_path="so3lr"), None),
 ])
 def test_engine_choice_in_free_space(monkeypatch, task, change, reason):
     """A structure with no box (acetone) runs on flash at any long-range cutoff, but not in
-    NPT or with k-space."""
+    NPT, with k-space or with enhanced sampling."""
     monkeypatch.setattr(check, "device_problem", lambda: None)
     settings = {"model_path": None, "lr_cutoff": 12.0, **({"ensemble": "nvt"} if task == "md" else {}), **change}
     problem = check.flash_problem(settings, _acetone(), task=task)
@@ -438,13 +460,13 @@ def test_free_space_box_has_no_images_within_reach(rc_lr):
 
 
 @pytest.mark.parametrize("bad", [dict(engine="Flash"), dict(engine="neighbour-list"), dict(flash_mode="Fast"),
-                                 dict(flash_mixed="false"), dict(flash_devices=0), dict(flash_devices="2"),
+                                 dict(flash_kernels="CUDA"), dict(flash_devices=0), dict(flash_devices="2"),
                                  dict(flash_devices=2, flash_mode="lean"), dict(flash_devices=4096)])
 def test_bad_engine_options_raise(bad):
     """Settings files bypass the CLI's choices: a value flash does not take is an error."""
     with pytest.raises(ValueError):
         check.validate_options(bad)
-    check.validate_options(dict(engine="flash", flash_mode="lean", flash_mixed=False))
+    check.validate_options(dict(engine="flash", flash_mode="lean"))
     check.validate_options(dict(engine="standard", flash_mode="lean", flash_devices=4096))
 
 
@@ -517,12 +539,346 @@ def test_flash_refuses_untrained_elements(monkeypatch):
     """Flash runs the neighbour-list engine's element check before anything else (so no
     GPU is needed here): Rn is past what so3lr-tauri-m was trained on, an error rather than a
     value gathered from another element's row of the reference tables."""
+    from so3lr.cli import so3lr_md
     from so3lr.flash import md as flash_md
-    monkeypatch.setattr(flash_md, "setup_jax_globals", lambda **kwargs: None)
+    monkeypatch.setattr(so3lr_md, "setup_jax_globals", lambda **kwargs: None)  # via setup_run
     atoms = _water((3, 3, 3))
     atoms.numbers[0] = 86
     with pytest.raises(ValueError, match="Z=86"):
         flash_md.perform_md_flash(SETTINGS, atoms=atoms)
+
+
+class _StandInEngine:
+    """FlashSO3LR as perform_md_flash uses it, around the neighbour-list potential set up as
+    perform_md sets it up for PySAGES (Cartesian positions, dense lists; positions and pair
+    vectors in the MD state's precision, the model in the model's: run_dtypes), so the flash
+    MD driver runs without a GPU. A table overflow, until the engine has been widened
+    ``overflows`` times: the force traced into a jitted loop is NaN, and once a loop has
+    overflowed, the engine's own call (energy_forces, the step-at-a-time path) widens the
+    tables first, as FlashSO3LR rebuilds them after an overflow."""
+    P, device_mesh, K, maxh, vacuum = 1, None, 0, 0, False
+
+    def __init__(self, atoms, settings, overflows=0):
+        from functools import partial
+        from so3lr.cli import so3lr_md as M
+        model_dtype, dtype = M.run_dtypes(settings)
+        geo = M.atoms_to_jnp(atoms, precision=dtype)
+        R, box, disp, _, _ = M.handle_box("periodic_cart", geo["positions"], np.asarray(atoms.cell[:]),
+                                          precision=dtype)
+        pot = M.load_model(settings["model_path"], precision=model_dtype, lr_cutoff=settings["lr_cutoff"])
+        nfn, nfn_lr, efn = M.process_model(pot, geo["species"], disp, box, precision=model_dtype,
+                                           buffer_size_multiplier_sr=settings["buffer_size_multiplier_sr"],
+                                           buffer_size_multiplier_lr=settings["buffer_size_multiplier_lr"])
+        nb, nb_lr = nfn.allocate(R, box=box), nfn_lr.allocate(R, box=box)
+        energy = partial(efn, k_smearing=None, k_smearing_disp=None, has_aux=False)
+
+        def ef(R):
+            n = nb.update(R, neighbor=nb.idx, box=box)
+            n_lr = nb_lr.update(R, neighbor=nb_lr.idx, box=box)
+            e, g = jax.value_and_grad(energy)(R, neighbor=n.idx, neighbor_lr=n_lr.idx, box=box,
+                                              k_grid=None, k_grid_disp=None)
+            return e, -g
+        self._ef, self._jit = ef, jax.jit(ef)
+        self.rc, self.loops, self.overflows, self._overflowed = float(pot.cutoff), {}, overflows, False
+
+    def _energy_forces(self, R):
+        e, f = self._ef(R)
+        # traced when a jitted loop compiles: that loop overflows
+        self._overflowed |= self.overflows > 0
+        return e, f, jnp.asarray(self.overflows > 0), jnp.zeros((), R.dtype)
+
+    def widen(self):
+        self.overflows -= 1
+        self._overflowed = False
+        self.loops = {}
+
+    def energy_forces_strain(self, R, diag=False):
+        if self._overflowed and self.overflows > 0:
+            self.widen()
+        return (*self._jit(R), jnp.zeros((), R.dtype))
+
+    def energy_forces(self, R):
+        return self.energy_forces_strain(R)[:2]
+
+
+PYSAGES_ABF = {"method": "abf", "cv": [
+    {"type": "coordinationnumber", "indices": [4, 7], "cn_exps": [6, 30], "species": 1,
+     "grid_min": 0.0, "grid_max": 1.5, "grid_stride": 32, "periodic": False},
+    {"type": "distance", "grp1": [4], "grp2": [7], "grid_min": 1.0, "grid_max": 4.0,
+     "grid_stride": 24, "periodic": False}]}
+
+
+PYSAGES_HARMONIC = {"method": "harmonic", "cv": [PYSAGES_ABF["cv"][1]],
+                    "method_args": {"kspring": 10.0, "center": [2.3]}}
+
+
+def _pysages_run(tmp_path, name, engine, monkeypatch, overflows=0, pysages=PYSAGES_ABF,
+                 input_file=DATA / "benzoic_acid_aq_1.xyz", staged=False, **change):
+    """A PySAGES run (by default ABF of benzoic acid, 2 cycles of 5 steps, float64) in its
+    own directory (PySAGES writes cv_vs_timestep.txt there) by perform_md, by
+    perform_md_flash, or (engine "run") by so3lr_md.run with flash allowed."""
+    import yaml
+    from so3lr.cli import so3lr_md
+    from so3lr.cli.so3lr_cli import YAML_DEFAULTS
+    from so3lr.flash import md as flash_md
+    d = tmp_path / name
+    d.mkdir()
+    (d / "pysages.yaml").write_text(yaml.safe_dump(pysages))
+    s = dict(YAML_DEFAULTS, input_file=str(input_file), output_file=str(d / "out.hdf5"),
+             output_format="hdf5", log_file=str(d / "out.log"), ensemble="nvt", precision="float64",
+             model_path="so3lr-tauri-m-2606", lr_cutoff=12.0, relax_before_run=False,
+             md_cycles=2, md_steps=5, save_buffer=1, do_enhanced_sampling=True,
+             pysages_input=str(d / "pysages.yaml"), restart_save_path=str(d / "r.npz"),
+             restart_pysages_save_path=str(d / "r.pkl"))
+    s.update(change)
+    monkeypatch.chdir(d)
+    if engine == "standard":
+        so3lr_md.perform_md(s, restart=s.get("restart_load_path") is not None)
+        return d
+    monkeypatch.setattr(flash_md, "flash_problem", lambda settings, atoms, task="md": None)
+    monkeypatch.setattr(flash_md, "build_engine",
+                        lambda atoms, settings, dtype, **kw: (_StandInEngine(atoms, settings, overflows), staged))
+    if engine == "run":
+        monkeypatch.setattr(check, "flash_problem", lambda settings, atoms, task="md": None)
+        so3lr_md.run(s)
+    else:
+        flash_md.perform_md_flash(s, restart=s.get("restart_load_path") is not None)
+    return d
+
+
+def _pysages_outputs(d):
+    import pickle
+    import h5py
+    with h5py.File(d / "out.hdf5") as f:
+        traj = {k: f[k][:] for k in ("positions", "momenta")}
+    with open(d / "r.pkl", "rb") as f:
+        method_state = pickle.load(f).states[0]
+    state = np.load(d / "r.npz") if (d / "r.npz").exists() else None
+    return traj, state, method_state, np.loadtxt(d / "cv_vs_timestep.txt")
+
+
+def _same_run(out, ref, tol):
+    """Per-step CVs, trajectory, final MD state and every array of the method's state."""
+    (traj, state, method_state, cv), (traj_ref, state_ref, method_ref, cv_ref) = out, ref
+    _check("CVs", cv, cv_ref, tol)
+    for k in ("positions", "momenta"):
+        _check(k, traj[k], traj_ref[k], tol)
+    if state_ref is not None:
+        for k in ("position", "momentum", "force"):
+            _check(f"final {k}", state[k], state_ref[k], tol)
+    for k in method_ref._fields:
+        if getattr(method_ref, k) is not None:
+            _check(f"method state {k}", getattr(method_state, k), getattr(method_ref, k), 10 * tol)
+
+
+def test_flash_runs_pysages_as_perform_md(tmp_path, monkeypatch):
+    """perform_md_flash's PySAGES path (here around the neighbour-list potential) gives
+    perform_md's ABF run: per-step CVs, trajectory, final state, the ABF accumulators, and
+    across the cycle boundary. A table overflow in the first cycle repeats it from the last
+    accepted state and PySAGES result, with PySAGES' loop compiled again; the discarded
+    attempt's CV rows go to cv_vs_timestep_discarded.txt."""
+    pytest.importorskip("pysages")
+    ref = _pysages_outputs(_pysages_run(tmp_path, "standard", "standard", monkeypatch))
+    for overflows in (0, 1):
+        d = _pysages_run(tmp_path, f"flash{overflows}", "flash", monkeypatch, overflows)
+        out = _pysages_outputs(d)
+        log = (d / "out.log").read_text()
+        assert ("cycle repeated" in log) == bool(overflows)
+        (traj, state, abf, cv), (traj_ref, state_ref, abf_ref, cv_ref) = out, ref
+        _check("CVs", cv, cv_ref, 1e-9)
+        discarded = d / "cv_vs_timestep_discarded.txt"
+        assert discarded.exists() == bool(overflows)
+        if overflows:
+            assert discarded.read_text().startswith(
+                "# 5 steps from step 0, attempt 1: discarded (non-finite forces)\n")
+            assert np.loadtxt(discarded).shape == (5, cv_ref.shape[1])
+        for k in ("positions", "momenta"):
+            _check(k, traj[k], traj_ref[k], 1e-9)
+        for k in ("position", "momentum", "force"):
+            _check(f"final {k}", state[k], state_ref[k], 1e-9)
+        assert not state["fractional_coordinates"] and not state_ref["fractional_coordinates"]
+        np.testing.assert_array_equal(np.asarray(abf.hist), np.asarray(abf_ref.hist))
+        for k in ("Fsum", "force", "bias"):
+            _check(f"ABF {k}", getattr(abf, k), getattr(abf_ref, k), 1e-8)
+
+
+def test_perform_md_repeats_an_overflowed_pysages_cycle(tmp_path, monkeypatch):
+    """A neighbour-list overflow in perform_md's first PySAGES cycle repeats it from the last
+    accepted state and PySAGES result: the same run as without one. The discarded attempt's
+    CV rows go to cv_vs_timestep_discarded.txt, so cv_vs_timestep.txt keeps one row per step."""
+    pytest.importorskip("pysages")
+    from so3lr.cli import so3lr_md
+    ref = _pysages_outputs(_pysages_run(tmp_path, "ref", "standard", monkeypatch))
+    real, calls = so3lr_md.check_overflow, []
+
+    def overflow_once(*args, **kwargs):
+        nbrs, nbrs_lr, sr, lr = real(*args, **kwargs)
+        calls.append(sr)
+        return nbrs, nbrs_lr, sr or len(calls) == 1, lr
+
+    monkeypatch.setattr(so3lr_md, "check_overflow", overflow_once)
+    d = _pysages_run(tmp_path, "repeat", "standard", monkeypatch)
+    assert len(calls) == 3
+    _same_run(_pysages_outputs(d), ref, 1e-9)
+    discarded = d / "cv_vs_timestep_discarded.txt"
+    assert discarded.read_text().startswith(
+        "# 5 steps from step 0, attempt 1: discarded (neighbour lists overflowed)\n")
+    _check("discarded CVs", np.loadtxt(discarded), ref[3][:5], 1e-9)
+
+
+def test_flash_continues_a_perform_md_pysages_run(tmp_path, monkeypatch):
+    """A PySAGES restart of perform_md continued by perform_md_flash, and by perform_md:
+    the same run (the ABF state and the MD state carry over between the engines)."""
+    pytest.importorskip("pysages")
+    first = _pysages_run(tmp_path, "first", "standard", monkeypatch, md_cycles=1)
+    restart = dict(restart_load_path=str(first / "r.npz"), restart_pysages_load_path=str(first / "r.pkl"))
+    ref = _pysages_outputs(_pysages_run(tmp_path, "standard", "standard", monkeypatch, **restart))
+    out = _pysages_outputs(_pysages_run(tmp_path, "flash", "flash", monkeypatch, **restart))
+    (traj, state, abf, cv), (traj_ref, state_ref, abf_ref, cv_ref) = out, ref
+    _check("CVs", cv, cv_ref, 1e-9)
+    _check("positions", traj["positions"], traj_ref["positions"], 1e-9)
+    _check("final momentum", state["momentum"], state_ref["momentum"], 1e-9)
+    assert int(np.asarray(abf.hist).sum()) == int(np.asarray(abf_ref.hist).sum()) == 15
+    np.testing.assert_array_equal(np.asarray(abf.hist), np.asarray(abf_ref.hist))
+    _check("ABF Fsum", abf.Fsum, abf_ref.Fsum, 1e-8)
+
+
+def test_flash_runs_pysages_in_nve(tmp_path, monkeypatch):
+    """A harmonic bias in NVE on flash (the NVE state rebuilt after each cycle) gives
+    perform_md's run."""
+    pytest.importorskip("pysages")
+    kw = dict(pysages=PYSAGES_HARMONIC, ensemble="nve")
+    ref = _pysages_outputs(_pysages_run(tmp_path, "standard", "standard", monkeypatch, **kw))
+    out = _pysages_outputs(_pysages_run(tmp_path, "flash", "flash", monkeypatch, **kw))
+    _same_run(out, ref, 1e-9)
+
+
+def test_flash_runs_pysages_in_float32_and_mixed(tmp_path, monkeypatch):
+    """float32: flash gives perform_md's run. mixed (a float64 MD state around a float32 model,
+    the default precision): both engines continue a float32 PySAGES restart of perform_md
+    the same way, the restart carried into the float64 state; perform_md continues flash's
+    mixed PySAGES restart in float32."""
+    pytest.importorskip("pysages")
+    f32 = dict(precision="float32")
+    ref = _pysages_outputs(_pysages_run(tmp_path, "standard", "standard", monkeypatch, **f32))
+    out = _pysages_outputs(_pysages_run(tmp_path, "flash", "flash", monkeypatch, **f32))
+    assert out[1]["momentum"].dtype == ref[1]["momentum"].dtype == np.float32
+    _same_run(out, ref, 1e-4)
+    first = _pysages_run(tmp_path, "first", "standard", monkeypatch, md_cycles=1, **f32)
+    restart = dict(restart_load_path=str(first / "r.npz"), restart_pysages_load_path=str(first / "r.pkl"),
+                   precision="mixed")
+    ref = _pysages_outputs(_pysages_run(tmp_path, "standard_mixed", "standard", monkeypatch, **restart))
+    mixed = _pysages_run(tmp_path, "flash_mixed", "flash", monkeypatch, **restart)
+    out = _pysages_outputs(mixed)
+    assert out[1]["momentum"].dtype == ref[1]["momentum"].dtype == np.float64
+    assert int(np.asarray(out[2].hist).sum()) == int(np.asarray(ref[2].hist).sum()) == 15
+    _same_run(out, ref, 1e-6)
+    back = dict(restart_load_path=str(mixed / "r.npz"), restart_pysages_load_path=str(mixed / "r.pkl"), **f32)
+    _, state, method_state, cv = _pysages_outputs(_pysages_run(tmp_path, "back", "standard", monkeypatch, **back))
+    assert state["momentum"].dtype == np.float32
+    assert len(cv) == 10 and int(np.asarray(method_state.hist).sum()) == 25
+
+
+def test_flash_runs_pysages_without_a_coordination_number(tmp_path, monkeypatch):
+    """CVs that need no neighbour list (ionsitedistance finds the waters in the starting
+    positions; distance_pbc) on 512 waters: flash gives perform_md's run."""
+    pytest.importorskip("pysages")
+    from ase.io import write
+    write(tmp_path / "w.xyz", _water((2, 2, 2)))
+    pysages = {"method": "abf", "cv": [
+        {"type": "ionsitedistance", "indices": [0], "mode": "acid", "grid_min": 1.875, "grid_max": 6.125,
+         "grid_stride": 17, "periodic": False},
+        {"type": "distance_pbc", "grp1": [0], "grp2": [3], "grid_min": 1.0, "grid_max": 9.0,
+         "grid_stride": 32, "periodic": False}]}
+    # no MD checkpoint: its force is one step's, where the lag below shows in full
+    kw = dict(pysages=pysages, input_file=tmp_path / "w.xyz", md_steps=3, restart_save_path=None)
+    ref = _pysages_outputs(_pysages_run(tmp_path, "standard", "standard", monkeypatch, **kw))
+    out = _pysages_outputs(_pysages_run(tmp_path, "flash", "flash", monkeypatch, **kw))
+    assert int(np.asarray(ref[2].hist).sum()) == 6
+    # perform_md's step takes the force with the neighbour lists of the step before (a pair
+    # entering the cutoff joins a step late), flash's with those of the step: here ~1e-5 in
+    # the forces and momenta, ~1e-8 in the CVs (a wrong set of waters moves them by Angstroms)
+    _same_run(out, ref, 1e-4)
+
+
+def test_flash_pysages_falls_back_from_a_staged_mode(tmp_path, monkeypatch):
+    """A system that only a staged memory mode fits: auto runs the PySAGES run on the
+    neighbour-list potential, having written nothing on flash."""
+    pytest.importorskip("pysages")
+    d = _pysages_run(tmp_path, "run", "run", monkeypatch, staged=True)
+    log = (d / "out.log").read_text()
+    assert "flash cannot: it failed to start: ValueError: enhanced sampling runs the jitted fast mode" in log
+    assert "Starting MD simulation (flash engine)" not in log
+    _, _, method_state, cv = _pysages_outputs(d)
+    assert len(cv) == 10 and int(np.asarray(method_state.hist).sum()) == 10
+
+
+def test_flash_runs_chargeseparation_charge_sites_as_perform_md(tmp_path, monkeypatch):
+    """chargeseparation with charge_sites: both engines take the neutral H counts from the
+    input structure (same CVs); a PySAGES restart whose pysages_input differs from the
+    restart file's method (here charge_sites) warns in both engines."""
+    pytest.importorskip("pysages")
+    cv = {"type": "chargeseparation", "reference": [4, 7], "charge_sites": "all",
+          "grid_min": -1.0, "grid_max": 1.0, "grid_stride": 20, "periodic": False}
+    kw = dict(pysages={"method": "unbiased", "cv": [cv]})
+    ref = _pysages_run(tmp_path, "standard", "standard", monkeypatch, **kw)
+    out = _pysages_run(tmp_path, "flash", "flash", monkeypatch, **kw)
+    for d in (ref, out):
+        assert "neutral H counts from the input structure" in (d / "out.log").read_text()
+    _check("CVs", _pysages_outputs(out)[3], _pysages_outputs(ref)[3], 1e-9)
+    restart = dict(restart_load_path=str(ref / "r.npz"), restart_pysages_load_path=str(ref / "r.pkl"),
+                   pysages={"method": "unbiased", "cv": [dict(cv, charge_sites="water")]})
+    for engine in ("standard", "flash"):
+        log = (_pysages_run(tmp_path, f"restart_{engine}", engine, monkeypatch, **restart) / "out.log").read_text()
+        assert "PySAGES restart: cv[0].charge_sites in pysages_input is None" in log
+
+
+def test_flash_saves_pysages_state_without_an_md_checkpoint(tmp_path, monkeypatch):
+    """restart_pysages_save_path without restart_save_path: flash saves the PySAGES state
+    alone, as perform_md does."""
+    pytest.importorskip("pysages")
+    ref = _pysages_outputs(_pysages_run(tmp_path, "standard", "standard", monkeypatch, restart_save_path=None))
+    out = _pysages_outputs(_pysages_run(tmp_path, "flash", "flash", monkeypatch, restart_save_path=None))
+    assert out[1] is None and ref[1] is None
+    assert int(np.asarray(out[2].hist).sum()) == 10
+    _same_run(out, ref, 1e-9)
+
+
+def test_flash_repeats_an_overflowed_jitted_cycle_a_step_at_a_time(tmp_path, monkeypatch):
+    """A table overflow in the jitted mode, without PySAGES (on a CPU, around the stand-in;
+    test_md_loop_widens_its_tables does it on a GPU): the first cycle is repeated a step at a
+    time, where the engine widens its tables, the next cycle runs in a jitted loop made
+    again on the wider tables (jax-md's step is jitted, and jit keeps the trace of the old
+    ones), and the run is the run without an overflow."""
+    import h5py
+    out = []
+    for overflows in (0, 1):
+        d = _pysages_run(tmp_path, f"plain{overflows}", "flash", monkeypatch, overflows, md_cycles=3,
+                         do_enhanced_sampling=False, restart_pysages_save_path=None)
+        # once: the loop made after the widening does not overflow again
+        assert (d / "out.log").read_text().count("cycle repeated a step at a time") == overflows
+        with h5py.File(d / "out.hdf5") as f:
+            out.append({k: f[k][:] for k in ("positions", "momenta")})
+    for k in ("positions", "momenta"):
+        _check(k, out[1][k], out[0][k], 1e-12)
+
+
+def test_flash_declines_pysages_with_no_box(monkeypatch):
+    """Free space: flash runs MD with no box, but not PySAGES (a cycle runs inside PySAGES'
+    loop, where the box laid out for the atoms cannot be laid out again, and the
+    coordinationnumber CV's list needs a periodic box): auto runs the neighbour-list engine,
+    as before flash took free space."""
+    from so3lr.cli import so3lr_md
+    monkeypatch.setattr(check, "device_problem", lambda: None)
+    atoms = _water((1, 1, 1))
+    atoms.pbc = False                                # no box, as _cluster
+    assert check.flash_problem(dict(SETTINGS), atoms) is None
+    s = dict(SETTINGS, do_enhanced_sampling=True)
+    assert check.flash_problem(s, atoms) == "its enhanced sampling needs a box"
+    ran, _ = so3lr_md.run_on_flash(s, atoms, "md", lambda flash_md: pytest.fail("flash ran"))
+    assert not ran
+    with pytest.raises(ValueError, match="--engine flash: its enhanced sampling needs a box"):
+        so3lr_md.run_on_flash(dict(s, engine="flash"), atoms, "md", lambda flash_md: pytest.fail("flash ran"))
 
 
 GPU = pytest.mark.skipif(check.device_problem() is not None, reason="SO3LR-Flash needs an NVIDIA or AMD Instinct GPU")
@@ -557,6 +913,26 @@ def test_float32_follows_float64(model):
     (e, f), (e_ref, f_ref) = out["float32"], out["float64"]
     _check("energy", e, e_ref, 1e-6)
     _check("forces", f, f_ref, 1e-4)
+
+
+@GPU
+def test_atoms_in_any_order():
+    """Each call runs with the atoms sorted in space: shuffled atoms give the energy, the
+    dE/d(strain) per axis and each atom's force (in the input's order) of the atoms in their
+    own order without the sort, jitted and staged (float64, PME)."""
+    atoms = _water((3, 3, 3))
+    perm = np.random.default_rng(0).permutation(len(atoms))
+    pme = dict(pme_electrostatics=(2.0, 1.55))
+    e0, f0, w0 = _engine(None, atoms, "float64", sort_atoms=False, **pme).energy_forces_strain(
+        jnp.asarray(atoms.get_positions(), jnp.float64), diag=True)
+    shuffled = atoms[perm]
+    R = jnp.asarray(shuffled.get_positions(), jnp.float64)
+    eng = _engine(None, shuffled, "float64", **pme)
+    for call in (eng.energy_forces_strain, eng.energy_forces_strain_staged):
+        e, f, w = call(R, diag=True)
+        _check("energy", e, e0, 1e-10)
+        _check("forces", f, np.asarray(f0)[perm], 1e-9)
+        _check("dE/d(strain) per axis", w, w0, 1e-9)
 
 
 @GPU
@@ -709,11 +1085,13 @@ def test_eval_falls_back_for_other_targets(tmp_path):
     assert "flash cannot: it evaluates energy and forces, not dipole_vec, hirshfeld_ratios" in log, log[-2000:]
 
 
-def _so3lr(args, cwd, env=None):
+def _so3lr(args, cwd):
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
     from subprocess_env import so3lr_subprocess_env
+    # this process holds most of each GPU (its own tests): the runs allocate as they go,
+    # leaving them room on smaller GPUs, and NCCL and cuSolver room
     result = subprocess.run(["so3lr", *args], cwd=cwd, capture_output=True, text=True,
-                            env=so3lr_subprocess_env(env))
+                            env=so3lr_subprocess_env({"XLA_PYTHON_CLIENT_PREALLOCATE": "false"}))
     assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
 
 
@@ -733,6 +1111,53 @@ def test_md_restarts_on_flash(tmp_path):
         log = (tmp_path / f"{name}.log").read_text()
         assert "Engine: flash" in log, log[-2000:]
 
+
+
+@GPU
+def test_semi_isotropic_npt_on_flash(tmp_path):
+    """Semi-isotropic NPT on flash (npt_coupling: semi-isotropic, jax-md's flexible cell, the
+    engine's per-axis dE/d(strain)): it runs, x and y stay equal, the log has the pressure
+    tensor's diagonal, and a restart file continues it."""
+    import yaml
+    from ase.io import write
+    write(tmp_path / "w.xyz", _water((3, 3, 3)))
+    base = dict(input_file="w.xyz", ensemble="npt", npt_coupling="semi-isotropic", md_P=1.0, md_T=300.0,
+                md_dt=0.5, md_cycles=2, md_steps=5, relax_before_run=False)
+    for name, extra in (("a", dict(restart_save_path="a.npz")), ("b", dict(restart_load_path="a.npz"))):
+        (tmp_path / f"{name}.yaml").write_text(yaml.safe_dump(
+            dict(base, output_file=f"{name}.hdf5", log_file=f"{name}.log", **extra)))
+        _so3lr(["--settings", f"{name}.yaml"], tmp_path)
+        log = (tmp_path / f"{name}.log").read_text()
+        assert "Engine: flash" in log and "P [bar] (xx,yy,zz)" in log, log[-2000:]
+        rows = [r.split(" - ")[-1].split("\t") for r in log.splitlines()]
+        rows = [r for r in rows if len(r) > 6 and r[0].isdigit()]
+        sides = [float(v) for v in rows[-1][-2].strip("()").split(",")]
+        assert sides[0] == sides[1] and np.isfinite(sides).all(), rows[-1]
+
+
+def test_surrogate_takes_the_strain_derivative_per_axis():
+    """The NPT step's surrogate energy (CPU): its gradient by a flexible-cell perturbation
+    (1 + diag(strain)) is the per-axis dE/d(strain) given, by the isotropic one (1 + strain)
+    the number given; a per-axis W needs three numbers."""
+    from so3lr.flash.md import _surrogate
+    R = jnp.zeros((2, 3))
+    W3 = jnp.asarray([1.0, 2.0, 3.0])
+    g = jax.grad(lambda e: _surrogate(R, perturbation=jnp.eye(3) + jnp.diag(e), W=W3))(jnp.zeros(3))
+    np.testing.assert_allclose(np.asarray(g), np.asarray(W3))
+    assert float(jax.grad(lambda e: _surrogate(R, perturbation=1.0 + e, W=6.0))(0.0)) == 6.0
+    with pytest.raises(ValueError, match="per axis"):
+        _surrogate(R, perturbation=jnp.eye(3), W=6.0)
+
+
+def test_npt_start_motion():
+    """The NPT init's starting motion (CPU): momenta for the isotropic state, velocities
+    (momenta / masses) for the flexible cell, None where none are given."""
+    from so3lr.cli.so3lr_md import npt_start_motion
+    p, m = jnp.ones((2, 3)), jnp.asarray([2.0, 4.0])
+    assert npt_start_motion(p, m, "isotropic")["momenta"] is p
+    v = npt_start_motion(p, m, "semi_isotropic")["velocities"]
+    np.testing.assert_allclose(np.asarray(v), np.asarray(p / m[:, None]))
+    assert npt_start_motion(None, m, "semi-isotropic") == dict(velocities=None)
 
 @GPU
 @pytest.mark.parametrize("model", [None, "so3lr"])
@@ -773,6 +1198,45 @@ def test_auto_falls_back_when_flash_fails_to_start(tmp_path, monkeypatch):
              md_cycles=1, md_steps=2, save_buffer=1))
     log = (tmp_path / "o.log").read_text()
     assert "flash cannot: it failed to start: RuntimeError: no kernels here" in log, log[-2000:]
+
+
+@GPU
+def test_flash_runs_pysages(tmp_path):
+    """ABF (a coordination number and a distance) on 5,184 waters, continued from one
+    checkpoint, both engines in the default precision (mixed: a float64 MD state around a
+    float32 model): auto picks flash, which follows --engine standard to float32 accuracy in
+    the per-step CVs, the trajectory and the samples."""
+    import h5py
+    import pickle
+    import yaml
+    from ase.io import write
+    write(tmp_path / "w.xyz", _water((3, 3, 3)))
+    _so3lr(["nvt", "--input", "w.xyz", "--no-relax", "--md-cycles", "1", "--md-steps", "2", "--engine",
+            "standard", "--output", "eq.hdf5", "--restart-save", "eq.npz"], tmp_path)
+    (tmp_path / "pysages.yaml").write_text(yaml.safe_dump({"method": "abf", "cv": [
+        {"type": "coordinationnumber", "indices": [0, 3], "cn_exps": [6, 24], "species": 1,
+         "grid_min": 0.0, "grid_max": 6.0, "grid_stride": 30, "periodic": False},
+        {"type": "distance_pbc", "grp1": [0], "grp2": [3], "grid_min": 1.0, "grid_max": 9.0,
+         "grid_stride": 32, "periodic": False}]}))
+    for engine in ("standard", "auto"):
+        d = tmp_path / engine
+        d.mkdir()
+        (d / "md.yaml").write_text(yaml.safe_dump(dict(
+            input_file="../w.xyz", output_file="out.hdf5", log_file="out.log", ensemble="nvt", md_cycles=2,
+            md_steps=10, relax_before_run=False, engine=engine, do_enhanced_sampling=True, pysages_input="../pysages.yaml",
+            restart_load_path="../eq.npz", restart_pysages_save_path="r.pkl")))
+        _so3lr(["--settings", "md.yaml"], d)
+    assert "Engine: flash (auto)" in (tmp_path / "auto" / "out.log").read_text()
+    cv, cv_ref = (np.loadtxt(tmp_path / e / "cv_vs_timestep.txt") for e in ("auto", "standard"))
+    assert cv.shape == cv_ref.shape == (20, 2)
+    np.testing.assert_allclose(cv, cv_ref, atol=1e-3)
+    with h5py.File(tmp_path / "auto" / "out.hdf5") as a, h5py.File(tmp_path / "standard" / "out.hdf5") as b:
+        np.testing.assert_allclose(a["positions"][:], b["positions"][:], atol=1e-3)
+    hist = []
+    for e in ("auto", "standard"):
+        with open(tmp_path / e / "r.pkl", "rb") as f:
+            hist.append(np.asarray(pickle.load(f).states[0].hist))
+    assert hist[0].sum() == hist[1].sum() == 20
 
 
 def _cluster():
@@ -1018,8 +1482,8 @@ GPUS = pytest.mark.skipif(check.device_problem() is not None or len(jax.local_de
 @GPUS
 @pytest.mark.parametrize("precision,tol", [("float64", 1e-10), ("float32", 1e-5)])
 def test_several_gpus_give_one_gpus_forces(precision, tol):
-    """Energy, forces and dE/d(strain) on two and on all visible GPUs as on one: PME for
-    both, an atom count the GPUs do not divide (the last one shares rows); and with
+    """Energy, forces and dE/d(strain) per axis on two and on all visible GPUs as on one: PME
+    for both, an atom count the GPUs do not divide (the last one shares rows); and with
     neighbour rows too short, widened as on one GPU."""
     from so3lr.flash.loader import load_params
     atoms = _water((3, 3, 3))[:-3]
@@ -1027,12 +1491,12 @@ def test_several_gpus_give_one_gpus_forces(precision, tol):
     args = (params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]))
     kw = dict(pme_electrostatics=(2.0, 1.55), pme_dispersion=(2.0, 1.55), **E.MODES["fast"][0])
     R = jnp.asarray(atoms.get_positions(), statics["dtype"])
-    e_ref, f_ref, w_ref = E.FlashSO3LR(*args, **kw).energy_forces_strain(R)
+    e_ref, f_ref, w_ref = E.FlashSO3LR(*args, **kw).energy_forces_strain(R, diag=True)
     for P in sorted({2, len(jax.local_devices())}):
-        e, f, w = E.FlashSO3LR(*args, devices=P, **kw).energy_forces_strain(R)
+        e, f, w = E.FlashSO3LR(*args, devices=P, **kw).energy_forces_strain(R, diag=True)
         _check(f"energy on {P} GPUs", e, e_ref, tol / 100)
         _check(f"forces on {P} GPUs", f, f_ref, tol)
-        _check(f"dE/d(strain) on {P} GPUs", w, w_ref, tol)
+        _check(f"dE/d(strain) per axis on {P} GPUs", w, w_ref, tol)
     if precision == "float64":
         eng = E.FlashSO3LR(*args, devices=2, max_neighbours=16, **kw)
         e, f, w = eng.energy_forces_strain(R)
@@ -1062,11 +1526,8 @@ def test_md_on_two_gpus(tmp_path):
     write(tmp_path / "w.xyz", _water((3, 3, 3)))
     run = ["--input", "w.xyz", "--no-relax", "--md-cycles", "2", "--md-steps", "5", "--precision", "float64",
            "--lr-cutoff", "10", "--kspace-electrostatics", "pme"]
-    # this process holds most of each GPU (its own tests): the runs allocate as they go,
-    # leaving NCCL and cuSolver room
-    env = {"XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
-    _so3lr(["nvt", *run, "--output", "a.hdf5"], tmp_path, env)
-    _so3lr(["nvt", *run, "--flash-devices", "2", "--output", "b.hdf5"], tmp_path, env)
+    _so3lr(["nvt", *run, "--output", "a.hdf5"], tmp_path)
+    _so3lr(["nvt", *run, "--flash-devices", "2", "--output", "b.hdf5"], tmp_path)
     assert "Flash: 2 GPUs" in (tmp_path / "b.log").read_text()
     with h5py.File(tmp_path / "a.hdf5") as a, h5py.File(tmp_path / "b.hdf5") as b:
         _check("positions", b["positions"][:], a["positions"][:], 1e-9)
@@ -1140,3 +1601,210 @@ def test_pick_splits_takes_only_allowed_splits():
     assert k > 1 and 2160.0 / k >= 12.1 and 2160.0 / k + 2 * 12.1 + 0.1 <= 2160.0
     with pytest.raises(ValueError, match="no domain split fits"):
         pick_splits(10 ** 9, np.diag([40.0] * 3), statics, 4 << 30)
+
+
+# ---- the CUDA kernels (so3lr/flash/cuda) -----------------------------------------------
+def _cuda_kernels_problem():
+    """Why the CUDA kernels cannot run here (None: they can): no GPU, one of compute capability
+    below 8.0, no nvcc."""
+    from so3lr.flash.cuda import build
+    return build.problem()
+
+
+CUDA = pytest.mark.skipif(_cuda_kernels_problem() is not None,
+                          reason="the CUDA kernels need a GPU of compute capability 8.0 or newer and nvcc")
+
+
+# shared memory in bytes: per block (opt-in), per SM, reserved per block
+SMEM_227K, SMEM_163K, SMEM_99K = (232448, 233472, 1024), (166912, 167936, 1024), (101376, 102400, 1024)
+# the kernels' build variants of so3lr-tauri-m and -l (cuda.variant)
+M_VARIANT, L_VARIANT = (128, 4, 24, 32, 0x4321, 48), (256, 8, 48, 64, 0x44332211, 64)
+
+
+@pytest.mark.parametrize("limits,m,l", [
+    (SMEM_227K, ((64, 2, True, 2), (32, 2, False, 1)), ((64, 2, True, 1), (32, 2, True, 1))),
+    (SMEM_163K, ((32, 2, True, 2), (32, 2, False, 1)), ((16, 2, True, 1), (16, 1, True, 1))),
+    (SMEM_99K, ((64, 2, True, 1), (32, 2, True, 1)), None),
+])
+def test_cuda_kernel_tiles(monkeypatch, limits, m, l):
+    """The attention kernels' tiles (pairs, stages, a CTA per channel, CTAs per SM) follow the
+    GPU's shared memory per block and per SM: the largest that fit, two CTAs of four heads on an
+    SM where they fit; none for so3lr-tauri-l where a block has less than its 16-pair tiles'."""
+    from so3lr.flash.cuda import build
+    monkeypatch.setattr(build, "smem", lambda: limits)
+    for var, want in ((M_VARIANT, m), (L_VARIANT, l)):
+        t = build.tiles(var)
+        assert (None if t is None else (t["fwd"][:4], t["bwd"][:4])) == want
+        assert t is None or max(t["fwd"].smem, t["bwd"].smem) <= limits[0]
+
+
+def _engine(model, atoms, precision, **kw):
+    from so3lr.flash.loader import load_params
+    params, statics = load_params(model, precision=precision, lr_cutoff=12.0)
+    return E.FlashSO3LR(params, statics, atoms.get_atomic_numbers(), np.asarray(atoms.cell[:]), **kw)
+
+
+def _skip_without_tiles(model):
+    """Skip on a GPU whose shared memory per block so3lr-tauri-l's kernels do not fit."""
+    from so3lr.flash.cuda import build
+    if "tauri-l" in model and build.tiles(L_VARIANT) is None:
+        pytest.skip("so3lr-tauri-l's CUDA kernels need more shared memory per block than this GPU has")
+
+
+@functools.cache
+def _cuda_ref(model):
+    """Energy, forces and dE/d(strain) per axis of 27 water boxes on the CUDA kernels as built for
+    this GPU, every layer's per-pair data kept: the reference of the kernels' other paths."""
+    _skip_without_tiles(model)
+    atoms = _water((3, 3, 3))
+    eng = _engine(model, atoms, "float32", keep_attention=True, kernels="cuda")
+    assert eng.cuda_kernels is not None and eng.cuda_kernels.chunk is None
+    return tuple(np.asarray(x) for x in eng.energy_forces_strain(jnp.asarray(atoms.get_positions(), jnp.float32),
+                                                                   diag=True))
+
+
+@CUDA
+@pytest.mark.parametrize("model", ["so3lr-tauri-m-2606", "so3lr-tauri-s-2606", "so3lr-tauri-l-2606", "so3lr"])
+def test_cuda_kernels_follow_float64(model):
+    """The CUDA kernels (asked for explicitly, in the fast memory mode they serve) give the
+    float64 engine's energy, forces and dE/d(strain) per axis (the angular forces' part, which
+    cancels in the isotropic sum) to float32 accuracy, in the jitted program and in the
+    staged one."""
+    _skip_without_tiles(model)
+    atoms = _water((4, 4, 4))
+    R = atoms.get_positions()
+    e_ref, f_ref, w_ref = _engine(model, atoms, "float64").energy_forces_strain(jnp.asarray(R, jnp.float64), diag=True)
+    eng = _engine(model, atoms, "float32", keep_attention=True, kernels="cuda")
+    e, f, w = eng.energy_forces_strain(jnp.asarray(R, jnp.float32), diag=True)
+    assert eng.cuda_kernels is not None
+    _check("energy", e, e_ref, 1e-6)
+    _check("forces", f, f_ref, 1e-4)
+    _check("dE/d(strain) per axis", w, w_ref, 1e-4)
+    e2, f2, w2 = eng.energy_forces_strain_staged(jnp.asarray(R, jnp.float32), diag=True)
+    _check("staged energy", e2, e, 1e-6)
+    _check("staged forces", f2, f, 1e-5)
+    _check("staged dE/d(strain) per axis", w2, w, 1e-5)
+
+
+@CUDA
+def test_cuda_kernels_fall_back_where_they_do_not_apply():
+    """auto takes the Pallas kernels for a float64 model and for the memory modes that split
+    the attention into passes (the Pallas kernels' own); cuda asked for explicitly raises
+    there instead."""
+    atoms = _water((3, 3, 3))
+    for precision, kw in (("float64", dict(keep_attention=True)),
+                          ("float32", dict(keep_layer_inputs=False, split_channels=True))):
+        R = jnp.asarray(atoms.get_positions(), jnp.float64 if precision == "float64" else jnp.float32)
+        eng = _engine("so3lr-tauri-m-2606", atoms, precision, **kw)
+        eng.energy_forces(R)
+        assert eng.cuda_kernels is None
+        with pytest.raises(RuntimeError, match="do not serve"):
+            _engine("so3lr-tauri-m-2606", atoms, precision, kernels="cuda", **kw).energy_forces(R)
+
+
+@CUDA
+def test_cuda_kernels_widen_rows(monkeypatch):
+    """Neighbour rows too short for water on the CUDA kernels: the engine widens them (its
+    pair records and filters sized for the wider rows at the next program) and gives what
+    wide ones give, jitted and staged; where the wider rows' per-pair data no longer fits the
+    memory the kernels were planned in, a chunk of rows at a time."""
+    from so3lr.flash import cuda
+    from so3lr.flash import md as flash_md
+    atoms = _water((3, 3, 3))
+    R = jnp.asarray(atoms.get_positions(), jnp.float32)
+    e_ref, f_ref, _ = _cuda_ref("so3lr-tauri-m-2606")
+
+    def widened(staged):
+        eng = _engine("so3lr-tauri-m-2606", atoms, "float32", keep_attention=True, kernels="cuda", max_neighbours=16)
+        e, f = (eng.energy_forces_staged if staged else eng.energy_forces)(R)
+        assert eng.K > 16
+        _check("energy", e, e_ref, 1e-6)
+        _check("forces", f, f_ref, 1e-5)
+        return eng
+
+    for staged in (False, True):
+        eng = widened(staged)
+        assert eng.cuda_kernels.chunk is None
+    need = cuda.kept_bytes(eng)          # the wider rows' per-pair data, kept
+    monkeypatch.setattr(flash_md, "_free_bytes", lambda: need - 1)
+    assert widened(False).cuda_kernels.chunk is not None
+
+
+@CUDA
+@pytest.mark.parametrize("model,kw", [
+    ("so3lr-tauri-m-2606", dict(keep_attention=True)),
+    ("so3lr-tauri-m-2606", dict()),                              # the attention outputs made again
+    ("so3lr-tauri-m-2606", dict(keep_layer_inputs=False)),       # the layer inputs too
+    ("so3lr-tauri-s-2606", dict(keep_attention=True)),
+    ("so3lr-tauri-l-2606", dict(keep_attention=True)),
+    ("so3lr-tauri-l-2606", dict(keep_layer_inputs=False)),
+])
+def test_cuda_kernels_in_chunks(model, kw):
+    """The CUDA kernels a chunk of rows at a time (each chunk's per-pair data made in the
+    forward and again in the backward; chunks forced small: several, the last one shifted back
+    over the one before it), in the engine's memory modes, give what the kernels keeping every
+    layer's per-pair data give: energy, forces and dE/d(strain) per axis, jitted and staged,
+    and on two GPUs."""
+    from so3lr.flash import cuda
+    atoms = _water((3, 3, 3))
+    R = jnp.asarray(atoms.get_positions(), jnp.float32)
+    e_ref, f_ref, w_ref = _cuda_ref(model)
+    runs = [(1, False, 1100), (1, True, 1100)]
+    if len(jax.local_devices()) >= 2 and kw.get("keep_attention"):
+        runs.append((2, False, 550))                               # several GPUs run the jitted fast mode
+    for devices, staged, rows in runs:
+        eng = _engine(model, atoms, "float32", kernels="pallas", devices=devices, **kw)
+        ck = cuda.attach(eng, strict=True, chunk=rows)
+        nchunks = -(-eng.nl // ck.chunk)
+        assert nchunks > 1 and nchunks * ck.chunk > eng.nl          # the last chunk shifted back
+        e, f, w = (eng.energy_forces_strain_staged if staged else eng.energy_forces_strain)(R, diag=True)
+        _check("energy", e, e_ref, 1e-6)
+        _check("forces", f, f_ref, 1e-5)
+        _check("dE/d(strain) per axis", w, w_ref, 1e-5)
+
+
+@CUDA
+@pytest.mark.parametrize("limits,fits,declines", [
+    (SMEM_163K, ["so3lr-tauri-m-2606", "so3lr-tauri-l-2606"], []),
+    (SMEM_99K, ["so3lr-tauri-m-2606"], ["so3lr-tauri-l-2606"]),
+])
+def test_cuda_kernels_for_less_shared_memory(monkeypatch, limits, fits, declines):
+    """The kernels as built for compute capability 8.0 (this GPU's driver compiles their PTX)
+    and a GPU of less shared memory (smaller tiles, one stage, a CTA per channel) give what this
+    GPU's build gives, the per-pair data kept and in chunks; a model whose kernels need more
+    shared memory than a block has takes the Pallas kernels."""
+    from so3lr.flash import cuda
+    from so3lr.flash.cuda import build
+    if build.arch() == "sm_80" and build.smem() == limits:
+        pytest.skip("this GPU's own build")
+    atoms = _water((3, 3, 3))
+    R = jnp.asarray(atoms.get_positions(), jnp.float32)
+    refs = {m: _cuda_ref(m) for m in fits}                         # this GPU's build, before the patch
+    monkeypatch.setattr(build, "arch", lambda: "sm_80")
+    monkeypatch.setattr(build, "smem", lambda: limits)
+    for m in fits:
+        e_ref, f_ref, w_ref = refs[m]
+        for chunk in (None, 1100):
+            eng = _engine(m, atoms, "float32", keep_attention=True, kernels="pallas")
+            assert "_sm_80_" in cuda.attach(eng, strict=True, chunk=chunk).prefix
+            e, f, w = eng.energy_forces_strain(R, diag=True)
+            _check("energy", e, e_ref, 1e-6)
+            _check("forces", f, f_ref, 1e-5)
+            _check("dE/d(strain) per axis", w, w_ref, 1e-5)
+    for m in declines:
+        eng = _engine(m, atoms, "float32", keep_attention=True, kernels="pallas")
+        assert cuda.attach(eng) is None
+        with pytest.raises(RuntimeError, match="shared memory"):
+            cuda.attach(eng, strict=True)
+
+
+@CUDA
+def test_cuda_kernels_asked_for_say_why_they_do_not_fit(monkeypatch):
+    """flash_kernels cuda where the CUDA kernels fit none of their modes and the mode that fits
+    is one they do not serve (the attention in passes): the MD's engine says so, with the memory
+    they need."""
+    from so3lr.flash import md as flash_md
+    monkeypatch.setattr(flash_md, "_free_bytes", lambda: 1 << 29)
+    with pytest.raises(RuntimeError, match="flash_kernels cuda.*GiB of the 0 free.*minimal"):
+        flash_md.build_engine(_water((3, 3, 3)), dict(model_path="so3lr-tauri-m-2606", flash_kernels="cuda"),
+                              jnp.float32)

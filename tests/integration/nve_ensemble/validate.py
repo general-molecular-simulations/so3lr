@@ -4,6 +4,7 @@ import sys
 import h5py
 import numpy as np
 from validation_utils import Validator
+from so3lr.md_settings_validation import model_precision
 
 
 def validate():
@@ -35,7 +36,8 @@ def validate():
     )
 
     with h5py.File(v.workdir / 'trajectory.hdf5', 'r') as trajectory:
-        expected_dtype = np.dtype(settings['precision'])
+        # trajectories are written in the model's precision
+        expected_dtype = np.dtype(model_precision(settings.get('precision')))
         if trajectory['positions'].dtype != expected_dtype:
             v.errors.append(
                 f"Trajectory dtype is {trajectory['positions'].dtype}; "

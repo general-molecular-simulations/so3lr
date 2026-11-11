@@ -326,8 +326,8 @@ class FlashDomains:
             self._engines.pop((p, key), None)
             gc.collect()
             params = self._on(p, "params", lambda: self.params)
-            eng = FlashSO3LR(params, self.statics, np.asarray(zz), np.diag(sub_L),
-                             total_charge=self.total_charge, total_spin=self.total_spin, **kw)
+            eng = FlashSO3LR(params, self.statics, np.asarray(zz), np.diag(sub_L),     # run staged, a domain at a time
+                             total_charge=self.total_charge, total_spin=self.total_spin, **dict(kw, staged=True))
             eng.x0_table = self._on(p, "x0", lambda: eng._embed_table(
                 jnp.asarray(self.zu), jnp.asarray(self.counts, eng.dtype), self.total_charge,
                 self.total_spin))                # before anything is traced
@@ -395,9 +395,8 @@ class FlashDomains:
         def make():
             def lr(R, q, a0, c6):
                 pos3 = eng._pos3(R)
-                zero = jnp.zeros((eng.n,), eng.dtype)
-                return eng._long_range(pos3, eng.build_grid(pos3), q, a0, c6, zero,
-                                       (zero + 0.0, zero + 0.0, zero + 0.0, zero + 0.0))
+                return eng._long_range(pos3, eng.build_grid(pos3), q, a0, c6, jnp.zeros((eng.n,), eng.dtype),
+                                       eng._fw_zeros())
             return lr
         for _ in range(MAX_REBUILDS + 1):
             e, gq, ga0, gc6, f3, most = _staged(eng, "long_range", make)(pos, q, a0, c6)

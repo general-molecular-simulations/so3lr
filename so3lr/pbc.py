@@ -57,3 +57,17 @@ def lattice_rows(cell):
         return cell
     import jax.numpy as jnp
     return jnp.swapaxes(cell, -1, -2)
+
+
+def box_to_diag(box):
+    """Return orthorhombic lengths from a box vector or diagonal matrix.
+
+    This is intentionally not a conversion for general cells. Fully flexible
+    cells are rejected by
+    :func:`so3lr.md_settings_validation.normalize_npt_coupling` before they can reach
+    any caller of this helper.
+    """
+    if box is not None and hasattr(box, 'ndim') and box.ndim == 2:
+        import jax.numpy as jnp
+        return jnp.diag(box)
+    return box
