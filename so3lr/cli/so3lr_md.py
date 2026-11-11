@@ -1276,12 +1276,13 @@ def log_nbrs_info(nbrs, label: str = 'SR', box=None):
     logger.info(f'  {label} ({fmt}): occupancy={actual_occ}, allocated={max_occ} '
                 f'(util: {util:.1f}%, memory: {mem_mb:.0f} MB)')
     if nbrs.cell_list_capacity is not None:
-        # a scalar, or one fractional size per axis in newer jax-md
-        cell_size = np.asarray(np.nan if nbrs.cell_size is None else nbrs.cell_size, float)
+        # the smallest cell size jax-md accepts (a scalar, or one per axis in newer
+        # jax-md); with a box it is fractional and each side has floor(1/size) cells
+        cell_size = np.asarray(nbrs.cell_size, float)
         if box is not None:
-            cell_size = cell_size * np.asarray(box_to_diag(box), float)
+            cell_size = np.asarray(box_to_diag(box)) / np.floor(1 / cell_size)
         logger.info(f'  {label} cell list: capacity={nbrs.cell_list_capacity}, '
-                    f'cell_size={float(np.min(cell_size)):.2f} A')
+                    f'cell_size={cell_size.min():.2f} A')
 
 
 # Per-overflow cell-list headroom, added to cell_capacity on each reallocation.
@@ -1302,7 +1303,10 @@ def check_overflow(
 ) -> Tuple[jax_md.partition.NeighborList, jax_md.partition.NeighborList, bool, bool]:
     """
 
-    Check if the neighbor lists have overflowed and reallocate them if needed.
+    Check if the neighbor lists have overflowed, or their cells have become
+    smaller than the cutoff (an NPT box that shrank: the cell list then misses
+    pairs), and reallocate them for the current box if needed. Either way the
+    caller repeats the cycle.
 
     Args:
         neighbor_fn (callable): Function that creates the short range neighbor list.
@@ -1320,14 +1324,18 @@ def check_overflow(
     sr_overflow = False
     lr_overflow = False
     box_diag = box_to_diag(box)
-    if nbrs.did_buffer_overflow:
+    def why(lists):
+        return ('cells became smaller than the cutoff (the box shrank)'
+                if lists.cell_size_too_small else 'overflowed')
+
+    if nbrs.did_buffer_overflow or nbrs.cell_size_too_small:
         sr_overflow = True
-        logger.info(f'Neighbor list overflowed, reallocating (SR extra_capacity={sr_extra}).')
+        logger.info(f'Neighbor list {why(nbrs)}, reallocating (SR extra_capacity={sr_extra}).')
         nbrs = neighbor_fn.allocate(state.position, box=box_diag, extra_capacity=sr_extra)
         log_nbrs_info(nbrs, 'SR', box=box)
-    if nbrs_lr.did_buffer_overflow:
+    if nbrs_lr.did_buffer_overflow or nbrs_lr.cell_size_too_small:
         lr_overflow = True
-        logger.info(f'Long-range neighbor list overflowed, reallocating (LR extra_capacity={lr_extra}).')
+        logger.info(f'Long-range neighbor list {why(nbrs_lr)}, reallocating (LR extra_capacity={lr_extra}).')
         nbrs_lr = neighbor_fn_lr.allocate(state.position, box=box_diag, extra_capacity=lr_extra)
         log_nbrs_info(nbrs_lr, 'LR', box=box)
     return nbrs, nbrs_lr, sr_overflow, lr_overflow
@@ -3567,8 +3575,8 @@ def load_state(
 
     _new_vals = {}
     for _f in dataclasses.fields(state):
-        if _f.metadata.get('static', False):
-            continue    # pytree metadata (e.g. jax-md's fix_center_of_mass), not an array
+        if not _f.metadata.get('pytree_node', True):
+            continue    # static metadata (e.g. jax-md's fix_center_of_mass), not an array
         _v = getattr(state, _f.name)
         if _v is None:
             _new_vals[_f.name] = None

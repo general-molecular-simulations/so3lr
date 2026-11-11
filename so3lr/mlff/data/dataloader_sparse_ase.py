@@ -282,6 +282,14 @@ def ASE_to_jraph(
     else:
         c6_ratios = np.array(c6_ratios).reshape(num_atoms, )
 
+    # Per-atom partial charges: an optional target for the charge head that drives
+    # the electrostatic energy (e.g. pseudo-labels from a pretrained model, which
+    # anchor the charges during energy/force-only fine-tuning). NaN when absent, so
+    # frames without them are masked out of the loss.
+    partial_charges = mol.arrays.get('partial_charges')
+    partial_charges = (np.full((num_atoms,), np.nan) if partial_charges is None
+                       else np.array(partial_charges).reshape(num_atoms))
+
     # Initialize monomer-specific information for dimer binding energy calculations,
     # as described in the Methods section of SO3LR paper.
     residue_charge = None
@@ -384,7 +392,8 @@ def ASE_to_jraph(
             "atomic_numbers": atomic_numbers.reshape(num_atoms),
             "forces": forces.reshape(num_atoms, 3),
             "hirshfeld_ratios": hirshfeld_ratios.reshape(num_atoms),
-            "c6_ratios": c6_ratios.reshape(num_atoms)
+            "c6_ratios": c6_ratios.reshape(num_atoms),
+            "partial_charges": partial_charges.reshape(num_atoms)
             }
     if residue_segments is not None:
         node_features["residue_segments"] = residue_segments
