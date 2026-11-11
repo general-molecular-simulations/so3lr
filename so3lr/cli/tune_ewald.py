@@ -14,7 +14,6 @@ from so3lr.mlff.nn.observable.observable_sparse import coulomb_erf_shifted_force
 import numpy as np
 import jax
 import jax.numpy as jnp
-import json
 import math
 import time
 import logging
@@ -32,6 +31,7 @@ from so3lr.mlff.utils.kspace_utils import setup_kspace_grid
 from ase.io import read
 from ase.units import Bohr
 
+from so3lr.model_config import load_model_config
 from so3lr.model_registry import resolve_model
 from so3lr.pbc import lattice_rows, minimum_image_problem
 from so3lr.cli.so3lr_md import load_model, atoms_to_jnp, process_model, dispersion_ratios
@@ -285,8 +285,8 @@ class _WithKernelError:
     """A k-space method's estimates plus the measured error of SO3LR's real-space kernel."""
 
     def __init__(self, charges, cell, positions, displacement: DisplacementFn, nbrs_lr,
-                 nbrs_lr_distances, cutoff_sr: float = 4.5,
-                 electrostatic_energy_scale: float = 1.0):
+                 nbrs_lr_distances, cutoff_sr: float = 4.5, *,
+                 electrostatic_energy_scale: float):
         super().__init__(charges, cell, positions)
         # depends on (smearing, cutoff) only, so it is computed once for all spacings
         self.kernel_error = lru_cache(maxsize=None)(partial(
@@ -409,8 +409,8 @@ class NativeErrorBounds:
     and that sum against the one over every long-range pair (rspace_lr)."""
 
     def __init__(self, charges, positions, displacement: DisplacementFn, nbrs_lr,
-                 nbrs_lr_distances, cutoff_sr: float = 4.5,
-                 electrostatic_energy_scale: float = 1.0):
+                 nbrs_lr_distances, cutoff_sr: float = 4.5, *,
+                 electrostatic_energy_scale: float):
         # cutoff_sr comes with the other bounds' arguments and is unused: this kernel
         # switches on at 0.45 * cutoff
         self.positions, self.charges, self.displacement = positions, charges, displacement
@@ -474,7 +474,7 @@ class NativeErrorBounds_Dispersion:
 
     def __init__(self, hirshfeld_ratios, positions, displacement: DisplacementFn,
                  nbrs_lr, nbrs_lr_distances, atomic_numbers,
-                 dispersion_energy_scale: float = 1.2, c6_ratios: jnp.ndarray = None):
+                 *, dispersion_energy_scale: float, c6_ratios: jnp.ndarray = None):
         self.positions, self.hirshfeld_ratios = positions, hirshfeld_ratios
         self.displacement = displacement
         self.nbrs_lr, self.nbrs_lr_distances = nbrs_lr, nbrs_lr_distances
@@ -504,8 +504,7 @@ def model_energy_scales(model_path) -> tuple:
     """(electrostatic_energy_scale, dispersion_energy_scale) of the model (a name, a path,
     or None for the default): the widths of its own pair functions, which the error
     estimates evaluate."""
-    with open(resolve_model(model_path).dir / 'hyperparameters.json') as fp:
-        model = json.load(fp)['model']
+    model = load_model_config(resolve_model(model_path).dir)['model']
     return float(model['electrostatic_energy_scale']), float(model['dispersion_energy_scale'])
 
 
