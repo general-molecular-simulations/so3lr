@@ -582,12 +582,21 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         # Langevin acts per atom, so the thermostat of the rest is unchanged; check.py declines NPT and
         # the relaxation before MD, which would move them
         R_held = (position if state is None else state.position)[held]
-        free_apply = apply_fn
 
-        def apply_fn(st, **kwargs):
-            st = free_apply(st, **kwargs)
-            return st.set(position=st.position.at[held].set(R_held.astype(st.position.dtype)),
-                          momentum=st.momentum.at[held].set(0.0))
+        def hold(free_apply):
+            def apply(st, **kwargs):
+                st = free_apply(st, **kwargs)
+                return st.set(position=st.position.at[held].set(R_held.astype(st.position.dtype)),
+                              momentum=st.momentum.at[held].set(0.0))
+            return apply
+
+        apply_fn = hold(apply_fn)
+        free_integrator = integrator
+
+        def integrator():
+            """The jitted loop (_run_jitted) makes its own steps: they hold the atoms too."""
+            init, apply = free_integrator()
+            return init, hold(apply)
 
     def cartesian(st):
         """Positions in A and the box sides of a state."""
