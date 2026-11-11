@@ -2984,6 +2984,12 @@ def perform_min(
     kspace_smearing = all_settings.get('kspace_smearing', KS.DEFAULT_KSPACE_SMEARING)
     kspace_spacing = all_settings.get('kspace_spacing', KS.DEFAULT_KSPACE_SPACING)
     kspace_interp_nodes = all_settings.get('kspace_interp_nodes', KS.DEFAULT_KSPACE_INTERP_NODES)
+    # Dispersion k-space settings, as in perform_md: the relaxation must minimise the
+    # same energy the MD that follows samples
+    kspace_dispersion = all_settings.get('kspace_dispersion', None)
+    kspace_dispersion_smearing = all_settings.get('kspace_dispersion_smearing', KS.DEFAULT_KSPACE_DISPERSION_SMEARING)
+    kspace_dispersion_spacing = all_settings.get('kspace_dispersion_spacing', KS.DEFAULT_KSPACE_DISPERSION_SPACING)
+    kspace_dispersion_interp_nodes = all_settings.get('kspace_dispersion_interp_nodes', KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES)
     charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
     charge_equilibration_total_charge = all_settings.get('charge_equilibration_total_charge', None)
 
@@ -3039,12 +3045,13 @@ def perform_min(
     cell = cell_from_atoms_boundary_conditions(
         initial_geometry, lr_cutoff, kspace_electrostatics, kspace_smearing,
     )
-    if kspace_electrostatics is not None and cell is None:
-        raise ValueError(
-            f"kspace_electrostatics={kspace_electrostatics!r} requires a periodic "
-            "cell, but the input geometry has none. Either supply a cell, or "
-            "omit kspace_electrostatics."
-        )
+    for key, method in (('kspace_electrostatics', kspace_electrostatics),
+                        ('kspace_dispersion', kspace_dispersion)):
+        if method is not None and cell is None:
+            raise ValueError(
+                f"{key}={method!r} requires a periodic cell, but the input geometry "
+                f"has none. Either supply a cell, or omit {key}."
+            )
 
     if cell is not None:
         shift_displacement = 'periodic'
@@ -3075,6 +3082,8 @@ def perform_min(
         dispersion_damping=dispersion_damping,
         kspace_electrostatics=kspace_electrostatics,
         kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
         charge_embed_total_charge=charge_embed_total_charge,
         charge_equilibration_total_charge=charge_equilibration_total_charge,
     )
@@ -3100,11 +3109,18 @@ def perform_min(
         kspace_smearing=kspace_smearing,
         box=box
     )
+    k_grid_disp, k_smearing_disp = setup_kspace_grid(
+        kspace_electrostatics=kspace_dispersion,
+        kspace_spacing=kspace_dispersion_spacing,
+        kspace_smearing=kspace_dispersion_smearing,
+        box=box
+    )
 
     if cell is not None:
         check_box_for_neighbour_lists(box, nbrs_cutoff(potential), 'Input cell')
 
-    energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False, k_grid=k_grid, k_smearing=k_smearing))
+    energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False, k_grid=k_grid, k_smearing=k_smearing,
+                                k_grid_disp=k_grid_disp, k_smearing_disp=k_smearing_disp))
     force_fn = jax.jit(jax_md.quantity.force(energy_fn))
 
     # Allocating the neighbor lists
