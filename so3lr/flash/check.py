@@ -15,6 +15,8 @@ import os
 
 import numpy as np
 
+from so3lr.md_settings_validation import normalize_npt_coupling
+
 # NPT: the cell grid is laid out for a box this much smaller, so the box moves without
 # a compile (and is laid out again if it leaves the margin)
 NPT_BOX_MARGIN = 0.03
@@ -26,6 +28,7 @@ ENGINES = ("auto", "flash", "standard")
 # the AMD GPUs (gfx targets) flash is tested on: the MI355X
 ROCM_TARGETS = ("gfx950",)
 FLASH_MODES = ("auto", "fast", "default", "lean", "leanest", "minimal")     # engine.MODES and auto
+KERNELS = ("auto", "pallas", "cuda")      # flash_kernels: the CUDA kernels where they apply, Pallas, CUDA only
 TASKS = ("md", "opt", "eval", "ase")
 # what so3lr eval can take from the engine
 EVAL_TARGETS = ("energy", "forces")
@@ -47,22 +50,26 @@ HANDLED = {
     "kspace_smearing", "kspace_spacing", "kspace_interp_nodes", "kspace_dispersion",
     "kspace_dispersion_smearing", "kspace_dispersion_spacing", "kspace_dispersion_interp_nodes",
     "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
-    "engine", "flash_mode", "flash_mixed", "flash_devices", "md_precision",
+    "engine", "flash_mode", "flash_mixed", "flash_devices", "flash_kernels", "md_precision",
+    "do_enhanced_sampling", "pysages_input", "restart_pysages_load_path", "restart_pysages_save_path",
+    "buffer_size_multiplier_sr", "buffer_sr",       # the coordinationnumber CV's neighbour list
 }
 # settings that only concern the neighbour-list engine, other commands sharing a settings
 # file (eval, tune-ewald), or act only together with a declined setting below (the
-# PySAGES files with do_enhanced_sampling, the constraint mode with fixed atoms)
+# constraint mode with fixed atoms, the cylinder parameters with cylinder_restraint_enabled)
 IRRELEVANT = {
-    "buffer_size_multiplier_sr", "buffer_sr", "buffer_size_multiplier_lr", "buffer_lr",
-    "minimum_cell_size_multiplier", "jit_compile", "datafile", "save_to", "targets", "batch_size",
-    "accuracy", "cutoff_lo", "cutoff_hi", "cutoff_it", "dispersion_damping_lo", "dispersion_damping_hi",
-    "dispersion_damping_it", "mesh_lo", "mesh_hi", "nodes_lo", "nodes_hi", "ns_lo", "ns_hi", "smear_lo",
-    "smear_hi", "smear_it", "help",
-    "pysages_input", "restart_pysages_load_path", "restart_pysages_save_path", "fixed_atom_constraint",
+    "buffer_size_multiplier_lr", "buffer_lr", "minimum_cell_size_multiplier", "jit_compile", "datafile",
+    "save_to", "targets", "batch_size", "accuracy", "cutoff_lo", "cutoff_hi", "cutoff_it",
+    "dispersion_damping_lo", "dispersion_damping_hi", "dispersion_damping_it", "mesh_lo", "mesh_hi",
+    "nodes_lo", "nodes_hi", "ns_lo", "ns_hi", "smear_lo", "smear_hi", "smear_it", "help",
+    "fixed_atom_constraint",
+    "cylinder_restraint_atom_indices", "cylinder_restraint_axis", "cylinder_restraint_axis_origin",
+    "cylinder_restraint_radius", "cylinder_restraint_force_constant", "cylinder_restraint_axial_min",
+    "cylinder_restraint_axial_max", "cylinder_restraint_axial_force_constant",
 }
 # settings flash does not implement: it declines when one is active
 UNSUPPORTED = {
-    "do_enhanced_sampling": "enhanced sampling",
+    "cylinder_restraint_enabled": "cylindrical restraint",
     "observables": "observables", "observable": "observables",
     "atom_mask_path": "fixed atoms from a mask file (give fixed_atom_indices)",
     "mobile_atom_indices": "mobile_atom_indices (give fixed_atom_indices)",
@@ -111,13 +118,11 @@ def _off(value):
 
 
 def validate_options(settings):
-    """Raise on an engine, flash_mode, flash_mixed or flash_devices value flash does not take
+    """Raise on an engine, flash_mode, flash_kernels or flash_devices value flash does not take
     (a settings file bypasses the CLI's choices)."""
-    for key, allowed in (("engine", ENGINES), ("flash_mode", FLASH_MODES)):
+    for key, allowed in (("engine", ENGINES), ("flash_mode", FLASH_MODES), ("flash_kernels", KERNELS)):
         if settings.get(key) is not None and settings[key] not in allowed:
             raise ValueError(f"{key} must be one of {', '.join(allowed)} (received {settings[key]!r})")
-    if settings.get("flash_mixed") is not None and not isinstance(settings["flash_mixed"], bool):
-        raise ValueError(f"flash_mixed must be true or false (received {settings['flash_mixed']!r})")
     n = settings.get("flash_devices")
     if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
         raise ValueError(f"flash_devices must be a positive integer (received {n!r})")
@@ -178,8 +183,25 @@ def settings_problem(settings, task="md"):
             return "it holds atoms fixed only in nve, nvt and nvt-langevin (the NPT box moves them)"
         if s.get("relax_before_run", True) and not s.get("restart_load_path"):
             return "it holds fixed atoms only without the relaxation before MD (relax_before_run: false)"
-    if ens == "npt" and (s.get("npt_coupling") or "isotropic") != "isotropic":
-        return f"its NPT is isotropic, not {s.get('npt_coupling')}"
+    if not _off(s.get("do_enhanced_sampling")):
+        # enhanced sampling is an MD setting: opt, eval and ase decline it as they did
+        # before flash ran PySAGES, so their engine choice does not change
+        if task != "md":
+            return "it has no enhanced sampling"
+        # PySAGES runs the MD step inside its own jitted loop: the jitted fast mode on one
+        # GPU, in nvt or nve (flash's NPT runs each step from Python); and in a periodic box
+        # (vacuum_problem)
+        if ens not in ("nvt", "nve"):
+            return f"its enhanced sampling runs nvt and nve, not {ens}"
+        if (s.get("flash_mode") or "auto") not in ("auto", "fast"):
+            return f"its enhanced sampling runs flash_mode fast, not {s.get('flash_mode')}"
+        if int(s.get("flash_devices") or 1) > 1:
+            return "its enhanced sampling runs on one GPU"
+    if ens == "npt":
+        try:
+            normalize_npt_coupling(s.get("npt_coupling") or "isotropic")    # isotropic or semi-isotropic
+        except ValueError:
+            return f"its NPT is isotropic or semi-isotropic, not {s.get('npt_coupling')}"
     for key, nodes in (("kspace_electrostatics", "kspace_interp_nodes"),
                        ("kspace_dispersion", "kspace_dispersion_interp_nodes")):
         if s.get(key) not in (None, "pme"):
@@ -294,6 +316,12 @@ def vacuum_fits(size, L, rc, rc_lr, reach):
 
 def vacuum_problem(settings):
     """Why flash cannot run these settings in free space (None if it can)."""
+    if not _off(settings.get("do_enhanced_sampling")):
+        # PySAGES runs a whole cycle inside its own loop, where perform_md_flash widens the
+        # engine's tables but cannot lay out free space's box again when the atoms outgrow
+        # it, and the coordinationnumber CV's neighbour list needs a periodic box: the
+        # neighbour-list engine runs these, as it did before flash took free space
+        return "its enhanced sampling needs a box"
     if settings.get("ensemble") == "npt":
         return "its NPT needs a box"
     for key in ("kspace_electrostatics", "kspace_dispersion"):

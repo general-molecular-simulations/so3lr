@@ -102,10 +102,13 @@ def test_strategy_selects_real_parameters(strategy, model_name):
         )
 
     # Every key must select something, so a typo or a renamed head cannot pass
-    # unnoticed. The legacy `so3lr` checkpoint genuinely has no C6 head.
+    # unnoticed. The legacy `so3lr` checkpoint genuinely has no C6 head, and no
+    # shipped checkpoint has the residual readout, which fine-tuning creates.
     if model_name == 'so3lr' and (strategy in _OBS_3_STRATEGIES
                                   or strategy in ('freeze_long_range', 'forces_only')):
         assert unmatched == ['observables_3']
+    elif strategy == 'readout_only':
+        assert unmatched == ['observables_0/energy_residual*']
     else:
         assert unmatched == [], f'{strategy} on {model_name}: {unmatched} match nothing'
 

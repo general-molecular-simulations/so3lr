@@ -56,6 +56,7 @@ def graph_to_batch_fn(graph: jraph.GraphsTuple, lr_batch: dict, kspace_constants
         dipole_vec=graph.globals.get('dipole_vec'),
         hirshfeld_ratios=graph.nodes.get('hirshfeld_ratios'),
         c6_ratios=graph.nodes.get('c6_ratios'),
+        partial_charges=graph.nodes.get('partial_charges'),
         idx_i_lr=lr_batch['idx_i_lr'],
         idx_j_lr=lr_batch['idx_j_lr'],
         cell_offset_lr=lr_batch.get('cell_offsets_lr'),
@@ -158,8 +159,45 @@ def dynamically_batch_with_lr(
         yield _finalize_batch(accumulated, n_node, n_edge, n_graph, n_pairs)
 
 
+def is_periodic_graph(graph):
+    """True when the graph is periodic along at least one axis."""
+    pbc = (graph.globals or {}).get('pbc')
+    return pbc is not None and bool(np.any(pbc))
+
+
+def with_uniform_periodic_fields(items):
+    """Give non-periodic graphs a zero cell and zero cell offsets when `items` (a list
+    of (graph, lr_data)) also holds periodic ones, so the two can share a batch.
+
+    jraph batches only graphs of one pytree structure, and the long-range offsets of a
+    batch were taken from its first item: a molecule first dropped the image offsets of
+    every crystal after it, a crystal first failed on the molecule's missing ones. Zero
+    offsets leave every distance unchanged; the pbc flags (and the singular cell) keep
+    the molecule non-periodic in the model.
+    """
+    if not any(item is not None and is_periodic_graph(item[0]) for item in items):
+        return items
+    out = []
+    for item in items:
+        if item is None:  # loaders keep a None where a structure was filtered out
+            out.append(item)
+            continue
+        graph, lr = item
+        if 'cell_offset' not in (graph.edges or {}):
+            n_edge = int(np.sum(graph.n_edge))
+            graph = graph._replace(
+                edges={**(graph.edges or {}), 'cell_offset': np.zeros((n_edge, 3), np.int64)},
+                globals={**graph.globals, 'cell': np.zeros((len(graph.n_node), 3, 3))},
+            )
+        if lr.get('cell_offsets_lr') is None:
+            lr = {**lr, 'cell_offsets_lr': np.zeros((len(lr['idx_i_lr']), 3), np.int64)}
+        out.append((graph, lr))
+    return out
+
+
 def _finalize_batch(items, n_node, n_edge, n_graph, n_pairs):
     """Batch main graph and manually concatenate/offset/pad LR indices."""
+    items = with_uniform_periodic_fields(items)
     graphs = [g for g, _ in items]
     lr_datas = [lr for _, lr in items]
 
