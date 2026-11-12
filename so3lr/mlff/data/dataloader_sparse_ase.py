@@ -11,6 +11,8 @@ import jraph
 import os
 from pathlib import Path
 
+from so3lr.structure_info import charge_and_multiplicity
+
 from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
 from ..utils.jraph_utils import with_uniform_periodic_fields
 
@@ -156,20 +158,6 @@ class AseDataLoaderSparse:
         # Molecules and crystals in one data set must be able to share a batch.
         loaded_data = with_uniform_periodic_fields(loaded_data)
         return loaded_data, {'max_num_of_nodes': max_num_of_nodes, 'max_num_of_edges': max_num_of_edges, 'max_num_of_pairs': max_num_of_pairs}
-
-
-def charge_and_multiplicity(mol: Atoms):
-    """The total charge and spin multiplicity in ``mol.info``, None where absent.
-
-    Spin multiplicity (2S+1): OMol25/OPoly26 extxyz store it under `spin=`, other
-    datasets use `multiplicity=`. Prefer the canonical `multiplicity`, falling back
-    to `spin` so open-shell structures are not silently read as closed-shell
-    singlets (num_unpaired_electrons = multiplicity - 1).
-    """
-    multiplicity = mol.info.get('multiplicity')
-    if multiplicity is None:
-        multiplicity = mol.info.get('spin')
-    return mol.info.get('charge'), multiplicity
 
 
 def ASE_to_jraph(

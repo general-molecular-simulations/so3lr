@@ -1585,6 +1585,29 @@ def setup_kspace_grid(
         k_grid=k_grid,
     )
 
+def _warn_about_charge_and_spin(atoms, total_charge, num_unpaired_electrons):
+    """Warn when the run's charge/spin contradict the file or cannot exist.
+
+    The settings stay authoritative: a file value never replaces them here.
+    """
+    from so3lr.structure_info import electron_count_problem, recorded_charge_and_unpaired
+    file_charge, file_unpaired = recorded_charge_and_unpaired(atoms)
+    charge = None if total_charge is None else int(total_charge)
+    unpaired = 0 if num_unpaired_electrons is None else int(num_unpaired_electrons)
+    if file_charge is not None and charge is not None and file_charge != charge:
+        logger.warning(f"The structure file records charge={file_charge}, but this run uses total "
+                       f"charge {charge}. Pass --total-charge {file_charge} (YAML: total_charge) "
+                       f"if the file is right.")
+    if file_unpaired is not None and file_unpaired != unpaired:
+        logger.warning(f"The structure file records multiplicity {file_unpaired + 1}, but this run uses "
+                       f"{unpaired} unpaired electrons. Pass --spin {file_unpaired} "
+                       f"(YAML: num_unpaired_electrons) if the file is right.")
+    if charge is not None:
+        problem = electron_count_problem(int(atoms.get_atomic_numbers().sum()), charge, unpaired)
+        if problem:
+            logger.warning(problem)
+
+
 def validate_and_log_input(initial_geometry, input_file_path,
                            total_charge=None, num_unpaired_electrons=None,
                            verbose=True):
@@ -1631,6 +1654,8 @@ def validate_and_log_input(initial_geometry, input_file_path,
     for i in range(min(3, n_atoms)):
         x, y, z = positions[i]
         logger.info(f"    {symbols[i]:>2}  {x:11.5f} {y:11.5f} {z:11.5f}")
+
+    _warn_about_charge_and_spin(initial_geometry, total_charge, num_unpaired_electrons)
 
     # Warn about poorly-behaved electrostatics/spin in periodic cells.
     if is_periodic and total_charge is not None and abs(total_charge) > 2:

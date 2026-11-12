@@ -15,6 +15,7 @@ from . import theme
 
 from so3lr.md_settings_validation import DEFAULT_PRECISION, DEFAULT_PRESSURE, validate_md_counts
 from so3lr.model_registry import DEFAULT_MODEL, canonical_models, model_aliases
+from so3lr.structure_info import electron_count_problem, recorded_charge_and_unpaired
 
 
 _SCHEDULER_VARIABLES = ('SLURM_JOB_ID', 'SLURM_JOBID', 'PBS_JOBID', 'LSB_JOBID',
@@ -62,62 +63,23 @@ class Structure:
     has_momenta: bool = False
     input_temperature: float | None = None
     keep_input_momenta: bool = True
-    isolated: bool = False
     electrons: int = 0
     input_charge: int | None = None
     input_unpaired: int | None = None
 
 
-def _info_integer(info, *keys):
-    """Return the first integral value stored under one of ``keys``."""
-    from .formatting import finite_number
-    for key in keys:
-        number = finite_number(info.get(key))
-        if number is not None and number.is_integer():
-            return int(number)
-    return None
-
-
 def structure_charge_and_unpaired(info):
-    """Read total charge and unpaired electrons recorded in an XYZ comment line.
+    """Total charge and unpaired electrons recorded in an XYZ comment line.
 
-    ``spin`` is deliberately ignored: datasets disagree on whether it means S,
-    2S or the multiplicity, and a wrong guess would silently change the physics.
+    Follows the same rule as ``so3lr eval``: ``charge``, and ``multiplicity``
+    (or OMol25's ``spin``) as 2S+1.
     """
-    charge = _info_integer(info, 'total_charge', 'charge')
-    unpaired = _info_integer(info, 'num_unpaired_electrons', 'unpaired_electrons')
-    if unpaired is None:
-        multiplicity = _info_integer(info, 'multiplicity')
-        if multiplicity is not None and multiplicity >= 1:
-            unpaired = multiplicity - 1
-    return charge, (unpaired if unpaired is None or unpaired >= 0 else None)
-
-
-def electron_count_problem(electrons, charge, unpaired):
-    """Explain an impossible charge/multiplicity combination, or return ''."""
-    if electrons <= 0:
-        return ''
-    count = electrons - charge
-    if count < 0:
-        return f'A total charge of {charge:+d} removes more than the {electrons} electrons of the neutral structure.'
-    if unpaired > count:
-        return f'{unpaired} unpaired electrons exceed the {count} electrons at charge {charge:+d}.'
-    if (count - unpaired) % 2:
-        parity = 'an odd' if count % 2 else 'an even'
-        return (f'Charge {charge:+d} leaves {count} electrons ({parity} number), which cannot have '
-                f'{unpaired} unpaired electrons. Check the total charge or the multiplicity.')
-    return ''
+    return recorded_charge_and_unpaired(info)
 
 
 def _digest(path):
     with Path(path).open('rb') as handle:
         return hashlib.file_digest(handle, 'sha256').hexdigest()
-
-
-def _as_isolated(structure):
-    """Describe an explicitly requested transformation of the exported copy."""
-    return replace(structure, periodic=False,
-                   cell_lengths=(0.0, 0.0, 0.0), minimum_cell_height=None, isolated=True)
 
 
 def inspect_structure(path, frame_index=None):
@@ -195,15 +157,13 @@ def export_run(directory, structure, settings):
     # Re-read on save so a changed or replaced input cannot silently introduce
     # several frames after the user reviewed a single-frame structure.
     current = inspect_structure(structure.path, frame_index=structure.frame_index)
-    if structure.isolated:
-        current = _as_isolated(current)
     if current != replace(structure, keep_input_momenta=True):
         raise ValueError('The structure changed during setup. Go back and review it again.')
     directory.mkdir()  # exclusive: never replace a prior run or symlink
     written = []
     try:
         input_path = directory / 'structure.extxyz'
-        if structure.frame_count == 1 and structure.keep_input_momenta and not structure.isolated:
+        if structure.frame_count == 1 and structure.keep_input_momenta:
             # Another process may have populated the new directory after mkdir.
             # Reserve each file exclusively and claim cleanup ownership only
             # after creation succeeds, including when ASE rewrites a frame.
@@ -217,9 +177,6 @@ def export_run(directory, structure, settings):
             atoms = read(structure.path, index=structure.frame_index, format='extxyz')
             if not structure.keep_input_momenta:
                 atoms.set_momenta(None)
-            if structure.isolated:
-                atoms.set_pbc(False)
-                atoms.set_cell([0, 0, 0])
             with input_path.open('x', encoding='utf-8') as handle:
                 written.append(input_path)
                 write(handle, atoms, format='extxyz')
@@ -429,16 +386,6 @@ def _select_structure(console, old):
         except (ValueError, OSError, IndexError, AssertionError) as exc:
             _say(console, exc, theme.DANGER)
             continue
-        dha_path = next((path for _, path in presets if path.name == 'dha.xyz'), None)
-        if structure.path == dha_path and structure.periodic:
-            lengths = ', '.join(f'{length:.6g}' for length in structure.cell_lengths)
-            boundary = _choose(console, 'DHA boundary conditions',
-                               (f'Keep input periodic cell ({lengths} Å)',
-                                'Use isolated molecule (remove cell from exported copy)'),
-                               2 if old.get('isolated') and old.get('source') == str(structure.path) else 1)
-            if boundary == 1:
-                structure = _as_isolated(structure)
-                _say(console, 'The exported copy will use gas-phase boundaries; the source stays unchanged.')
         _say(console, f'{structure.formula} · {structure.atoms} atoms · '
              f'{"PBC: all three axes" if structure.periodic else "PBC: off (gas phase)"}')
         if structure.periodic:
@@ -643,8 +590,7 @@ class _Draft:
         self.dt = Decimal(str(old.get('dt', self.default_dt)))
         self.seed = old.get('seed', self.default_seed)
         self.relax = old.get('relax', True)
-        same_input = (old.get('source') == str(structure.path) and old.get('model') == self.model
-                      and old.get('isolated', False) == structure.isolated)
+        same_input = old.get('source') == str(structure.path) and old.get('model') == self.model
         self.cutoff = Decimal(str(old['cutoff'])) if same_input and 'cutoff' in old else \
             Decimal(str(self.proposal['lr_cutoff']))
 
@@ -714,7 +660,7 @@ class _Draft:
         """Answers to prefill a fresh setup after 'start over'."""
         structure = self.structure
         return dict(source=str(structure.path), frame_index=structure.frame_index,
-                    keep_input_momenta=structure.keep_input_momenta, isolated=structure.isolated,
+                    keep_input_momenta=structure.keep_input_momenta,
                     ensemble=self.ensemble, model=self.model, temperature=str(self.temperature),
                     pressure=str(self.pressure) if self.pressure is not None else None,
                     dt=str(self.dt), duration=str(self.duration), frame=str(self.frame),
@@ -736,8 +682,7 @@ def review_view(structure, destination, settings):
     precision = precision_label(settings['precision'])
     steps = settings['md_cycles'] * settings['md_steps']
     system = [('Structure', f'{home_path(structure.path)} ({structure.atoms} atoms; {structure.formula})'),
-              ('Boundary', 'Gas phase · input cell removed from exported copy' if structure.isolated
-               else 'Periodic' if structure.periodic else 'Gas phase'),
+              ('Boundary', 'Periodic' if structure.periodic else 'Gas phase'),
               *([('Cell lengths', ', '.join(f'{length:.6g}' for length in structure.cell_lengths) + ' Å')]
                 if structure.periodic else []),
               ('Source frame', f'{structure.frame_index + 1} of {structure.frame_count}'),

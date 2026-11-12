@@ -13,7 +13,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from so3lr.mlff.data.dataloader_sparse_ase import charge_and_multiplicity
+from so3lr.structure_info import charge_and_multiplicity
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported, supported_atomic_numbers_for_model)
 

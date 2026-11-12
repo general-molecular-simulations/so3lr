@@ -577,8 +577,7 @@ def test_example_structures_report_actual_frames_pbc_and_cell():
     assert (water.atoms, water.periodic, water.has_momenta) == (192, True, False)
     assert water.minimum_cell_height == pytest.approx(12.4)
     dha = setup.inspect_structure(presets['dha.xyz'])
-    assert dha.atoms == 56 and dha.periodic
-    assert dha.cell_lengths == pytest.approx((999.900024,) * 3)
+    assert (dha.atoms, dha.periodic) == (56, False)
     water = setup.inspect_structure(Path(__file__).parent / 'test_data/water_64.xyz')
     assert water.atoms == 192 and water.periodic and water.has_momenta
     assert water.minimum_cell_height == pytest.approx(12.4)
@@ -616,23 +615,15 @@ def test_manual_water_input_reviews_pme_and_explicit_velocity_choice(tmp_path, m
     assert source.read_bytes() == original
 
 
-def test_dha_isolation_is_chosen_and_only_changes_exported_copy(tmp_path, monkeypatch):
-    from ase.io import read
+def test_dha_example_is_a_gas_phase_molecule_copied_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(setup, '_interactive', lambda: True)
     source = dict((path.name, path) for _, path in setup.available_presets())['dha.xyz']
-    original = source.read_bytes()
-    destination = tmp_path / 'isolated-dha'
-    text = '\n'.join(['2', '2', '1', '1', '300', '0.01', '0.005',
-                      '0', '0', str(destination), '1']) + '\n'
+    destination = tmp_path / 'dha'
+    text = '\n'.join(['2', '1', '1', '300', '0.01', '0.005', '0', '0', str(destination), '1']) + '\n'
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
-    assert '999.9' in result.output
-    assert 'input cell removed from exported copy' in result.output
-    exported = read(destination / 'structure.extxyz')
-    assert not exported.pbc.any()
-    assert not exported.cell.any()
-    assert exported.positions == pytest.approx(read(source).positions)
-    assert source.read_bytes() == original
+    assert 'boundary' not in result.output.lower().split('review and start')[0]
+    assert (destination / 'structure.extxyz').read_bytes() == source.read_bytes()
     settings = yaml.safe_load((destination / 'settings.yaml').read_text())
     assert settings['lr_cutoff'] == 100
     assert 'kspace_electrostatics' not in settings
@@ -697,15 +688,15 @@ print(f'RESULT:{result};RESTORED:{before == after}')
 
 @pytest.mark.parametrize('info, expected', [
     ({'charge': 0}, (0, None)),
-    ({'total_charge': -1.0, 'charge': 3}, (-1, None)),
+    ({'charge': -1.0, 'total_charge': 3}, (-1, None)),
     ({'charge': 0.5}, (None, None)),
     ({'multiplicity': 3}, (None, 2)),
-    ({'num_unpaired_electrons': 1, 'multiplicity': 5}, (None, 1)),
-    ({'spin': 1}, (None, None)),  # ambiguous convention: never guessed
+    ({'spin': 2}, (None, 1)),  # OMol25 stores the multiplicity under spin=, as in so3lr eval
+    ({'multiplicity': 1, 'spin': 3}, (None, 0)),
     ({'charge': True, 'multiplicity': 0}, (None, None)),
     ({'charge': 10 ** 400, 'multiplicity': '1e999'}, (None, None)),  # overflow and infinity
 ])
-def test_structure_charge_and_unpaired_reads_unambiguous_keys(info, expected):
+def test_structure_charge_and_multiplicity_follow_the_eval_rule(info, expected):
     assert setup.structure_charge_and_unpaired(info) == expected
 
 
