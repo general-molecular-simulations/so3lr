@@ -156,8 +156,8 @@ def test_md_forces_sum_to_zero_with_pme():
     # ... which is gone, with every atom's force moved by the same mean
     assert np.linalg.norm(f1.sum(0)) < 1e-10 * len(f1)
     npt.assert_allclose(f1, f0 - f0.mean(0), atol=1e-10)
-    # energy and pressure unchanged
-    assert e1 == e0
+    # energy and pressure unchanged (to the last bits: on a GPU the two programs sum in their own order)
+    assert e1 == pytest.approx(e0, rel=1e-13)
     npt.assert_allclose(w1, w0, rtol=1e-12, atol=1e-12)
 
 
