@@ -1456,27 +1456,34 @@ def test_interrupted_plain_run_prints_checkpoint_and_resume_hint(tmp_path, monke
             'relaxation is skipped and the trajectory is appended.') in err
 
 
-def test_failed_run_carries_resume_hint_and_explains_missing_checkpoints(tmp_path):
+def test_failed_run_prints_resume_hint_and_explains_missing_checkpoints(tmp_path, capsys):
     ui.configure(display='plain')
-    with pytest.raises(RuntimeError) as caught:
+    with pytest.raises(RuntimeError):
         with ui.run_display({'log_file': str(tmp_path / 'run.log'), 'output_file': 'traj.hdf5'}) as reporter:
             reporter.start_md(0, 1000, 0.5)
             raise RuntimeError('diverged')
-    assert caught.value._so3lr_resume == [
-        'No checkpoint was saved. Set restart_save_path (or --restart-save) to make runs resumable.']
-    with pytest.raises(RuntimeError) as caught:
+    assert ('No checkpoint was saved. Set restart_save_path (or --restart-save) to make runs resumable.'
+            in capsys.readouterr().err)
+    with pytest.raises(RuntimeError):
         with ui.run_display({'log_file': str(tmp_path / 'run2.log'), 'output_file': 'traj.hdf5',
                              'restart_save_path': 'r.npz'}) as reporter:
             reporter.start_md(0, 1000, 0.5)
             reporter.checkpoint(100, '/elsewhere/r.npz')
             raise RuntimeError('diverged')
-    assert caught.value._so3lr_resume[0] == 'Last checkpoint: step 100 · /elsewhere/r.npz'
-    assert 'choose a new output path for HDF5' in caught.value._so3lr_resume[1]
+    err = capsys.readouterr().err
+    assert 'Last checkpoint: step 100 · /elsewhere/r.npz' in err
+    assert 'choose a new output path for HDF5' in err
+    ui.configure(display='plain', quiet=True)
+    with pytest.raises(RuntimeError):
+        with ui.run_display({'log_file': str(tmp_path / 'run3.log')}) as reporter:
+            reporter.start_md(0, 1000, 0.5)
+            raise RuntimeError('diverged')
+    assert 'checkpoint' not in capsys.readouterr().err
 
 
-def test_optimization_failures_have_no_md_resume_hint(tmp_path):
+def test_optimization_failures_have_no_md_resume_hint(tmp_path, capsys):
     ui.configure(display='plain')
-    with pytest.raises(RuntimeError) as caught:
+    with pytest.raises(RuntimeError):
         with ui.run_display({'log_file': str(tmp_path / 'run.log')}):
             raise RuntimeError('bad input')
-    assert caught.value._so3lr_resume == []
+    assert 'checkpoint' not in capsys.readouterr().err

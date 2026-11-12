@@ -1978,8 +1978,6 @@ def main() -> None:
             details = presentation.failure_details(exc)
             if details:
                 click.echo(details, err=True)
-            for line in getattr(exc, '_so3lr_resume', ()):
-                click.echo(presentation.terminal_text(line), err=True)
         sys.exit(1)
 
 

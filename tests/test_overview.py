@@ -260,9 +260,13 @@ def test_overview_folder_abbreviates_home(monkeypatch, tmp_path):
 
 
 def test_interrupted_runs_are_not_counted_as_failures():
-    readers = [reader('/runs/a/run.events.jsonl', status='Failed', message='KeyboardInterrupt: interrupted'),
-               reader('/runs/b/run.events.jsonl', status='Failed', message='Terminated by SIGTERM'),
-               reader('/runs/c/run.events.jsonl', status='Failed', message='RuntimeError: diverged')]
+    readers = [reader('/runs/a/run.events.jsonl', status='Failed', message='KeyboardInterrupt: interrupted',
+                      failure_reason='interrupt'),
+               reader('/runs/b/run.events.jsonl', status='Failed', message='Terminated by SIGTERM',
+                      failure_reason='signal'),
+               # The recorded reason decides, not the wording of the message.
+               reader('/runs/c/run.events.jsonl', status='Failed', message='KeyboardInterrupt-like text',
+                      failure_reason='error')]
     text = render(readers)
     assert '1 failed' in text and '2 interrupted' in text
     assert text.count('Interrupted') == 2

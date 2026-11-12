@@ -80,7 +80,7 @@ class _NullReporter:
     def finish(self):
         pass
 
-    def fail(self, message):
+    def fail(self, message, reason='error'):
         pass
 
     def logger_ready(self, log_file):
@@ -540,12 +540,12 @@ class _Reporter:
                     pass
         self._refresh(force=True)
 
-    def fail(self, message):
+    def fail(self, message, reason='error'):
         if self.status == 'failed':
             return
         self.status = 'failed'
         self.phase_name, self.detail = 'Stopped', str(message)
-        self._observe('run_failed', {'message': str(message)})
+        self._observe('run_failed', {'message': str(message), 'reason': reason})
         self._refresh(force=True)
 
     def close(self):
@@ -787,15 +787,16 @@ class _RunReporter:
             self.renderer.artifacts.append(('Metrics', str(self.journal.path)))
         self.renderer.finish()
 
-    def fail(self, message, *, display_message=None):
+    def fail(self, message, *, display_message=None, reason='error'):
+        """Record a failure; ``reason`` is 'interrupt' (Ctrl+C), 'signal' or 'error'."""
         with self._log_lock:
             if self.status != 'running':
                 return
             self.status = 'failed'
         self._drain_logs()
         self.run_log.finish('failed', str(message))
-        self.journal.emit('run_failed', {'message': str(message)})
-        self.renderer.fail(message if display_message is None else display_message)
+        self.journal.emit('run_failed', {'message': str(message), 'reason': reason})
+        self.renderer.fail(message if display_message is None else display_message, reason=reason)
 
     def close(self):
         self._drain_logs()
@@ -845,32 +846,30 @@ def run_display(settings):
                 message = exception_message(exc)
                 failure_detail = failure_details(exc) if isinstance(exc, Exception) else ''
                 display = message.splitlines()[0] if failure_detail else None
-                if isinstance(exc, KeyboardInterrupt):
+                reason = ('interrupt' if isinstance(exc, KeyboardInterrupt)
+                          else 'signal' if isinstance(exc, _TerminationSignal) else 'error')
+                if reason == 'interrupt':
                     # The journal keeps the exact record; the screen says what happened.
                     display = 'Interrupted (Ctrl+C)'
-                reporter.fail(message, display_message=display)
+                reporter.fail(message, display_message=display, reason=reason)
                 resume = reporter.resume_hint()
                 try:
                     exc._so3lr_reported = reporter.enabled
-                    # The CLI prints these after its plain error line.
-                    exc._so3lr_resume = resume
                 except (AttributeError, TypeError):
-                    if not reporter.enabled:
-                        for line in resume:
-                            print(line, file=sys.stderr)
-                if not reporter.enabled and not isinstance(exc, Exception) and not _configuration.quiet:
-                    # Interrupts never reach the CLI's error printer.
-                    for line in resume:
-                        print(line, file=sys.stderr)
+                    pass
             raise
         else:
             reporter.finish()
         finally:
             try:
                 reporter.close()
+                # One place prints the hints, whichever way the error is reported later.
                 if reporter.enabled:
                     for line in ([failure_detail] if failure_detail else []) + resume:
                         renderer.console.print(renderer._text(line, theme.MUTED))
+                elif not _configuration.quiet:
+                    for line in resume:
+                        print(terminal_text(line), file=sys.stderr)
             finally:
                 _active.reset(token)
 

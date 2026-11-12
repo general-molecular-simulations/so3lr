@@ -212,15 +212,6 @@ def test_npt_choice_on_vacuum_retries_the_ensemble(tmp_path, structure_file, mon
     assert yaml.safe_load((tmp_path / 'nvt/settings.yaml').read_text())['ensemble'] == 'nvt'
 
 
-def test_nondivisible_duration_is_not_rounded():
-    assert setup.duration_cycles('5', '0.5', 100) == 100
-    with pytest.raises(ValueError, match='exact multiple of 0.05 ps'):
-        setup.duration_cycles('5.01', '0.5', 100)
-    for invalid in ('nan', 'inf', '0', '-1'):
-        with pytest.raises(ValueError, match='finite positive'):
-            setup.duration_cycles(invalid, '0.5', 100)
-
-
 def test_export_refuses_existing_directory_and_changed_input(tmp_path, structure_file):
     inspected = setup.inspect_structure(structure_file)
     existing = tmp_path / 'existing'
@@ -712,6 +703,7 @@ print(f'RESULT:{result};RESTORED:{before == after}')
     ({'num_unpaired_electrons': 1, 'multiplicity': 5}, (None, 1)),
     ({'spin': 1}, (None, None)),  # ambiguous convention: never guessed
     ({'charge': True, 'multiplicity': 0}, (None, None)),
+    ({'charge': 10 ** 400, 'multiplicity': '1e999'}, (None, None)),  # overflow and infinity
 ])
 def test_structure_charge_and_unpaired_reads_unambiguous_keys(info, expected):
     assert setup.structure_charge_and_unpaired(info) == expected

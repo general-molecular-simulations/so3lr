@@ -323,6 +323,7 @@ def test_interrupted_event_keeps_failure_readable(tmp_path, interrupted_operatio
     reader.poll()
     assert reader.state.status == 'Failed'
     assert reader.state.message == 'KeyboardInterrupt: interrupted'
+    assert reader.state.failure_reason == 'interrupt'
     assert reader.state.sequence == reporter.journal.seq
     assert reader.pending == b''
     assert reader.state.malformed == int(interrupted_operation == 'partial_write')

@@ -99,9 +99,13 @@ def observation_status(reader, now):
         age = _age_seconds(observation_timestamp(state), now)
         if age is not None and age > stale_after_seconds(state):
             return 'Stale?'
-    if status == 'Failed' and str(getattr(state, 'message', '') or '').startswith(
-            ('KeyboardInterrupt', 'Terminated by SIG')):
-        # Stopped on request: a user or scheduler decision, not a numerical failure.
+    return lifecycle_label(state)
+
+
+def lifecycle_label(state):
+    """The recorded state, naming runs stopped on request rather than calling them failed."""
+    status = str(getattr(state, 'status', None) or 'Unknown')
+    if status == 'Failed' and getattr(state, 'failure_reason', '') in ('interrupt', 'signal'):
         return 'Interrupted'
     return status
 
@@ -301,6 +305,7 @@ class RunState:
     checkpoint: dict | None = None
     checkpoint_timestamp: datetime | None = None
     message: str = ''
+    failure_reason: str = ''      # 'interrupt' or 'signal' when stopped on request
     diagnostic: tuple | None = None
     malformed: int = 0
     unsupported: int = 0
@@ -384,6 +389,7 @@ class RunState:
             self.phase, self.detail = 'Complete', ''
         elif kind == 'run_failed':
             self.status, self.message = 'Failed', str(data.get('message', ''))
+            self.failure_reason = str(data.get('reason', ''))
             self.phase, self.detail = 'Failed', ''
         elif kind in ('warning', 'error'):
             self.diagnostic = (kind, str(data.get('message', '')))
@@ -669,7 +675,7 @@ def _attached_header(state, width, ascii_only):
     def label(value):
         return terminal_text(value, ascii_only)
 
-    status = str(state.status)
+    status = lifecycle_label(state)
     glyph = theme.status_glyph(status)
     title = Text(no_wrap=True, overflow='ellipsis')
     title.append(label(f'{theme.BRAND} SO3LR TAURI'), style=theme.ACCENT_BOLD)

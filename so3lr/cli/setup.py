@@ -70,15 +70,10 @@ class Structure:
 
 def _info_integer(info, *keys):
     """Return the first integral value stored under one of ``keys``."""
+    from .formatting import finite_number
     for key in keys:
-        value = info.get(key)
-        if isinstance(value, bool) or value is None:
-            continue
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(number) and number == int(number):
+        number = finite_number(info.get(key))
+        if number is not None and number.is_integer():
             return int(number)
     return None
 
@@ -187,20 +182,6 @@ def _decimal(value, label):
     if not number.is_finite() or number <= 0:
         raise ValueError(f'{label} must be a finite positive number.')
     return number
-
-
-def duration_cycles(duration_ps, dt_fs, steps_per_cycle):
-    """Convert user units exactly; never round a requested duration silently."""
-    duration = _decimal(duration_ps, 'Duration')
-    dt = _decimal(dt_fs, 'Timestep')
-    if isinstance(steps_per_cycle, bool) or not isinstance(steps_per_cycle, int) or steps_per_cycle < 1:
-        raise ValueError('Steps per cycle must be a positive integer.')
-    cycle_ps = dt * steps_per_cycle / Decimal(1000)
-    cycles = duration / cycle_ps
-    if cycles != cycles.to_integral_value():
-        raise ValueError(f'Duration must be an exact multiple of {cycle_ps:g} ps '
-                         f'({steps_per_cycle} steps × {dt:g} fs). Change the duration or cadence.')
-    return int(cycles)
 
 
 def export_run(directory, structure, settings):
@@ -515,9 +496,16 @@ def frame_plan(duration_ps, frame_ps, dt_fs):
     return max(1, frames), int(steps)
 
 
-EDIT_CHOICES = ('Structure, dynamics and model (start over)', 'Temperature and pressure',
-                'Duration and frame interval', 'Timestep', 'Charge and multiplicity',
-                'Seed and initial relaxation', 'Long-range cutoff', 'Output directory', '← Back to review')
+_EDITS = (('Structure, dynamics and model (start over)', 'start_over'),
+          ('Temperature and pressure', 'ask_conditions'),
+          ('Duration and frame interval', 'ask_length'),
+          ('Timestep', 'ask_timestep'),
+          ('Charge and multiplicity', 'ask_chemistry'),
+          ('Seed and initial relaxation', 'ask_seed_and_relaxation'),
+          ('Long-range cutoff', 'ask_cutoff'),
+          ('Output directory', 'ask_directory'),
+          ('← Back to review', None))
+EDIT_CHOICES = tuple(label for label, _ in _EDITS)
 
 
 class _Draft:
@@ -585,15 +573,12 @@ class _Draft:
                 _say(console, exc, theme.DANGER)
 
     def ask_timestep(self):
-        while True:
-            self.dt = _positive(self.console, 'Timestep (fs)', self.dt)
-            try:
-                self._plan()
-                return
-            except ValueError as exc:
-                _say(self.console, exc, theme.DANGER)
-                self.ask_length()
-                return
+        self.dt = _positive(self.console, 'Timestep (fs)', self.dt)
+        try:
+            self._plan()
+        except ValueError as exc:  # the frame interval no longer fits the timestep
+            _say(self.console, exc, theme.DANGER)
+            self.ask_length()
 
     def ask_chemistry(self):
         console, old, structure = self.console, self.old, self.structure
@@ -695,22 +680,11 @@ class _Draft:
 
     def edit(self, choice):
         """Ask one group again; return False when the whole setup restarts."""
-        if choice == 0:
+        method = _EDITS[choice][1]
+        if method == 'start_over':
             return False
-        if choice == 1:
-            self.ask_conditions()
-        elif choice == 2:
-            self.ask_length()
-        elif choice == 3:
-            self.ask_timestep()
-        elif choice == 4:
-            self.ask_chemistry()
-        elif choice == 5:
-            self.ask_seed_and_relaxation()
-        elif choice == 6:
-            self.ask_cutoff()
-        elif choice == 7:
-            self.ask_directory()
+        if method is not None:
+            getattr(self, method)()
         return True
 
     # -- results ------------------------------------------------------------
