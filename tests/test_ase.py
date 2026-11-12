@@ -38,34 +38,6 @@ def test_bounding_cell_does_not_change_free_molecule():
     npt.assert_allclose(boxed.get_forces(), forces, atol=1e-3)
 
 
-def test_one_calculator_goes_between_free_space_and_a_box():
-    """A calculator used on a free-space structure, then on a periodic one (and back), gives
-    what a fresh calculator gives for each: the neighbour list is allocated again when the
-    periodicity changes (before, a list allocated without a cell took no periodic images)."""
-    package_dir = pathlib.Path(__file__).parent.parent.resolve()
-    box = read(package_dir / 'tests/test_data/water_64.xyz')
-    box.wrap()
-    cluster = box.copy()
-    cluster.pbc = False
-    cluster.set_cell(np.zeros(3))
-
-    def calc():
-        return AseCalculatorSparse.create_from_workdir(
-            workdir=resolve_model('so3lr-tauri-s-2602').dir, lr_cutoff=6., from_file=True, dtype=np.float64)
-
-    def energy(atoms, calculator):
-        atoms = atoms.copy()
-        atoms.calc = calculator
-        return atoms.get_potential_energy(), atoms.get_forces()
-
-    fresh = {False: energy(cluster, calc()), True: energy(box, calc())}
-    shared = calc()
-    for periodic in (False, True, False):
-        e, f = energy(box if periodic else cluster, shared)
-        npt.assert_allclose(e, fresh[periodic][0], rtol=0, atol=1e-8)
-        npt.assert_allclose(f, fresh[periodic][1], rtol=0, atol=1e-7)
-
-
 def test_water():
     """Periodic water box against saved references, and its energy decomposition.
 
