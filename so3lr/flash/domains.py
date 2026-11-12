@@ -402,7 +402,8 @@ class FlashDomains:
             e, gq, ga0, gc6, f3, most = _staged(eng, "long_range", make)(pos, q, a0, c6)
             if int(most) <= eng.maxh:
                 return e, gq, ga0, gc6, jnp.stack(f3[:3], -1)
-            eng.maxh = min(int(int(most) * 1.25), eng.n)
+            # over the periodic images an atom can have more partners than n - 1
+            eng.maxh = int(int(most) * 1.25) if eng.images else min(int(int(most) * 1.25), eng.n)
             eng._build_jit()
         raise RuntimeError(f"Flash domains: overflowed again after {MAX_REBUILDS} rebuilds")
 
