@@ -17,6 +17,7 @@ from so3lr.model_registry import DEFAULT_MODEL
 @pytest.fixture(autouse=True)
 def isolated_log(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv('SO3LR_JOURNAL', raising=False)
     logger = logging.getLogger('SO3LR')
     monkeypatch.setattr(logger, 'handlers', [])
     previous_level = logger.level
@@ -58,6 +59,80 @@ def settings(tmp_path):
 def runtime(reporter):
     reporter.update_info(model=DEFAULT_MODEL, precision='mixed', engine='standard',
                          devices=['cpu'], atoms=9)
+
+
+@pytest.mark.parametrize('display,quiet', [('plain', False), ('auto', True), ('rich', False)])
+def test_journal_opt_out_preserves_text_log_and_attached_metrics(tmp_path, monkeypatch, display, quiet):
+    import io
+    monkeypatch.setenv('SO3LR_JOURNAL', '0')
+    if display == 'rich':
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        monkeypatch.setattr(sys, 'stderr', Terminal())
+    ui.configure(display=display, quiet=quiet)
+    old_journal, old_snapshot = tmp_path / 'old.events.jsonl', tmp_path / 'old.settings.resolved.yaml'
+    old_journal.write_text('previous journal\n')
+    old_snapshot.write_text('previous snapshot\n')
+    with ui.run_display(settings(tmp_path)) as reporter:
+        logger = ready(reporter, 'run.log')
+        runtime(reporter)
+        assert reporter.observing and not reporter.journal.enabled
+        reporter.start_md(40, 20, .5)
+        reporter.progress(60, temperature=301., energy=-8.9, kinetic_energy=1.2, potential_energy=-10.1)
+        row = '60\t-8.900\t1.200\t-10.100\t-8.900\t301.0\t2.00e-03'
+        logger.info(row)
+        reporter.checkpoint(60, 'restart.npz')
+        assert reporter.run_log.settings_path is None
+    text = Path('run.log').read_text()
+    assert 'Event journal and resolved settings: disabled by SO3LR_JOURNAL=0' in text
+    assert row in text and 'Execution: completed' in text
+    assert 'additional steps: 20 / 20; segment time: 0.01 ps' in text
+    assert 'Final total energy (eV): -8.9' in text
+    assert 'Last saved checkpoint: step 60' in text
+    assert 'Warnings: 0; errors: 0' in text
+    assert 'Artifact Events:' not in text and 'Artifact Resolved settings:' not in text
+    assert sorted(tmp_path.glob('*.events.jsonl')) == [old_journal]
+    assert sorted(tmp_path.glob('*.settings.resolved.yaml')) == [old_snapshot]
+    assert old_journal.read_text() == 'previous journal\n'
+    assert old_snapshot.read_text() == 'previous snapshot\n'
+    if display == 'rich':
+        assert reporter.renderer._state.sample_count == 1
+        assert reporter.renderer._state.samples[-1]['energy_eV'] == -8.9
+        assert reporter.renderer._state.status == 'Completed'
+        assert all(label != 'Metrics' for label, path in reporter.artifacts)
+
+
+def test_opted_out_failure_keeps_original_error_and_text_summary(tmp_path, monkeypatch):
+    monkeypatch.setenv('SO3LR_JOURNAL', '0')
+    failure = ValueError('invalid starting geometry')
+    with pytest.raises(ValueError) as caught:
+        with ui.run_display(settings(tmp_path)) as reporter:
+            ready(reporter, 'run.log')
+            raise failure
+    assert caught.value is failure
+    text = Path('run.log').read_text()
+    assert 'Execution: failed' in text and 'ValueError: invalid starting geometry' in text
+    assert not list(tmp_path.glob('*.events.jsonl'))
+    assert not list(tmp_path.glob('*.settings.resolved.yaml'))
+
+
+def test_journal_io_failure_still_allows_resolved_settings(tmp_path, monkeypatch):
+    original_open = Path.open
+    def fail_journal(path, *args, **kwargs):
+        if str(path).endswith('.events.jsonl'):
+            raise PermissionError('journal unavailable')
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', fail_journal)
+    with ui.run_display(settings(tmp_path)) as reporter:
+        ready(reporter, 'run.log')
+        runtime(reporter)
+        assert reporter.journal.enabled and not reporter.journal.active
+        snapshot = reporter.run_log.settings_path
+    assert snapshot.exists()
+    assert yaml.safe_load(snapshot.read_text())['model_path'] == DEFAULT_MODEL
+    assert 'Run telemetry disabled' in Path('run.log').read_text()
+    assert 'disabled by SO3LR_JOURNAL=0' not in Path('run.log').read_text()
 
 
 def test_md_summary_restart_segment_units_and_paths(tmp_path, capsys):

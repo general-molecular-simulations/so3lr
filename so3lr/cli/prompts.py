@@ -21,6 +21,7 @@ _KEYS = {
     '\x1b[6~': 'page_down', '\xe0Q': 'page_down',
 }
 _CSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
+ESCAPE_TIMEOUT = 0.12
 
 
 def decode_key(buffer, *, final=False, literal=False):
@@ -47,8 +48,12 @@ def decode_key(buffer, *, final=False, literal=False):
         if not final and len(buffer) < 64:
             return None, buffer
         return 'ignore', buffer[min(len(buffer), 64):]
-    if buffer.startswith('\x1bO') and len(buffer) >= 3:
-        return 'ignore', buffer[3:]
+    if buffer.startswith('\x1bO'):
+        if len(buffer) >= 3:
+            return 'ignore', buffer[3:]
+        # A timed-out SS3 prefix is one unsupported key, not Escape then O.
+        # O is a viewer shortcut and must not leak out of an incomplete arrow.
+        return ('ignore', '') if final else (None, buffer)
     char, rest = buffer[0], buffer[1:]
     if char in ('\x03', '\x04', '\x1a', '\x1b'):
         return (char if literal else 'cancel'), rest
@@ -74,7 +79,7 @@ class _Keys:
                 # Most keyboards send an entire escape sequence together; SSH
                 # or a busy terminal can split it. Keep character input active while
                 # waiting so canonical line buffering cannot swallow the tail.
-                if self.ready(0.12):
+                if self.ready(ESCAPE_TIMEOUT):
                     self.buffer += self.read()
                     continue
                 event, remainder = decode_key(self.buffer, final=True)
@@ -87,14 +92,10 @@ class _Keys:
 
 @contextmanager
 def terminal_keys():
-    """Restore terminal input mode on selection, errors and cancellation."""
-    with termination_signals(enabled=bool(getattr(sys.stdin, 'isatty', lambda: False)())):
-        with _terminal_keys() as keys:
-            yield keys
+    """Restore terminal input mode on selection, errors and cancellation.
 
-
-@contextmanager
-def _terminal_keys():
+    The caller owns the termination-signal guard (see ``choose``).
+    """
     if os.name == 'nt':
         import msvcrt
         import time

@@ -7,6 +7,7 @@ from collections import deque
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from itertools import groupby
 import json
 import math
 import os
@@ -15,8 +16,7 @@ import shlex
 import sys
 import time
 
-from .formatting import optimization_status, precision_label, throughput_label, terminal_text
-from .formatting import terminal_text as _literal
+from .formatting import finite_number as _finite, optimization_status, precision_label, throughput_label, terminal_text
 from .terminal import input_mode, live_display, termination_signals
 
 
@@ -30,16 +30,6 @@ MAX_HISTORY = 2048
 MAX_MEAN_BINS = 2048
 READ_BUDGET = 4 * 1024 * 1024
 MAX_LINE_BYTES = 1024 * 1024
-
-
-def _finite(value):
-    if isinstance(value, bool):
-        return None
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return number if math.isfinite(number) else None
 
 
 def _stamp(value):
@@ -325,6 +315,10 @@ class JournalReader:
                 self.state = RunState(self.path)
                 self.offset, self.pending, self.discarding = 0, b'', False
                 self.identity = identity
+            if stat.st_size == self.offset:
+                # Nothing new: skip the open/close (metadata calls on Lustre).
+                self.error = ''
+                return 0
             with self.path.open('rb') as stream:
                 stream.seek(self.offset)
                 content = stream.read(max(0, int(max_bytes)))
@@ -478,18 +472,22 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
     for row in range(rows):
         label = ylabels[{0: 0, rows // 2: 1, rows - 1: 2}[row]] if row in (0, rows // 2, rows - 1) else ''
         line = Text(label.rjust(label_width) + (' |' if ascii_only else ' │'), style='dim')
-        for col, mask in enumerate(grid[row]):
+        cells = []
+        for mask in grid[row]:
             if mask:
-                line.append('*' if ascii_only else chr(0x2800 + mask), style='yellow not dim')
+                cells.append(('*' if ascii_only else chr(0x2800 + mask), 'yellow not dim'))
             elif row == target_row:
                 # A quiet, solid line behind the recorded trace. Do not merge
                 # guide pixels into orange data cells: that makes the guide
                 # change color and invents horizontal pieces in the trace.
                 # The exact reference value is retained in the caption;
                 # this line is positioned at terminal-character resolution.
-                line.append('-' if ascii_only else '─', style='dim')
+                cells.append(('-' if ascii_only else '─', 'dim'))
             else:
-                line.append(' ')
+                cells.append((' ', None))
+        # One span per run of equal style, not one per terminal cell.
+        for style, run in groupby(cells, key=lambda cell: cell[1]):
+            line.append(''.join(char for char, _ in run), style=style)
         result.append(line)
     axis = list(('-' if ascii_only else '─') * columns)
     labels = [' '] * columns
@@ -548,11 +546,16 @@ def _state_plot(state, key, title, unit, width, target, ascii_only, rows=7, labe
 def _controls(state, attached=False, paged=False, multiple=False):
     if attached:
         if state.status in ('Completed', 'Failed'):
-            return 'View saved graphs: so3lr show ' + _literal(shlex.quote(str(state.path.parent)))
+            if state.info.get('_journal_enabled') is False:
+                return 'Saved graphs unavailable: SO3LR_JOURNAL=0. Text log retained.'
+            # Escape the path here: the paged view keeps layout newlines.
+            return 'View saved graphs: so3lr show ' + terminal_text(shlex.quote(str(state.path.parent)))
         if not state.info.get('_attached_keyboard'):
+            if state.info.get('_journal_enabled') is False:
+                return 'Ctrl+C: interrupt MD · saved graphs disabled (SO3LR_JOURNAL=0)'
             return 'Ctrl+C: interrupt MD · more plots: so3lr show <run-folder>'
-        return ('↑/↓: plots · ' if paged else '') + 'e: energy · q: hide plots · Ctrl+C: interrupt MD'
-    close = 'q: close viewer' if state.status in ('Completed', 'Failed') else 'q: detach'
+        return ('↑/↓: plots · ' if paged else '') + 'e: energy · Esc/q: hide plots · Ctrl+C: interrupt MD'
+    close = 'Esc/q: close viewer' if state.status in ('Completed', 'Failed') else 'Esc/q: detach'
     if state.info.get('operation') == 'optimization':
         return ('←/→: run · o: overview · ' if multiple else '') + close
     if multiple:
@@ -568,9 +571,7 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
     from rich.text import Text as RichText
 
     def Text(value='', style=''):
-        value = _literal(value)
-        value = terminal_text(value, ascii_only)
-        return RichText(value, style=style, no_wrap=compact,
+        return RichText(terminal_text(value, ascii_only), style=style, no_wrap=compact,
                         overflow=('crop' if ascii_only else 'ellipsis') if compact else 'fold')
 
     state = reader.state
@@ -625,7 +626,7 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
     if compact:
         # Quit comes first, so horizontal truncation cannot hide the escape
         # route on very narrow terminals either.
-        controls = 'q: close viewer' if state.status in ('Completed', 'Failed') else 'q: detach'
+        controls = 'Esc/q: close viewer' if state.status in ('Completed', 'Failed') else 'Esc/q: detach'
         if count > 1:
             controls += ' · ←/→: run · o: overview'
     add(controls, 'dim', 0)
@@ -650,7 +651,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     rows = [Text('SO3LR TAURI  live MD' if attached else 'SO3LR TAURI  monitor', style='bold yellow')]
     if not readers:
         return Group(*rows, Text('Waiting for *.events.jsonl journals.', style='dim'),
-                     Text('q: close observer', style='dim'))
+                     Text('Esc/q: close observer', style='dim'))
     reader = readers[selected % len(readers)]
     state = reader.state
     if state.info.get('operation') == 'optimization':
@@ -659,7 +660,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     if state.run_id and run_name.endswith('.' + state.run_id):
         run_name = run_name[:-(len(state.run_id) + 1)]
     short_id = f' · {state.run_id[:8]}' if state.run_id else ''
-    rows.append(Text(('Run · ' if attached else f'Run {selected + 1}/{len(readers)} · ') + _literal(run_name + short_id)))
+    rows.append(Text(('Run · ' if attached else f'Run {selected + 1}/{len(readers)} · ') + run_name + short_id))
     status_style = 'green' if state.status == 'Completed' else 'red' if state.status == 'Failed' else 'yellow'
     rows.append(Text(f'{"State" if attached else "Last reported state"}: {state.status}', style=status_style))
     metadata = Table.grid(padding=(0, 2))
@@ -667,27 +668,27 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     metadata.add_column(overflow='fold')
     model = state.info.get('model', state.settings.get('model', state.settings.get('model_path')))
     if model is not None:
-        metadata.add_row(Text('Model'), Text(_literal(model)))
+        metadata.add_row(Text('Model'), Text(model))
     details = [state.settings.get('ensemble'),
                f"{state.info['atoms']} atoms" if 'atoms' in state.info else None,
                state.info.get('engine')]
     details = [str(value) for value in details if value is not None]
     if details:
-        metadata.add_row(Text('Run'), Text(_literal(' · '.join(details))))
+        metadata.add_row(Text('Run'), Text(' · '.join(details)))
     if attached:
         for key, label in (('kernels', 'Kernels'), ('devices', 'Device')):
             value = state.info.get(key)
             if isinstance(value, (list, tuple)):
                 value = ', '.join(str(item) for item in value)
             if value is not None:
-                metadata.add_row(Text(label), Text(_literal(value)))
+                metadata.add_row(Text(label), Text(value))
     precision = state.info.get('precision', state.settings.get('precision'))
     if precision is not None:
-        metadata.add_row(Text('Precision'), Text(_literal(precision_label(precision))))
+        metadata.add_row(Text('Precision'), Text(precision_label(precision)))
     if state.phase:
-        metadata.add_row(Text('Phase'), Text(_literal(state.phase + (' · ' + state.detail if state.detail else ''))))
+        metadata.add_row(Text('Phase'), Text(state.phase + (' · ' + state.detail if state.detail else '')))
     if state.message:
-        metadata.add_row(Text('Message'), Text(_literal(state.message)))
+        metadata.add_row(Text('Message'), Text(state.message))
     rows.append(metadata)
     if attached:
         rows.extend(Text(state.info.get(key, ''), style='dim')
@@ -714,21 +715,22 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     if throughput:
         rows.append(Text(f'Cycle throughput {throughput} (excludes startup/I/O)', style='dim'))
     if state.checkpoint:
-        rows.append(Text(f"Saved checkpoint · step {_literal(state.checkpoint.get('step', '?'))} · "
-                         f"{_literal(state.checkpoint['path'])} · age {_age(state.checkpoint_timestamp, now)}", style='dim'))
+        rows.append(Text(f"Saved checkpoint · step {state.checkpoint.get('step', '?')} · "
+                         f"{state.checkpoint['path']} · age {_age(state.checkpoint_timestamp, now)}", style='dim'))
     artifacts = Table.grid(padding=(0, 2))
     artifacts.add_column(style='dim', no_wrap=True)
     artifacts.add_column(overflow='fold')
     for key, label in (('output_file', 'Trajectory path'), ('log_file', 'Log path')):
         if state.settings.get(key):
-            artifacts.add_row(Text(label), Text(_literal(state.settings[key])))
-    artifacts.add_row(Text('Journal'), Text(_literal(reader.path)))
+            artifacts.add_row(Text(label), Text(state.settings[key]))
+    if not attached or state.info.get('_journal_enabled') is not False:
+        artifacts.add_row(Text('Journal'), Text(reader.path))
     rows.append(artifacts)
     if state.diagnostic:
         kind, message = state.diagnostic
-        rows.append(Text(f'{kind.upper()}: {_literal(message)}', style='red' if kind == 'error' else 'yellow'))
+        rows.append(Text(f'{kind.upper()}: {message}', style='red' if kind == 'error' else 'yellow'))
     if reader.error:
-        rows.append(Text('Read error: ' + _literal(reader.error), style='yellow'))
+        rows.append(Text('Read error: ' + reader.error, style='yellow'))
     if state.malformed or state.unsupported:
         rows.append(Text(f'Skipped {state.malformed} malformed and {state.unsupported} unsupported events.', style='yellow'))
     rows.append(Text(_controls(state, attached, multiple=len(readers) > 1), style='dim'))
@@ -756,15 +758,15 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
         name = name[:-(len(state.run_id) + 1)]
     if attached:
         model = state.info.get('model', state.settings.get('model', state.settings.get('model_path', '')))
-        header = [Text(f'SO3LR TAURI · {state.status} · {_literal(model)}', 'bold yellow')]
+        header = [Text(f'SO3LR TAURI · {state.status} · {model}', 'bold yellow')]
         precision = state.info.get('precision', state.settings.get('precision'))
         if precision is not None:
             header.append(Text('Precision ' + precision_label(precision), 'dim'))
         header.extend(Text(state.info.get(key, ''), 'dim')
                       for key in ('_attached_compact_progress', '_attached_timing'))
     else:
-        header = [Text(f'SO3LR TAURI · Run {selected + 1}/{len(readers)} · {_literal(name)}', 'bold yellow'),
-                  Text(f'Last reported state: {state.status} · {_literal(state.phase)}',
+        header = [Text(f'SO3LR TAURI · Run {selected + 1}/{len(readers)} · {name}', 'bold yellow'),
+                  Text(f'Last reported state: {state.status} · {state.phase}',
                        'red' if state.status == 'Failed' else 'green' if state.status == 'Completed' else 'yellow')]
     if state.samples and not attached:
         last = state.samples[-1]
@@ -780,29 +782,32 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
     if throughput:
         summary.append(f'Cycle {throughput}')
     if state.checkpoint and not attached:
-        summary.append(f"Checkpoint step {_literal(state.checkpoint.get('step', '?'))} · age {_age(state.checkpoint_timestamp, now)}")
+        summary.append(f"Checkpoint step {state.checkpoint.get('step', '?')} · age {_age(state.checkpoint_timestamp, now)}")
     if not summary:
         summary.append(f'{state.sample_count:,} recorded samples · lines connect recorded values')
     footer = [Text(' · '.join(summary), 'dim')]
     if attached and state.checkpoint:
-        footer.append(Text(f"Checkpoint step {_literal(state.checkpoint.get('step', '?'))} · age {_age(state.checkpoint_timestamp, now)}", 'dim'))
+        footer.append(Text(f"Checkpoint step {state.checkpoint.get('step', '?')} · age {_age(state.checkpoint_timestamp, now)}", 'dim'))
     if reader.error or state.diagnostic:
         message = 'Read error: ' + reader.error if reader.error else state.diagnostic[0].upper() + ': ' + state.diagnostic[1]
-        footer.append(Text(_literal(message), 'yellow'))
+        footer.append(Text(message, 'yellow'))
     if state.status == 'Failed' and state.message:
-        footer.append(Text(_literal(state.message), 'red'))
+        footer.append(Text(state.message, 'red'))
     controls_text = _controls(state, attached, paged=True, multiple=len(readers) > 1)
     if (cell_len(terminal_text(controls_text, ascii_only)) > width
             and not (attached and state.status in ('Completed', 'Failed'))):
         if attached:
-            controls_text = (('↑/↓: plots · e: energy · q: hide\n' if state.info.get('_attached_keyboard') else '')
+            controls_text = (('↑/↓: plots · e: energy · Esc/q: hide\n' if state.info.get('_attached_keyboard') else '')
                              + 'Ctrl+C interrupts MD')
         else:
-            close = 'q: close' if state.status in ('Completed', 'Failed') else 'q: detach'
+            close = 'Esc/q: close' if state.status in ('Completed', 'Failed') else 'Esc/q: detach'
             controls_text = ('←/→: run · o: overview\n' if len(readers) > 1 else '') + '↑/↓: plots · e: energy · ' + close
         if ascii_only:
             controls_text = (controls_text.replace('↑/↓', 'up/down').replace('←/→', 'left/right')
                              .replace('energy', 'E').replace('plots', 'plot'))
+        if any(cell_len(terminal_text(line, ascii_only)) > width for line in controls_text.splitlines()):
+            # Keep the close/hide action complete on narrow terminals, too.
+            controls_text = controls_text.replace(' · Esc/q:', '\nEsc/q:')
     controls = Text(controls_text, 'dim', allow_newlines=True)
     if attached and state.status in ('Completed', 'Failed'):
         # The saved-directory command must stay copyable even for long paths.
@@ -882,6 +887,7 @@ class _Keyboard(AbstractContextManager):
         self.fd = None
         self.previous = None
         self.pending = ''
+        self._escape_since = None
 
     def __enter__(self):
         self.fd = sys.stdin.fileno()
@@ -897,10 +903,10 @@ class _Keyboard(AbstractContextManager):
         return self
 
     def read(self, timeout=0.1):
-        from .prompts import decode_key
+        from .prompts import ESCAPE_TIMEOUT, decode_key
 
         def adapt(key):
-            return {'left': 'previous', 'right': 'next', 'ignore': '', '\x1b': ''}.get(key, key)
+            return {'left': 'previous', 'right': 'next', 'ignore': '', '\x1b': 'escape'}.get(key, key)
 
         if os.name == 'nt':
             import msvcrt
@@ -915,18 +921,29 @@ class _Keyboard(AbstractContextManager):
         import select
         key, remainder = decode_key(self.pending, literal=True)
         if key is None:
-            if not select.select([self.fd], [], [], timeout)[0]:
-                return ''
-            chunk = os.read(self.fd, 32).decode('utf-8', errors='ignore')
-            if not chunk:
-                return 'q'
-            self.pending += chunk
-            key, remainder = decode_key(self.pending, literal=True)
-            if key is None:
+            if self.pending and self._escape_since is None:
+                self._escape_since = time.monotonic()
+            wait = timeout
+            if self._escape_since is not None:
+                wait = min(wait, max(0.0, ESCAPE_TIMEOUT - (time.monotonic() - self._escape_since)))
+            if select.select([self.fd], [], [], wait)[0]:
+                chunk = os.read(self.fd, 32).decode('utf-8', errors='ignore')
+                if not chunk:
+                    return 'q'
+                self.pending += chunk
+                key, remainder = decode_key(self.pending, literal=True)
+                if key is None:
+                    if self._escape_since is None:
+                        self._escape_since = time.monotonic()
+                    return ''
+            elif self._escape_since is not None and time.monotonic() - self._escape_since >= ESCAPE_TIMEOUT:
+                key, remainder = decode_key(self.pending, final=True, literal=True)
+            else:
                 return ''
         # Preserve queued keys. A single terminal read can contain an arrow,
         # energy selection and quit/toggle; each must get its own UI update.
         self.pending = remainder
+        self._escape_since = None
         return adapt(key)
 
     def __exit__(self, *args):
@@ -995,7 +1012,7 @@ def show(path, once=False, interval=1.0, no_color=False):
                     live.update(view, refresh=True)
                     next_refresh = now + interval
                 key = keyboard.read(min(0.1, interval))
-                if key in ('q', 'Q', '\x04'):
+                if key in ('q', 'Q', '\x04', 'escape'):
                     break
                 if key in ('j', 'next', 'k', 'previous') and readers:
                     views = [-1, *range(len(readers))] if len(readers) > 1 else [0]

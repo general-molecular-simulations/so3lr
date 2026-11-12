@@ -1,8 +1,9 @@
 """Offline, append-only CLI run events; no numerical or terminal dependencies.
 
-Every invocation owns one exclusively-created journal. The simulation remains
-authoritative: a filesystem failure disables this optional observer, rather
-than aborting a long-running calculation or changing its numerical work.
+By default each invocation owns one exclusively-created journal. Explicit
+SO3LR_JOURNAL=0 disables its sidecars. The simulation remains authoritative:
+a filesystem failure disables this optional observer, rather than aborting a
+long-running calculation or changing its numerical work.
 """
 from datetime import datetime, timezone
 import json
@@ -53,6 +54,9 @@ class EventJournal:
 
     def __init__(self, settings):
         self.run_id = uuid.uuid4().hex
+        # Requested policy is distinct from active IO: a failed journal should
+        # not suppress a replay snapshot that can still be written separately.
+        self.enabled = os.environ.get('SO3LR_JOURNAL') != '0'
         self.path = None
         self.seq = 0
         self._stream = None
@@ -63,6 +67,8 @@ class EventJournal:
         self._pending_initial_error = None
         self._started_at = time.monotonic()
         try:
+            if not self.enabled:
+                return
             base = Path(settings.get('log_file') or settings.get('output_file') or 'so3lr').expanduser()
             base.parent.mkdir(parents=True, exist_ok=True)
             # The exclusive create, not probability alone, guarantees that even

@@ -12,6 +12,7 @@ from so3lr.cli import telemetry
 @pytest.fixture(autouse=True)
 def plain_run(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv('SO3LR_JOURNAL', raising=False)
     # Numerical CLI tests may previously have installed non-propagating file
     # handlers. Keep this module's failure notifications isolated and captured.
     monkeypatch.setattr(telemetry._LOGGER, 'handlers', [])
@@ -29,6 +30,44 @@ def events(path):
     def nonfinite(value):
         pytest.fail(f'non-finite JSON constant: {value}')
     return [json.loads(line, parse_constant=nonfinite) for line in Path(path).read_text().splitlines()]
+
+
+@pytest.mark.parametrize('value', [None, '1', '', 'false', 'off', '00'])
+def test_only_explicit_zero_disables_journal(tmp_path, monkeypatch, value):
+    if value is not None:
+        monkeypatch.setenv('SO3LR_JOURNAL', value)
+    journal = telemetry.EventJournal({'log_file': tmp_path / 'run.log'})
+    assert journal.enabled and journal.active
+    journal.close()
+    assert events(journal.path)[0]['type'] == 'run_started'
+
+
+def test_explicit_opt_out_does_not_attempt_sidecar_io(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv('SO3LR_JOURNAL', '0')
+    def unexpected_io(*args, **kwargs):
+        pytest.fail('an opted-out journal must not create directories or files')
+    monkeypatch.setattr(Path, 'mkdir', unexpected_io)
+    monkeypatch.setattr(Path, 'open', unexpected_io)
+    journal = telemetry.EventJournal({'log_file': tmp_path / 'missing' / 'run.log'})
+    assert not journal.enabled and not journal.active
+    assert journal.path is None and journal.run_id
+    journal.emit('phase', {'name': 'Compiling'})
+    journal.flush_initial_warning()
+    journal.close()
+    assert not caplog.records
+
+
+def test_journal_policy_is_fixed_for_each_invocation(tmp_path, monkeypatch):
+    journal = telemetry.EventJournal({'log_file': tmp_path / 'run.log'})
+    try:
+        monkeypatch.setenv('SO3LR_JOURNAL', '0')
+        journal.emit('phase', {'name': 'Running'})
+        assert journal.enabled and events(journal.path)[-1]['type'] == 'phase'
+        disabled = telemetry.EventJournal({'log_file': tmp_path / 'next.log'})
+        assert not disabled.enabled and disabled.path is None
+        disabled.close()
+    finally:
+        journal.close()
 
 
 @pytest.mark.parametrize('display,quiet', [('auto', False), ('plain', False), ('auto', True)])

@@ -31,6 +31,14 @@ def test_zero_force_target_matches_the_actual_fire_comparison():
     assert optimization_status(info, 'Completed') == 'Step budget reached; force criterion not met'
 
 
+@pytest.mark.parametrize('field', ['opt_force_target_eVA', 'opt_force_max_eVA'])
+@pytest.mark.parametrize('value', [True, False])
+def test_boolean_metadata_cannot_report_optimization_convergence(field, value):
+    from so3lr.cli.formatting import optimization_status
+    info = {'opt_force_target_eVA': .02, 'opt_force_max_eVA': .01, field: value}
+    assert optimization_status(info, 'Completed') != 'Force criterion met'
+
+
 @pytest.mark.parametrize('value', ['float32', 'float64', 'unknown', '', None])
 def test_other_precision_labels_are_preserved(value):
     assert precision_label(value) == str(value)

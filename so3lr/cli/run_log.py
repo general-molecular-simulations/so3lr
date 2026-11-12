@@ -178,7 +178,10 @@ class RunLog:
             self._write(f'Run started (UTC): {self.started_utc}; operation: {self.operation}; '
                         f'host: {socket.gethostname()}; pid: {os.getpid()}')
             self._write(f'Working directory: {self.cwd}')
-            self._write(f'Event journal: {self.journal.path or "unavailable"}')
+            if self.journal.enabled:
+                self._write(f'Event journal: {self.journal.path or "unavailable"}')
+            else:
+                self._write('Event journal and resolved settings: disabled by SO3LR_JOURNAL=0')
             self._write('Table units: step = integration-step counter; E/PE/KE/H = eV; '
                         'T = K; cell = A; P (when present) = bar; timing = s/step. '
                         'Journal volume = A^3; journal pressure = eV/A^3. '
@@ -196,30 +199,30 @@ class RunLog:
                 self._save_settings()
 
     def _report_identity(self, force=False):
-        fields = []
-        for field, key in (('model', 'model_path'), ('engine', 'engine'), ('precision', 'precision')):
+        def resolved(field, key):
             actual = self.info.get(field)
             value = actual if actual is not None else self.settings.get(key, 'default')
             if field == 'precision':
                 value = precision_label(value)
-            label = 'backend' if field == 'engine' else field
-            fields.append(f'{label}: {value}' + (' (requested; unresolved)' if actual is None else ''))
+            return f'{value}' + (' (requested; unresolved)' if actual is None else '')
+
         devices = self.info.get('devices')
         if isinstance(devices, (list, tuple)):
             devices = ', '.join(map(str, devices))
-        fields.extend([f'hardware: {devices or "not reported"}',
-                       f'seed: {self.settings.get("seed", "not applicable")}'])
+        system = [f'hardware: {devices or "not reported"}',
+                  f'seed: {self.settings.get("seed", "not applicable")}']
         if self.info.get('atoms') is not None:
-            fields.append(f'atoms: {self.info["atoms"]}')
-        identity = tuple(fields)
-        if force or identity != self._identity:
-            self._write(f'Model: {fields[0].removeprefix("model: ")}; {fields[1]}')
-            self._write('Precision: ' + fields[2].removeprefix('precision: '))
-            self._write('Hardware and system: ' + '; '.join(fields[3:]))
-            self._identity = identity
+            system.append(f'atoms: {self.info["atoms"]}')
+        lines = (f"Model: {resolved('model', 'model_path')}; backend: {resolved('engine', 'engine')}",
+                 'Precision: ' + resolved('precision', 'precision'),
+                 'Hardware and system: ' + '; '.join(system))
+        if force or lines != self._identity:
+            for line in lines:
+                self._write(line)
+            self._identity = lines
 
     def _save_settings(self):
-        if self.operation is None or self._settings_disabled:
+        if not self.journal.enabled or self.operation is None or self._settings_disabled:
             return
         try:
             import yaml

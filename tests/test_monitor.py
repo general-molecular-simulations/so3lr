@@ -406,7 +406,8 @@ def test_show_existing_parent_folder_opens_all_run_overview(tmp_path, monkeypatc
     assert '\x1b' not in text
 
 
-def test_show_cycles_overview_and_runs_and_returns_directly(tmp_path, monkeypatch):
+@pytest.mark.parametrize('close_key', ['q', 'escape'])
+def test_show_cycles_overview_and_runs_and_returns_directly(tmp_path, monkeypatch, close_key):
     from rich.console import Console
     import rich.live
 
@@ -436,7 +437,7 @@ def test_show_cycles_overview_and_runs_and_returns_directly(tmp_path, monkeypatc
             frames.append(output.getvalue())
     class Keyboard:
         def __enter__(self):
-            self.keys = iter(['next', 'e', 'next', 'next', 'previous', 'o', 'q'])
+            self.keys = iter(['next', 'e', 'next', 'next', 'previous', 'o', close_key])
             return self
         def __exit__(self, *args):
             pass
@@ -465,6 +466,18 @@ def test_once_is_ansi_free_even_in_a_terminal(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, 'stdout', output)
     monitor.show(path, once=True)
     assert '\x1b' not in output.getvalue()
+
+
+@pytest.mark.parametrize('width', [32, 80])
+@pytest.mark.parametrize('ascii_only', [False, True])
+def test_folder_overview_always_shows_escape_close_hint(tmp_path, width, ascii_only):
+    from rich.console import Console
+    from so3lr.cli.overview import render_overview
+    reader = monitor.JournalReader(tmp_path / 'run.events.jsonl')
+    output = io.StringIO()
+    Console(file=output, width=width, color_system=None).print(
+        render_overview([reader], width=width, height=2, ascii_only=ascii_only))
+    assert output.getvalue().splitlines()[-1].startswith('Esc/q: close')
 
 
 @pytest.mark.parametrize('interval', [0, -1, float('nan'), float('inf')])
@@ -611,6 +624,34 @@ def test_completed_attached_display_reopens_with_show_and_has_no_stale_controls(
         assert len(text.splitlines()) <= height
 
 
+@pytest.mark.parametrize('height', [None, 24])
+@pytest.mark.parametrize('status', ['Completed', 'Failed'])
+def test_opted_out_attached_display_does_not_offer_unsaved_graphs(tmp_path, height, status):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    reader.state.status = status
+    reader.state.info['_journal_enabled'] = False
+    text = render(reader, height=height, attached=True)
+    assert 'Saved graphs unavailable: SO3LR_JOURNAL=0. Text log retained.' in text.replace('\n', '')
+    assert 'so3lr show' not in text
+    assert 'Esc/q:' not in text
+
+
+@pytest.mark.parametrize('keyboard', [False, True])
+def test_opted_out_attached_plots_do_not_advertise_a_nonexistent_journal(tmp_path, keyboard):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    reader.state.info.update(_journal_enabled=False, _attached_keyboard=keyboard)
+    text = render(reader, attached=True)
+    assert 'Temperature' in text and 'Total energy' in text
+    assert 'so3lr show' not in text and 'Journal' not in text
+    assert str(path) not in text
+
+
 def test_import_does_not_load_model_backends():
     result = subprocess.run([sys.executable, '-c',
         "import sys; import so3lr.cli.monitor; "
@@ -654,6 +695,32 @@ def test_keyboard_preserves_batched_keys_and_split_arrows(monkeypatch, chunks, e
     assert keyboard.pending == ''
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX keyboard byte stream')
+@pytest.mark.parametrize('prefix, expected', [(b'\x1b', 'escape'), (b'\x1b[', ''), (b'\x1bO', '')])
+def test_keyboard_times_out_standalone_escape_without_leaking_prefix_shortcuts(monkeypatch, prefix, expected):
+    import select
+    from so3lr.cli.prompts import ESCAPE_TIMEOUT
+
+    chunks, waits, now = [prefix], [], [0.0]
+    keyboard = monitor._Keyboard()
+    keyboard.fd = 42
+    def ready(read, write, errors, timeout):
+        waits.append(timeout)
+        return ([42], [], []) if chunks else ([], [], [])
+    monkeypatch.setattr(select, 'select', ready)
+    monkeypatch.setattr(os, 'read', lambda *args: chunks.pop(0))
+    monkeypatch.setattr(monitor.time, 'monotonic', lambda: now[0])
+    assert keyboard.read(timeout=0) == ''
+    now[0] = ESCAPE_TIMEOUT / 2
+    assert keyboard.read(timeout=0) == ''
+    now[0] = ESCAPE_TIMEOUT * 2
+    assert keyboard.read(timeout=0) == expected
+    assert keyboard.pending == ''
+    chunks.append(b'q')
+    assert keyboard.read(timeout=0) == 'q'
+    assert waits and not any(waits)  # attached polling never waits for a key
+
+
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX terminal byte stream')
 def test_real_pty_application_arrows_preserve_shortcuts_and_restore_input(monkeypatch):
     import pty
@@ -675,6 +742,9 @@ def test_real_pty_application_arrows_preserve_shortcuts_and_restore_input(monkey
                 os.write(master, b'Dq')
                 assert keyboard.read(timeout=0.2) == 'previous'
                 assert keyboard.read(timeout=0.2) == 'q'
+                os.write(master, b'\x1b')
+                assert keyboard.read(timeout=0.2) == ''
+                assert keyboard.read(timeout=0.3) == 'escape'
                 raise RuntimeError('restore after input')
         restored = termios.tcgetattr(slave)
         pending = getattr(termios, 'PENDIN', 0)
@@ -1133,6 +1203,6 @@ def test_short_optimization_views_keep_controls_and_outcome(tmp_path, height, st
         reader.state.message = 'Model evaluation failed'
     text = render(reader, height=height)
     assert len(text.splitlines()) <= height
-    assert text.splitlines()[-1].startswith('q:')
+    assert text.splitlines()[-1].startswith('Esc/q:')
     if height >= 3:
         assert monitor.optimization_status(reader.state.info, status) in text

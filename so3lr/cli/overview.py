@@ -5,17 +5,7 @@ import math
 import os
 from pathlib import Path
 
-from .formatting import terminal_text as _literal
-
-
-def _number(value):
-    if isinstance(value, bool):
-        return None
-    try:
-        value = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return value if math.isfinite(value) else None
+from .formatting import finite_number as _number, terminal_text as _literal
 
 
 def _shorten(value, width, ascii_only):
@@ -154,8 +144,8 @@ def _render(readers, width, height, now, ascii_only, page):
     if read_errors:
         label = 'error' if read_errors == 1 else 'errors'
         footer.append(line(f'{read_errors} journal read {label}; cached values may be outdated.', 'red'))
-    controls = ('Left/Right: individual runs | Up/Down: overview page | q: close' if ascii_only else
-                '←/→: individual runs · ↑/↓: overview page · q: close')
+    controls = ('Esc/q: close | Left/Right: individual runs | Up/Down: overview page' if ascii_only else
+                'Esc/q: close · ←/→: individual runs · ↑/↓: overview page')
     if not states:
         return Group(*header, line('No run journals found.'), line(controls, 'dim'))
 

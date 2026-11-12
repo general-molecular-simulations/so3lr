@@ -19,26 +19,29 @@ def input_mode(keyboard):
         keyboard.__exit__(None, None, None)
 
 
+def stop_live(live):
+    """Restore the cursor even when Rich only partially acquired the terminal."""
+    try:
+        live.stop()
+    finally:
+        # A partial start can hide the cursor before pushing Rich's render
+        # hook; stop() can then fail while popping that absent hook.
+        live.console.show_cursor(True)
+
+
 @contextmanager
 def live_display(live):
     """Own Rich cleanup before its first refresh, including BaseException."""
-    def close():
-        try:
-            live.stop()
-        finally:
-            # A partial start can hide the cursor before pushing Rich's render
-            # hook; stop() can then fail while popping that absent hook.
-            live.console.show_cursor(True)
     try:
         yield live.__enter__()
     except BaseException:
         try:
-            close()
+            stop_live(live)
         except BaseException:
             pass  # preserve the original interruption after best-effort cleanup
         raise
     else:
-        close()
+        stop_live(live)
 
 
 @contextmanager
@@ -70,8 +73,12 @@ def termination_signals(*, enabled=True):
 
     Callers must enable this only while owning a TTY. Batch execution keeps
     native dispositions, including while the main thread is blocked in C. A
-    first termination restores defaults before raising, so another signal can
-    terminate even if cleanup blocks or a callback swallows that exception.
+    first Python handler restores defaults before raising, so another signal
+    can terminate even if cleanup blocks or a callback swallows that exception.
+    Python handlers cannot run while native code withholds interpreter signal
+    checks: until that first handler runs, TERM/HUP may remain pending. Moving
+    cleanup into Python callbacks would have the same latency; a hard native
+    hang requires external SIGKILL, without Python or terminal finalization.
     Custom/ignored handlers, blocked signals and worker-thread calls retain
     their existing policy. Nested terminal owners use the outer owner's guard.
     """

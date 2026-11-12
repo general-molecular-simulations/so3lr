@@ -9,7 +9,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
-import math
 import os
 import sys
 import threading
@@ -20,8 +19,8 @@ from types import SimpleNamespace
 
 from .telemetry import EventJournal
 from .run_log import RunLog
-from .formatting import precision_label, throughput_label, optimization_status, terminal_text
-from .terminal import TerminationSignal as _TerminationSignal, termination_signals as _termination_signals
+from .formatting import finite_number as _finite, precision_label, throughput_label, optimization_status, terminal_text
+from .terminal import TerminationSignal as _TerminationSignal, termination_signals as _termination_signals, stop_live
 
 
 @dataclass(frozen=True)
@@ -117,16 +116,6 @@ def _seconds(value):
     return f'{hours:d}:{minutes:02d}:{seconds:02d}' if hours else f'{minutes:02d}:{seconds:02d}'
 
 
-def _finite(value):
-    if value is None:
-        return None
-    try:
-        result = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return result if math.isfinite(result) else None
-
-
 @dataclass(frozen=True)
 class _Activity:
     """Animate wall time from immutable host snapshots, never simulation state."""
@@ -170,8 +159,9 @@ class _Reporter:
         self._keyboard = None
         self._graphs_hidden = False
         self._plot_page, self._energy_index = 0, 1  # Total energy is the initial graph.
+        self._stderr_before = sys.stderr
         self.console = Console(
-            file=sys.stderr,
+            file=self._stderr_before,
             force_terminal=True if self.config.display == 'rich' else None,
             no_color=self.config.no_color or 'NO_COLOR' in os.environ,
             markup=False, highlight=False,
@@ -222,7 +212,8 @@ class _Reporter:
         # numerical path and avoiding concurrent reads of mutable accumulators.
         self.live = Live(get_renderable=self._live_view, console=self.console,
                          auto_refresh=self._heartbeat, refresh_per_second=2,
-                         transient=False, redirect_stdout=False, redirect_stderr=False)
+                         transient=False, redirect_stdout=False,
+                         redirect_stderr=bool(getattr(self._stderr_before, 'isatty', lambda: False)()))
         try:
             self.live.start(refresh=True)
         except BaseException:
@@ -240,9 +231,12 @@ class _Reporter:
         # Text treats paths and user messages literally, including [brackets].
         return Text(self._label(text), style=style)
 
+    @property
+    def _ascii_only(self):
+        return self.console.encoding.lower().replace('-', '') not in ('utf8', 'utf16', 'utf32')
+
     def _label(self, text):
-        ascii_only = self.console.encoding.lower().replace('-', '') not in ('utf8', 'utf16', 'utf32')
-        return terminal_text(text, ascii_only)
+        return terminal_text(text, self._ascii_only)
 
     def _snapshot(self):
         from rich.console import Group
@@ -259,8 +253,7 @@ class _Reporter:
             rows.append(row)
         activity = None
         if self.status == 'running':
-            unicode = self.console.encoding.lower().replace('-', '') in ('utf8', 'utf16', 'utf32')
-            activity = _Activity(self.phase_name, self._opened_at, self._reported_at, unicode)
+            activity = _Activity(self.phase_name, self._opened_at, self._reported_at, not self._ascii_only)
         return Group(*rows), activity
 
     def _live_view(self):
@@ -292,7 +285,7 @@ class _Reporter:
             self._state.info['_attached_keyboard'] = self._keyboard is not None
             return render_monitor([self._reader], energy=list(ENERGIES)[self._energy_index],
                                   width=self.console.width, height=self.console.height - int(self._heartbeat),
-                                  ascii_only=self.console.encoding.lower().replace('-', '') not in ('utf8', 'utf16', 'utf32'),
+                                  ascii_only=self._ascii_only,
                                   page=self._plot_page, attached=True)
 
         title = self._text('SO3LR TAURI', 'bold yellow')
@@ -392,8 +385,9 @@ class _Reporter:
             rows.append(self._text(_controls(self._state, attached=True), 'dim'))
         return Group(*rows)
 
-    def attach_journal(self, path, run_id):
+    def attach_journal(self, path, run_id, *, enabled=True):
         self._state.run_id = run_id
+        self._state.info['_journal_enabled'] = enabled
         if path is not None:
             self._state.path = self._reader.path = Path(path)
 
@@ -442,6 +436,10 @@ class _Reporter:
             self._energy_index = (self._energy_index + 1) % len(ENERGIES)
         elif key in ('up', 'down'):
             self._plot_page += 1 if key == 'down' else -1
+        elif key == 'escape':
+            # Escape leaves the graph view without stopping MD or toggling an
+            # already hidden view back on. q remains the explicit toggle.
+            self._graphs_hidden = True
         elif key in ('q', 'Q'):
             # Keep input active while the compact status is visible so the
             # same key can restore the graphs, including samples gathered
@@ -548,10 +546,16 @@ class _Reporter:
         try:
             if not self._closed:
                 try:
-                    self.live.stop()
+                    try:
+                        # Rich does not flush its partial-line buffer on stop.
+                        # Only flush the proxy this display installed; existing
+                        # stream handlers and the real stderr retain ownership.
+                        if getattr(sys.stderr, 'rich_proxied_file', None) is self._stderr_before:
+                            sys.stderr.flush()
+                    finally:
+                        stop_live(self.live)
                 finally:
                     self._closed = True
-                    self.console.show_cursor(True)
         finally:
             self._stop_keyboard()
 
@@ -580,7 +584,8 @@ class _RunReporter:
         try:
             self.run_log = RunLog(settings, self.journal)
             if self.enabled:
-                self.renderer.attach_journal(self.journal.path, self.journal.run_id)
+                self.renderer.attach_journal(self.journal.path, self.journal.run_id,
+                                             enabled=self.journal.enabled)
         except BaseException:
             self.journal.close()
             raise
@@ -777,7 +782,6 @@ def run_display(settings):
             else:
                 reporter.fail(exception_message(exc))
                 try:
-                    exc._so3lr_display_owned = True
                     exc._so3lr_reported = reporter.enabled
                 except (AttributeError, TypeError):
                     pass

@@ -141,7 +141,7 @@ def get_hardware_info():
 
                 logger.info(f"Device {i}:                  {device}")
                 logger.info(f"Memory usage:              {mem_str}")
-            except:
+            except Exception:  # a bare except would swallow the run display's TerminationSignal
                 logger.info(f"Device {i}:                {device}")
                 logger.info(
                     "Memory usage:               Unable to retrieve memory info")
@@ -639,7 +639,7 @@ def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Pa
 @click.option('--settings', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Path to YAML settings file. All simulation parameters are read from this file.')
 @click.option('--help-full', is_flag=True,
-              help='Show the command overview (compatibility alias for --help).')
+              help='Show the command overview with additional examples.')
 @click.option('--help', '-h', is_flag=True,
               help='Show brief command overview.')
 @click.version_option(version=__version__, prog_name='SO3LR Tauri')
@@ -849,12 +849,19 @@ def _record_run_failure(exc, message, log_file):
         logger.exception(message, extra={'file_only': True})
         handler.flush()
         after = path.stat()
-        size = after.st_size - before.st_size
-        if ((after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
-                or not 0 < size <= 1024 * 1024):
+        # RotatingFileHandler may replace the file during this write. Verify
+        # the new current file from its beginning in that case; an unchanged
+        # file must still prove preservation in newly appended bytes only.
+        rotated = (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+        offset = 0 if rotated else before.st_size
+        size = after.st_size - offset
+        if not 0 < size <= 1024 * 1024:
             return
         with path.open('rb') as stream:
-            stream.seek(before.st_size)
+            current = os.fstat(stream.fileno())
+            if (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino):
+                return
+            stream.seek(offset)
             exc._so3lr_traceback_preserved = expected in stream.read(size)
     except Exception:
         # No saved-traceback claim when the file is unavailable, the formatter

@@ -3255,8 +3255,7 @@ def perform_min(
         box=box
     )
     f_max = np.abs(F).max()
-    energy = float(E)
-    report_opt_step(reporter, 0, energy, f_max, total_steps=min_cycles * min_steps,
+    report_opt_step(reporter, 0, E, f_max, total_steps=min_cycles * min_steps,
                     force_target=force_convergence)
 
     # If tracking trajectory, store all positions
@@ -3292,8 +3291,7 @@ def perform_min(
         )
 
         f_max = np.abs(F).max()
-        energy = float(E)
-        report_opt_step(reporter, i * min_steps, energy, f_max)
+        report_opt_step(reporter, i * min_steps, E, f_max)
 
         # Save the current positions to the trajectory
         minimization_trajectory.append(np.array(min_state.position))

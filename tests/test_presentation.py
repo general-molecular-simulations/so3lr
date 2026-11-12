@@ -956,6 +956,129 @@ def test_attached_keyboard_pages_selects_energy_and_toggles_plots_without_stoppi
     assert 'q: show plots' not in render(reporter)
 
 
+def test_attached_escape_hides_idempotently_and_q_restores_plots(monkeypatch):
+    from so3lr.cli import monitor
+
+    monkeypatch.setattr(sys, 'stderr', Terminal())
+    monkeypatch.setattr(sys, 'stdin', InputTerminal())
+    keyboard = FakeKeyboard()
+    monkeypatch.setattr(monitor, '_Keyboard', lambda: keyboard)
+    ui.configure(display='rich')
+    with ui.run_display({'ensemble': 'nvt', 'md_T': 300}) as reporter:
+        reporter.start_md(0, 1000, 0.5)
+        reporter.progress(100, temperature=300, energy=-38)
+        assert 'Temperature [K]' in render(reporter)
+        for step in (200, 300):
+            keyboard.keys.append('escape')
+            reporter.progress(step, temperature=310, energy=-37)
+            assert reporter.status == 'running'
+            assert 'Temperature [K]' not in render(reporter)
+            assert 'q: show plots' in render(reporter)
+            assert keyboard.closed == 0
+        keyboard.keys.append('q')
+        reporter.progress(400, temperature=315, energy=-36)
+        assert 'Temperature [K]  315.0' in render(reporter)
+        assert reporter._state.sample_count == 4
+        assert reporter.status == 'running'
+    assert keyboard.closed == 1
+
+
+@pytest.mark.parametrize('error', [KeyboardInterrupt(), RuntimeError('partial Rich start')])
+def test_shared_live_stop_restores_cursor_when_stop_raises(error):
+    from types import SimpleNamespace
+    from so3lr.cli.terminal import stop_live
+
+    cursors = []
+
+    def stop():
+        raise error
+
+    live = SimpleNamespace(stop=stop, console=SimpleNamespace(show_cursor=cursors.append))
+    with pytest.raises(type(error)) as captured:
+        stop_live(live)
+    assert captured.value is error
+    assert cursors == [True]
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX terminal stderr redirection')
+@pytest.mark.parametrize('failure', [False, True])
+def test_terminal_stderr_redirect_is_scoped_and_flushes_partial_lines(tmp_path, failure):
+    import json
+    import pty
+    import select
+
+    code = r'''
+import json, logging, pathlib, sys, warnings
+from so3lr.cli import presentation as ui
+original_stderr, original_stdout = sys.stderr, sys.stdout
+existing = logging.StreamHandler(original_stderr)
+logger = logging.getLogger('existing-handler')
+logger.handlers = [existing]
+logger.propagate = False
+ui.configure(display='rich')
+inside = {}
+try:
+    with ui.run_display({'log_file': 'run.log'}) as reporter:
+        inside['stderr_redirected'] = sys.stderr is not original_stderr
+        inside['stdout_unchanged'] = sys.stdout is original_stdout
+        inside['old_handler_unchanged'] = logger.handlers == [existing] and existing.stream is original_stderr
+        with warnings.catch_warnings():
+            warnings.simplefilter('always')
+            warnings.warn('warning-via-live', UserWarning)
+        sys.stderr.write('direct-via-live\n')
+        fresh = logging.StreamHandler()
+        inside['new_handler_uses_current_stderr'] = fresh.stream is sys.stderr
+        new_logger = logging.getLogger('new-handler')
+        new_logger.handlers = [fresh]
+        new_logger.propagate = False
+        new_logger.warning('new-handler-via-live')
+        new_logger.removeHandler(fresh)
+        fresh.close()
+        sys.stderr.write('partial-via-live')
+        if sys.argv[1] == 'True':
+            raise RuntimeError('expected run failure')
+except RuntimeError:
+    pass
+reporter.renderer.close()  # repeated cleanup must not replay a partial line
+inside['stderr_restored'] = sys.stderr is original_stderr
+inside['stdout_restored'] = sys.stdout is original_stdout
+inside['old_handler_retained'] = logger.handlers == [existing] and existing.stream is original_stderr
+pathlib.Path('stderr.json').write_text(json.dumps(inside))
+'''
+    master, slave = pty.openpty()
+    process = subprocess.Popen([sys.executable, '-c', code, str(failure)], cwd=tmp_path,
+                               stdin=subprocess.DEVNULL, stdout=slave, stderr=slave,
+                               env=dict(os.environ, TERM='xterm', COLUMNS='100', LINES='30'))
+    os.close(slave)
+    capture = bytearray()
+    deadline = time.monotonic() + 10
+    try:
+        while True:
+            assert time.monotonic() < deadline, 'stderr capture timed out'
+            if not select.select([master], [], [], .05)[0]:
+                if process.poll() is not None:
+                    break
+                continue
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            capture.extend(chunk)
+        assert process.wait(timeout=2) == 0, capture.decode(errors='replace')
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(master)
+    result = json.loads((tmp_path / 'stderr.json').read_text())
+    assert result and all(result.values()), result
+    for marker in (b'warning-via-live', b'direct-via-live', b'new-handler-via-live', b'partial-via-live'):
+        assert capture.count(marker) == 1, capture.decode(errors='replace')
+    assert b'\x1b[?25l' in capture and b'\x1b[?25h' in capture
+
+
 @pytest.mark.parametrize('stdin', [io.StringIO(), Terminal()])
 def test_attached_never_takes_redirected_or_unusable_input(monkeypatch, stdin):
     from so3lr.cli import monitor

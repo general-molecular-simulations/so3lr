@@ -24,6 +24,16 @@ def test_version_is_available_without_model_initialization():
     assert 'SO3LR Tauri' in result.output
 
 
+def test_full_help_advertises_and_includes_its_additional_examples():
+    brief = CliRunner().invoke(cli, ['--help'])
+    full = CliRunner().invoke(cli, ['--help-full'])
+    assert brief.exit_code == full.exit_code == 0
+    assert 'with additional examples' in ' '.join(brief.output.split())
+    assert 'More examples' not in brief.output
+    assert 'More examples' in full.output
+    assert 'so3lr --display plain --settings run.yaml' in full.output
+
+
 def test_grouped_help_exposes_common_and_advanced_options():
     result = CliRunner().invoke(cli, ['nvt', '--help'])
     assert result.exit_code == 0
@@ -361,7 +371,9 @@ def test_preamble_failure_retains_traceback_or_proves_it_was_saved(failure_cli, 
         durable = log_path.read_text()
         assert 'Traceback (most recent call last)' in durable
         assert f'RuntimeError: {stage} preamble failed' in durable
-        assert 'Traceback (most recent call last)' not in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert f'Error: RuntimeError: {stage} preamble failed' in err
+        assert 'Traceback (most recent call last)' not in err
     else:
         assert caught.value is failure
         assert not getattr(failure, '_so3lr_traceback_preserved', False)
@@ -393,3 +405,70 @@ def test_failed_traceback_file_write_keeps_original_exception(failure_cli, monke
         invoke(operation)
     assert not getattr(caught.value, '_so3lr_traceback_preserved', False)
     assert 'Traceback (most recent call last)' not in log_path.read_text()
+
+
+@pytest.mark.parametrize('operation', ['md', 'opt'])
+def test_traceback_rollover_still_produces_one_compact_terminal_error(
+        failure_cli, monkeypatch, capsys, operation):
+    from logging.handlers import RotatingFileHandler
+    app, log_path, invoke = failure_cli
+    handler = RotatingFileHandler(log_path, maxBytes=8192, backupCount=1)
+
+    def setup(path):
+        app.logger.addHandler(presentation.make_console_handler())
+        app.logger.addHandler(handler)
+        presentation.get_reporter().logger_ready(path)
+
+    def runtime(settings):
+        # Force the next logging record (the traceback) to roll the file.
+        handler.stream.write('previous log entry ' * 500 + '\n')
+        handler.flush()
+        raise AssertionError('runtime failure')
+
+    monkeypatch.setattr(app, 'setup_logger', setup)
+    monkeypatch.setattr(app, 'run', runtime)
+    monkeypatch.setattr(app, 'perform_min', runtime)
+    with pytest.raises(SystemExit) as caught:
+        invoke(operation)
+    assert caught.value.code == 1
+    assert log_path.with_suffix(log_path.suffix + '.1').exists()
+    assert 'AssertionError: runtime failure' in log_path.read_text()
+    err = capsys.readouterr().err
+    assert 'Error: AssertionError: runtime failure' in err
+    assert 'Traceback (most recent call last)' not in err
+
+
+def test_filtered_traceback_does_not_claim_preservation(failure_cli, monkeypatch):
+    import logging
+    app, log_path, invoke = failure_cli
+
+    def setup(path):
+        handler = logging.FileHandler(path)
+        handler.addFilter(lambda record: not record.exc_info)
+        app.logger.addHandler(presentation.make_console_handler())
+        app.logger.addHandler(handler)
+        presentation.get_reporter().logger_ready(path)
+
+    monkeypatch.setattr(app, 'setup_logger', setup)
+    with pytest.raises(AssertionError, match='runtime failure') as caught:
+        invoke('md')
+    assert not getattr(caught.value, '_so3lr_traceback_preserved', False)
+    assert 'Traceback (most recent call last)' not in log_path.read_text()
+
+
+@pytest.mark.parametrize('failure', [KeyboardInterrupt(), SystemExit(7),
+                                   presentation._TerminationSignal(15)])
+def test_hardware_inspection_does_not_swallow_control_flow(monkeypatch, failure):
+    import sys
+    from types import SimpleNamespace
+    from so3lr.cli import so3lr_cli as app
+
+    def memory_stats():
+        raise failure
+
+    device = SimpleNamespace(device_kind='test GPU', memory_stats=memory_stats)
+    monkeypatch.setitem(sys.modules, 'jax', SimpleNamespace(
+        default_backend=lambda: 'gpu', local_devices=lambda **kwargs: [device]))
+    with pytest.raises(type(failure)) as caught:
+        app.get_hardware_info()
+    assert caught.value is failure

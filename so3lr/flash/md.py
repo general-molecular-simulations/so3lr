@@ -329,8 +329,7 @@ def relax_flash(eng, staged, position, shift, box, settings, atoms, start, opt_f
     f_max = float(jnp.abs(F).max())
     logger.info("Starting minimization (flash engine)...")
     logger.info("Step\tE [eV]\tF_max [eV/Å]")
-    energy = float(e)
-    report_opt_step(reporter, 0, energy, f_max, total_steps=min_cycles * min_steps,
+    report_opt_step(reporter, 0, e, f_max, total_steps=min_cycles * min_steps,
                     force_target=fconv)
     frames = [np.asarray(position)]
     for c in range(1, min_cycles + 1):
@@ -341,8 +340,7 @@ def relax_flash(eng, staged, position, shift, box, settings, atoms, start, opt_f
             state = _run_jitted(eng, fire, state, min_steps, predict, finish)
         e, F = ef(state.position)
         f_max = float(jnp.abs(F).max())
-        energy = float(e)
-        report_opt_step(reporter, c * min_steps, energy, f_max)
+        report_opt_step(reporter, c * min_steps, e, f_max)
         frames.append(np.asarray(state.position))
         if fconv is not None and f_max <= fconv:
             logger.info(f"Convergence criterion met at step {c * min_steps}: Fmax = {f_max:.3f} eV/Å")
@@ -745,11 +743,13 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
             h = ke + pe
         return ke, pe, h, temp
 
-    def report(step, ke, pe, h, temp, per_step, *, timing_valid):
+    def report(step, ke, pe, h, temp, per_step, *, timing_valid, sides=None):
         """Use the shared MD row and observer values, with this engine's physical cell."""
+        if npt and sides is None:
+            sides = cartesian(state)[1]
         report_md_row(reporter, step, ke, pe, h, temp, per_step, ensemble=ensemble,
                       npt_state=state if npt else None,
-                      box=cartesian(state)[1] if npt else (None if vacuum else box),
+                      box=sides if npt else (None if vacuum else box),
                       timing_valid=timing_valid)
 
     # trajectory positions as perform_md writes them: fractional unless asked otherwise (or
@@ -804,8 +804,9 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
         if not np.all(np.isfinite([ke, pe, temp])):
             raise RuntimeError("MD simulation diverged: NaN/Inf detected in energy or temperature.")
         reporter.phase('Running')
+        R, L1 = cartesian(state)
         # advance returns only an accepted cycle, including any overflow retries.
-        report(current_cycle * md_steps, ke, pe, h, temp, per_step, timing_valid=cycle > 0)
+        report(current_cycle * md_steps, ke, pe, h, temp, per_step, timing_valid=cycle > 0, sides=L1)
         if ensemble != "nvt-langevin" and not drift_warned and np.isfinite(h) and h != 0.0:
             t_ps = current_cycle * md_steps * md_dt_ps
             if drift_ref is None:
@@ -823,7 +824,6 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
                         f"[meV/atom/ps] to tune, or drift_warmup_ps to change the equilibration window; some "
                         f"drift early in the run is normal.)")
                     drift_warned = True
-        R, L1 = cartesian(state)
         positions.append(np.asarray(R / L1 if frac_out else R, odt))
         momenta.append(np.asarray(state.momentum, odt))
         boxes.append(np.asarray(L1, odt))            # orthorhombic: the box is its sides ([0]: none)

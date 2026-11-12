@@ -29,14 +29,20 @@ def precision_label(value):
     return label
 
 
-def _positive_number(value):
+def finite_number(value):
+    """A finite float, or None for missing, non-numeric, boolean or non-finite values."""
     if isinstance(value, bool):
         return None
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
-    return number if math.isfinite(number) and number > 0 else None
+    return number if math.isfinite(number) else None
+
+
+def _positive_number(value):
+    number = finite_number(value)
+    return number if number is not None and number > 0 else None
 
 
 def throughput_label(seconds_per_step, dt_fs=None, atoms=None):
@@ -68,17 +74,9 @@ def optimization_status(info, status):
         return 'Optimization stopped'
     # FIRE compares against every explicitly supplied finite threshold. Zero
     # is an exact-force target, not the absence of a stopping criterion.
-    raw_target = info.get('opt_force_target_eVA')
-    try:
-        target = float(raw_target) if not isinstance(raw_target, bool) else float('nan')
-    except (TypeError, ValueError, OverflowError):
-        target = float('nan')
-    target = target if math.isfinite(target) else None
-    try:
-        force = float(info.get('opt_force_max_eVA'))
-    except (TypeError, ValueError, OverflowError):
-        force = float('nan')
-    if target is not None and math.isfinite(force) and 0 <= force <= target:
+    target = finite_number(info.get('opt_force_target_eVA'))
+    force = finite_number(info.get('opt_force_max_eVA'))
+    if target is not None and force is not None and 0 <= force <= target:
         return 'Force criterion met'
     if str(status).lower() in ('complete', 'completed'):
         return ('Step budget reached; force criterion not met' if target is not None

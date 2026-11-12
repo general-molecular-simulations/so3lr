@@ -149,11 +149,11 @@ def test_multiframe_input_is_rejected_without_selecting_a_frame(tmp_path, struct
 
 
 def test_npt_requires_full_periodicity_and_a_positive_orthorhombic_cell(tmp_path, structure_file):
-    assert not setup.inspect_structure(structure_file).npt_compatible
+    assert not setup.inspect_structure(structure_file).periodic
     periodic = tmp_path / 'periodic.extxyz'
     periodic.write_text(structure_file.read_text().replace('pbc="F F F"',
                         'pbc="T T T" Lattice="30 0 0 0 30 0 0 0 30"'))
-    assert setup.inspect_structure(periodic).npt_compatible
+    assert setup.inspect_structure(periodic).periodic
     periodic.write_text(periodic.read_text().replace('pbc="T T T"', 'pbc="T T F"'))
     with pytest.raises(ValueError, match='mixed-axis periodic boundary conditions'):
         setup.inspect_structure(periodic)
@@ -365,6 +365,31 @@ def test_key_reader_handles_split_arrows_and_coalesced_keys():
     assert [keys.next(), keys.next(), keys.next()] == ['down', 'up', 'enter']
     with pytest.raises(click.Abort):
         _Keys(lambda: '\x1b', lambda timeout: False).next()
+
+
+@pytest.mark.parametrize('prefix', ['\x1b[', '\x1bO'])
+def test_incomplete_arrow_prefix_does_not_cancel_setup_or_become_a_shortcut(prefix):
+    from so3lr.cli.prompts import _Keys, decode_key
+    assert decode_key(prefix) == (None, prefix)
+    assert decode_key(prefix, final=True, literal=True) == ('ignore', '')
+    chunks = iter([prefix, '\r'])
+    assert _Keys(lambda: next(chunks), lambda timeout: False).next() == 'enter'
+
+
+def test_escape_in_guided_menu_cancels_without_export(tmp_path, monkeypatch):
+    from so3lr.cli import prompts
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup, '_interactive', lambda: True)
+    monkeypatch.setattr(prompts, 'arrow_input_available', lambda console: True)
+    @contextmanager
+    def keys():
+        yield prompts._Keys(lambda: '\x1b', lambda timeout: False)
+    monkeypatch.setattr(prompts, 'terminal_keys', keys)
+    # The first source picker uses the actual selection loop and key decoder.
+    result = CliRunner().invoke(wizard)
+    assert result.exit_code == 0, result.output
+    assert 'Setup cancelled. No files written.' in result.output
+    assert not list(tmp_path.iterdir())
 
 
 def test_arrow_selector_moves_highlight_and_commits_on_enter(monkeypatch):

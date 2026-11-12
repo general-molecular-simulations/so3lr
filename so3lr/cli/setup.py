@@ -50,7 +50,6 @@ class Structure:
     atoms: int
     formula: str
     periodic: bool
-    npt_compatible: bool
     digest: str
     frame_index: int = 0
     frame_count: int = 1
@@ -69,7 +68,7 @@ def _digest(path):
 
 def _as_isolated(structure):
     """Describe an explicitly requested transformation of the exported copy."""
-    return replace(structure, periodic=False, npt_compatible=False,
+    return replace(structure, periodic=False,
                    cell_lengths=(0.0, 0.0, 0.0), minimum_cell_height=None, isolated=True)
 
 
@@ -115,13 +114,12 @@ def inspect_structure(path, frame_index=None):
         # for every ensemble. Match check_cell's exact off-diagonal check;
         # accepting tiny tilts here would still fail after saving and launching.
         raise ValueError('Periodic MD requires a positive, axis-aligned orthorhombic cell.')
-    npt_ok = periodic
     height = None
     if periodic:
         height = float(np.min(cell_heights(cell))) if np.linalg.matrix_rank(cell) == 3 else 0.0
     has_momenta = first.has('momenta') and bool(np.any(first.get_momenta()))
     return Structure(path, len(first), first.get_chemical_formula(),
-                     periodic, npt_ok, _digest(path), frame_index or 0, count,
+                     periodic, _digest(path), frame_index or 0, count,
                      tuple(float(length) for length in first.cell.lengths()), height,
                      has_momenta, float(first.get_temperature()) if has_momenta else None)
 
@@ -421,7 +419,7 @@ def _collect(console, previous):
             ensemble = _ENSEMBLES[_choose(console, 'Dynamics',
                 ('NVT · Nosé–Hoover', 'NVT · Langevin', 'NVE', 'NPT'),
                 _ENSEMBLES.index(old.get('ensemble', 'nvt')) + 1)]
-            if ensemble != 'npt' or structure.npt_compatible:
+            if ensemble != 'npt' or structure.periodic:
                 break
             _say(console, 'NPT requires a fully periodic, positive, axis-aligned orthorhombic cell.', 'red')
         model = _select_model(console, old.get('model', DEFAULT_MODEL))
