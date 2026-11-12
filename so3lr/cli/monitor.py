@@ -529,7 +529,7 @@ def _plot_scale(samples, key, target=None, reference=None, label_budget=24):
 
 def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=7,
           reference=None, reference_approximate=False, label_width=None, time_bounds=None,
-          empty_message='No samples for this property yet.'):
+          empty_message='No samples for this property yet.', scale=None):
     from rich.console import Group
     from rich.text import Text
 
@@ -538,7 +538,8 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
     trace = theme.series_style(key)
     heading = Text()
     heading.append(f'{title} [{unit}]', style=theme.STRONG)
-    scale = _plot_scale(samples, key, target, reference, label_budget=max(8, width - 10))
+    if scale is None:
+        scale = _plot_scale(samples, key, target, reference, label_budget=max(8, width - 10))
     if scale is None:
         return Group(heading, Text(empty_message, style=theme.MUTED))
     points, decimals, low, high, ylabels = scale
@@ -648,27 +649,57 @@ def _plot_specs(state, energy, ascii_only=False):
     return specs
 
 
+def _cached(state, name, compute):
+    """Memoize per-sample-set work (scales, time bounds) until the state receives a new event.
+
+    The live view redraws several times per second between MD samples; scanning
+    every retained sample again on each frame would be wasted work.
+    """
+    marker = (getattr(state, 'sequence', None), getattr(state, 'sample_count', None), len(state.samples))
+    cache = getattr(state, '_render_cache', None)
+    if cache is None or cache[0] != marker:
+        cache = (marker, {})
+        try:
+            state._render_cache = cache
+        except AttributeError:  # an immutable test double: compute without caching
+            return compute()
+    if name not in cache[1]:
+        cache[1][name] = compute()
+    return cache[1][name]
+
+
+def _state_scale(state, key, target, reference, width):
+    budget = max(8, width - 10)
+    return _cached(state, ('scale', key, target, reference, budget),
+                   lambda: _plot_scale(state.samples, key, target, reference, label_budget=budget))
+
+
 def _shared_label_width(state, specs, width=80):
     widths = []
     for key, _, _, target in specs:
         reference = state.reference(key)[0] if target is None else None
-        scale = _plot_scale(state.samples, key, target, reference, label_budget=max(8, width - 10))
+        scale = _state_scale(state, key, target, reference, width)
         if scale is not None:
             widths.append(max(map(len, scale[-1])))
     return max(widths, default=0)
 
 
-def _state_plot(state, key, title, unit, width, target, ascii_only, rows=7, label_width=None):
-    reference, approximate = state.reference(key) if target is None else (None, False)
+def _time_bounds(state):
     times = [_finite(row.get('time_ps')) for row in state.samples]
     times = [value for value in times if value is not None]
-    bounds = (min(0, min(times)), max(times)) if times else None
+    return (min(0, min(times)), max(times)) if times else None
+
+
+def _state_plot(state, key, title, unit, width, target, ascii_only, rows=7, label_width=None):
+    reference, approximate = state.reference(key) if target is None else (None, False)
+    bounds = _cached(state, 'time_bounds', lambda: _time_bounds(state))
     message = ('Not defined for Langevin dynamics (stochastic thermostat).'
                if key == 'conserved_energy_eV' and str(state.settings.get('ensemble')).lower() == 'nvt-langevin'
                else 'No samples for this property yet.')
     return _plot(state.samples, key, title, unit, width, target, ascii_only, rows,
                  reference=reference, reference_approximate=approximate,
-                 label_width=label_width, time_bounds=bounds, empty_message=message)
+                 label_width=label_width, time_bounds=bounds, empty_message=message,
+                 scale=_state_scale(state, key, target, reference, width))
 
 
 @dataclass(frozen=True)
@@ -1066,18 +1097,23 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
         return Group(*compact, controls)
     specs = _plot_specs(state, energy, ascii_only)
     label_width = _shared_label_width(state, specs, width)
-    # Rows a block needs besides its plot rows: heading, axis, tick labels and,
-    # when it does not fit on the heading, the guide caption. Measure it.
-    overhead = max(line_count(_state_plot(state, key, title, unit, width, target, ascii_only, 2, label_width)) - 2
-                   for key, title, unit, target in specs)
-    plot_rows = max(2, min(12, budget - overhead))
-    if budget >= 2 * (overhead + 3) + 1:  # pairs only when each plot keeps 3+ rows
-        # Keep temperature and energy together on one page when possible.
-        plot_rows = max(2, min(12, (budget - 2 * overhead - 1) // 2))
-    blocks = []
-    for key, title, unit, target in specs:
-        block = _state_plot(state, key, title, unit, width, target, ascii_only, plot_rows, label_width)
-        blocks.append((title, block, line_count(block)))
+    def plan(overhead):
+        rows = max(2, min(12, budget - overhead))
+        if budget >= 2 * (overhead + 3) + 1:  # pairs only when each plot keeps 3+ rows
+            # Keep temperature and energy together on one page when possible.
+            rows = max(2, min(12, (budget - 2 * overhead - 1) // 2))
+        built = [(title, block, line_count(block)) for title, block in
+                 ((title, _state_plot(state, key, title, unit, width, target, ascii_only, rows, label_width))
+                  for key, title, unit, target in specs)]
+        return rows, built
+
+    # Rows a block needs besides its plot rows: heading, axis and tick labels,
+    # plus the guide caption when it does not fit on the heading. Assume the
+    # usual three; re-plan with the measured value only when a caption wrapped.
+    plot_rows, blocks = plan(3)
+    overhead = max(count - plot_rows for _, _, count in blocks)
+    if overhead != 3:
+        plot_rows, blocks = plan(overhead)
     pages, current, used = [], [], 0
     for title, block, count in blocks:
         separator = 1 if current else 0
@@ -1100,6 +1136,9 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
     return Group(*header, Text(''), *content, *footer, *pager, controls)
 
 
+FULL_ATTACHED_ROWS = 44  # below this, attached views always page
+
+
 class _MonitorView:
     def __init__(self, readers, **kwargs):
         self.readers, self.kwargs = readers, kwargs
@@ -1112,9 +1151,13 @@ class _MonitorView:
         kwargs = dict(self.kwargs)
         kwargs['width'] = min(kwargs['width'], options.max_width)
         page = kwargs.pop('page')
-        full = _render_monitor(self.readers, **kwargs)
         height = kwargs.get('height')
-        if height is not None and self.readers and len(console.render_lines(full, options, pad=False)) > height:
+        # The tall attached layout needs about 46 rows (60 for NPT); below that,
+        # skip rendering it just to learn that it does not fit.
+        full = None if kwargs.get('attached') and height is not None and height < FULL_ATTACHED_ROWS \
+            else _render_monitor(self.readers, **kwargs)
+        if height is not None and self.readers and (
+                full is None or len(console.render_lines(full, options, pad=False)) > height):
             reader = self.readers[kwargs['selected'] % len(self.readers)]
             if reader.state.info.get('operation') == 'optimization':
                 yield _render_optimization(reader, kwargs['selected'], len(self.readers), kwargs['ascii_only'],

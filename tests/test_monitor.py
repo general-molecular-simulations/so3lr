@@ -1393,3 +1393,18 @@ def test_show_reports_only_path_errors_as_bad_paths(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli, ['show', str(tmp_path)])
     assert result.exit_code == 1 and 'Invalid value for PATH' not in result.output
     assert isinstance(result.exception, ValueError)
+
+
+def test_render_cache_follows_new_samples(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    entries = samples()
+    write(path, entries)
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    first = render(reader, height=24)
+    assert render(reader, height=24) == first  # served from the cache between samples
+    last = max(item['seq'] for item in entries)
+    reader.state.consume(event(last + 1, 'sample', step=99_000, segment_step=2000, time_ps=9.0,
+                               temperature_K=999.0, energy_eV=-1.0))
+    updated = render(reader, height=24)
+    assert '999.0' in updated and updated != first
