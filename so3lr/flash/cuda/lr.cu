@@ -162,13 +162,12 @@ __global__ void __launch_bounds__(LW * 32) lr_kernel(LrParams p) {
   A.c6_a = c6_ta * p.c6r[wi];
   Acc acc = {};
   int qn = 0;
-  // IMG: the atom's wrapped position (the cell grid bins wrapped positions)
-  const double awx = ax - Lx * floor(ax / Lx), awy = ay - Ly * floor(ay / Ly), awz = az - Lz * floor(az / Lz);
   // the atoms of cells c0..c1 of a row into the queue; IMG: as their image shifted by
-  // (shx, shy, shz) boxes, else as the minimum image
+  // (shx, shy, shz) boxes (the positions wrapped into the box: engine._pos3), else as the
+  // minimum image
   auto scan = [&](int row, int c0, int c1, int shx, int shy, int shz) {
     const bool itself = shx == 0 && shy == 0 && shz == 0;
-    const double tx = shx * Lx - awx, ty = shy * Ly - awy, tz = shz * Lz - awz;
+    const double tx = shx * Lx - ax, ty = shy * Ly - ay, tz = shz * Lz - az;
     const int s = p.cell_start[row + c0], e = p.cell_start[row + c1 + 1];
     for (int k0 = s; k0 < e; k0 += 32) {
       const int kk = k0 + lane;
@@ -179,9 +178,7 @@ __global__ void __launch_bounds__(LW * 32) lr_kernel(LrParams p) {
         j = kk;                                   // cell order: contiguous loads
         double dxd, dyd, dzd;
         if (p.IMG) {
-          dxd = p.px[j] - Lx * floor(p.px[j] / Lx) + tx;
-          dyd = p.py[j] - Ly * floor(p.py[j] / Ly) + ty;
-          dzd = p.pz[j] - Lz * floor(p.pz[j] / Lz) + tz;
+          dxd = p.px[j] + tx; dyd = p.py[j] + ty; dzd = p.pz[j] + tz;
         } else {
           dxd = p.px[j] - ax; dyd = p.py[j] - ay; dzd = p.pz[j] - az;
           dxd -= Lx * floor(dxd * iLx + 0.5);

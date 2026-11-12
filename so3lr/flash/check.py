@@ -304,10 +304,12 @@ def layout(L, rc, rc_lr, images=True):
     return None if grid is None else (*grid[:2], True, grid[2])
 
 
-def grid_problem(L, rc, rc_lr, images=True):
-    """Why the engine cannot lay out an orthorhombic box of sides L (None if it can):
-    ``box_problem``, then its cell grid (``layout``) must have fewer than MAX_CELLS cells.
-    The engine raises it when it lays out a box (``_layout``)."""
+def grid_problem(L, rc, rc_lr, images=True, n=0):
+    """Why the engine cannot lay out an orthorhombic box of sides L for n atoms (None if it
+    can): ``box_problem``, then its cell grid (``layout``) must have fewer than MAX_CELLS
+    cells, and with the short range over the periodic images each neighbour entry (an atom
+    and its image, n (2 ks + 1)^3 of them) must fit an int32. The engine raises it when it
+    lays out a box (``_layout``)."""
     problem = box_problem(L, rc, rc_lr, images)
     if problem:
         return problem
@@ -315,6 +317,9 @@ def grid_problem(L, rc, rc_lr, images=True):
     if grid is not None and math.prod(grid[0]) >= MAX_CELLS:
         return (f"box {[round(v) for v in L]} A too large for the cell grid "
                 f"({' x '.join(map(str, grid[0]))} cells, 2^{MAX_CELLS.bit_length() - 1} or more)")
+    if grid is not None and n * (2 * grid[3] + 1) ** 3 >= 2 ** 31:
+        return (f"box {[round(v, 2) for v in L]} A: {n} atoms and their periodic images overflow the "
+                f"neighbour rows' int32 entries (a larger box)")
     return None
 
 
@@ -434,7 +439,7 @@ def structure_problem(settings, atoms, rc):
         sides = np.diag(box) if box.ndim == 2 else np.broadcast_to(box.reshape(-1), (3,))
     shrink = 1.0 - (NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0)
     L = [float(v) * shrink for v in sides]
-    return grid_problem(L, rc, rc_lr)
+    return grid_problem(L, rc, rc_lr, n=len(atoms))
 
 
 @functools.cache

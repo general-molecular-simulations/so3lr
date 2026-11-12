@@ -401,6 +401,8 @@ def test_cell_grid_takes_every_box_from_the_smallest():
     # a slab: the thin side alone takes the images
     assert check.layout([49.6, 49.6, 12.4], 4.5, 12.0) == ([11, 11, 2], 3, True, 0)
     assert check.layout([3.567, 3.567, 7.134], 4.5, 12.0) == ([1, 1, 1], 4, True, 2)
+    # ks 2: each atom has 125 packed entries, which must fit an int32
+    assert "int32" in check.grid_problem([3.567, 3.567, 7.134], 4.5, 12.0, n=2 ** 31 // 125 + 1)
     # the images' walk is bounded: a 1000 A cutoff needs a box of the minimum image
     assert check.box_problem([12.4] * 3, 4.5, 1000.0) is not None
 

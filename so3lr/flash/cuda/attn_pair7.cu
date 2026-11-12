@@ -51,7 +51,7 @@ __global__ void pair_prep(PrepParams p) {
   const int v = p.nbr[(size_t)a * p.K + c];
   const int b = edge_atom(v, p.KS);
   const int W = 2 * p.KS + 1, C = W * W * W;
-  const int back = a * C + (C - 1 - (v - b * C));       // b's entry of a (C 1: a)
+  const int back = a * C + (C - 1 - (v - b * C));       // b's entry of a (KS 0: C 1, back a)
   const bool b_local = b >= r0 && b < r0 + p.nl;
   const int cm = b_local ? min(p.cnt[b], p.K) : 0;
   int lo = 0, hi = cm;
@@ -434,6 +434,7 @@ __global__ void __launch_bounds__(MW * 32) att_msg(MsgParams p) {
     int c = t0 + e;
     bool valid = c < n_a;
     double dxd, dyd, dzd;
+    // the minimum image inline (not edge_disp): this loop keeps a's position and 1 / L in registers
     if (p.KS) {
       edge_disp(p.px, p.py, p.pz, a, valid ? row[c] : a * (2 * p.KS + 1) * (2 * p.KS + 1) * (2 * p.KS + 1),
                 p.KS, Lx, Ly, Lz, dxd, dyd, dzd);

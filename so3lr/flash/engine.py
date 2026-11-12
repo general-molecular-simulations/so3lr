@@ -57,9 +57,8 @@ neighbour-list potential.
 from __future__ import annotations
 
 import contextlib
-import functools
 import math
-from functools import partial
+from functools import partial, reduce
 
 import numpy as np
 import jax
@@ -167,19 +166,38 @@ def _min_image(d, L):
 
 
 def _wrap(x, L):
-    """x in [0, L): the coordinate the cell grid bins (build_grid)."""
+    """x in [0, L) (up to rounding): the coordinate the cell grid bins (build_grid)."""
     return x - L * jnp.floor(x / L)
+
+
+def _pack(sh, K):
+    """A periodic image's shift (boxes per axis, each within [-K, K]) as one code in
+    [0, (2 K + 1)^3); no shift is ((2 K + 1)^3 - 1) / 2."""
+    W = 2 * K + 1
+    return (sh[0] + K) + W * ((sh[1] + K) + W * (sh[2] + K))
+
+
+def _unpack(code, K):
+    """The shift ``_pack`` packed."""
+    W = 2 * K + 1
+    return _rem(code, W) - K, _rem(_div(code, W), W) - K, _div(code, W * W) - K
+
+
+def _unwrap(c, n, K):
+    """Cell c of a side of n cells, c within K of [0, n): its cell in the box and its
+    image's shift in boxes (made non-negative by whole periods first, as _div and _rem take)."""
+    t = c + (K // n + 1) * n
+    return _rem(t, n), _div(t, n) - (K // n + 1)
 
 
 def _edge(v, KS):
     """A neighbour-row entry: the partner, and (KS, the short range over the periodic
-    images) its image's shift in boxes per axis, packed as partner * (2 KS + 1)^3 + code
-    (``_ell_kernel``); None where the row holds the minimum image's partners."""
+    images) its image's shift, packed as partner * (2 KS + 1)^3 + ``_pack`` (``_ell_kernel``);
+    None where the row holds the minimum image's partners."""
     if not KS:
         return v, None
-    W = 2 * KS + 1
-    code = _rem(v, W ** 3)
-    return _div(v, W ** 3), (_rem(code, W) - KS, _rem(_div(code, W), W) - KS, _div(code, W * W) - KS)
+    C = (2 * KS + 1) ** 3
+    return _div(v, C), _unpack(_rem(v, C), KS)
 
 
 def _switch(x, on, off):
@@ -435,22 +453,22 @@ def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, rows, nbr, co
             dy = _rem(_div(k, W), W) - W // 2
             dx = _rem(k, W) - W // 2
             if KS:
-                # the unwrapped cell: its cell in the box, and the image (boxes per axis),
-                # within [-KS, KS] (the cells are at least 1 a side)
-                t = [cv + dv + (KS // nc + 1) * nc for cv, dv, nc in ((cx, dx, NX), (cy, dy, NY), (cz, dz, NZ))]
-                sh = [_div(tv, nc) - (KS // nc + 1) for tv, nc in zip(t, (NX, NY, NZ))]
-                cc = (_rem(t[2], NZ) * NY + _rem(t[1], NY)) * NX + _rem(t[0], NX)
-                code = (sh[0] + KS) + W * ((sh[1] + KS) + W * (sh[2] + KS))
-                own = code == (W ** 3 - 1) // 2
+                # the unwrapped cell: its cell in the box, and the image's shift, within
+                # [-KS, KS] boxes per axis (the cells are at least 1 a side)
+                (xc, shx), (yc, shy), (zc, shz) = (_unwrap(cv + dv, nc, KS)
+                                                   for cv, dv, nc in ((cx, dx, NX), (cy, dy, NY), (cz, dz, NZ)))
+                sh = (shx, shy, shz)
+                code = _pack(sh, KS)
             else:
-                cc = (_rem(cz + dz + NZ, NZ) * NY + _rem(cy + dy + NY, NY)) * NX + _rem(cx + dx + NX, NX)
+                xc, yc, zc = (_rem(cv + dv + nc, nc) for cv, dv, nc in ((cx, dx, NX), (cy, dy, NY), (cz, dz, NZ)))
+            cc = (zc * NY + yc) * NX + xc
             s = cell_start[cc]
             e = cell_start[cc + 1]
             # a side of two cells (a box under 3 cutoffs, check.image_grid): the cells one
             # either way are the same cell, walked once
             twice = [d == 1 for d, nc in ((dx, NX), (dy, NY), (dz, NZ)) if nc == 2]
             if twice and not KS:
-                e = jnp.where(functools.reduce(jnp.logical_or, twice), s, e)
+                e = jnp.where(reduce(jnp.logical_or, twice), s, e)
 
             def chunk(t, n):
                 ks = s + t * BLE + jnp.arange(BLE)
@@ -459,12 +477,13 @@ def _ell_kernel(px, py, pz, order, cell_start, cell_of, geo, boxl, rows, nbr, co
                 d = [plgpu.load(p.at[j], mask=m, other=0.0) - av for p, av in ((px, ax), (py, ay), (pz, az))]
                 if KS:
                     d = [v + sv.astype(v.dtype) * L for v, sv, L in zip(d, sh, (Lx, Ly, Lz))]
-                    hit = m & (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < rc2) & ((j != a) | ~own)
+                    itself = (j == a) & (code == (W ** 3 - 1) // 2)
                     v = j * W ** 3 + code
                 else:
                     d = [_min_image(v, L) for v, L in zip(d, (Lx, Ly, Lz))]
-                    hit = m & (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < rc2) & (j != a)
+                    itself = j == a
                     v = j
+                hit = m & (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < rc2) & ~itself
                 slot = n + jnp.cumsum(hit.astype(jnp.int32)) - 1
                 plgpu.store(nbr.at[a, slot], v, mask=hit & (slot < K))
                 return (n + jnp.sum(hit.astype(jnp.int32))).astype(jnp.int32)
@@ -785,10 +804,8 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
     """IMG: a box under 2 x the reach across (check.image_grid). The walk goes kc cells each
     way without wrapping, through the periodic images (a side of fewer than 2 kc + 1 cells
     is walked more than once, each time as another image), and each partner within the
-    reach is an atom and its image, image[pid, slot] (the shift in boxes per axis, each
-    within [-IB, IB], packed in base IW), the displacement formed from the wrapped
-    positions plus the shift. An
-    atom's own images are partners too; the minimum image (IMG False) stays as it was."""
+    reach is an atom and its image, image[pid, slot] (``_pack``), the displacement formed
+    from the wrapped positions (``_pos3``) plus the shift; an atom's own images included."""
     pid = _i32(pl.program_id(0))
     nprog = _i32(pl.num_programs(0))
     # [rc, phi spacing, phi intervals, ke, damping start, gamma_scale, fs^(-4/21), hartree,
@@ -806,10 +823,9 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
     sx, sy, sz = sxd.astype(dt), syd.astype(dt), szd.astype(dt)
     b0, b1, b2, b3 = (jnp.asarray(v, dt) for v in (-0.00433008, 0.24428889, 0.04125273, -0.00078893))
     p0 = jnp.asarray(5.08, dt)
-    # IMG: the shifts are within [-IB, IB] boxes per axis, packed in base IW
+    # IMG: the shifts are within [-IB, IB] boxes per axis (_pack)
     IB = KC + 1
-    IW = 2 * IB + 1
-    I0 = IB + IW * (IB + IW * IB)                               # no shift: the atom itself
+    I0 = _pack((0, 0, 0), IB)                                   # no shift: the atom itself
 
     def atom(it, most_seen):
         # N rows from rows[0] on (a device's own rows)
@@ -822,13 +838,12 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
         ox = jnp.clip(ax - Lx * jnp.floor(ax / Lx) - cx.astype(ax.dtype) * sxd, 0.0, sxd).astype(dt)
         oy = jnp.clip(ay - Ly * jnp.floor(ay / Ly) - cy.astype(ay.dtype) * syd, 0.0, syd).astype(dt)
         oz = jnp.clip(az - Lz * jnp.floor(az / Lz) - cz.astype(az.dtype) * szd, 0.0, szd).astype(dt)
-        if IMG:
-            awx, awy, awz = _wrap(ax, Lx), _wrap(ay, Ly), _wrap(az, Lz)
 
         def image_d(j, m, sh):
-            """IMG: the displacement to atom j's image shifted by sh (boxes per axis)."""
-            return tuple((_wrap(plgpu.load(p_.at[j], mask=m, other=0.0), L_) + s_.astype(L_.dtype) * L_ - w_).astype(dt)
-                         for p_, L_, s_, w_ in zip((px, py, pz), (Lx, Ly, Lz), sh, (awx, awy, awz)))
+            """IMG: the displacement to atom j's image shifted by sh (boxes per axis; the
+            positions wrapped into the box, _pos3)."""
+            return tuple((plgpu.load(p_.at[j], mask=m, other=0.0) + s_.astype(L_.dtype) * L_ - a_).astype(dt)
+                         for p_, L_, s_, a_ in zip((px, py, pz), (Lx, Ly, Lz), sh, (ax, ay, az)))
 
         # ---- pass 1: partners within the cutoff into this program's scratch row ----
         def row_fn(k, nh):
@@ -844,14 +859,11 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
             hi = jnp.minimum(cx + jnp.floor((ox + xr) / sx).astype(jnp.int32), cx + KC)
             hi = jnp.where(g2 < reach2, hi, lo - 1)
             if IMG:
-                # cells cz + dzc unwrapped: the cell and its image's shift (made non-negative
-                # by whole periods first, as _div and _rem take)
-                zt, yt = cz + dzc + (KC // NZ + 1) * NZ, cy + dyc + (KC // NY + 1) * NY
-                zc, yc = _rem(zt, NZ), _rem(yt, NY)
-                shz, shy = _div(zt, NZ) - (KC // NZ + 1), _div(yt, NY) - (KC // NY + 1)
+                # cells unwrapped: the cell and its image's shift
+                zc, shz = _unwrap(cz + dzc, NZ, KC)
+                yc, shy = _unwrap(cy + dyc, NY, KC)
                 row = (zc * NY + yc) * NX
-                OX = KC // NX + 1
-                p_lo = _div(lo + OX * NX, NX) - OX                   # the period of cell lo
+                p_lo = _unwrap(lo, NX, KC)[1]                        # the period of cell lo
 
                 def image_part(part, nh):
                     # the columns lo..hi within period p_lo + part: cells c0..c1, shift p_lo + part
@@ -862,7 +874,7 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
                     c1 = jnp.where(hi >= lo, c1, c0 - 1)
                     s = cell_start[row + c0]
                     e = jnp.where(c1 >= c0, cell_start[row + jnp.maximum(c1, c0 - 1) + 1], s)
-                    code = (shx + IB) + IW * ((shy + IB) + IW * (shz + IB))
+                    code = _pack((shx, shy, shz), IB)
 
                     def chunk(tc, nh):
                         ks = s + tc * BL + jnp.arange(BL)
@@ -927,8 +939,7 @@ def _lr_kernel(px, py, pz, z, q, a0r, c6r, alphas, c6tab, order, cell_start, cel
             j = plgpu.load(scratch.at[pid, hidx], mask=hit, other=0)
             if IMG:
                 code = plgpu.load(image.at[pid, hidx], mask=hit, other=I0)
-                sh = (_rem(code, IW) - IB, _rem(_div(code, IW), IW) - IB, _div(code, IW * IW) - IB)
-                dx, dy, dz = image_d(j, hit, sh)
+                dx, dy, dz = image_d(j, hit, _unpack(code, IB))
             else:
                 dx = _min_image(plgpu.load(px.at[j], mask=hit, other=0.0) - ax, Lx).astype(dt)
                 dy = _min_image(plgpu.load(py.at[j], mask=hit, other=0.0) - ay, Ly).astype(dt)
@@ -1498,7 +1509,7 @@ class FlashSO3LR:
         self.c6tab = jnp.asarray(statics["dispersion_c6"], dt)
         self.lr_programs = lr_programs()
         self.lr_scratch = int(lr_scratch)
-        self.maxh = min(self.lr_scratch, n)        # no atom has more partners than n - 1 (images aside: _layout)
+        self.maxh = min(self.lr_scratch, n)        # long-range scratch per atom; the layout adjusts it
         self.builds = 0
         self.atoms_per_program = atoms_per_program
         if self.vacuum:
@@ -1525,7 +1536,7 @@ class FlashSO3LR:
         images = not self.vacuum          # free space's box is the minimum image's (check.vacuum_box)
         if box_problem(small, self.rc, self.reach, images):
             small = L                     # near the smallest box: no room to shrink in this layout
-        problem = grid_problem(small, self.rc, self.reach, images)
+        problem = grid_problem(small, self.rc, self.reach, images, self.n)
         if problem:
             raise ValueError(problem + (" (an atom far from the rest? free space takes a box around all of them)"
                                         if self.vacuum else ""))
@@ -1533,13 +1544,10 @@ class FlashSO3LR:
         self.box = jnp.asarray(L, jnp.float64 if jax.config.jax_enable_x64 else self.dtype)
         # images: a box under 2 x the reach across, the long range over its periodic images
         self.nc, self.kc, self.images, self.ks = grid_layout(small, self.rc, self.reach, images)
-        if self.n * (2 * self.ks + 1) ** 3 >= 2 ** 31:
-            raise ValueError(f"box {[round(v, 2) for v in L]} A: {self.n} atoms and their periodic images "
-                             f"overflow the neighbour rows' int32 entries (a larger box)")
-        if self.images:
-            # an atom's partners are its neighbours' images too, as many as the density
-            # gives within the reach: more than n - 1 in a box smaller than the reach
-            self.maxh = max(self.maxh, self.lr_scratch)
+        # an atom's long-range partners: at most n - 1 with the minimum image; with the
+        # images as many as the density gives within the reach (more than n - 1 in a box
+        # smaller than the reach)
+        self.maxh = max(self.maxh, self.lr_scratch) if self.images else min(self.maxh, self.n)
         self.mesh_el, self.mesh_disp = self._meshes(L)
         for m in (self.mesh_el, self.mesh_disp):
             if m and math.prod(m) >= 2 ** 31:
@@ -1944,12 +1952,12 @@ class FlashSO3LR:
         """x, y, z columns: float64 positions stay float64 (with a float32 model: mixed
         precision, the displacements formed in float64), others become the model dtype."""
         R = R if R.dtype == jnp.float64 else R.astype(self.dtype)
-        if self.ks:
-            # the short range over the periodic images: each pair's shift is the image's
-            # in boxes, so every kernel takes the same wrapped positions (an atom on the
-            # far face rounded onto it is at 0)
+        if self.images:
+            # over the periodic images each pair's shift is the image's in boxes, so every
+            # kernel takes the same positions wrapped into the box (an atom on the far face
+            # rounded onto it is at 0)
             L = self._box(R[:, 0])
-            R = R - L * jnp.floor(R / L)
+            R = _wrap(R, L)
             R = jnp.where(R >= L, R - L, R)
         return (R[:, 0], R[:, 1], R[:, 2])
 
