@@ -729,11 +729,9 @@ def test_attached_total_energy_reference_and_checkpoint_fit_short_terminal(tmp_p
     reader = monitor.JournalReader(path)
     reader.snapshot()
     reader.state.samples[-1]['seconds_per_step'] = 0.0014
-    reader.state.info.update(_attached_keyboard=True,
-                             _attached_compact_progress='50% · 1,000/2,000 steps · 0.500 / 1.000 ps this run',
-                             _attached_timing='MD elapsed 00:01 · ETA 00:01')
+    live = monitor.LiveProgress(completed=1000, total=2000, step=3000, dt_fs=0.5, elapsed=1, eta=1, keyboard=True)
     reader.state.consume(event(200, 'checkpoint', step=3000, path='restart.npz'))
-    text = render(reader, energy='energy_eV', height=24, attached=True)
+    text = render(reader, energy='energy_eV', height=24, attached=True, live=live)
     assert 'Temperature [K]' in text and 'Total energy [eV]' in text
     assert 'Reference · latter half' in text
     assert 'Checkpoint' in text and 'q: hide plots' in text
@@ -749,8 +747,8 @@ def test_completed_attached_display_reopens_with_show_and_has_no_stale_controls(
     write(path, [*samples(), event(200, 'run_completed')])
     reader = monitor.JournalReader(path)
     reader.snapshot()
-    reader.state.info['_attached_keyboard'] = True
-    text = render(reader, height=height, attached=True)
+    live = monitor.LiveProgress(completed=2000, total=2000, running=False, keyboard=True)
+    text = render(reader, height=height, attached=True, live=live)
     assert 'View saved graphs: so3lr show' in text
     assert 'q:' not in text and 'Ctrl+C:' not in text and 'e: energy' not in text
     assert 'watch' not in text
@@ -780,8 +778,8 @@ def test_opted_out_attached_plots_do_not_advertise_a_nonexistent_journal(tmp_pat
     write(path, samples())
     reader = monitor.JournalReader(path)
     reader.snapshot()
-    reader.state.info.update(_journal_enabled=False, _attached_keyboard=keyboard)
-    text = render(reader, attached=True)
+    reader.state.info.update(_journal_enabled=False)
+    text = render(reader, attached=True, live=monitor.LiveProgress(completed=1, total=2, keyboard=keyboard))
     assert 'Temperature' in text and 'Total energy' in text
     assert 'so3lr show' not in text and 'Journal' not in text
     assert str(path) not in text

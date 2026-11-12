@@ -16,7 +16,7 @@ from statistics import median
 import sys
 import time
 
-from .formatting import ascii_only_console, display_path, finite_number as _finite, optimization_status, show_command, precision_label, throughput_label, terminal_text
+from .formatting import ascii_only_console, display_path, duration_label, finite_number as _finite, optimization_status, show_command, precision_label, throughput_label, terminal_text
 from .terminal import input_mode, live_display, termination_signals
 from . import theme
 
@@ -671,7 +671,40 @@ def _state_plot(state, key, title, unit, width, target, ascii_only, rows=7, labe
                  label_width=label_width, time_bounds=bounds, empty_message=message)
 
 
-def _attached_header(state, width, ascii_only):
+@dataclass(frozen=True)
+class LiveProgress:
+    """Producer-side progress of an attached run; display state, never journaled."""
+    completed: int
+    total: int
+    step: int = 0
+    dt_fs: float | None = None
+    elapsed: float | None = None
+    eta: float | None = None       # None while it cannot be estimated yet
+    running: bool = True
+    keyboard: bool = False         # whether view keys are being read
+
+    @property
+    def ratio(self):
+        return self.completed / self.total if self.total else 0.0
+
+    def steps_text(self):
+        return f'{self.ratio:.0%} · {self.completed:,}/{self.total:,} steps'
+
+    def span_text(self):
+        if self.dt_fs is None:
+            return ''
+        return f'{self.completed * self.dt_fs / 1000:.3f} / {self.total * self.dt_fs / 1000:.3f} ps this run'
+
+    def timing_text(self):
+        if self.elapsed is None:
+            return ''
+        text = f'MD elapsed {duration_label(self.elapsed)}'
+        if self.running:
+            text += f' · ETA {duration_label(self.eta)}' if self.eta is not None else ' · ETA estimating'
+        return text
+
+
+def _attached_header(state, width, ascii_only, live=None):
     """Brand and status, a progress bar, then wall-clock facts: three rows."""
     from rich.cells import cell_len
     from rich.text import Text
@@ -700,19 +733,18 @@ def _attached_header(state, width, ascii_only):
         title.append(right, style=theme.MUTED)
     elif right:
         rows.append(Text(right, style=theme.MUTED, no_wrap=True, overflow='ellipsis'))
-    progress = label(state.info.get('_attached_compact_progress', ''))
-    ratio = _finite(state.info.get('_attached_ratio'))
-    if progress:
+    if live is not None:
+        separator = label(' · ')
+        rest = separator.join(label(item) for item in (f'{live.completed:,}/{live.total:,} steps', live.span_text()) if item)
+        percent = f'{live.ratio:.0%}'
         line = Text(no_wrap=True, overflow='ellipsis')
-        if ratio is not None:
-            bar_width = max(10, min(40, width - cell_len(progress) - 2))
-            line.append_text(theme.bar(ratio, bar_width, ascii_only))
-            line.append('  ')
-        percent, separator, rest = progress.partition(' | ' if ascii_only else ' · ')
+        bar_width = max(10, min(40, width - cell_len(percent + separator + rest) - 2))
+        line.append_text(theme.bar(live.ratio, bar_width, ascii_only))
+        line.append('  ')
         line.append(percent, style=theme.STRONG)
         line.append(separator + rest, style=theme.MUTED)
         rows.append(line)
-    timing = state.info.get('_attached_timing', '')
+    timing = live.timing_text() if live is not None else ''
     cycle_seconds = _finite(state.samples[-1].get('seconds_per_step')) if state.samples else None
     throughput = throughput_label(cycle_seconds, state.dt_fs, state.info.get('atoms'))
     timing = ' · '.join(item for item in (timing, throughput) if item)
@@ -721,14 +753,14 @@ def _attached_header(state, width, ascii_only):
     return rows
 
 
-def _controls(state, attached=False, paged=False, multiple=False):
+def _controls(state, attached=False, paged=False, multiple=False, keyboard=False):
     if attached:
         if state.status in ('Completed', 'Failed'):
             if state.info.get('_journal_enabled') is False:
                 return 'Saved graphs unavailable: SO3LR_JOURNAL=0. Text log retained.'
             # Escape the path here: the paged view keeps layout newlines.
             return 'View saved graphs: so3lr show ' + terminal_text(show_command(state.path.parent))
-        if not state.info.get('_attached_keyboard'):
+        if not keyboard:
             if state.info.get('_journal_enabled') is False:
                 return 'Ctrl+C: interrupt MD · saved graphs disabled (SO3LR_JOURNAL=0)'
             return 'Ctrl+C: interrupt MD · more plots: so3lr show <run-folder>'
@@ -824,7 +856,7 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
 
 
 def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None, ascii_only=False, height=None, attached=False,
-                    static=False):
+                    static=False, live=None):
     """Build the native view after Rich has supplied the available width."""
     from rich.console import Group
     from rich.table import Table
@@ -883,8 +915,10 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
         metadata.add_row(Text('Message'), Text(state.message))
     rows.append(metadata)
     if attached:
-        rows.extend(Text(state.info.get(key, ''), style=theme.MUTED)
-                    for key in ('_attached_progress', '_attached_time', '_attached_timing'))
+        if live is not None:
+            rows.extend(Text(text, style=theme.MUTED) for text in
+                        (live.steps_text() + f' · step counter {live.step:,}', live.span_text(), live.timing_text())
+                        if text)
     elif state.samples:
         last = state.samples[-1]
         step = _finite(last.get('step'))
@@ -926,12 +960,13 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     if state.malformed or state.unsupported:
         rows.append(Text(f'Skipped {state.malformed} malformed and {state.unsupported} unsupported events.', style=theme.WARNING))
     if not static:
-        rows.append(theme.controls(_controls(state, attached, multiple=len(readers) > 1), ascii_only))
+        rows.append(theme.controls(_controls(state, attached, multiple=len(readers) > 1,
+                                             keyboard=live is not None and live.keyboard), ascii_only))
     return Group(*rows)
 
 
 def _paged_monitor(console, options, readers, selected, energy, width, height, page, now, ascii_only, attached=False,
-                   static=False):
+                   static=False, live=None):
     """Pack complete plot blocks into short screens; keep controls visible."""
     from rich.cells import cell_len
     from rich.console import Group
@@ -951,7 +986,7 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
     if state.run_id and name.endswith('.' + state.run_id):
         name = name[:-(len(state.run_id) + 1)]
     if attached:
-        header = _attached_header(state, width, ascii_only)
+        header = _attached_header(state, width, ascii_only, live)
     else:
         qualifier = observation_status(reader, now)
         observation = f' · {"Reading history" if qualifier == "Reading" else qualifier}' if qualifier != state.status else ''
@@ -990,11 +1025,12 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
         footer.append(Text(message, theme.WARNING))
     if state.status == 'Failed' and state.message:
         footer.append(Text(state.message, theme.DANGER))
-    controls_text = _controls(state, attached, paged=True, multiple=len(readers) > 1)
+    keyboard = live is not None and live.keyboard
+    controls_text = _controls(state, attached, paged=True, multiple=len(readers) > 1, keyboard=keyboard)
     if (cell_len(terminal_text(controls_text, ascii_only)) > width
             and not (attached and state.status in ('Completed', 'Failed'))):
         if attached:
-            controls_text = (('↑/↓: plots · e: energy · Esc/q: hide\n' if state.info.get('_attached_keyboard') else '')
+            controls_text = (('↑/↓: plots · e: energy · Esc/q: hide\n' if keyboard else '')
                              + 'Ctrl+C interrupts MD')
         else:
             close = 'Esc/q: close' if state.status in ('Completed', 'Failed') else 'Esc/q: detach'
@@ -1090,11 +1126,11 @@ class _MonitorView:
 
 
 def render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None, ascii_only=False, height=None, page=0, attached=False,
-                   static=False):
+                   static=False, live=None):
     """Return an adaptive Rich view without touching the simulation process."""
     return _MonitorView(readers, selected=selected, energy=energy, width=width,
                         now=now, ascii_only=ascii_only, height=None if static else height, page=page,
-                        attached=attached, static=static)
+                        attached=attached, static=static, live=live)
 
 
 class _Keyboard(AbstractContextManager):

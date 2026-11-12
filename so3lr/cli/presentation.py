@@ -325,26 +325,10 @@ class _Reporter:
 
         if self._state.samples and not self._graphs_hidden:
             from .monitor import ENERGIES, render_monitor
-            completed = max(0, min(self.step - self.start_step, self.total_steps))
-            ratio = completed / self.total_steps if self.total_steps else 0
-            progress = f'{ratio:.0%} · {completed:,}/{self.total_steps:,} steps'
-            segment_time = (f'{completed * self.dt_fs / 1000:.3f} / '
-                            f'{self.total_steps * self.dt_fs / 1000:.3f} ps this run') if self.dt_fs is not None else ''
-            timing = f'MD elapsed {duration_label(time.monotonic() - self.started_at)}'
-            if self.status == 'running':
-                timing += (f' · ETA {duration_label((self.total_steps - completed) * self.time_per_step)}'
-                           if completed and self.time_per_step is not None and self.time_per_step > 0
-                           else ' · ETA estimating')
-            self._state.info['_attached_ratio'] = ratio
-            self._state.info['_attached_progress'] = progress + f' · step counter {self.step:,}'
-            self._state.info['_attached_time'] = segment_time
-            self._state.info['_attached_compact_progress'] = progress + (' · ' + segment_time if segment_time else '')
-            self._state.info['_attached_timing'] = timing
-            self._state.info['_attached_keyboard'] = self._keyboard is not None
             return render_monitor([self._reader], energy=list(ENERGIES)[self._energy_index],
                                   width=self.console.width, height=self.console.height - int(self._heartbeat),
                                   ascii_only=self._ascii_only,
-                                  page=self._plot_page, attached=True)
+                                  page=self._plot_page, attached=True, live=self._live_progress())
 
         title = self._text('')
         title.append(self._label(f'{theme.BRAND} SO3LR TAURI'), style=theme.ACCENT_BOLD)
@@ -397,29 +381,21 @@ class _Reporter:
                 if outcome != 'Relaxing geometry':  # the phase row already says so
                     rows.append(self._text(outcome, theme.SUCCESS if outcome == 'Force criterion met' else theme.MUTED))
         if self.started_at is not None:
-            completed = max(0, min(self.step - self.start_step, self.total_steps))
-            ratio = completed / self.total_steps if self.total_steps else 0
+            live = self._live_progress()
             width = min(40, max(8, self.console.width - 40))
-            bar = theme.bar(ratio, width, self._ascii_only)
-            bar.append(f'  {ratio:.0%}', style=theme.STRONG)
-            bar.append(f'  {completed:,}/{self.total_steps:,} steps', style=theme.MUTED)
+            bar = theme.bar(live.ratio, width, self._ascii_only)
+            bar.append(f'  {live.ratio:.0%}', style=theme.STRONG)
+            bar.append(f'  {live.completed:,}/{live.total:,} steps', style=theme.MUTED)
             rows.append(bar)
             if self.start_step:
                 rows.append(self._text(f'Restart counter {self.start_step:,} · step counter {self.step:,}', theme.MUTED))
-            if self.dt_fs is not None:
-                rows.append(self._text(f'{completed * self.dt_fs / 1000:.3f} / '
-                                       f'{self.total_steps * self.dt_fs / 1000:.3f} ps this run', theme.MUTED))
-            elapsed = time.monotonic() - self.started_at
-            timing = f'MD elapsed {duration_label(elapsed)}'
-            # No ETA is invented during compilation or at the restored step.
-            if completed and self.time_per_step is not None and self.time_per_step > 0:
-                if self.status == 'running':
-                    timing += f' · ETA {duration_label((self.total_steps - completed) * self.time_per_step)}'
+            if live.span_text():
+                rows.append(self._text(live.span_text(), theme.MUTED))
+            timing = live.timing_text()
+            if live.completed and self.time_per_step is not None and self.time_per_step > 0:
                 rate = throughput_label(self.time_per_step, self.dt_fs, self.info.get('atoms'))
                 if rate:
                     timing += f' · {rate}'
-            elif self.status == 'running':
-                timing += ' · ETA estimating'
             rows.append(self._text(timing, theme.MUTED))
             metrics = []
             if self.temperature is not None:
@@ -448,6 +424,17 @@ class _Reporter:
 
     def print_hint(self, line):
         self.console.print(self._text(line, theme.MUTED))
+
+    def _live_progress(self):
+        """Progress known only to this process, handed to the view instead of the journal state."""
+        from .monitor import LiveProgress
+        completed = max(0, min(self.step - self.start_step, self.total_steps))
+        known_rate = completed and self.time_per_step is not None and self.time_per_step > 0
+        # No ETA is invented during compilation or at the restored step.
+        return LiveProgress(completed=completed, total=self.total_steps, step=self.step, dt_fs=self.dt_fs,
+                            elapsed=time.monotonic() - self.started_at,
+                            eta=(self.total_steps - completed) * self.time_per_step if known_rate else None,
+                            running=self.status == 'running', keyboard=self._keyboard is not None)
 
     def attach_journal(self, path, run_id, *, enabled=True):
         self._state.run_id = run_id
