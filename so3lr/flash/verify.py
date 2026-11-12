@@ -80,7 +80,7 @@ def main(argv=None):
         k_grid, k_smearing = setup_kspace_grid(kel, args.kspace_smearing, args.kspace_spacing, box)
         k_grid_disp, k_smearing_disp = setup_kspace_grid(kdi, args.kspace_smearing, args.kspace_spacing, box)
         if kel or kdi:
-            print(f"  meshes: so3lr_dev {None if k_grid is None else k_grid.shape} "
+            print(f"  meshes: so3lr {None if k_grid is None else k_grid.shape} "
                   f"{None if k_grid_disp is None else k_grid_disp.shape}, flash {eng.mesh_el} {eng.mesh_disp}")
         energy_fn = partial(energy_or_obs_fn, has_aux=False, k_smearing=k_smearing, k_smearing_disp=k_smearing_disp)
         nbrs = neighbor_fn.allocate(position, box=box)

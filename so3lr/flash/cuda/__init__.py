@@ -329,7 +329,8 @@ class CudaKernels:
         eng = self.eng
         n, K = eng.n, eng.K
         nl = eng.nl if rows is None else rows
-        if (K, nl) not in self._calls:
+        KS = eng.ks                   # the rows' periodic images (engine._edge), set by the layout
+        if (K, nl, KS) not in self._calls:
             F, NH, M = eng.F, eng.nh, eng.M
             f32, i32, S = jnp.float32, jnp.int32, jax.ShapeDtypeStruct
             # the per-slot and per-pair buffers hold this device's range of rows: its nl K
@@ -350,25 +351,25 @@ class CudaKernels:
             # in chunks the gather writes the projections' gradients of the chunk's rows only
             # (local), into a carry of the dE/dev and force sums (aliased)
             local = self.chunk is not None
-            self._calls[K, nl] = dict(
+            self._calls[K, nl, KS] = dict(
                 pmax=pmax, tiles16=-(-pmax // 16),
                 # the pair records; PIDX from a zeroed input (a slot without a pair, while a row
                 # overflows, reads pair 0 rather than anything)
                 prep=call("prep", (S((pmax * 4,), i32), S((pmax * 8,), f32), S((slots,), i32)), {14: 2},
-                          zmax=eng.zmax, P=pmax, NL=nl),
+                          zmax=eng.zmax, P=pmax, NL=nl, KS=KS),
                 # the scores per slot, with the filters per pair for the backward (fwd) or not
                 fwd=call("fwd", (scores, S((pmax * 2 * F,), f32)), P=pmax, keep_w=1),
                 scores=call("fwd", (scores, S((1,), f32)), P=pmax, keep_w=0),
-                msg=call("msg", (S((n, F), f32), S((n, M), f32)), al({8: 0, 9: 1}), NL=nl),
+                msg=call("msg", (S((n, F), f32), S((n, M), f32)), al({8: 0, 9: 1}), NL=nl, KS=KS),
                 # the backward: slot scalars, and the forces and ev gradients per slot (a copy per
                 # channel where each channel's CTA writes its own)
                 bwd=call("bwd", (S((slots * 5 * NH,), f32), S((self.copies * slots * 8,), f32),   # 8 floats per slot (FVS)
                                  S((self.copies * slots * M,), f32)), P=pmax),
                 gather=call("gather", tuple(S((nl if local else n, F), f32) for _ in range(5))
                             + (S((n, M), f32), S((6, n), f32)), {9: 5, 10: 6} if local else al({9: 5, 10: 6}),
-                            NL=nl, local=int(local)),
+                            NL=nl, local=int(local), KS=KS),
                 lr=call("lr", tuple(S((n,), f32) for _ in range(4)) + (S((6, n), f32),), al({18: 0, 19: 4})))
-        return self._calls[K, nl]
+        return self._calls[K, nl, KS]
 
     # ---- once per force call: sorted rows and the pair records ---------------------------
     def build(self, pos3):
@@ -389,13 +390,17 @@ class CudaKernels:
     def _records(self, pos3, ns, cnt, row0, nl):
         """The pair records (PI, PG, PIDX, off) of the rows [r0, r0 + nl) (r0 = row0[0]), with
         their per-row arrays: a row keeps its partners outside the range and the larger ones
-        inside it (sorted: columns [0, lo) and [hi, cnt))."""
+        inside it (sorted: columns [0, lo) and [hi, cnt)). With the periodic images (KS) the
+        entries compare packed (engine._edge): a row's own atom unshifted is a C + C0, so
+        of an atom's pairs with its own images the shifts above C0 are kept."""
         eng, c = self.eng, self._sized(nl)
+        C = (2 * eng.ks + 1) ** 3
         r0 = row0[0]
         rows = jax.lax.dynamic_slice_in_dim(ns, r0, nl)
         cm = jnp.minimum(jax.lax.dynamic_slice_in_dim(cnt, r0, nl), ns.shape[1])
-        lo = jnp.sum(rows < r0, axis=1).astype(jnp.int32)
-        hi = jnp.sum(rows < (r0 + jnp.arange(nl, dtype=jnp.int32))[:, None], axis=1).astype(jnp.int32)
+        lo = jnp.sum(rows < r0 * C, axis=1).astype(jnp.int32)
+        hi = jnp.sum(rows < ((r0 + jnp.arange(nl, dtype=jnp.int32)) * C + (C - 1) // 2)[:, None],
+                     axis=1).astype(jnp.int32)
         off = jnp.concatenate([jnp.zeros((1,), jnp.int32), jnp.cumsum(cm - (hi - lo)).astype(jnp.int32)])
         tile_atom = jnp.clip(jnp.searchsorted(off, 16 * jnp.arange(c["tiles16"], dtype=jnp.int32), side="right") - 1,
                              0, nl - 1).astype(jnp.int32)
@@ -565,7 +570,8 @@ class CudaKernels:
         eng = self.eng
         return (int(eng.elec) | int(eng.disp) << 1 | int(eng.pme_disp is not None) << 2
                 | int(eng.r_tab < eng.reach) << 3 | int(eng.reach > 0.45 * eng.rc_lr) << 4
-                | int(eng.reach > eng.rc_lr - eng.statics["dispersion_energy_cutoff_lr_damping"]) << 5)
+                | int(eng.reach > eng.rc_lr - eng.statics["dispersion_energy_cutoff_lr_damping"]) << 5
+                | int(eng.images) << 6)
 
     def long_range(self, pos3, grid, q, a0, c6, e_atom, f3):
         eng, c = self.eng, self._sized()

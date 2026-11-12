@@ -3,7 +3,9 @@
 // damping, optional PME residual), per atom over all partners within the reach, both ends of
 // every pair (gather only: deterministic). One warp per atom (atoms in cell order); the cell
 // rows walked as flash walks them; hits compacted into a per-warp queue so all 32 lanes
-// evaluate real pairs.
+// evaluate real pairs. IMG (a box under 2 x the reach across): the walk goes KC cells each
+// way without wrapping, through the periodic images, each partner an atom's image (the
+// displacement from the wrapped positions plus the shift), an atom's own images included.
 #include <cstdint>
 
 #include "ffi_common.cuh"
@@ -18,7 +20,7 @@ struct LrParams {
   const int* row0;                // this device's rows: row0 <= atom < row0 + nl
   float *e_out, *gq, *ga0, *gc6, *f_out;
   int nl;
-  int n, NX, NY, NZ, KC, ELEC, DISP, DPME, FAR, EL_SWITCH, DISP_SWITCH;
+  int n, NX, NY, NZ, KC, ELEC, DISP, DPME, FAR, EL_SWITCH, DISP_SWITCH, IMG;
 };
 
 __device__ __forceinline__ void switching(float x, float on, float off, float& f, float& df) {
@@ -160,6 +162,59 @@ __global__ void __launch_bounds__(LW * 32) lr_kernel(LrParams p) {
   A.c6_a = c6_ta * p.c6r[wi];
   Acc acc = {};
   int qn = 0;
+  // IMG: the atom's wrapped position (the cell grid bins wrapped positions)
+  const double awx = ax - Lx * floor(ax / Lx), awy = ay - Ly * floor(ay / Ly), awz = az - Lz * floor(az / Lz);
+  // the atoms of cells c0..c1 of a row into the queue; IMG: as their image shifted by
+  // (shx, shy, shz) boxes, else as the minimum image
+  auto scan = [&](int row, int c0, int c1, int shx, int shy, int shz) {
+    const bool itself = shx == 0 && shy == 0 && shz == 0;
+    const double tx = shx * Lx - awx, ty = shy * Ly - awy, tz = shz * Lz - awz;
+    const int s = p.cell_start[row + c0], e = p.cell_start[row + c1 + 1];
+    for (int k0 = s; k0 < e; k0 += 32) {
+      const int kk = k0 + lane;
+      bool hit = false;
+      int j = 0;
+      float dx = 0.f, dy = 0.f, dz = 0.f;
+      if (kk < e) {
+        j = kk;                                   // cell order: contiguous loads
+        double dxd, dyd, dzd;
+        if (p.IMG) {
+          dxd = p.px[j] - Lx * floor(p.px[j] / Lx) + tx;
+          dyd = p.py[j] - Ly * floor(p.py[j] / Ly) + ty;
+          dzd = p.pz[j] - Lz * floor(p.pz[j] / Lz) + tz;
+        } else {
+          dxd = p.px[j] - ax; dyd = p.py[j] - ay; dzd = p.pz[j] - az;
+          dxd -= Lx * floor(dxd * iLx + 0.5);
+          dyd -= Ly * floor(dyd * iLy + 0.5);
+          dzd -= Lz * floor(dzd * iLz + 0.5);
+        }
+        dx = (float)dxd; dy = (float)dyd; dz = (float)dzd;
+        float r2 = dx * dx + dy * dy + dz * dz;
+        hit = r2 < reach2 && (j != wi || !itself) && r2 > 0.f;
+      }
+      const unsigned m = __ballot_sync(0xffffffff, hit);
+      if (hit) {
+        const int pos = qn + __popc(m & ((1u << lane) - 1));
+        qj[warp][pos] = j; qx[warp][pos] = dx; qy[warp][pos] = dy; qz[warp][pos] = dz;
+      }
+      qn += __popc(m);
+      __syncwarp();
+      if (qn >= 32) {
+#ifdef NOPAIR
+        acc.e += qx[warp][lane];
+#else
+        pair(p, A, qj[warp][lane], qx[warp][lane], qy[warp][lane], qz[warp][lane], acc);
+#endif
+        __syncwarp();
+        if (lane < qn - 32) {
+          qj[warp][lane] = qj[warp][lane + 32]; qx[warp][lane] = qx[warp][lane + 32];
+          qy[warp][lane] = qy[warp][lane + 32]; qz[warp][lane] = qz[warp][lane + 32];
+        }
+        qn -= 32;
+        __syncwarp();
+      }
+    }
+  };
   const int W2 = 2 * KC + 1;
   for (int k = 0; k < W2 * W2; ++k) {
     const int dzc = k / W2 - KC, dyc = k % W2 - KC;
@@ -170,6 +225,20 @@ __global__ void __launch_bounds__(LW * 32) lr_kernel(LrParams p) {
     const float xr = sqrtf(fmaxf(reach2 - g2, 0.f));
     const int lo = max(cx + (int)floorf((ox - xr) / sx), cx - KC);
     const int hi = min(cx + (int)floorf((ox + xr) / sx), cx + KC);
+    if (p.IMG) {
+      // cells unwrapped: the cell and its image's shift (non-negative by whole periods first)
+      const int OZ = KC / NZ + 1, OY = KC / NY + 1, OX = KC / NX + 1;
+      const int zt = cz + dzc + OZ * NZ, yt = cy + dyc + OY * NY;
+      const int row = ((zt % NZ) * NY + yt % NY) * NX;
+      const int shz = zt / NZ - OZ, shy = yt / NY - OY;
+      // columns lo..hi, a period of NX at a time
+      for (int shx = (lo + OX * NX) / NX - OX; shx * NX <= hi; ++shx) {
+        const int base = shx * NX;
+        const int c0 = max(lo, base) - base, c1 = min(hi, base + NX - 1) - base;
+        if (c1 >= c0) scan(row, c0, c1, shx, shy, shz);
+      }
+      continue;
+    }
     const int zc = (cz + dzc + NZ) % NZ, yc = (cy + dyc + NY) % NY;
     const int row = (zc * NY + yc) * NX;
     for (int part = 0; part < 2; ++part) {
@@ -180,44 +249,7 @@ __global__ void __launch_bounds__(LW * 32) lr_kernel(LrParams p) {
       else { c0 = 1; c1 = 0; }
       if (hi < lo) c1 = c0 - 1;
       if (c1 < c0) continue;
-      const int s = p.cell_start[row + c0], e = p.cell_start[row + c1 + 1];
-      for (int k0 = s; k0 < e; k0 += 32) {
-        const int kk = k0 + lane;
-        bool hit = false;
-        int j = 0;
-        float dx = 0.f, dy = 0.f, dz = 0.f;
-        if (kk < e) {
-          j = kk;                                   // cell order: contiguous loads
-          double dxd = p.px[j] - ax, dyd = p.py[j] - ay, dzd = p.pz[j] - az;
-          dxd -= Lx * floor(dxd * iLx + 0.5);
-          dyd -= Ly * floor(dyd * iLy + 0.5);
-          dzd -= Lz * floor(dzd * iLz + 0.5);
-          dx = (float)dxd; dy = (float)dyd; dz = (float)dzd;
-          float r2 = dx * dx + dy * dy + dz * dz;
-          hit = r2 < reach2 && j != wi && r2 > 0.f;
-        }
-        const unsigned m = __ballot_sync(0xffffffff, hit);
-        if (hit) {
-          const int pos = qn + __popc(m & ((1u << lane) - 1));
-          qj[warp][pos] = j; qx[warp][pos] = dx; qy[warp][pos] = dy; qz[warp][pos] = dz;
-        }
-        qn += __popc(m);
-        __syncwarp();
-        if (qn >= 32) {
-#ifdef NOPAIR
-          acc.e += qx[warp][lane];
-#else
-          pair(p, A, qj[warp][lane], qx[warp][lane], qy[warp][lane], qz[warp][lane], acc);
-#endif
-          __syncwarp();
-          if (lane < qn - 32) {
-            qj[warp][lane] = qj[warp][lane + 32]; qx[warp][lane] = qx[warp][lane + 32];
-            qy[warp][lane] = qy[warp][lane + 32]; qz[warp][lane] = qz[warp][lane + 32];
-          }
-          qn -= 32;
-          __syncwarp();
-        }
-      }
+      scan(row, c0, c1, 0, 0, 0);
     }
   }
 #ifdef NOPAIR
@@ -265,7 +297,7 @@ static ffi::Error LrImpl(cudaStream_t stream, F64 px, F64 py, F64 pz, F64 box, S
   p.n = (int)px.dimensions()[0];
   p.NX = (int)NX; p.NY = (int)NY; p.NZ = (int)NZ; p.KC = (int)KC; p.nl = (int)NL; p.row0 = row0.typed_data();
   p.ELEC = flags & 1; p.DISP = (flags >> 1) & 1; p.DPME = (flags >> 2) & 1; p.FAR = (flags >> 3) & 1;
-  p.EL_SWITCH = (flags >> 4) & 1; p.DISP_SWITCH = (flags >> 5) & 1;
+  p.EL_SWITCH = (flags >> 4) & 1; p.DISP_SWITCH = (flags >> 5) & 1; p.IMG = (flags >> 6) & 1;
   lr_kernel<<<(p.n + LW - 1) / LW, LW * 32, 0, stream>>>(p);
   return launch_status();
 }

@@ -24,6 +24,7 @@ struct PrepParams {
   float4* PG;      // [2 per pair]: (ux, uy, uz, r), (ce, dce, drt, rt / spacing)
   int* PIDX;       // directed slot -> pair
   int n, K, zmax, nl, pmax;      // pmax: the records' room
+  int KS;                        // the rows' periodic images (edge_atom), 0: the minimum image
 };
 
 // The pairs of a range of rows (a device's, or a chunk of them): for each of its rows a
@@ -32,6 +33,10 @@ struct PrepParams {
 // (b < row0) and [hi, cnt) (b > a). The directed slots and the per-row arrays are the
 // range's own: slot (a - row0) K + column, so a range's buffers hold its rows only. A
 // partner outside the range gets no slot: its reverse score goes to the shadow slot nl K + q.
+// With images (KS) an entry is a partner and its image (edge_atom), compared as packed: an
+// atom's own entry would be a C + C0 (C = (2 KS + 1)^3, C0 = (C - 1) / 2: no shift), the
+// reverse of b's image s is a's image -s (code C - 1 - code), and a pair of an atom with its
+// own image once (code above C0).
 __global__ void pair_prep(PrepParams p) {
   const int P = min(p.off[p.nl], p.pmax);
   const int q = blockIdx.x * blockDim.x + threadIdx.x;
@@ -43,24 +48,24 @@ __global__ void pair_prep(PrepParams p) {
   const int a = r0 + al;
   const int j = q - p.off[al], la = p.lo[al], ha = p.hi[al];
   const int c = j < la ? j : j + (ha - la);
-  const int b = p.nbr[(size_t)a * p.K + c];
+  const int v = p.nbr[(size_t)a * p.K + c];
+  const int b = edge_atom(v, p.KS);
+  const int W = 2 * p.KS + 1, C = W * W * W;
+  const int back = a * C + (C - 1 - (v - b * C));       // b's entry of a (C 1: a)
   const bool b_local = b >= r0 && b < r0 + p.nl;
   const int cm = b_local ? min(p.cnt[b], p.K) : 0;
   int lo = 0, hi = cm;
   const int* row = p.nbr + (size_t)b * p.K;
   while (lo < hi) {
     int mid = (lo + hi) >> 1;
-    if (row[mid] < a) lo = mid + 1; else hi = mid;
+    if (row[mid] < back) lo = mid + 1; else hi = mid;
   }
   // b's slot of a: none when b is outside the range, or (a row overflowed; the engine widens
   // the rows and calls again) when b's truncated row lacks a: the reverse score goes to the shadow
-  const bool found = lo < cm && row[lo] == a;
+  const bool found = lo < cm && row[lo] == back;
   const int sba = found ? (b - r0) * p.K + lo : p.nl * p.K + q;
-  const double Lx = p.box[0], Ly = p.box[1], Lz = p.box[2];
-  double dxd = p.px[b] - p.px[a], dyd = p.py[b] - p.py[a], dzd = p.pz[b] - p.pz[a];
-  dxd -= Lx * floor(dxd * (1.0 / Lx) + 0.5);
-  dyd -= Ly * floor(dyd * (1.0 / Ly) + 0.5);
-  dzd -= Lz * floor(dzd * (1.0 / Lz) + 0.5);
+  double dxd, dyd, dzd;
+  edge_disp(p.px, p.py, p.pz, a, v, p.KS, p.box[0], p.box[1], p.box[2], dxd, dyd, dzd);
   float dx = (float)dxd, dy = (float)dyd, dz = (float)dzd;
   float r2 = dx * dx + dy * dy + dz * dz;
   bool ok = r2 > 0.f;
@@ -374,7 +379,7 @@ struct MsgParams {
   const float *x_in, *ev_in, *scal;
   const int* row0;
   float *x_out, *ev_out;
-  int n, K, nl;
+  int n, K, nl, KS;
 };
 
 // each equivariant component of a half (0: components 0 .. M/2, 1: the rest): its degree
@@ -419,7 +424,7 @@ __global__ void __launch_bounds__(MW * 32) att_msg(MsgParams p) {
     const int cn = min(32, n_a - c0);
 #pragma unroll 4
     for (int j = 0; j < cn; ++j) {
-      const int b = __shfl_sync(0xffffffff, nbc, j);
+      const int b = edge_atom(__shfl_sync(0xffffffff, nbc, j), p.KS);
       const float* vr = p.v1 + (size_t)b * F + lane;
 #pragma unroll
       for (int h = 0; h < NH; ++h) acc[h] += __shfl_sync(0xffffffff, scc[h], j) * vr[h * 32];
@@ -428,11 +433,17 @@ __global__ void __launch_bounds__(MW * 32) att_msg(MsgParams p) {
   for (int t0 = 0; t0 < n_a; t0 += 16) {
     int c = t0 + e;
     bool valid = c < n_a;
-    int b = valid ? row[c] : a;
-    double dxd = p.px[b] - ax, dyd = p.py[b] - ay, dzd = p.pz[b] - az;
-    dxd -= Lx * floor(dxd * iLx + 0.5);
-    dyd -= Ly * floor(dyd * iLy + 0.5);
-    dzd -= Lz * floor(dzd * iLz + 0.5);
+    double dxd, dyd, dzd;
+    if (p.KS) {
+      edge_disp(p.px, p.py, p.pz, a, valid ? row[c] : a * (2 * p.KS + 1) * (2 * p.KS + 1) * (2 * p.KS + 1),
+                p.KS, Lx, Ly, Lz, dxd, dyd, dzd);
+    } else {
+      int b = valid ? row[c] : a;
+      dxd = p.px[b] - ax; dyd = p.py[b] - ay; dzd = p.pz[b] - az;
+      dxd -= Lx * floor(dxd * iLx + 0.5);
+      dyd -= Ly * floor(dyd * iLy + 0.5);
+      dzd -= Lz * floor(dzd * iLz + 0.5);
+    }
     float dx = (float)dxd, dy = (float)dyd, dz = (float)dzd;
     float r2 = dx * dx + dy * dy + dz * dz;
     bool ok = valid && r2 > 0.f;
@@ -468,7 +479,7 @@ __global__ void __launch_bounds__(MW * 32) att_msg(MsgParams p) {
 static ffi::Error PrepImpl(cudaStream_t stream, F64 px, F64 py, F64 pz, F64 box, S32 nbr, S32 cnt, S32 z, S32 off,
                            S32 lo, S32 hi, S32 tile_atom, S32 row0, F32 rmin, F32 scal, S32 pidx0, RS32 PI,
                            RF32 PG, RS32 PIDX, int64_t zmax, int64_t P,
-                           int64_t NL) {
+                           int64_t NL, int64_t KS) {
   PrepParams p;
   p.px = px.typed_data(); p.py = py.typed_data(); p.pz = pz.typed_data(); p.box = box.typed_data();
   p.nbr = nbr.typed_data(); p.cnt = cnt.typed_data(); p.z = z.typed_data(); p.off = off.typed_data();
@@ -477,7 +488,7 @@ static ffi::Error PrepImpl(cudaStream_t stream, F64 px, F64 py, F64 pz, F64 box,
   p.PI = reinterpret_cast<int4*>(PI->typed_data()); p.PG = reinterpret_cast<float4*>(PG->typed_data());
   p.PIDX = PIDX->typed_data();
   auto d = nbr.dimensions();
-  p.n = (int)d[0]; p.K = (int)d[1]; p.zmax = (int)zmax; p.nl = (int)NL; p.pmax = (int)P;
+  p.n = (int)d[0]; p.K = (int)d[1]; p.zmax = (int)zmax; p.nl = (int)NL; p.pmax = (int)P; p.KS = (int)KS;
   p.lo = lo.typed_data(); p.hi = hi.typed_data(); p.row0 = row0.typed_data();
   pair_prep<<<((int)P + 255) / 256, 256, 0, stream>>>(p);
   return launch_status();
@@ -515,14 +526,14 @@ static ffi::Error PairImpl(cudaStream_t stream, F32 q1, F32 k1, F32 q2, F32 k2, 
 
 static ffi::Error MsgImpl(cudaStream_t stream, F32 v1, F32 S, F64 px, F64 py, F64 pz, F64 box, S32 nbr, S32 cnt,
                           F32 x_in, F32 ev_in, F32 scal, S32 row0, RF32 x_out,
-                          RF32 ev_out, int64_t NL) {
+                          RF32 ev_out, int64_t NL, int64_t KS) {
   MsgParams p;
   p.v1 = v1.typed_data(); p.S = S.typed_data(); p.px = px.typed_data(); p.py = py.typed_data();
   p.pz = pz.typed_data(); p.box = box.typed_data(); p.nbr = nbr.typed_data(); p.cnt = cnt.typed_data();
   p.x_in = x_in.typed_data(); p.ev_in = ev_in.typed_data(); p.scal = scal.typed_data();
   p.x_out = x_out->typed_data(); p.ev_out = ev_out->typed_data();
   auto d = nbr.dimensions();
-  p.n = (int)d[0]; p.K = (int)d[1]; p.nl = (int)NL; p.row0 = row0.typed_data();
+  p.n = (int)d[0]; p.K = (int)d[1]; p.nl = (int)NL; p.row0 = row0.typed_data(); p.KS = (int)KS;
   att_msg<<<(p.nl + MW - 1) / MW, MW * 32, 0, stream>>>(p);
   return launch_status();
 }
@@ -534,7 +545,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(PairPrep, PrepImpl,
         .Arg<S32>().Arg<S32>().Arg<S32>().Arg<S32>().Arg<S32>().Arg<S32>()  // nbr cnt z off lo hi
         .Arg<S32>().Arg<S32>()                                             // tile_atom row0
         .Arg<F32>().Arg<F32>().Arg<S32>()                                  // rmin scal, PIDX zeroed (aliased)
-        .Ret<S32>().Ret<F32>().Ret<S32>().Attr<int64_t>("zmax").Attr<int64_t>("P").Attr<int64_t>("NL"));
+        .Ret<S32>().Ret<F32>().Ret<S32>().Attr<int64_t>("zmax").Attr<int64_t>("P").Attr<int64_t>("NL")
+        .Attr<int64_t>("KS"));
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(AttPair, PairImpl,
     ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
@@ -550,4 +562,4 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(AttMsg, MsgImpl,
     ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
         .Arg<F32>().Arg<F32>().Arg<F64>().Arg<F64>().Arg<F64>().Arg<F64>()   // v1 S px py pz box
         .Arg<S32>().Arg<S32>().Arg<F32>().Arg<F32>().Arg<F32>().Arg<S32>()    // nbr cnt x_in ev_in scal row0
-        .Ret<F32>().Ret<F32>().Attr<int64_t>("NL"));
+        .Ret<F32>().Ret<F32>().Attr<int64_t>("NL").Attr<int64_t>("KS"));
