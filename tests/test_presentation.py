@@ -1487,3 +1487,39 @@ def test_optimization_failures_have_no_md_resume_hint(tmp_path, capsys):
         with ui.run_display({'log_file': str(tmp_path / 'run.log')}):
             raise RuntimeError('bad input')
     assert 'checkpoint' not in capsys.readouterr().err
+
+
+def test_plain_progress_lines_do_not_wait_for_a_checkpoint(tmp_path, monkeypatch, caplog):
+    import logging
+    ui.configure(display='plain')
+    clock = [0.0]
+    monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
+    with caplog.at_level(logging.INFO, logger='SO3LR'):
+        with ui.run_display({'log_file': str(tmp_path / 'run.log')}) as reporter:
+            reporter.start_md(0, 100_000, 0.5)
+            for index in range(12):  # 22 minutes of samples, no checkpoint at all
+                reporter.progress(index * 1000, temperature=300)
+                clock[0] += 120
+            reporter.finish()
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith('Progress ')]
+    assert len(lines) == 2
+
+
+def test_resume_hint_counts_remaining_cycles_and_avoids_tilde(tmp_path, monkeypatch, capsys):
+    ui.configure(display='plain')
+    home = tmp_path / 'home'
+    (home / 'runs').mkdir(parents=True)
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.chdir(tmp_path)
+    checkpoint = home / 'runs' / 'restart.npz'
+    with pytest.raises(KeyboardInterrupt):
+        with ui.run_display({'log_file': str(tmp_path / 'run.log'), 'md_steps': 100,
+                             'restart_save_path': str(checkpoint)}) as reporter:
+            reporter.start_md(1000, 10_000, 0.5)
+            reporter.checkpoint(6000, checkpoint)
+            raise KeyboardInterrupt
+    err = capsys.readouterr().err
+    assert '~' not in err
+    assert 'runs/restart.npz' in err
+    # 5,000 of 10,000 steps remain from step 6,000: 50 cycles of 100 steps.
+    assert 'also set --md-cycles 50 (YAML: md_cycles: 50); md_cycles counts from the checkpoint.' in err

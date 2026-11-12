@@ -853,11 +853,11 @@ def init_command():
               help='Seconds between journal reads.')
 @click.pass_context
 def show_command(ctx, path, once, interval):
-    from .monitor import show
+    from .monitor import JournalPathError, show
     try:
         show(path, once=once, interval=interval,
              no_color=ctx.find_root().params.get('no_color', False))
-    except ValueError as exc:
+    except JournalPathError as exc:
         raise click.BadParameter(str(exc), param_hint='PATH') from exc
 
 
@@ -918,7 +918,7 @@ def _execute_md(settings: Dict[str, Any], settings_source=None) -> None:
             logger.info(SO3LR_ASCII)
             if reporter.journal.active:
                 logger.info(f'Run journal: {reporter.journal.path}')
-                logger.info(f'Watch live: so3lr show {show_argument(Path(reporter.journal.path).parent)}')
+                logger.info(f'Watch live: so3lr show {show_argument(reporter.journal.path)}')
             if settings_source is not None:
                 logger.info(f'Loading settings from {settings_source}')
             log_simulation_settings(settings)
@@ -1359,7 +1359,7 @@ def fire_optimization(
             logger.info("=" * 60)
             if reporter.journal.active:
                 logger.info(f'Run journal: {reporter.journal.path}')
-                logger.info(f'Watch live: so3lr show {show_argument(Path(reporter.journal.path).parent)}')
+                logger.info(f'Watch live: so3lr show {show_argument(reporter.journal.path)}')
             reserve_gpu(settings, task='opt')   # before JAX starts
             get_hardware_info()
             # Run optimization

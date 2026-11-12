@@ -840,3 +840,21 @@ def test_start_over_keeps_previous_answers_as_defaults(tmp_path, structure_file,
                                          (Decimal('1E+1'), '10'), ('abc', 'abc')])
 def test_prompt_defaults_are_plain_numbers(value, text):
     assert setup._plain_number(value) == text
+
+
+def test_editing_temperature_keeps_this_drafts_pressure_and_velocity_choice(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup, '_interactive', lambda: True)
+    source = Path(__file__).parent / 'test_data/water_64.xyz'
+    destination = tmp_path / 'water'
+    # NPT, retain velocities, 500 bar; then edit only the temperature, pressing
+    # Enter for the velocity choice and the pressure.
+    text = '\n'.join([str(len(setup.available_presets()) + 2), str(source),
+                      '4', '1', '300', '2', '500', '0.01', '0.005', '0', '0', str(destination),
+                      *edit('Temperature and pressure', '310', '', ''), '2']) + '\n'
+    result = CliRunner().invoke(wizard, input=text)
+    assert result.exit_code == 0, result.output
+    exported = yaml.safe_load((destination / 'settings.yaml').read_text())
+    assert (exported['md_T'], exported['md_P']) == (310, 500)
+    from ase.io import read
+    assert read(destination / 'structure.extxyz').has('momenta')

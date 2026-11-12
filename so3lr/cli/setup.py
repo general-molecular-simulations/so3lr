@@ -553,11 +553,13 @@ class _Draft:
                            (f'Initialize velocities at {self.temperature:g} K',
                             f'Retain input velocities ({self.structure.input_temperature:.1f} K '
                             'before center-of-mass removal)'),
-                           2 if old.get('keep_input_momenta') else 1) == 1
+                           2 if getattr(self, 'kept_momenta', old.get('keep_input_momenta')) else 1) == 1
             self.structure = replace(self.structure, keep_input_momenta=keep)
+            self.kept_momenta = keep
+        previous = getattr(self, 'pressure', None) or old.get('pressure') or DEFAULT_PRESSURE
         self.pressure = None
         if self.ensemble == 'npt':
-            self.pressure = _positive(console, 'Pressure (bar)', old.get('pressure') or DEFAULT_PRESSURE)
+            self.pressure = _positive(console, 'Pressure (bar)', previous)
 
     def ask_length(self):
         console, old = self.console, self.old

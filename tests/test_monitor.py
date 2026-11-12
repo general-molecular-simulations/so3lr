@@ -1367,3 +1367,31 @@ def test_show_command_abbreviates_home_and_stays_shell_safe(monkeypatch, tmp_pat
     assert show_command(home / 'runs') == '~/runs'
     assert show_command(home) == '~'
     assert show_command(tmp_path / 'home2' / 'x') == str(tmp_path / 'home2' / 'x')
+
+
+@pytest.mark.parametrize('attached', [False, True])
+def test_paged_views_never_exceed_the_terminal_when_guide_captions_wrap(tmp_path, attached):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples())
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    for width in (40, 44, 48, 52, 60, 80):
+        for height in range(12, 40):
+            text = render(reader, width=width, height=height, attached=attached)
+            assert len(text.splitlines()) <= height, (width, height)
+
+
+def test_show_reports_only_path_errors_as_bad_paths(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from so3lr.cli.so3lr_cli import cli
+    log = tmp_path / 'run.log'
+    log.write_text('')
+    result = CliRunner().invoke(cli, ['show', str(log)])
+    assert result.exit_code == 2 and 'Invalid value for PATH' in result.output
+
+    def broken(*args, **kwargs):
+        raise ValueError('a rendering bug')
+    monkeypatch.setattr(monitor, 'show', broken)
+    result = CliRunner().invoke(cli, ['show', str(tmp_path)])
+    assert result.exit_code == 1 and 'Invalid value for PATH' not in result.output
+    assert isinstance(result.exception, ValueError)

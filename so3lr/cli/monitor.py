@@ -136,6 +136,10 @@ def origin_label(state, compact=False):
     return f'Host {host or "unknown"}' + (f' · Slurm job {job}' if job else '')
 
 
+class JournalPathError(ValueError):
+    """The PATH given to so3lr show is not a journal or journal directory."""
+
+
 def discover_journals(path, max_depth=3, max_files=128, max_dirs=512):
     """Discover journals in a bounded subtree without following directory links."""
     path = Path(path).expanduser()
@@ -143,7 +147,7 @@ def discover_journals(path, max_depth=3, max_files=128, max_dirs=512):
         if not path.name.endswith('.events.jsonl'):
             neighbors = discover_journals(path.parent, max_depth=0, max_files=2)
             target = neighbors[0] if len(neighbors) == 1 else path.parent
-            raise ValueError(f'Expected a *.events.jsonl journal, not {path.name}. '
+            raise JournalPathError(f'Expected a *.events.jsonl journal, not {path.name}. '
                              f'Try: so3lr show {show_command(target)}')
         return [path]
     if not path.is_dir():
@@ -1024,14 +1028,17 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
             keep = sorted(sorted(range(len(compact)), key=lambda i: priorities[i])[:available])
             compact = [compact[index] for index in keep]
         return Group(*compact, controls)
-    # A plot block is its heading, the rows, the axis and the tick labels.
-    plot_rows = max(2, min(12, budget - 3))
-    if budget >= 12:
-        # Keep temperature and energy together on one page when possible.
-        plot_rows = max(2, min(12, (budget - 7) // 2))
-    blocks = []
     specs = _plot_specs(state, energy, ascii_only)
     label_width = _shared_label_width(state, specs, width)
+    # Rows a block needs besides its plot rows: heading, axis, tick labels and,
+    # when it does not fit on the heading, the guide caption. Measure it.
+    overhead = max(line_count(_state_plot(state, key, title, unit, width, target, ascii_only, 2, label_width)) - 2
+                   for key, title, unit, target in specs)
+    plot_rows = max(2, min(12, budget - overhead))
+    if budget >= 2 * (overhead + 3) + 1:  # pairs only when each plot keeps 3+ rows
+        # Keep temperature and energy together on one page when possible.
+        plot_rows = max(2, min(12, (budget - 2 * overhead - 1) // 2))
+    blocks = []
     for key, title, unit, target in specs:
         block = _state_plot(state, key, title, unit, width, target, ascii_only, plot_rows, label_width)
         blocks.append((title, block, line_count(block)))

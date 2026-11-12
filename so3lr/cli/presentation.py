@@ -674,6 +674,7 @@ class _RunReporter:
         self.run_log.progress(data)
         if self._rate_origin is None:
             self._rate_origin = (time.monotonic(), step)
+            self._last_progress_line = self._rate_origin[0]  # the ten-minute clock starts here
         elif (not self.enabled and self._last_progress_line is not None
               and time.monotonic() - self._last_progress_line >= PLAIN_PROGRESS_INTERVAL):
             self._log_progress(step)
@@ -689,13 +690,23 @@ class _RunReporter:
                 return []
             return ['No checkpoint was saved. Set restart_save_path (or --restart-save) to make runs resumable.']
         step, path = self._last_checkpoint
+        # No '~': YAML paths are not expanded, so the hint must work when pasted there.
         shown = _display_path(path)
+        shown = str(Path(path).resolve()) if shown.startswith('~') else shown
         output = str(self._settings.get('output_file') or '')
         appended = ('choose a new output path for HDF5' if output.endswith(('.h5', '.hdf5'))
                     else 'the trajectory is appended')
-        return [f'Last checkpoint: step {step:,} · {shown}',
-                f'Resume: --restart-load {shown} (YAML: restart_load_path: {shown}); '
-                f'relaxation is skipped and {appended}.']
+        lines = [f'Last checkpoint: step {step:,} · {shown}',
+                 f'Resume: --restart-load {shown} (YAML: restart_load_path: {shown}); '
+                 f'relaxation is skipped and {appended}.']
+        # A restart runs md_cycles more cycles from the checkpoint, not up to the old end.
+        steps_per_cycle = self._settings.get('md_steps')
+        remaining = self._start_step + self._total_steps - step
+        if isinstance(steps_per_cycle, int) and steps_per_cycle > 0 and remaining > 0:
+            cycles = -(-remaining // steps_per_cycle)
+            lines.append(f'To finish the original length, also set --md-cycles {cycles} '
+                         f'(YAML: md_cycles: {cycles}); md_cycles counts from the checkpoint.')
+        return lines
 
     def _log_progress(self, step):
         """One greppable progress line for plain and batch output."""
