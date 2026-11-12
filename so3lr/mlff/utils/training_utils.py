@@ -1279,7 +1279,8 @@ def fit(
             If None, loss_fn will be used. Defaults to None.
         num_epochs (int): Number of training epochs.
         ckpt_dir (str): Checkpoint path.
-        ckpt_manager_options (dict): Checkpoint manager options.
+        ckpt_manager_options (dict): Checkpoint manager options. Training keeps the
+            ``max_to_keep`` (default 3) lowest-loss checkpoints and always the newest one.
         eval_every_num_steps (int): Evaluate the metrics every num-th step
         allow_restart: Restarts from existing checkpoints are allowed.
         training_seed (int): Random seed for shuffling of training data.
@@ -1305,19 +1306,9 @@ def fit(
     ckpt_dir.mkdir(exist_ok=True)
 
     # Create orbax CheckpointManager.
-    if ckpt_manager_options is None:
-        ckpt_manager_options = {'max_to_keep': 3}
-
-    options = ocp.CheckpointManagerOptions(
-        best_fn=lambda u: u['loss'],
-        best_mode='min',
-        step_prefix='ckpt',
-        **ckpt_manager_options
-    )
-
     ckpt_mngr = checkpoint_utils.make_checkpoint_manager(
         ckpt_dir=ckpt_dir,
-        ckpt_mngr_options=options
+        ckpt_mngr_options=checkpoint_utils.make_training_checkpoint_options(ckpt_manager_options)
     )
 
     training_step_fn = make_training_step_fn(
@@ -1352,7 +1343,7 @@ def fit(
                 f'{ckpt_dir} already exists at step {latest_step}. If you want '
                 'to re-start training, set `allow_restart=True`.'
             )
-        params = checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir)
+        params = checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir, step=latest_step)
         params = expand_observables_to_theory_levels(params)
         step = latest_step
         logger.info('Loaded parameters from %s at step %s.', ckpt_dir, latest_step)
@@ -1631,7 +1622,7 @@ def fit_from_iterator(
         val_fn (Callable, optional): Validation function to use for metrics during validation.
             If None, loss_fn will be used. Defaults to None.
         ckpt_dir (str): Checkpoint path.
-        ckpt_manager_options (dict): Checkpoint manager options.
+        ckpt_manager_options (dict): Checkpoint manager options; see fit().
         eval_every_num_steps (int): Evaluate the metrics every num-th step
         allow_restart: Restarts from existing checkpoints are allowed.
         training_seed (int): Random seed for shuffling of training data.
@@ -1689,19 +1680,9 @@ def fit_from_iterator(
     ckpt_dir.mkdir(exist_ok=True)
 
     # Create orbax CheckpointManager.
-    if ckpt_manager_options is None:
-        ckpt_manager_options = {'max_to_keep': 3}
-
-    options = ocp.CheckpointManagerOptions(
-        best_fn=lambda u: u['loss'],
-        best_mode='min',
-        step_prefix='ckpt',
-        **ckpt_manager_options
-    )
-
     ckpt_mngr = checkpoint_utils.make_training_checkpoint_manager(
         ckpt_dir=ckpt_dir,
-        ckpt_mngr_options=options
+        ckpt_mngr_options=checkpoint_utils.make_training_checkpoint_options(ckpt_manager_options)
     )
 
     training_step_fn = _make_training_step(loss_fn)
@@ -1774,7 +1755,7 @@ def fit_from_iterator(
                 'and epoch counter.', latest_step,
             )
             params = expand_observables_to_theory_levels(
-                checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir)
+                checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir, step=latest_step)
             )
             step = int(latest_step)
     if training_state is not None:
