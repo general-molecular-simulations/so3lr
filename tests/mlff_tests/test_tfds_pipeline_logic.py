@@ -141,10 +141,13 @@ def test_atomic_training_state_round_trip(tmp_path, masked_sgd, legacy_fingerpri
         stage_two_active=True,
         header_printed=True,
         use_ema=True,
+        num_devices=4,
     )
     if legacy_fingerprint:
-        # Checkpoints written by earlier versions carry a 32-byte digest leaf.
+        # Checkpoints written by earlier versions carry a 32-byte digest leaf
+        # and no device count.
         state['restart_fingerprint'] = np.arange(32, dtype=np.uint8)
+        del state['num_devices']
     manager = checkpoint_utils.make_training_checkpoint_manager(tmp_path)
     assert manager.save(
         120,
@@ -175,6 +178,7 @@ def test_atomic_training_state_round_trip(tmp_path, masked_sgd, legacy_fingerpri
     assert restored['plateau_active']
     assert restored['stage_two_active']
     assert restored['header_printed']
+    assert restored.get('num_devices') == (None if legacy_fingerprint else 4)
     npt.assert_array_equal(restored['jax_rng'], jax.random.PRNGKey(7))
     manager.close()
 
