@@ -33,6 +33,21 @@ def home_path(path):
     return text
 
 
+def ascii_only_console(console):
+    """Whether a Rich console's stream cannot encode the UI glyphs."""
+    return console.encoding.lower().replace('-', '') not in ('utf8', 'utf16', 'utf32')
+
+
+def display_path(path):
+    """A path relative to the working directory when inside it, else with ~ for home."""
+    import os
+    try:
+        relative = os.path.relpath(path)
+    except ValueError:
+        relative = str(path)
+    return home_path(path if relative.startswith('..') else relative)
+
+
 def show_command(path):
     """A copyable ``so3lr show`` argument; a leading ``~`` stays unquoted for the shell."""
     import os

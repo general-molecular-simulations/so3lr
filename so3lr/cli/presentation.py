@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from .telemetry import EventJournal
 from .run_log import RunLog
 from . import theme
-from .formatting import duration_label, finite_number as _finite, home_path, precision_label, throughput_label, optimization_status, terminal_text
+from .formatting import ascii_only_console, display_path as _display_path, duration_label, finite_number as _finite, precision_label, throughput_label, optimization_status, terminal_text
 from .terminal import TerminationSignal as _TerminationSignal, termination_signals as _termination_signals, stop_live
 
 
@@ -118,19 +118,6 @@ def failure_details(exc):
     return terminal_text(f'Full traceback: {path}')
 
 
-def _display_path(path):
-    """A path relative to the working directory when inside it, else with ~ for home."""
-    try:
-        relative = os.path.relpath(path)
-    except ValueError:
-        relative = str(path)
-    return home_path(path if relative.startswith('..') else relative)
-
-
-def _seconds(value):
-    return duration_label(value)
-
-
 @dataclass(frozen=True)
 class _Activity:
     """Animate wall time from immutable host snapshots, never simulation state."""
@@ -149,9 +136,9 @@ class _Activity:
         text = Text(marker, style=theme.ACCENT, no_wrap=True,
                     overflow='ellipsis' if self.unicode else 'crop')
         text.append(terminal_text(f' {self.phase}', not self.unicode), style='default')
-        timing = f' · {_seconds(now - self.started)} since launch'
+        timing = f' · {duration_label(now - self.started)} since launch'
         if now - self.reported >= 2:
-            timing += f' · last update {_seconds(now - self.reported)} ago'
+            timing += f' · last update {duration_label(now - self.reported)} ago'
         text.append(terminal_text(timing, not self.unicode), style=theme.MUTED)
         yield text
 
@@ -248,7 +235,7 @@ class _Reporter:
 
     @property
     def _ascii_only(self):
-        return self.console.encoding.lower().replace('-', '') not in ('utf8', 'utf16', 'utf32')
+        return ascii_only_console(self.console)
 
     def _label(self, text):
         return terminal_text(text, self._ascii_only)
@@ -288,9 +275,9 @@ class _Reporter:
             progress = f'{ratio:.0%} · {completed:,}/{self.total_steps:,} steps'
             segment_time = (f'{completed * self.dt_fs / 1000:.3f} / '
                             f'{self.total_steps * self.dt_fs / 1000:.3f} ps this run') if self.dt_fs is not None else ''
-            timing = f'MD elapsed {_seconds(time.monotonic() - self.started_at)}'
+            timing = f'MD elapsed {duration_label(time.monotonic() - self.started_at)}'
             if self.status == 'running':
-                timing += (f' · ETA {_seconds((self.total_steps - completed) * self.time_per_step)}'
+                timing += (f' · ETA {duration_label((self.total_steps - completed) * self.time_per_step)}'
                            if completed and self.time_per_step is not None and self.time_per_step > 0
                            else ' · ETA estimating')
             self._state.info['_attached_ratio'] = ratio
@@ -328,7 +315,7 @@ class _Reporter:
                 value += ' (requested)'
             metadata.add_row(self._text(label), self._text(value))
         rows.extend((metadata, self._text('')))
-        style = theme.DANGER if self.status == 'failed' else theme.SUCCESS if self.status == 'complete' else theme.WARNING
+        style = theme.status_style(self.status)
         glyph = theme.status_glyph(self.status) or theme.status_glyph('running')
         phase = self._text(f'{glyph} {self.phase_name}', f'bold {style}')
         if self.detail:
@@ -368,11 +355,11 @@ class _Reporter:
                 rows.append(self._text(f'{completed * self.dt_fs / 1000:.3f} / '
                                        f'{self.total_steps * self.dt_fs / 1000:.3f} ps this run', theme.MUTED))
             elapsed = time.monotonic() - self.started_at
-            timing = f'MD elapsed {_seconds(elapsed)}'
+            timing = f'MD elapsed {duration_label(elapsed)}'
             # No ETA is invented during compilation or at the restored step.
             if completed and self.time_per_step is not None and self.time_per_step > 0:
                 if self.status == 'running':
-                    timing += f' · ETA {_seconds((self.total_steps - completed) * self.time_per_step)}'
+                    timing += f' · ETA {duration_label((self.total_steps - completed) * self.time_per_step)}'
                 rate = throughput_label(self.time_per_step, self.dt_fs, self.info.get('atoms'))
                 if rate:
                     timing += f' · {rate}'
@@ -723,7 +710,7 @@ class _RunReporter:
             if elapsed > 0 and step > first:
                 rate = (step - first) / elapsed  # steps per wall second, I/O included
                 if self._dt_fs:
-                    parts.append(f'{rate * self._dt_fs * 86400 * 1e-6:.3g} ns/day')
+                    parts.append(throughput_label(1 / rate, self._dt_fs))
                 if done < self._total_steps:
                     parts.append(f'ETA {duration_label((self._total_steps - done) / rate)}')
         logging.getLogger('SO3LR').info('Progress ' + ' · '.join(parts))
@@ -835,8 +822,8 @@ def run_display(settings):
     rich_enabled = _rich_enabled()
     if _configuration.display == 'rich' and not _configuration.quiet and not rich_enabled:
         print('Warning: --display rich requires a terminal; using plain output.', file=sys.stderr)
-    owns_terminal = rich_enabled and bool(getattr(sys.stderr, 'isatty', lambda: False)())
-    with _termination_signals(enabled=owns_terminal):
+    # _rich_enabled already requires stderr to be a terminal.
+    with _termination_signals(enabled=rich_enabled):
         renderer = _Reporter(settings) if rich_enabled else _null
         try:
             reporter = _RunReporter(settings, renderer)

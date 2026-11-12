@@ -829,7 +829,8 @@ def launch_setup():
     console = Console(file=sys.stdout, markup=False, highlight=False,
                       no_color='NO_COLOR' in os.environ or (context is not None and context.color is False))
     from .prompts import terminal_text
-    ascii_only = not console.encoding.lower().replace('-', '').startswith('utf')
+    from .formatting import ascii_only_console
+    ascii_only = ascii_only_console(console)
     title = Text(terminal_text(f'{theme.BRAND} SO3LR TAURI', ascii_only), style=theme.ACCENT_BOLD)
     title.append(terminal_text(' · New MD run', ascii_only), style=theme.STRONG)
     console.print(title)

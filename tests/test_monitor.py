@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from so3lr.cli import monitor, theme
+from so3lr.cli.formatting import show_command
 
 
 def event(seq, kind, **data):
@@ -1343,7 +1344,10 @@ def test_short_optimization_views_keep_controls_and_outcome(tmp_path, height, st
         assert monitor.optimization_status(reader.state.info, status) in text
 
 
-def test_completed_attached_paged_view_lists_saved_files(tmp_path):
+def test_completed_attached_paged_view_lists_saved_files(tmp_path, monkeypatch):
+    # Paths are shown relative to the working directory, which is the run
+    # directory for guided runs and run.sh launchers.
+    monkeypatch.chdir(tmp_path)
     path = tmp_path / 'run.events.jsonl'
     write(path, [*samples(), event(200, 'run_completed')])
     reader = monitor.JournalReader(path)
@@ -1359,7 +1363,7 @@ def test_completed_attached_paged_view_lists_saved_files(tmp_path):
 def test_show_command_abbreviates_home_and_stays_shell_safe(monkeypatch, tmp_path):
     home = tmp_path / 'home'
     monkeypatch.setenv('HOME', str(home))
-    assert monitor._show_command(home / 'runs' / 'water 300K') == "~/'runs/water 300K'"
-    assert monitor._show_command(home / 'runs') == '~/runs'
-    assert monitor._show_command(home) == '~'
-    assert monitor._show_command(tmp_path / 'home2' / 'x') == str(tmp_path / 'home2' / 'x')
+    assert show_command(home / 'runs' / 'water 300K') == "~/'runs/water 300K'"
+    assert show_command(home / 'runs') == '~/runs'
+    assert show_command(home) == '~'
+    assert show_command(tmp_path / 'home2' / 'x') == str(tmp_path / 'home2' / 'x')

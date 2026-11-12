@@ -12,12 +12,11 @@ import json
 import math
 import os
 from pathlib import Path
-import shlex
 from statistics import median
 import sys
 import time
 
-from .formatting import finite_number as _finite, home_path, optimization_status, show_command, precision_label, throughput_label, terminal_text
+from .formatting import ascii_only_console, display_path, finite_number as _finite, optimization_status, show_command, precision_label, throughput_label, terminal_text
 from .terminal import input_mode, live_display, termination_signals
 from . import theme
 
@@ -45,10 +44,6 @@ def _stamp(value):
 def _checkpoint_step(checkpoint):
     step = _finite(checkpoint.get('step'))
     return f'{int(step):,}' if step is not None and step == int(step) else '?'
-
-
-def _show_command(path):
-    return show_command(path)
 
 
 def _age(timestamp, now):
@@ -145,7 +140,7 @@ def discover_journals(path, max_depth=3, max_files=128, max_dirs=512):
             neighbors = discover_journals(path.parent, max_depth=0, max_files=2)
             target = neighbors[0] if len(neighbors) == 1 else path.parent
             raise ValueError(f'Expected a *.events.jsonl journal, not {path.name}. '
-                             f'Try: so3lr show {shlex.quote(str(target))}')
+                             f'Try: so3lr show {show_command(target)}')
         return [path]
     if not path.is_dir():
         raise FileNotFoundError(f'Journal or directory does not exist: {path}')
@@ -722,7 +717,7 @@ def _controls(state, attached=False, paged=False, multiple=False):
             if state.info.get('_journal_enabled') is False:
                 return 'Saved graphs unavailable: SO3LR_JOURNAL=0. Text log retained.'
             # Escape the path here: the paged view keeps layout newlines.
-            return 'View saved graphs: so3lr show ' + terminal_text(_show_command(state.path.parent))
+            return 'View saved graphs: so3lr show ' + terminal_text(show_command(state.path.parent))
         if not state.info.get('_attached_keyboard'):
             if state.info.get('_journal_enabled') is False:
                 return 'Ctrl+C: interrupt MD · saved graphs disabled (SO3LR_JOURNAL=0)'
@@ -750,7 +745,7 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
 
     state = reader.state
     now = now or datetime.now(timezone.utc)
-    style = theme.DANGER if state.status == 'Failed' else theme.SUCCESS if state.status == 'Completed' else theme.WARNING
+    style = theme.status_style(state.status)
     rows, priorities = [], []
 
     def add(value, style='', priority=20):
@@ -808,10 +803,7 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
         if count > 1:
             controls += ' · ←/→: run · o: overview'
     if not static:
-        hint = theme.controls(controls, ascii_only)
-        if compact:
-            hint.no_wrap, hint.overflow = True, 'crop' if ascii_only else 'ellipsis'
-        rows.append(hint)
+        rows.append(theme.controls(controls, ascii_only, single_line=compact))
         priorities.append(0)
     if compact and height is not None and len(rows) > height:
         # Every compact Text is exactly one row. Keep controls and the honest
@@ -847,7 +839,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
         run_name = run_name[:-(len(state.run_id) + 1)]
     short_id = f' · {state.run_id[:8]}' if state.run_id else ''
     rows.append(Text(('Run · ' if attached else f'Run {selected + 1}/{len(readers)} · ') + run_name + short_id))
-    status_style = theme.SUCCESS if state.status == 'Completed' else theme.DANGER if state.status == 'Failed' else theme.WARNING
+    status_style = theme.status_style(state.status)
     rows.append(Text(f'{"State" if attached else "Last reported state"}: {state.status}', style=status_style))
     if not attached:
         rows.append(Text(_observation_line(reader, now), style=theme.MUTED))
@@ -955,7 +947,7 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
         observation = f' · {"Reading history" if qualifier == "Reading" else qualifier}' if qualifier != state.status else ''
         header = [Text(f'{theme.BRAND} SO3LR TAURI · Run {selected + 1}/{len(readers)} · {name}', theme.ACCENT_BOLD),
                   Text(f'Last reported state: {state.status}{observation} · {state.phase}',
-                       theme.DANGER if state.status == 'Failed' else theme.SUCCESS if state.status == 'Completed' else theme.WARNING)]
+                       theme.status_style(state.status))]
         if origin := origin_label(state):
             header.append(Text(origin, theme.MUTED))
     if state.samples and not attached:
@@ -980,11 +972,7 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
         # The final frame stays in scrollback: say where the results are.
         saved = [str(state.settings[key]) for key in ('output_file', 'log_file') if state.settings.get(key)]
         if state.checkpoint and state.checkpoint.get('path'):
-            checkpoint = Path(str(state.checkpoint['path']))
-            # Writers report resolved paths; name files inside the run folder relatively.
-            if checkpoint.is_absolute() and checkpoint.parent == state.path.parent.resolve():
-                checkpoint = Path(checkpoint.name)
-            saved.append(str(checkpoint))
+            saved.append(display_path(state.checkpoint['path']))
         if saved:
             footer.append(Text(terminal_text('Saved: ' + ' · '.join(dict.fromkeys(saved))), theme.MUTED))
     if reader.error or state.diagnostic:
@@ -1007,8 +995,7 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
         if any(cell_len(terminal_text(line, ascii_only)) > width for line in controls_text.splitlines()):
             # Keep the close/hide action complete on narrow terminals, too.
             controls_text = controls_text.replace(' · Esc/q:', '\nEsc/q:')
-    controls = theme.controls(controls_text, ascii_only)
-    controls.no_wrap, controls.overflow = True, 'crop' if ascii_only else 'ellipsis'
+    controls = theme.controls(controls_text, ascii_only, single_line=True)
     if attached and state.status in ('Completed', 'Failed'):
         # The saved-directory command must stay copyable even for long paths.
         controls.no_wrap, controls.overflow = False, 'fold'
@@ -1183,7 +1170,7 @@ def show(path, once=False, interval=1.0, no_color=False):
     paths = discover_journals(path)
     readers = [JournalReader(item) for item in paths]
     interactive = console.is_terminal and sys.stdin.isatty() and os.environ.get('TERM') != 'dumb'
-    ascii_only = console.encoding.lower().replace('-', '') not in ('utf8', 'utf16', 'utf32')
+    ascii_only = ascii_only_console(console)
     if once or not interactive:
         for reader in readers:
             reader.snapshot()

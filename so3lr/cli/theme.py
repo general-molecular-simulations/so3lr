@@ -8,7 +8,6 @@ Glyphs used here have ASCII fallbacks in ``formatting.terminal_text``.
 
 ACCENT = '#f0b429'          # amber: brand mark, focus, progress, primary trace
 ACCENT_BOLD = f'bold {ACCENT}'
-TEXT = ''                   # the terminal's own foreground
 STRONG = 'bold'
 MUTED = '#8b93a1'           # labels, units, secondary facts
 FAINT = '#5c6370'           # axes, rules, guide lines
@@ -33,9 +32,9 @@ STATUS = {
     'complete': ('✓', SUCCESS),
     'completed': ('✓', SUCCESS),
     'failed': ('✕', DANGER),
-    'stopped': ('✕', DANGER),
     'interrupted': ('■', WARNING),
     'stale?': ('◌', WARNING),
+    'read error': ('✕', DANGER),
 }
 
 
@@ -52,16 +51,17 @@ def series_style(key):
     return SERIES.get(key, ACCENT)
 
 
-def controls(text, ascii_only=False):
+def controls(text, ascii_only=False, *, single_line=False):
     """Style ``key: action · key: action`` hints: keys stand out, actions recede.
 
     The visible characters are exactly ``text`` (after terminal escaping), so
-    copy/paste and plain-text consumers see the same hint.
+    copy/paste and plain-text consumers see the same hint. ``single_line``
+    truncates instead of wrapping.
     """
     from rich.text import Text
     from .formatting import terminal_text
 
-    result = Text(no_wrap=False)
+    result = Text(no_wrap=single_line, overflow=('crop' if ascii_only else 'ellipsis') if single_line else None)
     separator = ' | ' if ascii_only else ' · '
     for line_index, line in enumerate(terminal_text(text, ascii_only, allow_newlines=True).split('\n')):
         if line_index:
@@ -79,7 +79,11 @@ def controls(text, ascii_only=False):
 
 
 def bar(ratio, width, ascii_only=False):
-    """A progress bar with half-cell resolution: filled accent, faint track."""
+    """A progress bar with half-cell resolution: filled accent, faint track.
+
+    Rich's ProgressBar is not a Text, so it cannot share a line with labels,
+    and its fill and track look identical without color.
+    """
     from rich.text import Text
 
     ratio = max(0.0, min(1.0, float(ratio)))

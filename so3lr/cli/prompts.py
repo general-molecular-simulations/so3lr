@@ -145,8 +145,7 @@ def selection_view(title, choices, selected=0, height=24):
     start = max(0, min(selected - visible // 2, len(choices) - visible))
     end = min(len(choices), start + visible)
     from . import theme
-    hint = theme.controls('↑/↓: move · Enter: choose · Esc: cancel')
-    hint.no_wrap, hint.overflow = True, 'ellipsis'
+    hint = theme.controls('↑/↓: move · Enter: choose · Esc: cancel', single_line=True)
     lines = [Text(terminal_text(title), style=theme.STRONG, no_wrap=True, overflow='ellipsis'), hint]
     if start:
         lines.append(Text(f'  ↑ {start} more', style=theme.MUTED))
@@ -206,7 +205,9 @@ def choose(console, title, choices, default=0):
                 live.update(render(), refresh=True)
     from . import theme
     # Answered questions recede; the next question keeps the focus.
-    summary = Text('✓ ' if console.encoding.lower().startswith('utf') else '+ ', style=theme.SUCCESS)
-    summary.append(terminal_text(f'{title}: {choices[selected]}'), style=theme.MUTED)
+    from .formatting import ascii_only_console
+    ascii_only = ascii_only_console(console)
+    summary = Text(terminal_text(theme.status_glyph('completed') + ' ', ascii_only), style=theme.SUCCESS)
+    summary.append(terminal_text(f'{title}: {choices[selected]}', ascii_only), style=theme.MUTED)
     console.print(summary)
     return selected

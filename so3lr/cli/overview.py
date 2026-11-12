@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import theme
 from .formatting import finite_number as _number, home_path, terminal_text as _literal
-from .monitor import observation_status, observation_timestamp, origin_label
+from .monitor import _age_seconds, observation_status, observation_timestamp, origin_label
 
 
 def _shorten(value, width, ascii_only):
@@ -82,9 +82,10 @@ def _steps(state, sample):
     total = total if total is not None and total > 0 else None
     done = f'{int(segment):,}' if segment is not None else '-'
     planned = f'{int(total):,}' if total is not None else '-'
-    percentage = segment / total * 100 if segment is not None and total is not None else None
-    percentage = f'{percentage:.0f}%' if percentage is not None and math.isfinite(percentage) else '-'
-    return f'{done}/{planned}' if total is not None else done, percentage
+    ratio = segment / total if segment is not None and total is not None else None
+    ratio = ratio if ratio is not None and math.isfinite(ratio) else None
+    percentage = f'{ratio * 100:.0f}%' if ratio is not None else '-'
+    return f'{done}/{planned}' if total is not None else done, percentage, ratio
 
 
 def _metric(value, width, decimals):
@@ -95,11 +96,9 @@ def _metric(value, width, decimals):
     return label if len(label) <= width else f'{value:.4g}'
 
 
-def _progress_cell(percent, ascii_only):
+def _progress_cell(percent, ratio, ascii_only):
     from rich.text import Text
-    try:
-        ratio = float(percent.rstrip('%')) / 100
-    except ValueError:
+    if ratio is None:
         return Text(percent, style=theme.MUTED)
     cell = theme.bar(ratio, 7, ascii_only)
     cell.append(f' {percent:>4}')
@@ -107,13 +106,10 @@ def _progress_cell(percent, ascii_only):
 
 
 def _age(timestamp, now):
-    if not isinstance(timestamp, datetime):
+    seconds = _age_seconds(timestamp, now)
+    if seconds is None:
         return '?'
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    seconds = max(0, int((now - timestamp).total_seconds()))
+    seconds = int(seconds)
     if seconds < 60:
         return f'{seconds}s'
     if seconds < 3600:
@@ -140,9 +136,7 @@ def _render(readers, width, height, now, ascii_only, page, static):
                     overflow='crop' if ascii_only else 'ellipsis')
 
     def keys(value):
-        text = theme.controls(value, ascii_only)
-        text.no_wrap, text.overflow = True, 'crop' if ascii_only else 'ellipsis'
-        return text
+        return theme.controls(value, ascii_only, single_line=True)
 
     count_label = f'{len(states)} run' + ('' if len(states) == 1 else 's')
     title = 'Run overview snapshot' if static else 'Run overview'
@@ -225,11 +219,9 @@ def _render(readers, width, height, now, ascii_only, page, static):
         state = states[index]
         optimization = _optimization(state)
         sample = {} if optimization else _sample(state)
-        steps, percent = _steps(state, sample)
+        steps, percent, ratio = _steps(state, sample)
         status = statuses[index]
-        style = {'Running': theme.WARNING, 'Completed': theme.SUCCESS, 'Failed': theme.DANGER,
-                 'Interrupted': theme.WARNING, 'Stale?': theme.WARNING,
-                 'Read error': theme.DANGER}.get(status, theme.MUTED)
+        style = theme.status_style(status)
         name = _literal(names[index], ascii_only)
         if has_optimization and width < 76:
             prefix = 'OPT:' if optimization else 'MD:'
@@ -239,7 +231,7 @@ def _render(readers, width, height, now, ascii_only, page, static):
         values = {'#': str(index + 1), 'Run': name,
                   'Mode': 'OPT' if optimization else 'MD',
                   'State': _literal(status, ascii_only), progress_title: steps, '%': percent,
-                  'Progress': _progress_cell(percent, ascii_only),
+                  'Progress': _progress_cell(percent, ratio, ascii_only),
                   'T [K]': _metric(sample.get('temperature_K'), 7, 1),
                   'Total E [eV]': _metric(sample.get('energy_eV'), 12, 6),
                   'Age': _age(observation_timestamp(state), now),

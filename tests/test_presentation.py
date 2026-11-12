@@ -1411,7 +1411,7 @@ def test_plain_runs_log_greppable_progress_with_wall_clock_eta(tmp_path, monkeyp
             reporter.finish()
     lines = [record.getMessage() for record in caplog.records if record.getMessage().startswith('Progress ')]
     # 500 steps in 10 s of wall time: 50 steps/s, 0.5 fs -> 2.16 ns/day; 500 steps left -> 10 s.
-    assert lines[0] == 'Progress 50.0% · step 500/1,000 · 2.16 ns/day · ETA 00:10'
+    assert lines[0] == 'Progress 50.0% · step 500/1,000 · 2.160 ns/day · ETA 00:10'
     assert lines[1].startswith('Progress 90.0% · step 900/1,000 · ')
     assert len(lines) == 2
 
