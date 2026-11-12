@@ -1838,6 +1838,73 @@ def fit_from_iterator(
     if on_training_ready is not None:
         on_training_ready()
 
+    # The periodic evaluation and the final one after the loop share these two
+    # helpers; both read the current loop state.
+    def _evaluate(epoch):
+        """Validate the deployed weights (the EMA copy when EMA is on) and log
+        the metrics; returns (eval_params, eval_metrics)."""
+        nonlocal header_printed
+        eval_params = _single_device(ema_params if use_ema else params)
+        eval_metrics = _validation_metrics(
+            validation_step_fn, eval_params,
+            validation_iterator.next_epoch(split='train', mode='validation'),
+            graph_to_batch_fn)
+        if not header_printed:
+            logger.info(print_metrics_header(eval_metrics))
+            header_printed = True
+        logger.info(print_metrics_row(epoch, step, eval_metrics))
+        if use_wandb:
+            _wandb_log(eval_metrics, step=step)
+        return eval_params, eval_metrics
+
+    def _save_checkpoint(epoch, batches_consumed, eval_params, eval_loss):
+        """Save eval_params with the full training state at this step, or skip
+        a non-finite eval_loss (see _log_and_checkpoint)."""
+        if jnp.isfinite(eval_loss):
+            raw_params, optimizer_state, saved_ema_params = _single_device(
+                (params, opt_state, ema_params)
+            )
+            training_state = _make_tfds_training_state(
+                step=step,
+                raw_params=raw_params,
+                optimizer_state=optimizer_state,
+                ema_params=saved_ema_params,
+                jax_rng=jax_rng,
+                epoch=epoch,
+                batches_consumed=batches_consumed,
+                processed_graphs=processed_graphs,
+                processed_nodes=processed_nodes,
+                best_eval_loss=best_eval_loss,
+                evals_without_improvement=evals_without_improvement,
+                stop_training=stop_training,
+                plateau_best_loss=plateau_best_loss,
+                plateau_wait=plateau_wait,
+                plateau_cooldown_counter=plateau_cooldown_counter,
+                plateau_scale=plateau_scale,
+                plateau_active=_plateau_active,
+                reduce_lr_enabled=reduce_lr_on_plateau,
+                stage_two_active=_stage_two_active,
+                header_printed=header_printed,
+                use_ema=use_ema,
+                num_devices=num_devices,
+            )
+            checkpoint_started = ckpt_mngr.save(
+                step,
+                args=ocp.args.Composite(
+                    params=ocp.args.StandardSave(eval_params),
+                    training_state=ocp.args.StandardSave(training_state),
+                ),
+                metrics={'loss': eval_loss}
+            )
+            if checkpoint_started:
+                ckpt_mngr.wait_until_finished()
+        else:
+            print(
+                f"Skipping checkpoint at step {step} because "
+                f"eval_loss={eval_loss}"
+            )
+
+    start_step = step
     for epoch in range(start_epoch, num_epochs):
         if stop_training:
             logger.info(
@@ -1962,44 +2029,8 @@ def fit_from_iterator(
 
             # Start validation process.
             if step % eval_every_num_steps == 0:
-                # Use the EMA (deployed) weights for validation when enabled.
-                eval_params = _single_device(ema_params if use_ema else params)
-                # Start iteration over validation batches.
-                eval_totals = {}
-                eval_counts = {}
-                validation_iterator_loop = validation_iterator.next_epoch(split='train', mode='validation')
-                for graph_batch_validation, lr_batch_validation in validation_iterator_loop:
-                    batch_validation = graph_to_batch_fn(graph_batch_validation, lr_batch_validation)
-                    batch_validation = jax.tree_util.tree_map(jnp.array, batch_validation)
-
-                    eval_out = validation_step_fn(
-                        eval_params,
-                        batch_validation
-                    )
-
-                    for k, v in eval_out.items():
-                        eval_totals[k] = eval_totals.get(k, 0.0) + np.asarray(v).item()
-                        eval_counts[k] = eval_counts.get(k, 0) + 1
-
-                eval_metrics = {k: eval_totals[k] / eval_counts[k] for k in eval_totals}
-
-                # Convert to dict to log with weights and bias.
-                eval_metrics = {
-                    f'eval_{k}': float(v) for k, v in eval_metrics.items()
-                }
-
-                if not header_printed:
-                    logger.info(print_metrics_header(eval_metrics))
-                    header_printed = True
-                logger.info(print_metrics_row(epoch, step, eval_metrics))
+                eval_params, eval_metrics = _evaluate(epoch)
                 eval_loss = eval_metrics['eval_loss']
-
-                # Log to weights and bias.
-                if use_wandb:
-                    _wandb_log(
-                        eval_metrics,
-                        step=step
-                    )
 
                 # Early stopping on the validation loss.
                 if early_stopping_patience is not None:
@@ -2030,49 +2061,7 @@ def fit_from_iterator(
                 # Validation can update early-stop and plateau/optimizer state.
                 # Save only after those transitions so the restored next update
                 # sees exactly the same control state as uninterrupted training.
-                if jnp.isfinite(eval_loss):
-                    raw_params, optimizer_state, saved_ema_params = _single_device(
-                        (params, opt_state, ema_params)
-                    )
-                    training_state = _make_tfds_training_state(
-                        step=step,
-                        raw_params=raw_params,
-                        optimizer_state=optimizer_state,
-                        ema_params=saved_ema_params,
-                        jax_rng=jax_rng,
-                        epoch=epoch,
-                        batches_consumed=batches_consumed,
-                        processed_graphs=processed_graphs,
-                        processed_nodes=processed_nodes,
-                        best_eval_loss=best_eval_loss,
-                        evals_without_improvement=evals_without_improvement,
-                        stop_training=stop_training,
-                        plateau_best_loss=plateau_best_loss,
-                        plateau_wait=plateau_wait,
-                        plateau_cooldown_counter=plateau_cooldown_counter,
-                        plateau_scale=plateau_scale,
-                        plateau_active=_plateau_active,
-                        reduce_lr_enabled=reduce_lr_on_plateau,
-                        stage_two_active=_stage_two_active,
-                        header_printed=header_printed,
-                        use_ema=use_ema,
-                        num_devices=num_devices,
-                    )
-                    checkpoint_started = ckpt_mngr.save(
-                        step,
-                        args=ocp.args.Composite(
-                            params=ocp.args.StandardSave(eval_params),
-                            training_state=ocp.args.StandardSave(training_state),
-                        ),
-                        metrics={'loss': eval_loss}
-                    )
-                    if checkpoint_started:
-                        ckpt_mngr.wait_until_finished()
-                else:
-                    print(
-                        f"Skipping checkpoint at step {step} because "
-                        f"eval_loss={eval_loss}"
-                    )
+                _save_checkpoint(epoch, batches_consumed, eval_params, eval_loss)
             # Finished validation process.
 
             if stop_training:
@@ -2092,8 +2081,21 @@ def fit_from_iterator(
         if stop_training:
             break  # exit the epoch loop
 
+    # Validate and save the final weights too when this call trained past the
+    # last multiple of eval_every_num_steps, as fit() does.  Early stopping
+    # only fires on a multiple, so this epoch ran to its end and a resume from
+    # this checkpoint starts at the next one.  The extra evaluation does not
+    # feed early stopping or reduce-LR: a resume that adds epochs then sees the
+    # same control state as an uninterrupted run, which evaluates only on
+    # multiples.
+    if step > start_step and step % eval_every_num_steps != 0:
+        eval_params, eval_metrics = _evaluate(epoch)
+        _save_checkpoint(epoch, batches_consumed, eval_params, eval_metrics['eval_loss'])
+
     # Wait until checkpoint manager completes all save operations.
     ckpt_mngr.wait_until_finished()
+
+
 def make_optimizer(
         name: str = 'adam',
         optimizer_args: Dict = dict(),

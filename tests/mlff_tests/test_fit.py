@@ -5,11 +5,13 @@ from pathlib import Path
 import jax
 import numpy as np
 import optax
+import orbax.checkpoint as ocp
 import pytest
 from ase import units
 
 from so3lr.mlff import jraph_utils, training_utils
 from so3lr.mlff.data import NpzDataLoaderSparse, transformations
+from so3lr.mlff.utils import checkpoint_utils
 from so3lr.mlff.nn import SO3kratesSparse
 from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_force_fn_sparse
 
@@ -98,6 +100,65 @@ def test_fit_saves_the_final_weights(tmp_path, ethanol_frames):
     _fit(tmp_path / 'checkpoints', model, _loss(model), _ethanol(ethanol_frames, 15, 5),
          num_epochs=1, eval_every_num_steps=10_000)
     assert any((tmp_path / 'checkpoints').iterdir())
+
+
+class _Epochs:
+    """The next_epoch() interface fit_from_iterator reads, batching in-memory
+    frames like _fit does; records which training epochs were asked for."""
+
+    def __init__(self, frames):
+        self.frames = frames
+        self.train_epochs = []
+
+    def next_epoch(self, split, mode, epoch_index=None):
+        if mode == 'train':
+            self.train_epochs.append(epoch_index)
+        return jraph_utils.dynamically_batch_with_lr(
+            iter(self.frames), n_node=9 + 9 + 1, n_edge=72 + 72 + 1, n_graph=3, n_pairs=100)
+
+
+def test_fit_from_iterator_saves_the_final_weights(tmp_path, ethanol_frames):
+    """fit_from_iterator() (the TFDS path) also validates and saves the last
+    step, with the training state a resume needs. 15 frames make 8 steps per
+    epoch, so evaluating every 5 steps used to leave the last checkpoint at
+    step 5, and a resume (which starts at the next epoch) dropped steps 6-8."""
+    model = _so3krates()
+    training, validation = _ethanol(ethanol_frames, 15, 5)
+    ckpt_dir = tmp_path / 'checkpoints'
+
+    def run(num_epochs, **kwargs):
+        epochs = _Epochs(training)
+        training_utils.fit_from_iterator(
+            model=model, optimizer=optax.adam(learning_rate=1e-3), loss_fn=_loss(model),
+            val_fn=_loss(model), graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
+            training_iterator=epochs, validation_iterator=_Epochs(validation),
+            batch_max_num_edges=72 + 72 + 1, batch_max_num_nodes=9 + 9 + 1,
+            batch_max_num_graphs=3, batch_max_num_pairs=100, num_epochs=num_epochs,
+            ckpt_dir=ckpt_dir, ckpt_manager_options={'max_to_keep': 10},
+            eval_every_num_steps=5, use_wandb=False, **kwargs)
+        return epochs
+
+    def saved():
+        manager = checkpoint_utils.make_training_checkpoint_manager(ckpt_dir)
+        steps = manager.all_steps()
+        state = manager.restore(steps[-1], args=ocp.args.Composite(
+            training_state=ocp.args.StandardRestore()))['training_state']
+        manager.close()
+        return list(steps), state
+
+    run(num_epochs=1)
+    steps, state = saved()
+    assert steps == [5, 8]
+    assert (state['checkpoint_step'], state['epoch'], state['batches_consumed'],
+            state['processed_graphs']) == (8, 0, 8, 15)
+
+    # The final checkpoint closed epoch 0, so a resume trains epoch 1 only.
+    resumed = run(num_epochs=2, allow_restart=True)
+    assert resumed.train_epochs == [1]
+    steps, state = saved()
+    assert steps == [5, 8, 10, 15, 16]
+    assert (state['checkpoint_step'], state['epoch'], state['batches_consumed'],
+            state['processed_graphs']) == (16, 1, 8, 30)
 
 
 def test_fit_early_stopping(tmp_path, caplog, ethanol_frames):
