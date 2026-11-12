@@ -230,7 +230,7 @@ def test_fit_skips_checkpoints_with_non_finite_loss(
         tmp_path, monkeypatch, entry_point, eval_loss, saved_steps):
     """fit() used to save NaN-loss checkpoints; orbax ranks with best_mode='min'
     and a NaN can be retained as 'best', evicting the real best weights.
-    fit() saves through _log_and_checkpoint; fit_from_iterator has its own guard.
+    Both save through _save_if_finite.
     The finite case shows the stubbed loop does reach the save."""
     manager = _RecordingManager()
     for name in ('make_checkpoint_manager', 'make_training_checkpoint_manager'):
