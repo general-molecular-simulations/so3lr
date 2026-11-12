@@ -95,7 +95,8 @@ def test_data_parallel_step_matches_averaged_gradient_update():
 def test_fit_from_iterator_data_parallel_matches_single_device(tmp_path):
     """fit_from_iterator(data_parallel=True) on n batches per step reproduces a
     single-device run on the averaged batches, writes single-device checkpoints,
-    and resumes from them."""
+    resumes from them, and refuses a resume on another device count or an epoch
+    with fewer batches than devices."""
     out = _run_on_simulated_devices(f"""
         import functools
         import jax, jax.numpy as jnp, numpy as np, optax
@@ -143,6 +144,14 @@ def test_fit_from_iterator_data_parallel_matches_single_device(tmp_path):
                 use_ema=True, ema_decay=0.5, data_parallel=data_parallel)
             return it
 
+        def assert_refused(match, *args, **kwargs):
+            try:
+                run(*args, **kwargs)
+            except RuntimeError as exc:
+                assert match in str(exc), exc
+            else:
+                raise AssertionError(f'run{{args}} was not refused')
+
         # tree.map also checks that the two trees have the same structure
         # (a zip over the leaves passes vacuously when one side is empty).
         assert_trees_equal = functools.partial(
@@ -176,6 +185,13 @@ def test_fit_from_iterator_data_parallel_matches_single_device(tmp_path):
         # A partial set of batches at the end of an epoch is dropped, not stepped.
         run('partial', values[:n + 1], data_parallel=True)
         assert restored('partial')[0] == 1
+        # With fewer batches than devices no step at all would be taken.
+        assert_refused('fewer than', 'tiny', values[:n - 1], data_parallel=True)
+
+        # The device count sets the effective batch: resuming on another count is refused.
+        assert_refused('device(s)', 'dp', values, data_parallel=False, epochs=2, allow_restart=True)
+        assert_refused('device(s)', 'single', averaged, data_parallel=True, epochs=2,
+                       allow_restart=True)
 
         # Resume the data-parallel run for a second epoch and compare to an
         # uninterrupted two-epoch single-device run on the averaged batches.

@@ -36,7 +36,8 @@ ROBUST_LOSS_DIST = robust_loss_dist.Distribution()
 _TFDS_TRAINING_STATE_VERSION = 1
 # Checkpoints written before the fingerprint was dropped also carry a
 # ``restart_fingerprint`` leaf; the restore target is built from the saved
-# tree, so that extra leaf is restored and ignored.
+# tree, so that extra leaf is restored and ignored.  ``num_devices`` is
+# optional for the same reason: checkpoints written before it was saved lack it.
 _TFDS_TRAINING_STATE_KEYS = frozenset({
     'version', 'checkpoint_step',
     'raw_params', 'optimizer_state', 'ema_params', 'jax_rng',
@@ -54,7 +55,7 @@ def _make_tfds_training_state(
         best_eval_loss, evals_without_improvement, stop_training,
         plateau_best_loss, plateau_wait, plateau_cooldown_counter,
         plateau_scale, plateau_active, reduce_lr_enabled, stage_two_active,
-        header_printed, use_ema):
+        header_printed, use_ema, num_devices=1):
     """Build the versioned, Orbax-compatible restart PyTree."""
     return {
         'version': _TFDS_TRAINING_STATE_VERSION,
@@ -79,6 +80,7 @@ def _make_tfds_training_state(
         'stage_two_active': bool(stage_two_active),
         'header_printed': bool(header_printed),
         'use_ema': bool(use_ema),
+        'num_devices': int(num_devices),
     }
 
 
@@ -1632,7 +1634,8 @@ def fit_from_iterator(
             count (eval_every_num_steps still counts optimizer steps). Parameters, optimizer
             state and EMA are replicated on every device; validation and checkpoints use
             single-device copies, so checkpoints are identical in format to single-device
-            ones. Defaults to False.
+            ones. A restart must use the same device count, and every epoch needs at least
+            one batch per device. Defaults to False.
     Returns:
 
     """
@@ -1760,6 +1763,15 @@ def fit_from_iterator(
         ema_params = training_state['ema_params']
         jax_rng = training_state['jax_rng']
         step = int(training_state['checkpoint_step'])
+        # The device count sets the effective batch, so a different count would
+        # silently change the optimisation the learning-rate schedule was set for.
+        saved_devices = training_state.get('num_devices')
+        if saved_devices is not None and int(saved_devices) != num_devices:
+            raise RuntimeError(
+                f'Checkpoint step {latest_step} was written by a run on {int(saved_devices)} '
+                f'device(s), but this run trains on {num_devices}; the effective batch would '
+                'change. Resume on the same number of devices.'
+            )
         # Continue with the next epoch rather than replaying the batches this
         # one already consumed: the replay runs the full input pipeline and
         # costs about as long as training on them did (hours to days).
@@ -1840,6 +1852,7 @@ def fit_from_iterator(
         )
         # One optimizer step per group of num_devices batches (one per device); with data
         # parallelism a partial group at the end of an epoch is dropped.
+        epoch_start_step = step
         for batch_index, group in _batch_groups(training_iterator_loop, num_devices):
             batches_consumed = batch_index + 1
             batches = []
@@ -2023,6 +2036,7 @@ def fit_from_iterator(
                         stage_two_active=_stage_two_active,
                         header_printed=header_printed,
                         use_ema=use_ema,
+                        num_devices=num_devices,
                     )
                     checkpoint_started = ckpt_mngr.save(
                         step,
@@ -2049,6 +2063,12 @@ def fit_from_iterator(
                     close_training_iterator()
                 break  # exit the batch loop
 
+        if step == epoch_start_step and num_devices > 1:
+            raise RuntimeError(
+                f'Epoch {epoch} has fewer than {num_devices} training batches, so data-parallel '
+                f'training on {num_devices} devices takes no optimizer step. Use fewer devices, '
+                'a smaller batch or data_parallel: false.'
+            )
         if stop_training:
             break  # exit the epoch loop
 
