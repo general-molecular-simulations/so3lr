@@ -590,6 +590,9 @@ class _Reporter:
         self.console.print(self._text(label + message, style))
 
 
+PLAIN_PROGRESS_INTERVAL = 600  # seconds between plain progress lines without a checkpoint
+
+
 class _RunReporter:
     """Fan out host events to the journal and an optional terminal renderer."""
 
@@ -597,6 +600,8 @@ class _RunReporter:
 
     def __init__(self, settings, renderer):
         self.renderer = renderer
+        self._settings = settings
+        self._last_checkpoint = None
         # enabled continues to mean terminal rendering, not journal availability.
         self.enabled = renderer.enabled
         self.journal = EventJournal(settings)
@@ -618,6 +623,9 @@ class _RunReporter:
         self._phase = None
         self._start_step = None
         self._dt_fs = None
+        self._total_steps = None
+        self._rate_origin = None     # (wall clock, step) of the first MD sample
+        self._last_progress_line = None
 
     def __getattr__(self, name):
         # Keep the renderer's inspection surface (live/render/artifacts) usable.
@@ -649,6 +657,7 @@ class _RunReporter:
         # marker in both the journal and attached display before new samples.
         self.update_info(operation='md')
         self._start_step, self._dt_fs = int(start_step), _finite(dt_fs)
+        self._total_steps, self._rate_origin, self._last_progress_line = int(total_steps), None, None
         self.journal.emit('md_started', {'start_step': self._start_step,
                                        'total_steps': int(total_steps), 'dt_fs': self._dt_fs})
         self.run_log.start_md(self._start_step, int(total_steps), self._dt_fs)
@@ -676,13 +685,56 @@ class _RunReporter:
                 data[field] = optional[argument]
         self.journal.emit('sample', data)
         self.run_log.progress(data)
+        if self._rate_origin is None:
+            self._rate_origin = (time.monotonic(), step)
+        elif (not self.enabled and self._last_progress_line is not None
+              and time.monotonic() - self._last_progress_line >= PLAIN_PROGRESS_INTERVAL):
+            self._log_progress(step)
         self.renderer.progress(step, temperature=temperature, potential_energy=potential_energy,
                                time_per_step=time_per_step, _sample=data, **optional)
+
+    def resume_hint(self):
+        """How to continue an interrupted or failed MD run, or [] when unknown."""
+        if self._total_steps is None:
+            return []
+        if self._last_checkpoint is None:
+            if self._settings.get('restart_save_path'):
+                return []
+            return ['No checkpoint was saved. Set restart_save_path (or --restart-save) to make runs resumable.']
+        step, path = self._last_checkpoint
+        shown = _display_path(path)
+        output = str(self._settings.get('output_file') or '')
+        appended = ('choose a new output path for HDF5' if output.endswith(('.h5', '.hdf5'))
+                    else 'the trajectory is appended')
+        return [f'Last checkpoint: step {step:,} · {shown}',
+                f'Resume: --restart-load {shown} (YAML: restart_load_path: {shown}); '
+                f'relaxation is skipped and {appended}.']
+
+    def _log_progress(self, step):
+        """One greppable progress line for plain and batch output."""
+        self._last_progress_line = time.monotonic()
+        if self._total_steps is None or self._start_step is None or not self._total_steps:
+            return
+        done = max(0, min(step - self._start_step, self._total_steps))
+        parts = [f'{done / self._total_steps:.1%}', f'step {done:,}/{self._total_steps:,}']
+        if self._rate_origin is not None:
+            started, first = self._rate_origin
+            elapsed = time.monotonic() - started
+            if elapsed > 0 and step > first:
+                rate = (step - first) / elapsed  # steps per wall second, I/O included
+                if self._dt_fs:
+                    parts.append(f'{rate * self._dt_fs * 86400 * 1e-6:.3g} ns/day')
+                if done < self._total_steps:
+                    parts.append(f'ETA {duration_label((self._total_steps - done) / rate)}')
+        logging.getLogger('SO3LR').info('Progress ' + ' · '.join(parts))
 
     def checkpoint(self, step, path):
         self._drain_logs()
         self.journal.emit('checkpoint', {'step': int(step), 'path': str(path)})
         self.run_log.checkpoint(step, path)
+        self._last_checkpoint = (int(step), str(path))
+        if not self.enabled:
+            self._log_progress(int(step))
         self.renderer.checkpoint(step, path)
 
     def _log_data(self, record):
@@ -796,6 +848,7 @@ def run_display(settings):
             raise
         token = _active.set(reporter)
         failure_detail = ''
+        resume = []
         try:
             yield reporter
         except BaseException as exc:
@@ -804,19 +857,33 @@ def run_display(settings):
             else:
                 message = exception_message(exc)
                 failure_detail = failure_details(exc) if isinstance(exc, Exception) else ''
-                reporter.fail(message, display_message=message.splitlines()[0] if failure_detail else None)
+                display = message.splitlines()[0] if failure_detail else None
+                if isinstance(exc, KeyboardInterrupt):
+                    # The journal keeps the exact record; the screen says what happened.
+                    display = 'Interrupted (Ctrl+C)'
+                reporter.fail(message, display_message=display)
+                resume = reporter.resume_hint()
                 try:
                     exc._so3lr_reported = reporter.enabled
+                    # The CLI prints these after its plain error line.
+                    exc._so3lr_resume = resume
                 except (AttributeError, TypeError):
-                    pass
+                    if not reporter.enabled:
+                        for line in resume:
+                            print(line, file=sys.stderr)
+                if not reporter.enabled and not isinstance(exc, Exception) and not _configuration.quiet:
+                    # Interrupts never reach the CLI's error printer.
+                    for line in resume:
+                        print(line, file=sys.stderr)
             raise
         else:
             reporter.finish()
         finally:
             try:
                 reporter.close()
-                if reporter.enabled and failure_detail:
-                    renderer.console.print(renderer._text(failure_detail, theme.MUTED))
+                if reporter.enabled:
+                    for line in ([failure_detail] if failure_detail else []) + resume:
+                        renderer.console.print(renderer._text(line, theme.MUTED))
             finally:
                 _active.reset(token)
 

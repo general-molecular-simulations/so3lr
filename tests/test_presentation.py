@@ -1394,9 +1394,89 @@ def test_ascii_activity_truncates_without_adding_unicode():
     assert output.getvalue().isascii()
 
 
+def test_plain_runs_log_greppable_progress_with_wall_clock_eta(tmp_path, monkeypatch, caplog):
+    import logging
+    ui.configure(display='plain')
+    clock = [100.0]
+    monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
+    with caplog.at_level(logging.INFO, logger='SO3LR'):
+        with ui.run_display({'log_file': str(tmp_path / 'run.log')}) as reporter:
+            reporter.start_md(1000, 1000, 0.5)
+            reporter.progress(1000, temperature=300)
+            clock[0] = 110.0
+            reporter.progress(1500, temperature=300)
+            reporter.checkpoint(1500, tmp_path / 'restart.npz')
+            clock[0] += ui.PLAIN_PROGRESS_INTERVAL
+            reporter.progress(1900, temperature=300)
+            reporter.finish()
+    lines = [record.getMessage() for record in caplog.records if record.getMessage().startswith('Progress ')]
+    # 500 steps in 10 s of wall time: 50 steps/s, 0.5 fs -> 2.16 ns/day; 500 steps left -> 10 s.
+    assert lines[0] == 'Progress 50.0% · step 500/1,000 · 2.16 ns/day · ETA 00:10'
+    assert lines[1].startswith('Progress 90.0% · step 900/1,000 · ')
+    assert len(lines) == 2
+
+
+def test_rich_runs_do_not_add_plain_progress_lines(tmp_path, caplog):
+    import logging
+    ui.configure(display='rich')
+    with caplog.at_level(logging.INFO, logger='SO3LR'):
+        reporter = ui._RunReporter({'log_file': str(tmp_path / 'run.log')},
+                                   ui.SimpleNamespace(enabled=True, attach_journal=lambda *a, **k: None,
+                                                      start_md=lambda *a: None, progress=lambda *a, **k: None,
+                                                      checkpoint=lambda *a: None, update_info=lambda **k: None,
+                                                      remember_log=lambda record: None))
+        reporter.start_md(0, 100, 0.5)
+        reporter.progress(0)
+        reporter.progress(50)
+        reporter.checkpoint(50, 'restart.npz')
+        reporter.journal.close()
+    assert not any(record.getMessage().startswith('Progress ') for record in caplog.records)
+
+
 @pytest.mark.parametrize('seconds, label', [(0, '00:00'), (75, '01:15'), (3725, '1:02:05'),
                                             (86400 * 2 + 3 * 3600 + 4 * 60 + 5, '2d 03:04:05')])
 def test_duration_label_spells_out_days(seconds, label):
     from so3lr.cli.formatting import duration_label
     assert duration_label(seconds) == label
 
+
+def test_interrupted_plain_run_prints_checkpoint_and_resume_hint(tmp_path, monkeypatch, capsys):
+    ui.configure(display='plain')
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(KeyboardInterrupt):
+        with ui.run_display({'log_file': str(tmp_path / 'run.log'), 'output_file': 'trajectory.extxyz',
+                             'restart_save_path': 'restart.npz'}) as reporter:
+            reporter.start_md(0, 1000, 0.5)
+            reporter.progress(0)
+            reporter.checkpoint(500, tmp_path / 'restart.npz')
+            raise KeyboardInterrupt
+    err = capsys.readouterr().err
+    assert 'Last checkpoint: step 500 · restart.npz' in err
+    assert ('Resume: --restart-load restart.npz (YAML: restart_load_path: restart.npz); '
+            'relaxation is skipped and the trajectory is appended.') in err
+
+
+def test_failed_run_carries_resume_hint_and_explains_missing_checkpoints(tmp_path):
+    ui.configure(display='plain')
+    with pytest.raises(RuntimeError) as caught:
+        with ui.run_display({'log_file': str(tmp_path / 'run.log'), 'output_file': 'traj.hdf5'}) as reporter:
+            reporter.start_md(0, 1000, 0.5)
+            raise RuntimeError('diverged')
+    assert caught.value._so3lr_resume == [
+        'No checkpoint was saved. Set restart_save_path (or --restart-save) to make runs resumable.']
+    with pytest.raises(RuntimeError) as caught:
+        with ui.run_display({'log_file': str(tmp_path / 'run2.log'), 'output_file': 'traj.hdf5',
+                             'restart_save_path': 'r.npz'}) as reporter:
+            reporter.start_md(0, 1000, 0.5)
+            reporter.checkpoint(100, '/elsewhere/r.npz')
+            raise RuntimeError('diverged')
+    assert caught.value._so3lr_resume[0] == 'Last checkpoint: step 100 · /elsewhere/r.npz'
+    assert 'choose a new output path for HDF5' in caught.value._so3lr_resume[1]
+
+
+def test_optimization_failures_have_no_md_resume_hint(tmp_path):
+    ui.configure(display='plain')
+    with pytest.raises(RuntimeError) as caught:
+        with ui.run_display({'log_file': str(tmp_path / 'run.log')}):
+            raise RuntimeError('bad input')
+    assert caught.value._so3lr_resume == []

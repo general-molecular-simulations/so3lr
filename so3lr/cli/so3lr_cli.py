@@ -27,6 +27,7 @@ from ..flash.check import ENGINES, FLASH_MODES, KERNELS, reserve_gpu
 from ..model_registry import DEFAULT_MODEL, available_models
 from .help import GroupedCommand, format_overview
 from . import presentation
+from .formatting import show_command as show_argument
 
 MODEL_HELP = (f"Model to use: a bundled name ({', '.join(available_models())}) "
               f"or a path to a custom MLFF model directory. [default: {DEFAULT_MODEL}]")
@@ -917,6 +918,7 @@ def _execute_md(settings: Dict[str, Any], settings_source=None) -> None:
             logger.info(SO3LR_ASCII)
             if reporter.journal.active:
                 logger.info(f'Run journal: {reporter.journal.path}')
+                logger.info(f'Watch live: so3lr show {show_argument(Path(reporter.journal.path).parent)}')
             if settings_source is not None:
                 logger.info(f'Loading settings from {settings_source}')
             log_simulation_settings(settings)
@@ -1357,6 +1359,7 @@ def fire_optimization(
             logger.info("=" * 60)
             if reporter.journal.active:
                 logger.info(f'Run journal: {reporter.journal.path}')
+                logger.info(f'Watch live: so3lr show {show_argument(Path(reporter.journal.path).parent)}')
             reserve_gpu(settings, task='opt')   # before JAX starts
             get_hardware_info()
             # Run optimization
@@ -1975,6 +1978,8 @@ def main() -> None:
             details = presentation.failure_details(exc)
             if details:
                 click.echo(details, err=True)
+            for line in getattr(exc, '_so3lr_resume', ()):
+                click.echo(presentation.terminal_text(line), err=True)
         sys.exit(1)
 
 
