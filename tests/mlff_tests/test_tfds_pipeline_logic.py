@@ -230,9 +230,13 @@ def test_composite_checkpoint_prunes_params_and_training_state_together(tmp_path
     assert (tmp_path / 'ckpt_2' / 'training_state').is_dir()
 
 
+@pytest.mark.parametrize('eval_every', [1, 3])
 def test_fit_from_iterator_restart_matches_uninterrupted_updates(
-        tmp_path, monkeypatch):
-    """A stop at an epoch checkpoint must not alter the next optimizer step."""
+        tmp_path, monkeypatch, eval_every):
+    """A stop at an epoch checkpoint must not alter the next optimizer step.
+
+    With eval_every=3 the first epoch's two steps reach no multiple, so the
+    checkpoint the restart resumes from is the final save after the loop."""
 
     class FiniteIterator:
         def __init__(self, values):
@@ -298,7 +302,7 @@ def test_fit_from_iterator_restart_matches_uninterrupted_updates(
             num_epochs=epochs,
             ckpt_dir=checkpoint_dir,
             ckpt_manager_options={'max_to_keep': 10},
-            eval_every_num_steps=1,
+            eval_every_num_steps=eval_every,
             allow_restart=allow_restart,
             use_wandb=False,
             use_ema=True,
