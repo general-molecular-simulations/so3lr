@@ -59,7 +59,10 @@ class So3lrEngine:
     mixed, a float32 model around float64 positions and sums (None: mixed with x64, float32
     without; mixed and float64 need x64); kspace_electrostatics: ewald, pme or p3m for periodic
     electrostatics in k-space (None: in real space up to lr_cutoff), with kspace_smearing and
-    kspace_spacing in A (None: so3lr's defaults); engine: auto, flash or standard (above);
+    kspace_spacing in A (None: so3lr's defaults); kspace_dispersion: pme or ewald for periodic
+    dispersion in k-space (None: in real space up to lr_cutoff; flash takes pme only, and
+    the exact images none), with kspace_dispersion_smearing and kspace_dispersion_spacing in
+    A (None: so3lr's defaults); engine: auto, flash or standard (above);
     skin: the neighbour lists' skin (A; they are updated at every call either way);
     matmul_precision: what the model's matrix products run in (highest: full float32).
 
@@ -68,8 +71,9 @@ class So3lrEngine:
 
     def __init__(self, numbers, model=None, *, charge=0.0, multiplicity=1, lr_cutoff=12.0,
                  dispersion_damping=2.0, precision=None, kspace_electrostatics=None,
-                 kspace_smearing=None, kspace_spacing=None, engine="auto", skin=0.0,
-                 matmul_precision="highest"):
+                 kspace_smearing=None, kspace_spacing=None, kspace_dispersion=None,
+                 kspace_dispersion_smearing=None, kspace_dispersion_spacing=None, engine="auto",
+                 skin=0.0, matmul_precision="highest"):
         from so3lr.flash.check import model_cutoff, validate_options
         from so3lr.md_settings_validation import available_precision, model_precision, state_precision
         from so3lr.mlff.nn.observable.dispersion_ref_data import (
@@ -79,7 +83,9 @@ class So3lrEngine:
         self._kwargs = dict(model=model, charge=charge, multiplicity=multiplicity, lr_cutoff=lr_cutoff,
                             dispersion_damping=dispersion_damping, precision=precision,
                             kspace_electrostatics=kspace_electrostatics, kspace_smearing=kspace_smearing,
-                            kspace_spacing=kspace_spacing, engine=engine, skin=skin,
+                            kspace_spacing=kspace_spacing, kspace_dispersion=kspace_dispersion,
+                            kspace_dispersion_smearing=kspace_dispersion_smearing,
+                            kspace_dispersion_spacing=kspace_dispersion_spacing, engine=engine, skin=skin,
                             matmul_precision=matmul_precision)
         self.numbers = np.asarray(numbers, dtype=np.int32).reshape(-1)
         check_atomic_numbers_supported(self.numbers, supported_atomic_numbers_for_model(model),
@@ -89,13 +95,25 @@ class So3lrEngine:
             raise ValueError(f"kspace_electrostatics must be None, ewald, pme or p3m (received {kspace_electrostatics!r})")
         if kspace_electrostatics is None and (kspace_smearing is not None or kspace_spacing is not None):
             raise ValueError("kspace_smearing and kspace_spacing need kspace_electrostatics")
+        if kspace_dispersion not in (None, "ewald", "pme"):
+            raise ValueError(f"kspace_dispersion must be None, ewald or pme (received {kspace_dispersion!r})")
+        if kspace_dispersion is None and (kspace_dispersion_smearing is not None
+                                          or kspace_dispersion_spacing is not None):
+            raise ValueError("kspace_dispersion_smearing and kspace_dispersion_spacing need kspace_dispersion")
+        from so3lr import kspace_defaults as K
         self._kspace = {}               # the k-space settings, as so3lr's settings and calculator name them
         if kspace_electrostatics is not None:
-            from so3lr.kspace_defaults import DEFAULT_KSPACE_SMEARING, DEFAULT_KSPACE_SPACING
-            self._kspace = dict(
+            self._kspace.update(
                 kspace_electrostatics=kspace_electrostatics,
-                kspace_smearing=DEFAULT_KSPACE_SMEARING if kspace_smearing is None else float(kspace_smearing),
-                kspace_spacing=DEFAULT_KSPACE_SPACING if kspace_spacing is None else float(kspace_spacing))
+                kspace_smearing=K.DEFAULT_KSPACE_SMEARING if kspace_smearing is None else float(kspace_smearing),
+                kspace_spacing=K.DEFAULT_KSPACE_SPACING if kspace_spacing is None else float(kspace_spacing))
+        if kspace_dispersion is not None:
+            self._kspace.update(
+                kspace_dispersion=kspace_dispersion,
+                kspace_dispersion_smearing=(K.DEFAULT_KSPACE_DISPERSION_SMEARING if kspace_dispersion_smearing
+                                            is None else float(kspace_dispersion_smearing)),
+                kspace_dispersion_spacing=(K.DEFAULT_KSPACE_DISPERSION_SPACING if kspace_dispersion_spacing
+                                           is None else float(kspace_dispersion_spacing)))
         self.model, self.engine = model, engine
         self.charge, self.multiplicity = float(charge), int(multiplicity)
         self.lr_cutoff, self.dispersion_damping, self.skin = float(lr_cutoff), float(dispersion_damping), float(skin)
@@ -152,7 +170,12 @@ class So3lrEngine:
                 return "flash"
             if self.engine == "flash":
                 raise ValueError(f"flash: {problem}")
-        return "neighbour-list" if box is None or self._minimum_image_works(box) else "exact"
+        if box is None or self._minimum_image_works(box):
+            return "neighbour-list"
+        if "kspace_dispersion" in self._kspace:
+            raise ValueError("So3lrEngine: kspace_dispersion needs flash or the neighbour lists, and this box "
+                             "takes neither (the exact images have no dispersion in k-space)")
+        return "exact"
 
     def _flash_problem(self, positions, box):
         """Why flash cannot take this box (None if it can): the settings, model, device and
@@ -261,7 +284,8 @@ class So3lrEngine:
             options = dict(box_size=box, fractional_coordinates=True)
         potential = So3lrPotential(
             model=self.model, lr_cutoff=self.lr_cutoff, dispersion_energy_cutoff_lr_damping=self.dispersion_damping,
-            dtype=self.model_dtype, coulomb_kspace_method=self._kspace.get("kspace_electrostatics", "pme"))
+            dtype=self.model_dtype, coulomb_kspace_method=self._kspace.get("kspace_electrostatics", "pme"),
+            dispersion_kspace_method=self._kspace.get("kspace_dispersion"))
         self._neighbor_fn, self._neighbor_fn_lr, energy_fn = to_jax_md(
             potential, displacement, species=jnp.asarray(self.numbers), dr_threshold=self.skin,
             total_charge=self.charge, num_unpaired_electrons=float(self.multiplicity - 1),
@@ -290,16 +314,21 @@ class So3lrEngine:
             self._nbrs_lr = self._neighbor_fn_lr.allocate(R, extra_capacity=int(self._extra[1]), **box)
 
     def _k_grid(self, lengths):
-        """The k-space grid for this box, set up again only when the box changes."""
+        """The k-space grids for this box (electrostatics and dispersion, where on), set up
+        again only when the box changes."""
         from so3lr.mlff.utils.kspace_utils import setup_kspace_grid
 
         key = lengths.tobytes()
         if key != self._k_box:
-            k_grid, k_smearing = setup_kspace_grid(
-                self._kspace["kspace_electrostatics"], self._kspace["kspace_smearing"],
-                self._kspace["kspace_spacing"], jnp.asarray(lengths, self.dtype),
-                k_grid=self._k_args.get("k_grid"), dtype=self.dtype)
-            self._k_box, self._k_args = key, {"k_grid": k_grid, "k_smearing": k_smearing}
+            args = {}
+            for method, suffix in (("kspace_electrostatics", ""), ("kspace_dispersion", "_disp")):
+                if method in self._kspace:
+                    prefix = method if suffix else "kspace"
+                    args["k_grid" + suffix], args["k_smearing" + suffix] = setup_kspace_grid(
+                        self._kspace[method], self._kspace[prefix + "_smearing"],
+                        self._kspace[prefix + "_spacing"], jnp.asarray(lengths, self.dtype),
+                        k_grid=self._k_args.get("k_grid" + suffix), dtype=self.dtype)
+            self._k_box, self._k_args = key, args
         return self._k_args
 
     # ---- exact images ---------------------------------------------------------------

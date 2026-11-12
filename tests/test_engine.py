@@ -86,6 +86,31 @@ def test_mesh_kspace_matches_calculator(method):
     _assert_close(engine(atoms.positions, _box(atoms)), _reference(atoms, **kspace), energy=1e-6, forces=1e-5)
 
 
+# the calculator has no dispersion in k-space: the reference is the potential so3lr md integrates
+@pytest.mark.parametrize("electrostatics", [None, "pme"])
+def test_dispersion_kspace_matches_md(electrostatics):
+    from so3lr.cli.so3lr_cli import YAML_DEFAULTS
+    from test_pme import _cli_md_energy_and_forces
+    atoms = _water()
+    kspace = dict(kspace_dispersion="pme", kspace_dispersion_smearing=2.0, kspace_dispersion_spacing=1.5)
+    if electrostatics:
+        kspace.update(kspace_electrostatics=electrostatics, kspace_smearing=2.0, kspace_spacing=1.0)
+    settings = {**YAML_DEFAULTS, "model_path": MODEL, "lr_cutoff": LR, "precision": "float64", **kspace}
+    engine = _engine(atoms, **kspace)
+    result = engine(atoms.positions, _box(atoms))
+    assert engine.backend == "neighbour-list"
+    _assert_close(result, _cli_md_energy_and_forces(atoms, settings), energy=1e-6, forces=1e-5)
+    # the dispersion beyond the cutoff is in: the energy differs from the real-space one
+    real = {k: v for k, v in kspace.items() if "dispersion" not in k}
+    assert abs(result[0] - _engine(atoms, **real)(atoms.positions, _box(atoms))[0]) > 1e-3
+
+
+def test_dispersion_kspace_refuses_the_exact_images():
+    atoms = _skewed(_water())
+    with pytest.raises(ValueError, match="no dispersion in k-space"):
+        _engine(atoms, kspace_dispersion="pme")(atoms.positions, _box(atoms))
+
+
 def _skewed(atoms):
     cell = np.asarray(atoms.cell[:]).copy()
     cell[1, 0] = 2.0
@@ -151,6 +176,8 @@ def test_pickles_as_its_arguments():
     (dict(engine="fast"), "engine must be one of"),
     (dict(kspace_electrostatics="spme"), "kspace_electrostatics must be"),
     (dict(kspace_smearing=2.0), "need kspace_electrostatics"),
+    (dict(kspace_dispersion="p3m"), "kspace_dispersion must be"),
+    (dict(kspace_dispersion_spacing=3.0), "need kspace_dispersion"),
 ])
 def test_refuses_bad_arguments(kwargs, match):
     with pytest.raises(ValueError, match=match):
@@ -243,3 +270,13 @@ def test_flash_matches_neighbour_lists(periodic):
         assert flash.backend == "flash"
         _assert_close(result, lists(atoms.positions, _box(atoms)), energy=1e-7, forces=1e-6)
     assert flash._flash.box_margin == (NPT_BOX_MARGIN if periodic else 0.0)
+
+
+@GPU
+def test_flash_matches_neighbour_lists_with_both_in_kspace():
+    atoms = _water().repeat(2)
+    kspace = dict(kspace_electrostatics="pme", kspace_dispersion="pme")
+    flash = _engine(atoms, engine="auto", **kspace)
+    result = flash(atoms.positions, _box(atoms))
+    assert flash.backend == "flash"
+    _assert_close(result, _engine(atoms, **kspace)(atoms.positions, _box(atoms)), energy=1e-6, forces=1e-5)
