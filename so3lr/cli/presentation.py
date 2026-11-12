@@ -86,8 +86,63 @@ class _NullReporter:
     def logger_ready(self, log_file):
         pass
 
+    def print_hint(self, line):
+        pass
+
 
 _null = _NullReporter()
+
+
+PLAIN_PROGRESS_INTERVAL = 600  # seconds between plain progress lines without a checkpoint
+
+
+class _PlainReporter(_NullReporter):
+    """Plain and batch output: greppable progress lines and end-of-run hints on stderr.
+
+    The numeric MD table and diagnostics still come from the logger; this adds
+    only what a scheduler log cannot reconstruct: percent done, throughput and
+    ETA from wall clock (I/O included), and how to resume.
+    """
+
+    def __init__(self):
+        self._start_step = self._total_steps = self._dt_fs = None
+        self._rate_origin = None      # (wall clock, step) of the first MD sample
+        self._last_line = None
+
+    def start_md(self, start_step, total_steps, dt_fs):
+        self._start_step, self._total_steps, self._dt_fs = int(start_step), int(total_steps), _finite(dt_fs)
+        self._rate_origin = self._last_line = None
+
+    def progress(self, step, temperature=None, potential_energy=None, time_per_step=None, **optional):
+        now = time.monotonic()
+        if self._rate_origin is None:
+            self._rate_origin = (now, int(step))
+            self._last_line = now  # the ten-minute clock starts at the first sample
+        elif now - self._last_line >= PLAIN_PROGRESS_INTERVAL:
+            self._log_progress(int(step))
+
+    def checkpoint(self, step, path):
+        self._log_progress(int(step))
+
+    def _log_progress(self, step):
+        self._last_line = time.monotonic()
+        if not self._total_steps or self._start_step is None:
+            return
+        done = max(0, min(step - self._start_step, self._total_steps))
+        parts = [f'{done / self._total_steps:.1%}', f'step {done:,}/{self._total_steps:,}']
+        if self._rate_origin is not None:
+            started, first = self._rate_origin
+            elapsed = self._last_line - started
+            if elapsed > 0 and step > first:
+                rate = (step - first) / elapsed  # steps per wall second, I/O included
+                if self._dt_fs:
+                    parts.append(throughput_label(1 / rate, self._dt_fs))
+                if done < self._total_steps:
+                    parts.append(f'ETA {duration_label((self._total_steps - done) / rate)}')
+        logging.getLogger('SO3LR').info('Progress ' + ' · '.join(parts))
+
+    def print_hint(self, line):
+        print(terminal_text(line), file=sys.stderr)
 
 
 def get_reporter():
@@ -391,6 +446,9 @@ class _Reporter:
             rows.append(theme.controls(hint, self._ascii_only))
         return Group(*rows)
 
+    def print_hint(self, line):
+        self.console.print(self._text(line, theme.MUTED))
+
     def attach_journal(self, path, run_id, *, enabled=True):
         self._state.run_id = run_id
         self._state.info['_journal_enabled'] = enabled
@@ -577,9 +635,6 @@ class _Reporter:
         self.console.print(self._text(label + message, style))
 
 
-PLAIN_PROGRESS_INTERVAL = 600  # seconds between plain progress lines without a checkpoint
-
-
 class _RunReporter:
     """Fan out host events to the journal and an optional terminal renderer."""
 
@@ -611,8 +666,6 @@ class _RunReporter:
         self._start_step = None
         self._dt_fs = None
         self._total_steps = None
-        self._rate_origin = None     # (wall clock, step) of the first MD sample
-        self._last_progress_line = None
 
     def __getattr__(self, name):
         # Keep the renderer's inspection surface (live/render/artifacts) usable.
@@ -644,7 +697,7 @@ class _RunReporter:
         # marker in both the journal and attached display before new samples.
         self.update_info(operation='md')
         self._start_step, self._dt_fs = int(start_step), _finite(dt_fs)
-        self._total_steps, self._rate_origin, self._last_progress_line = int(total_steps), None, None
+        self._total_steps = int(total_steps)
         self.journal.emit('md_started', {'start_step': self._start_step,
                                        'total_steps': int(total_steps), 'dt_fs': self._dt_fs})
         self.run_log.start_md(self._start_step, int(total_steps), self._dt_fs)
@@ -672,12 +725,6 @@ class _RunReporter:
                 data[field] = optional[argument]
         self.journal.emit('sample', data)
         self.run_log.progress(data)
-        if self._rate_origin is None:
-            self._rate_origin = (time.monotonic(), step)
-            self._last_progress_line = self._rate_origin[0]  # the ten-minute clock starts here
-        elif (not self.enabled and self._last_progress_line is not None
-              and time.monotonic() - self._last_progress_line >= PLAIN_PROGRESS_INTERVAL):
-            self._log_progress(step)
         self.renderer.progress(step, temperature=temperature, potential_energy=potential_energy,
                                time_per_step=time_per_step, _sample=data, **optional)
 
@@ -708,31 +755,11 @@ class _RunReporter:
                          f'(YAML: md_cycles: {cycles}); md_cycles counts from the checkpoint.')
         return lines
 
-    def _log_progress(self, step):
-        """One greppable progress line for plain and batch output."""
-        self._last_progress_line = time.monotonic()
-        if self._total_steps is None or self._start_step is None or not self._total_steps:
-            return
-        done = max(0, min(step - self._start_step, self._total_steps))
-        parts = [f'{done / self._total_steps:.1%}', f'step {done:,}/{self._total_steps:,}']
-        if self._rate_origin is not None:
-            started, first = self._rate_origin
-            elapsed = time.monotonic() - started
-            if elapsed > 0 and step > first:
-                rate = (step - first) / elapsed  # steps per wall second, I/O included
-                if self._dt_fs:
-                    parts.append(throughput_label(1 / rate, self._dt_fs))
-                if done < self._total_steps:
-                    parts.append(f'ETA {duration_label((self._total_steps - done) / rate)}')
-        logging.getLogger('SO3LR').info('Progress ' + ' · '.join(parts))
-
     def checkpoint(self, step, path):
         self._drain_logs()
         self.journal.emit('checkpoint', {'step': int(step), 'path': str(path)})
         self.run_log.checkpoint(step, path)
         self._last_checkpoint = (int(step), str(path))
-        if not self.enabled:
-            self._log_progress(int(step))
         self.renderer.checkpoint(step, path)
 
     def _log_data(self, record):
@@ -836,7 +863,8 @@ def run_display(settings):
         print('Warning: --display rich requires a terminal; using plain output.', file=sys.stderr)
     # _rich_enabled already requires stderr to be a terminal.
     with _termination_signals(enabled=rich_enabled):
-        renderer = _Reporter(settings) if rich_enabled else _null
+        renderer = (_Reporter(settings) if rich_enabled
+                    else _null if _configuration.quiet else _PlainReporter())
         try:
             reporter = _RunReporter(settings, renderer)
         except BaseException:
@@ -874,13 +902,10 @@ def run_display(settings):
         finally:
             try:
                 reporter.close()
-                # One place prints the hints, whichever way the error is reported later.
-                if reporter.enabled:
-                    for line in ([failure_detail] if failure_detail else []) + resume:
-                        renderer.console.print(renderer._text(line, theme.MUTED))
-                elif not _configuration.quiet:
-                    for line in resume:
-                        print(terminal_text(line), file=sys.stderr)
+                # One place prints the hints, whichever way the error is reported later;
+                # plain runs get the traceback pointer from the CLI's error line instead.
+                for line in ([failure_detail] if failure_detail and reporter.enabled else []) + resume:
+                    renderer.print_hint(line)
             finally:
                 _active.reset(token)
 
