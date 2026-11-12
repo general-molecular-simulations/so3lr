@@ -53,7 +53,7 @@ HANDLED = {
     "min_start_dt", "min_max_dt", "min_n_min", "force_convergence", "force_conv", "kspace_electrostatics",
     "kspace_smearing", "kspace_spacing", "kspace_interp_nodes", "kspace_dispersion",
     "kspace_dispersion_smearing", "kspace_dispersion_spacing", "kspace_dispersion_interp_nodes",
-    "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
+    "kspace_remove_net_force", "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
     "engine", "flash_mode", "flash_mixed", "flash_devices", "flash_kernels", "md_precision",
     "do_enhanced_sampling", "pysages_input", "restart_pysages_load_path", "restart_pysages_save_path",
     "buffer_size_multiplier_sr", "buffer_sr",       # the coordinationnumber CV's neighbour list

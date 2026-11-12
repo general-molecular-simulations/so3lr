@@ -1087,6 +1087,7 @@ def to_jax_md_custom(
         total_charge: float = 0.,
         precision: jnp.dtype = jnp.float32,
         num_unpaired_electrons: float = 0.,
+        remove_net_force: bool = False,
         **neighbor_kwargs
 ):
     """Create neighbor functions and a jax-md energy function for the MD engine.
@@ -1112,6 +1113,8 @@ def to_jax_md_custom(
         total_charge: Total charge of the system.
         precision: Precision to use for the auxiliary graph arrays.
         num_unpaired_electrons: Number of unpaired electrons (spin).
+        remove_net_force: Forces minus their mean, so they sum to zero
+            (see :func:`so3lr.jaxmd_utils.without_net_force`).
         **neighbor_kwargs: Additional keyword arguments for neighbor functions.
 
     Returns:
@@ -1133,8 +1136,33 @@ def to_jax_md_custom(
         total_charge=total_charge,
         num_unpaired_electrons=num_unpaired_electrons,
         precision=precision,
+        remove_net_force=remove_net_force,
         **neighbor_kwargs,
     )
+
+
+def remove_kspace_net_force(all_settings: Dict) -> bool:
+    """Whether the forces are made to sum to zero: with a k-space part (PME or
+    Ewald, electrostatics or dispersion) unless ``kspace_remove_net_force: false``.
+    PME's mesh is fixed in space, so its forces leave a small net force that drifts
+    the whole box over a run (AMBER removes it the same way, netfrc)."""
+    kspace = bool(all_settings.get('kspace_electrostatics') or all_settings.get('kspace_dispersion'))
+    return bool(kspace and all_settings.get('kspace_remove_net_force', KS.DEFAULT_KSPACE_REMOVE_NET_FORCE))
+
+
+def restart_removes_com_motion(all_settings: Dict, restart_pysages: bool = False,
+                               held_atoms: bool = False) -> bool:
+    """Whether a restart zeroes the centre-of-mass motion (with or without k-space: a box that
+    drifted before is stopped): not when the run keeps the old behaviour
+    (``kspace_remove_net_force: false`` also keeps the restart's motion), not for Langevin
+    (its noise keeps the centre of mass thermal: jax-md ignores langevin_removecmmotion), not
+    with atoms held in place (their momenta stay zero), and not for a restarted PySAGES state
+    (it keeps its snapshot's momenta)."""
+    if restart_pysages or held_atoms:
+        return False
+    if not all_settings.get('kspace_remove_net_force', KS.DEFAULT_KSPACE_REMOVE_NET_FORCE):
+        return False
+    return str(all_settings.get('ensemble')).strip().lower().replace('_', '-') != 'nvt-langevin'
 
 
 def process_model(
@@ -1150,6 +1178,7 @@ def process_model(
     precision: jnp.dtype = jnp.float32,
     fractional_coordinates: bool = False,
     has_aux: bool = False,
+    remove_net_force: bool = False,
 ) -> Tuple[callable, callable, callable]:
     """
     Process the model and create the neighbor functions and energy function.
@@ -1172,6 +1201,9 @@ def process_model(
                     coordinates or not (needs to be True for periodic systems).
                                             Defaults to False.
         has_aux (bool, optional): Unused; the returned function takes has_aux per call.
+        remove_net_force (bool, optional): Forces minus their mean, so they sum to
+                    zero (k-space; see :func:`remove_kspace_net_force`).
+                                            Defaults to False.
 
     Returns:
         Tuple[callable, callable, callable]: Short- and long-range neighbor functions
@@ -1200,6 +1232,7 @@ def process_model(
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
         minimum_cell_size_multiplier=minimum_cell_size_multiplier,
+        remove_net_force=remove_net_force,
     )
 
     return neighbor_fn, neighbor_fn_lr, energy_or_obs_fn
@@ -1670,6 +1703,49 @@ def apply_atom_constraints_to_state(
     )
 
 
+COM_DRIFT_WARN_A_PER_PS = 1e-4  # 0.1 A per ns
+
+
+def remove_restart_com_momentum(momentum, mass):
+    """Restarted momenta with zero total momentum (m_i v_com off every momentum, the smallest
+    change in kinetic energy that does it; nothing for a single atom), logged: a warning when
+    the box was drifting. Periodic k-space runs before the net force was removed
+    (kspace_remove_net_force) random-walk the total momentum, and with zero-sum forces nothing
+    removes it later (restart_removes_com_motion says when this runs)."""
+    momentum = jnp.asarray(momentum)
+    m = jnp.broadcast_to(jnp.reshape(jnp.asarray(mass, momentum.dtype), (-1, 1)), (momentum.shape[0], 1))
+    v_com = jnp.sum(momentum, axis=0) / jnp.sum(m) * (momentum.shape[0] > 1)
+    speed = float(jnp.linalg.norm(v_com)) * units.metal_unit_system()['time']    # A/ps
+    if speed > COM_DRIFT_WARN_A_PER_PS:
+        logger.warning(
+            f'Restart: the box was drifting as a whole at {speed:.2e} A/ps '
+            f'({speed * 1e3:.2g} A per ns), as k-space runs did before kspace_remove_net_force; '
+            f'removed the centre-of-mass motion. Trajectories written before this restart '
+            f'contain the drift (it inflates MSDs and diffusion coefficients) unless the '
+            f'centre-of-mass motion is removed in the analysis.'
+        )
+    else:
+        logger.info(f'Restart: removed centre-of-mass motion of {speed:.2e} A/ps.')
+    return (momentum - m * v_com).astype(momentum.dtype)
+
+
+def remove_restart_com_motion(state):
+    """The restarted jax-md state without centre-of-mass motion."""
+    momentum = remove_restart_com_momentum(state.momentum, state.mass)
+    if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState):
+        # stores velocity; its momentum is a read-only property
+        mass = jnp.reshape(jnp.asarray(state.mass, momentum.dtype), (-1, 1))
+        state = state.set(velocity=(momentum / mass).astype(state.velocity.dtype))
+    else:
+        state = state.set(momentum=momentum)
+    # Nose-Hoover's first half-step reads its cached kinetic energy (NVT: chain, NPT: thermostat)
+    kinetic = jax_md.quantity.kinetic_energy(momentum=state.momentum, mass=state.mass)
+    for name in ('chain', 'thermostat'):
+        if getattr(state, name, None) is not None:
+            state = state.set(**{name: getattr(state, name).set(kinetic_energy=kinetic)})
+    return state
+
+
 def constrain_md_carry(
     carry,
     mobile_mask: Optional[jnp.ndarray],
@@ -1843,6 +1919,9 @@ def perform_md(
     charge_embed_total_charge = all_settings.get('charge_embed_total_charge', None)
     charge_equilibration_total_charge = all_settings.get('charge_equilibration_total_charge', None)
     kspace_npt_cycles = all_settings.get('kspace_npt_cycles', 100)
+    remove_net_force = remove_kspace_net_force(all_settings)
+    if remove_net_force:
+        logger.info('K-space: net force removed (forces minus their mean; kspace_remove_net_force).')
 
     # Dispersion PME settings
     kspace_dispersion = all_settings.get('kspace_dispersion', None)
@@ -2045,6 +2124,9 @@ def perform_md(
     hdf5_store = None
 
     current_cycle = 0
+    # a restarted PySAGES state keeps the momenta its snapshot holds
+    com_free_restart = restart_removes_com_motion(
+        all_settings, restart_pysages, mobile_mask is not None and bool(jnp.any(mobile_mask == 0)))
     # Loading restart
     if restart:
         logger.info(f'Loading state from {restart_load_path}.')
@@ -2058,6 +2140,8 @@ def perform_md(
             )
             if str(ensemble).lower() == 'npt':
                 validate_npt_restart_coupling(state, box, npt_coupling)
+            if com_free_restart:
+                state = remove_restart_com_motion(state)
             position = state.position
         except RestartInNewEnsembleError as e:
             check_pysages_restart_ensemble(e, restart_pysages, ensemble)
@@ -2065,6 +2149,9 @@ def perform_md(
             position = e.loaded_state['position']
             initial_geometry_dict['masses'] = e.loaded_state['mass']
             initial_geometry_dict['momenta'] = e.loaded_state['momentum']
+            if com_free_restart:
+                initial_geometry_dict['momenta'] = remove_restart_com_momentum(
+                    e.loaded_state['momentum'], e.loaded_state['mass'])
             box = e.loaded_state['box']
             if np.all(box == 0) or box is None:
                 box = jnp.array([0.0], dtype=dtype)
@@ -2129,6 +2216,7 @@ def perform_md(
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
         minimum_cell_size_multiplier=minimum_cell_size_multiplier,
+        remove_net_force=remove_net_force,
         has_aux=len(observables)>0,
     )
     if cell is not None:
@@ -3101,6 +3189,7 @@ def perform_min(
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
         minimum_cell_size_multiplier=minimum_cell_size_multiplier,
+        remove_net_force=remove_kspace_net_force(all_settings),
     )
 
     k_grid, k_smearing = setup_kspace_grid(
