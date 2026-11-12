@@ -639,7 +639,7 @@ def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Pa
 @click.option('--settings', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Path to YAML settings file. All simulation parameters are read from this file.')
 @click.option('--help-full', is_flag=True,
-              help='Show additional usage examples.')
+              help='Show the command overview (compatibility alias for --help).')
 @click.option('--help', '-h', is_flag=True,
               help='Show brief command overview.')
 @click.version_option(version=__version__, prog_name='SO3LR Tauri')
@@ -800,7 +800,14 @@ def _interactive_setup():
             os.chdir(previous)
 
 
-@cli.command(name='init', help='Prepare an MD run interactively and save settings.yaml plus run.sh.',
+@cli.command(name='start', help='Prepare an MD run interactively and save settings.yaml plus run.sh.',
+             context_settings={'help_option_names': ['--help', '-h']})
+def start_command():
+    _interactive_setup()
+
+
+@cli.command(name='init', hidden=True,
+             help='Compatibility alias for so3lr start; prepare settings.yaml plus run.sh.',
              context_settings={'help_option_names': ['--help', '-h']})
 def init_command():
     _interactive_setup()
@@ -819,17 +826,55 @@ def show_command(ctx, path, once, interval):
           no_color=ctx.find_root().params.get('no_color', False))
 
 
+def _record_run_failure(exc, message, log_file):
+    """Shorten console errors only after verifying this traceback in the new log bytes.
+
+    Logger setup or file writes can fail too. An unprovable write deliberately
+    falls back to Python's full terminal traceback, without reading an old run's
+    log or letting a logging error replace the original exception.
+    """
+    try:
+        exc._so3lr_traceback_preserved = False
+        if not log_file:
+            return
+        path = Path(log_file).resolve()
+        handler = next((handler for handler in logger.handlers
+                        if isinstance(handler, logging.FileHandler)
+                        and Path(handler.baseFilename).resolve() == path), None)
+        if handler is None or handler.stream is None:
+            return
+        before = path.stat()
+        import traceback
+        expected = ''.join(traceback.format_exception(exc)).rstrip().encode(handler.stream.encoding)
+        logger.exception(message, extra={'file_only': True})
+        handler.flush()
+        after = path.stat()
+        size = after.st_size - before.st_size
+        if ((after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+                or not 0 < size <= 1024 * 1024):
+            return
+        with path.open('rb') as stream:
+            stream.seek(before.st_size)
+            exc._so3lr_traceback_preserved = expected in stream.read(size)
+    except Exception:
+        # No saved-traceback claim when the file is unavailable, the formatter
+        # fails, or an unusual exception cannot hold the marker.
+        return
+
+
 def _execute_md(settings: Dict[str, Any], settings_source=None) -> None:
     """Share presentation lifetime between YAML and flag-based MD invocations."""
     with presentation.run_display(settings) as reporter:
-        # The display starts before the lazy MD import initializes JAX.
-        setup_logger(settings.get('log_file'))
-        logger.info(SO3LR_ASCII)
-        if reporter.journal.active:
-            logger.info(f'Run journal: {reporter.journal.path}')
-        if settings_source is not None:
-            logger.info(f'Loading settings from {settings_source}')
+        logger_ready = False
         try:
+            # The display starts before the lazy MD import initializes JAX.
+            setup_logger(settings.get('log_file'))
+            logger_ready = True
+            logger.info(SO3LR_ASCII)
+            if reporter.journal.active:
+                logger.info(f'Run journal: {reporter.journal.path}')
+            if settings_source is not None:
+                logger.info(f'Loading settings from {settings_source}')
             log_simulation_settings(settings)
             reserve_gpu(settings)       # before JAX starts
             get_hardware_info()
@@ -837,10 +882,10 @@ def _execute_md(settings: Dict[str, Any], settings_source=None) -> None:
             run(settings)
             logger.info('Simulation completed successfully!')
             logger.info(f'Total runtime: {_format_runtime(time.time() - time_start)}')
-        except Exception:
+        except Exception as exc:
             # Preserve the diagnostic traceback in the file while the terminal
             # shows the useful error once. Programmatic callers still get it.
-            logger.exception('Simulation failed', extra={'file_only': True})
+            _record_run_failure(exc, 'Simulation failed', settings.get('log_file') if logger_ready else None)
             raise
 
 
@@ -1228,47 +1273,49 @@ def fire_optimization(
     settings['output_format'] = infer_output_format(output_file)
 
     with presentation.run_display(settings) as reporter:
-        reporter.update_info(operation='optimization')
-        # Setup logging with default levels
-        setup_logger(log_file)
-
-        # Log the ASCII art
-        logger.info(SO3LR_ASCII)
-
-        logger.info("=" * 60)
-        logger.info(f"SO3LR Geometry Optimization (v{__version__})")
-        logger.info("=" * 60)
-        logger.info(f"Initial geometry:          {input_file}")
-        logger.info(f"Output geometry:           {output_file}")
-        logger.info(f"Log file:                  {log_file}")
-        logger.info(f"Total charge:              {total_charge}")
-        logger.info(f"Spin (unpaired e-):        {num_unpaired_electrons}")
-        # Mirror the MD / eval banner: log the resolved short name even when the
-        # user did not pass --model (otherwise the user has no record of which
-        # bundled checkpoint was loaded by default, e.g. so3lr-tauri-m vs. legacy v1).
-        from so3lr.model_registry import DEFAULT_MODEL, available_models
-        _model = model_path or DEFAULT_MODEL
-        _kind = 'bundled' if _model in available_models() else 'custom path'
-        logger.info(f"Force field:               {_model} ({_kind})")
-        logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
-
-        if force_conv is not None:
-            logger.info(f"Force convergence:         {force_conv} eV/Å")
-
-        else:
-            logger.info(f"Minimization cycles:       {min_cycles} cycles, each {min_steps} steps")
-
-        logger.info(f"Initial step size:         {min_start_dt} Å")
-        logger.info(f"Maximum step size:         {min_max_dt} Å")
-        logger.info(f"Min steps between updates: {min_n_min}")
-        logger.info(f"Precision:                 {precision}")
-        logger.info(f"Dispersion damping:        {dispersion_damping} Å")
-        logger.info(f"Short-range buffer:        {buffer_sr}")
-        logger.info(f"Long-range buffer:         {buffer_lr}")
-        logger.info("=" * 60)
-        if reporter.journal.active:
-            logger.info(f'Run journal: {reporter.journal.path}')
+        logger_ready = False
         try:
+            reporter.update_info(operation='optimization')
+            # Setup logging with default levels
+            setup_logger(log_file)
+            logger_ready = True
+
+            # Log the ASCII art
+            logger.info(SO3LR_ASCII)
+
+            logger.info("=" * 60)
+            logger.info(f"SO3LR Geometry Optimization (v{__version__})")
+            logger.info("=" * 60)
+            logger.info(f"Initial geometry:          {input_file}")
+            logger.info(f"Output geometry:           {output_file}")
+            logger.info(f"Log file:                  {log_file}")
+            logger.info(f"Total charge:              {total_charge}")
+            logger.info(f"Spin (unpaired e-):        {num_unpaired_electrons}")
+            # Mirror the MD / eval banner: log the resolved short name even when the
+            # user did not pass --model (otherwise the user has no record of which
+            # bundled checkpoint was loaded by default, e.g. so3lr-tauri-m vs. legacy v1).
+            from so3lr.model_registry import DEFAULT_MODEL, available_models
+            _model = model_path or DEFAULT_MODEL
+            _kind = 'bundled' if _model in available_models() else 'custom path'
+            logger.info(f"Force field:               {_model} ({_kind})")
+            logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
+
+            if force_conv is not None:
+                logger.info(f"Force convergence:         {force_conv} eV/Å")
+
+            else:
+                logger.info(f"Minimization cycles:       {min_cycles} cycles, each {min_steps} steps")
+
+            logger.info(f"Initial step size:         {min_start_dt} Å")
+            logger.info(f"Maximum step size:         {min_max_dt} Å")
+            logger.info(f"Min steps between updates: {min_n_min}")
+            logger.info(f"Precision:                 {precision}")
+            logger.info(f"Dispersion damping:        {dispersion_damping} Å")
+            logger.info(f"Short-range buffer:        {buffer_sr}")
+            logger.info(f"Long-range buffer:         {buffer_lr}")
+            logger.info("=" * 60)
+            if reporter.journal.active:
+                logger.info(f'Run journal: {reporter.journal.path}')
             reserve_gpu(settings, task='opt')   # before JAX starts
             get_hardware_info()
             # Run optimization
@@ -1278,8 +1325,8 @@ def fire_optimization(
             logger.info("=" * 60)
             logger.info('Optimization execution finished.')
             logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
-        except Exception:
-            logger.exception('Optimization failed', extra={'file_only': True})
+        except Exception as exc:
+            _record_run_failure(exc, 'Optimization failed', log_file if logger_ready else None)
             raise
 
 # Define the 'nvt' subcommand
@@ -1883,7 +1930,7 @@ def main() -> None:
         # Only display-owned simulations have already preserved a traceback
         # in their log. Other commands and programmatic callers must retain
         # the original exception and its diagnostic traceback.
-        if not getattr(exc, '_so3lr_display_owned', False):
+        if not getattr(exc, '_so3lr_traceback_preserved', False):
             raise
         if not getattr(exc, '_so3lr_reported', False):
             click.ClickException(presentation.exception_message(exc)).show()

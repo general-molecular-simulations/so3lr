@@ -6,13 +6,11 @@ or changes a setting. Rich is loaded only for an actual terminal display.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import math
 import os
-import signal
 import sys
 import threading
 import time
@@ -23,6 +21,7 @@ from types import SimpleNamespace
 from .telemetry import EventJournal
 from .run_log import RunLog
 from .formatting import precision_label, throughput_label, optimization_status, terminal_text
+from .terminal import TerminationSignal as _TerminationSignal, termination_signals as _termination_signals
 
 
 @dataclass(frozen=True)
@@ -84,9 +83,6 @@ class _NullReporter:
     def fail(self, message):
         pass
 
-    def record_log(self, record):
-        pass
-
     def logger_ready(self, log_file):
         pass
 
@@ -97,50 +93,6 @@ _null = _NullReporter()
 def get_reporter():
     """Return the current display, or a harmless reporter for library callers."""
     return _active.get() or _null
-
-
-class _TerminationSignal(BaseException):
-    def __init__(self, number):
-        self.number = number
-        super().__init__(f'Terminated by {signal.Signals(number).name}')
-
-
-@contextmanager
-def _termination_signals():
-    """Unwind terminal ownership, then preserve native termination semantics.
-
-    Signal installation belongs to the main thread. An application's custom or
-    ignored dispositions are its own policy and must not be replaced here.
-    """
-    installed = {}
-    received = None
-
-    def terminate(number, frame):
-        nonlocal received
-        if received is None:
-            received = number
-            raise _TerminationSignal(number)
-
-    try:
-        if threading.current_thread() is threading.main_thread():
-            for name in ('SIGTERM', 'SIGHUP'):
-                number = getattr(signal, name, None)
-                if number is not None and signal.getsignal(number) == signal.SIG_DFL:
-                    # Own restoration before installation: a signal may arrive
-                    # between signal.signal returning and the next assignment.
-                    installed[number] = signal.SIG_DFL
-                    signal.signal(number, terminate)
-        yield
-    finally:
-        for number, previous in installed.items():
-            if signal.getsignal(number) is terminate:
-                signal.signal(number, previous)
-        if received is not None:
-            # Re-delivery happens after run_display's cleanup, including when
-            # cleanup itself failed. Shells/schedulers see the original signal,
-            # not a successful exit or a generic Python exception status.
-            signal.raise_signal(received)
-            raise SystemExit(128 + received)  # a newly installed handler returned
 
 
 def exception_message(exc):
@@ -257,7 +209,6 @@ class _Reporter:
         self.saved = None
         self.artifacts = []
         self.status = 'running'
-        self.last_error = ''
         self._last_refresh = float('-inf')
         self._closed = False
         self._opened_at = self._reported_at = time.monotonic()
@@ -277,7 +228,10 @@ class _Reporter:
         except BaseException:
             # Construction has not returned to run_display yet. Restore any
             # cursor/live state acquired before a failed first refresh.
-            self.close()
+            try:
+                self.close()
+            except BaseException:
+                pass  # preserve the original interruption after cleanup attempts
             raise
         self._last_refresh = time.monotonic()
 
@@ -460,11 +414,12 @@ class _Reporter:
             if not getattr(sys.stdin, 'isatty', lambda: False)() or not getattr(sys.stderr, 'isatty', lambda: False)():
                 return
             sys.stdin.fileno()
-            self._keyboard = _Keyboard().__enter__()
+            self._keyboard = _Keyboard()
+            self._keyboard.__enter__()
         except Exception:
             # Some stream wrappers claim TTY support but lack usable termios.
             # Optional input controls must not prevent the calculation.
-            self._keyboard = None
+            self._stop_keyboard()
 
     def _stop_keyboard(self):
         keyboard, self._keyboard = self._keyboard, None
@@ -592,18 +547,21 @@ class _Reporter:
     def close(self):
         try:
             if not self._closed:
-                self.live.stop()
-                self._closed = True
+                try:
+                    self.live.stop()
+                finally:
+                    self._closed = True
+                    self.console.show_cursor(True)
         finally:
             self._stop_keyboard()
 
-    def log_record(self, record, message):
-        if record.levelno < logging.WARNING and not self.config.verbose:
-            return
-        if record.levelno >= logging.ERROR:
-            self.last_error = record.getMessage()
+    def remember_log(self, record):
+        """Update the latest diagnostic on the display's owning thread."""
         if record.levelno >= logging.WARNING:
             self._observe('error' if record.levelno >= logging.ERROR else 'warning', {'message': record.getMessage()})
+
+    def print_log(self, record, message):
+        """Print through Rich's synchronized console without mutating run state."""
         style = 'red' if record.levelno >= logging.ERROR else 'yellow' if record.levelno >= logging.WARNING else 'dim'
         label = f'{record.levelname}: ' if record.levelno >= logging.WARNING else ''
         self.console.print(self._text(label + message, style))
@@ -626,14 +584,13 @@ class _RunReporter:
         except BaseException:
             self.journal.close()
             raise
-        self.last_error = ''
         self.status = 'running'
         self._closed = False
         self._owner_thread = threading.get_ident()
         self._log_lock = threading.RLock()
-        # Worker records are already durable in the journal/file. Keep only a
-        # bounded terminal backlog, and mutate render state on the owner thread.
-        self._pending_logs = deque(maxlen=256)
+        # Every record is printed immediately and journaled. The mutable view
+        # only retains its latest diagnostic, updated on the owning thread.
+        self._pending_log = None
         self._phase = None
         self._start_step = None
         self._dt_fs = None
@@ -720,34 +677,30 @@ class _RunReporter:
         if data is None:
             return
         kind, values = data
-        if kind == 'error':
-            self.last_error = values['message']
         # An old and a replacement console handler can coexist in worker
         # threads during logger setup. Never acquire either handler's lock
         # through a failure warning while holding our lifecycle lock.
         return self.journal.emit(kind, values, defer_warning=True)
 
-    def record_log(self, record):
-        data = self._log_data(record)
-        error = None
-        with self._log_lock:
-            if not self._closed and self.status == 'running':
-                error = self._record_log(data)
-        if error is not None:
-            self.journal._warn(error)
-
     def route_log(self, record, message):
-        """Journal worker records immediately; render them at a host boundary."""
+        """Show diagnostics immediately, including during finalization."""
         data = self._log_data(record)
         error = None
+        show = False
         with self._log_lock:
-            if self._closed or self.status != 'running':
+            if self._closed:
                 return False
             error = self._record_log(data)
-            if self.enabled and (record.levelno >= logging.WARNING or self.renderer.config.verbose):
-                self._pending_logs.append((record, message))
+            show = self.enabled and (record.levelno >= logging.WARNING or self.renderer.config.verbose)
+            if self.enabled and record.levelno >= logging.WARNING:
+                self._pending_log = record
         if error is not None:
             self.journal._warn(error)
+        # Rich serializes console output with Live. Do not wait for a host hook:
+        # a worker warning may be the only clue while a compiled cycle stalls.
+        # Neither console output nor diagnostic logging holds _log_lock.
+        if show:
+            self.renderer.print_log(record, message)
         self._drain_logs()
         return self.enabled
 
@@ -755,16 +708,9 @@ class _RunReporter:
         if threading.get_ident() != self._owner_thread:
             return
         with self._log_lock:
-            pending = list(self._pending_logs)
-            self._pending_logs.clear()
-        for record, message in pending:
-            self.renderer.log_record(record, message)
-
-    def log_record(self, record, message):
-        with self._log_lock:
-            if not self._closed and self.status == 'running' and self.enabled:
-                self._pending_logs.append((record, message))
-        self._drain_logs()
+            record, self._pending_log = self._pending_log, None
+        if record is not None:
+            self.renderer.remember_log(record)
 
     def finish(self):
         with self._log_lock:
@@ -789,13 +735,16 @@ class _RunReporter:
         self.renderer.fail(message)
 
     def close(self):
-        with self._log_lock:
-            self._closed = True
         self._drain_logs()
         try:
             if self.enabled:
                 self.renderer.close()
         finally:
+            # Keep routing through Rich until Live releases the terminal.
+            # Stopping Live must not hold the logging/journal lifecycle lock.
+            with self._log_lock:
+                self._closed = True
+            self._drain_logs()
             self.run_log.close()
             self.journal.close()
 
@@ -807,8 +756,10 @@ def run_display(settings):
     if current is not None:
         yield current
         return
-    with _termination_signals():
-        renderer = _Reporter(settings) if _rich_enabled() else _null
+    rich_enabled = _rich_enabled()
+    owns_terminal = rich_enabled and bool(getattr(sys.stderr, 'isatty', lambda: False)())
+    with _termination_signals(enabled=owns_terminal):
+        renderer = _Reporter(settings) if rich_enabled else _null
         try:
             reporter = _RunReporter(settings, renderer)
         except BaseException:
@@ -853,11 +804,12 @@ class _ConsoleHandler(logging.StreamHandler):
             # ContextVars intentionally do not cross threads. Bind a weak
             # reference to this handler's invocation rather than consulting a
             # worker's empty context, and never retain a closed display.
-            if self._reporter is None:
-                current = _active.get()
-                if current is not None:
-                    self._reporter = weakref.ref(current)
             reporter = self._reporter() if self._reporter is not None else None
+            if reporter is None or reporter._closed:
+                current = _active.get()
+                if current is not None and not current._closed:
+                    self._reporter = weakref.ref(current)
+                    reporter = current
             if reporter is not None and reporter.route_log(record, self.format(record)):
                 return
             if _configuration.quiet and record.levelno < logging.WARNING:

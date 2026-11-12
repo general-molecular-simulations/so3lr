@@ -50,11 +50,14 @@ def test_new_commands_are_discoverable_and_help_never_launches(monkeypatch):
     from so3lr.cli import setup
     monkeypatch.setattr(setup, 'should_launch', lambda: True)
     monkeypatch.setattr(setup, 'launch_setup', lambda: (_ for _ in ()).throw(AssertionError('prompted')))
-    for args in (['--help'], ['init', '--help'], ['show', '--help']):
+    for args in (['--help'], ['start', '--help'], ['init', '--help'], ['show', '--help']):
         result = CliRunner().invoke(cli, args)
         assert result.exit_code == 0, result.output
     overview = CliRunner().invoke(cli, ['--help']).output
     assert 'Prepare and monitor' in overview
+    assert 'so3lr start' in overview
+    assert 'so3lr init' not in overview
+    assert cli.commands['init'].hidden and not cli.commands['start'].hidden
     assert 'so3lr show runs/' in overview
 
 
@@ -221,7 +224,7 @@ def test_main_unexpected_command_failure_keeps_terminal_traceback(tmp_path):
     assert 'ZeroDivisionError: division by zero' in result.stderr
 
 
-def test_main_display_owned_plain_failure_names_exception(tmp_path, monkeypatch, capsys):
+def test_main_keeps_traceback_when_display_ownership_does_not_prove_a_saved_trace(tmp_path, monkeypatch):
     from so3lr.cli import so3lr_cli
     presentation.configure(display='plain')
     def fail():
@@ -229,12 +232,12 @@ def test_main_display_owned_plain_failure_names_exception(tmp_path, monkeypatch,
             raise KeyError('forces')
     monkeypatch.setattr(so3lr_cli, 'cli', fail)
     try:
-        with pytest.raises(SystemExit) as caught:
+        with pytest.raises(KeyError) as caught:
             so3lr_cli.main()
     finally:
         presentation.reset()
-    assert caught.value.code == 1
-    assert "Error: KeyError: 'forces'" in capsys.readouterr().err
+    assert caught.value.args == ('forces',)
+    assert caught.traceback[-1].name == 'fail'
 
 
 def test_md_short_terminal_error_retains_complete_traceback_in_file(tmp_path, monkeypatch, capsys):
@@ -276,3 +279,117 @@ def test_md_short_terminal_error_retains_complete_traceback_in_file(tmp_path, mo
     assert 'Traceback (most recent call last)' in durable
     assert 'AssertionError: runtime failure' in durable
     assert 'Execution: failed' in durable
+
+
+@pytest.fixture
+def failure_cli(tmp_path, monkeypatch):
+    """Exercise the real command wrappers while intercepting numerical execution."""
+    import logging
+    from so3lr.cli import so3lr_cli as app
+    monkeypatch.setattr(app.logger, 'handlers', [])
+    monkeypatch.setattr(app.logger, 'propagate', False)
+    old_level = app.logger.level
+    app.logger.setLevel(logging.INFO)
+    log_path = tmp_path / 'run.log'
+    source = tmp_path / 'input.xyz'
+    source.write_text('1\n\nH 0 0 0\n')
+    presentation.configure(display='plain')
+
+    def setup(path):
+        app.logger.addHandler(presentation.make_console_handler())
+        app.logger.addHandler(logging.FileHandler(path))
+        presentation.get_reporter().logger_ready(path)
+
+    def runtime(settings):
+        raise AssertionError('runtime failure')
+
+    monkeypatch.setattr(app, 'setup_logger', setup)
+    monkeypatch.setattr(app, 'get_hardware_info', lambda: None)
+    monkeypatch.setattr(app, 'reserve_gpu', lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, 'log_simulation_settings', lambda *args: None)
+    monkeypatch.setattr(app, 'run', runtime)
+    monkeypatch.setattr(app, 'perform_min', runtime)
+
+    def invoke(operation):
+        if operation == 'md':
+            command = lambda: app._execute_md({'log_file': str(log_path)})
+        else:
+            command = lambda: app.fire_optimization.main(
+                ['--input', str(source), '--output', str(tmp_path / 'opt.xyz'),
+                 '--log-file', str(log_path)], standalone_mode=False)
+        monkeypatch.setattr(app, 'cli', command)
+        return app.main()
+
+    yield app, log_path, invoke
+    presentation.reset()
+    for handler in app.logger.handlers[:]:
+        app.logger.removeHandler(handler)
+        handler.close()
+    app.logger.setLevel(old_level)
+
+
+@pytest.mark.parametrize(('operation', 'stage', 'preserved'), [
+    ('md', 'setup', False), ('opt', 'setup', False),
+    ('md', 'banner', True), ('opt', 'banner', True), ('opt', 'metadata', False),
+])
+def test_preamble_failure_retains_traceback_or_proves_it_was_saved(failure_cli, monkeypatch, capsys,
+                                                                operation, stage, preserved):
+    app, log_path, invoke = failure_cli
+    failure = RuntimeError(f'{stage} preamble failed')
+    if stage == 'setup':
+        def fail_setup(*args, **kwargs):
+            raise failure
+        monkeypatch.setattr(app, 'setup_logger', fail_setup)
+    elif stage == 'banner':
+        original = app.logger.info
+        def fail_banner(message, *args, **kwargs):
+            if message == app.SO3LR_ASCII:
+                raise failure
+            return original(message, *args, **kwargs)
+        monkeypatch.setattr(app.logger, 'info', fail_banner)
+    else:
+        original = presentation._RunReporter.update_info
+        def fail_metadata(self, **kwargs):
+            if kwargs.get('operation') == 'optimization':
+                raise failure
+            return original(self, **kwargs)
+        monkeypatch.setattr(presentation._RunReporter, 'update_info', fail_metadata)
+    with pytest.raises(SystemExit if preserved else RuntimeError) as caught:
+        invoke(operation)
+    if preserved:
+        assert caught.value.code == 1
+        durable = log_path.read_text()
+        assert 'Traceback (most recent call last)' in durable
+        assert f'RuntimeError: {stage} preamble failed' in durable
+        assert 'Traceback (most recent call last)' not in capsys.readouterr().err
+    else:
+        assert caught.value is failure
+        assert not getattr(failure, '_so3lr_traceback_preserved', False)
+        assert caught.traceback[-1].name == ('fail_setup' if stage == 'setup' else 'fail_metadata')
+
+
+@pytest.mark.parametrize('operation', ['md', 'opt'])
+def test_failed_traceback_file_write_keeps_original_exception(failure_cli, monkeypatch, operation):
+    import logging
+    app, log_path, invoke = failure_cli
+    monkeypatch.setattr(logging, 'raiseExceptions', False)
+
+    class FullDiskHandler(logging.FileHandler):
+        def emit(self, record):
+            if record.exc_info:
+                try:
+                    raise OSError('No space left on device')
+                except OSError:
+                    self.handleError(record)  # logging normally swallows failed writes
+                return
+            return super().emit(record)
+
+    def setup(path):
+        app.logger.addHandler(presentation.make_console_handler())
+        app.logger.addHandler(FullDiskHandler(path))
+        presentation.get_reporter().logger_ready(path)
+    monkeypatch.setattr(app, 'setup_logger', setup)
+    with pytest.raises(AssertionError, match='runtime failure') as caught:
+        invoke(operation)
+    assert not getattr(caught.value, '_so3lr_traceback_preserved', False)
+    assert 'Traceback (most recent call last)' not in log_path.read_text()

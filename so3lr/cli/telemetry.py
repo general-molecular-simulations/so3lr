@@ -56,6 +56,7 @@ class EventJournal:
         self.path = None
         self.seq = 0
         self._stream = None
+        self._needs_separator = False
         self._warned = False
         self._lock = threading.RLock()
         self._initializing = True
@@ -167,9 +168,19 @@ class EventJournal:
                     'data': json_value(data),
                 }
                 line = json.dumps(event, allow_nan=False, ensure_ascii=False, separators=(',', ':')) + '\n'
+                # Reserve before any write: an interrupt can arrive after the
+                # stream accepted the complete record but before returning.
+                self.seq = event['seq']
+                if self._needs_separator:
+                    # A previous interrupted write may have left a JSON prefix.
+                    # Keep the file append-only so a live reader's pending
+                    # bytes/offset remain valid, and isolate the next event.
+                    # Readers skip this separator if the prior line completed.
+                    self._stream.write('\n')
+                self._needs_separator = True
                 self._stream.write(line)
                 self._stream.flush()
-                self.seq += 1
+                self._needs_separator = False
             except Exception as exc:
                 if self._disable_locked(exc):
                     error = exc

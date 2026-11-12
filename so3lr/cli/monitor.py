@@ -17,6 +17,7 @@ import time
 
 from .formatting import optimization_status, precision_label, throughput_label, terminal_text
 from .formatting import terminal_text as _literal
+from .terminal import input_mode, live_display, termination_signals
 
 
 ENERGIES = {
@@ -877,10 +878,13 @@ def render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None, 
 
 class _Keyboard(AbstractContextManager):
     """Temporary cbreak input; never takes ownership of another process."""
-    def __enter__(self):
-        self.fd = sys.stdin.fileno()
+    def __init__(self):
+        self.fd = None
         self.previous = None
         self.pending = ''
+
+    def __enter__(self):
+        self.fd = sys.stdin.fileno()
         if os.name != 'nt':
             import termios
             import tty
@@ -958,9 +962,9 @@ def show(path, once=False, interval=1.0, no_color=False):
     selected, energy_index, plot_page = (-1 if len(readers) > 1 else 0), list(ENERGIES).index('energy_eV'), 0
     next_refresh = next_discovery = 0.0
     try:
-        with _Keyboard() as keyboard, Live(console=console, auto_refresh=False,
+        with termination_signals(enabled=interactive), input_mode(_Keyboard()) as keyboard, live_display(Live(console=console, auto_refresh=False,
                                            screen=False, transient=False,
-                                           redirect_stdout=False, redirect_stderr=False) as live:
+                                           redirect_stdout=False, redirect_stderr=False)) as live:
             while True:
                 now = time.monotonic()
                 if now >= next_discovery:

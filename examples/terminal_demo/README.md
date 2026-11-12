@@ -107,7 +107,7 @@ energy or invent a temperature trace.
 ## Prepare a new run
 
 ```sh
-.venv/bin/so3lr init
+.venv/bin/so3lr start
 ```
 
 Use the arrow-key structure picker to browse to

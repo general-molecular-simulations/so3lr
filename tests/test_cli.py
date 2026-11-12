@@ -16,8 +16,8 @@ PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 MD_SETTINGS_PATH = PROJECT_ROOT / "so3lr" / "cli" / "md_settings.yaml"
 
 SUBCOMMANDS = ["opt", "nvt", "npt", "nve", "eval", "finetune", "train", "tune-ewald"]
-# Subcommands listed in the brief help text (tune-ewald is accessible but not shown)
-HELP_LISTED_COMMANDS = ["opt", "nvt", "npt", "nve", "eval", "finetune", "train"]
+# All visible command groups; the legacy init alias intentionally stays hidden.
+HELP_LISTED_COMMANDS = ["start", "show", "opt", "nvt", "nvt-langevin", "npt", "nve", "eval", "finetune", "train", "tune-ewald"]
 
 
 # ---------------------------------------------------------------------------
@@ -147,10 +147,13 @@ def test_the_run_gets_the_precision(tmp_path, stubbed_run, args, precision):
     assert stubbed_run['precision'] == precision and stubbed_run['flash_mixed'] is None
 
 
-def test_cli_import_does_not_load_jax():
+@pytest.mark.parametrize('args', [['--help'], ['start', '--help'], ['init', '--help']])
+def test_cli_import_does_not_load_jax(args):
     """`so3lr --help` must not pay for JAX/Flax start-up (see AGENTS.md); a fresh
     interpreter, since this one has imported JAX already."""
-    code = ("import sys, so3lr.cli.so3lr_cli; "
+    code = ("import sys; from click.testing import CliRunner; "
+            "from so3lr.cli.so3lr_cli import cli; "
+            f"assert CliRunner().invoke(cli, {args!r}).exit_code == 0; "
             "heavy = sorted(m for m in ('jax', 'flax', 'jax_md', 'glp') if m in sys.modules); "
             "print(heavy); sys.exit(1 if heavy else 0)")
     result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)

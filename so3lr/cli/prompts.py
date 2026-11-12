@@ -7,6 +7,7 @@ import sys
 import click
 
 from .formatting import terminal_text
+from .terminal import live_display, termination_signals
 
 
 _KEYS = {
@@ -87,6 +88,13 @@ class _Keys:
 @contextmanager
 def terminal_keys():
     """Restore terminal input mode on selection, errors and cancellation."""
+    with termination_signals(enabled=bool(getattr(sys.stdin, 'isatty', lambda: False)())):
+        with _terminal_keys() as keys:
+            yield keys
+
+
+@contextmanager
+def _terminal_keys():
     if os.name == 'nt':
         import msvcrt
         import time
@@ -170,8 +178,8 @@ def choose(console, title, choices, default=0):
     def render():
         return selection_view(title, choices, selected, height=console.height)
 
-    with Live(render(), console=console, transient=True, auto_refresh=False,
-              redirect_stdout=False, redirect_stderr=False) as live:
+    with termination_signals(enabled=arrow_input_available(console)), live_display(Live(render(), console=console, transient=True, auto_refresh=False,
+              redirect_stdout=False, redirect_stderr=False)) as live:
         with terminal_keys() as keys:
             while True:
                 event = keys.next()

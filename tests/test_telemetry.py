@@ -237,6 +237,73 @@ def test_interrupted_constructor_closes_its_own_stream(tmp_path, monkeypatch, in
     assert stream.closed
 
 
+@pytest.mark.parametrize('interrupted_operation', ['write', 'flush', 'partial_write'])
+def test_interrupted_event_keeps_failure_readable(tmp_path, interrupted_operation):
+    from so3lr.cli.monitor import JournalReader
+
+    interruption = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt) as caught:
+        with ui.run_display({'log_file': tmp_path / 'run.log'}) as reporter:
+            reporter.start_md(0, 10, .5)
+            reader = JournalReader(reporter.journal.path)
+            reader.poll()
+            assert reader.state.status == 'Running'
+            original = reporter.journal._stream
+
+            class InterruptedStream:
+                interrupted = False
+
+                def write(self, value):
+                    if not self.interrupted and interrupted_operation in ('write', 'partial_write'):
+                        self.interrupted = True
+                        # Use the real text stream, including its buffering:
+                        # either a full record or a visible prefix may precede
+                        # a signal raised before write returns to the caller.
+                        original.write(value if interrupted_operation == 'write' else value[:len(value) // 2])
+                        original.flush()
+                        reader.poll()
+                        raise interruption
+                    return original.write(value)
+
+                def flush(self):
+                    original.flush()
+                    if not self.interrupted and interrupted_operation == 'flush':
+                        self.interrupted = True
+                        reader.poll()
+                        raise interruption
+
+                def close(self):
+                    original.close()
+
+            reporter.journal._stream = InterruptedStream()
+            reporter.phase('Compiling', 'Interrupted host event')
+
+    assert caught.value is interruption
+    # This reader consumed the completed line or retained the partial prefix
+    # before run_failed was appended; recovery must work without reopening it.
+    reader.poll()
+    assert reader.state.status == 'Failed'
+    assert reader.state.message == 'KeyboardInterrupt: interrupted'
+    assert reader.state.sequence == reporter.journal.seq
+    assert reader.pending == b''
+    assert reader.state.malformed == int(interrupted_operation == 'partial_write')
+    valid = []
+    for line in reporter.journal.path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            valid.append(json.loads(line))
+        except json.JSONDecodeError:
+            assert interrupted_operation == 'partial_write'
+    sequences = [record['seq'] for record in valid]
+    assert sequences == sorted(set(sequences))
+    assert valid[-1]['type'] == 'run_failed'
+    assert not any(record['type'] == 'run_completed' for record in valid)
+    fresh_reader = JournalReader(reporter.journal.path)
+    fresh_reader.snapshot()
+    assert fresh_reader.state.status == 'Failed'
+
+
 def test_failed_write_disables_journal_once_without_recursive_events(tmp_path, caplog):
     class FailingStream:
         def write(self, value):
@@ -266,7 +333,6 @@ def test_warnings_errors_are_recorded_in_plain_mode_and_not_duplicated(tmp_path,
                                              'levelname': 'ERROR'}))
         handler.handle(logging.makeLogRecord({'name': 'SO3LR', 'msg': 'internal', 'levelno': logging.WARNING,
                                              'levelname': 'WARNING', 'telemetry_internal': True}))
-        assert reporter.last_error == 'error'
     records = events(reporter.journal.path)
     assert [record['type'] for record in records] == ['run_started', 'warning', 'error', 'run_completed']
     assert capsys.readouterr().err == 'warning\nerror\ninternal\n'

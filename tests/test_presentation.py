@@ -243,6 +243,26 @@ def test_plain_error_is_not_marked_reported():
     assert not getattr(error, '_so3lr_reported', False)
 
 
+def test_reporter_restores_cursor_after_interruption_before_live_hook(monkeypatch):
+    from rich.console import Console
+    output = Terminal()
+    monkeypatch.setattr(sys, 'stderr', output)
+    ui.configure(display='rich')
+    original_cursor = Console.show_cursor
+    interruption = KeyboardInterrupt()
+    def cursor(console, show=True):
+        original_cursor(console, show)
+        if not show:
+            raise interruption
+    monkeypatch.setattr(Console, 'show_cursor', cursor)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        with ui.run_display({}):
+            pytest.fail('interrupted initialization must not enter the body')
+    assert caught.value is interruption
+    assert '\x1b[?25l' in output.getvalue()
+    assert '\x1b[?25h' in output.getvalue()
+
+
 def test_failure_uses_actual_exception_chain_instead_of_previous_error(monkeypatch):
     import json
     monkeypatch.setattr(sys, 'stderr', Terminal())
@@ -263,7 +283,7 @@ def test_failure_uses_actual_exception_chain_instead_of_previous_error(monkeypat
     assert ui.exception_message(AssertionError()) == 'AssertionError'
 
 
-def test_worker_warning_renders_only_on_owner_thread(monkeypatch):
+def test_worker_warning_is_visible_immediately_but_state_updates_on_owner_thread(monkeypatch):
     import json
     import threading
     output = Terminal()
@@ -271,24 +291,106 @@ def test_worker_warning_renders_only_on_owner_thread(monkeypatch):
     ui.configure(display='rich')
     with ui.run_display({}) as reporter:
         handler = ui.make_console_handler()
-        original = reporter.renderer.log_record
+        original = reporter.renderer.remember_log
         rendered_on = []
-        def render_record(record, message):
+        def render_record(record):
             rendered_on.append(threading.get_ident())
-            original(record, message)
-        monkeypatch.setattr(reporter.renderer, 'log_record', render_record)
+            original(record)
+        monkeypatch.setattr(reporter.renderer, 'remember_log', render_record)
         thread = threading.Thread(target=lambda: handler.handle(logging.makeLogRecord({
             'msg': 'worker diagnostic', 'levelno': logging.WARNING, 'levelname': 'WARNING'})))
         thread.start()
         thread.join(timeout=3)
         assert not thread.is_alive()
         assert not rendered_on
-        assert 'worker diagnostic' not in output.getvalue()
+        assert 'worker diagnostic' in output.getvalue()
+        assert reporter.renderer._state.diagnostic is None
         records = [json.loads(line) for line in reporter.journal.path.read_text().splitlines()]
         assert records[-1]['type'] == 'warning'
         reporter.phase('Running')
         assert rendered_on == [threading.get_ident()]
         assert 'worker diagnostic' in output.getvalue()
+
+
+def test_worker_warning_burst_has_no_display_queue_loss(monkeypatch):
+    import json
+    import threading
+    output = Terminal()
+    monkeypatch.setattr(sys, 'stderr', output)
+    ui.configure(display='rich')
+    with ui.run_display({}) as reporter:
+        handler = ui.make_console_handler()
+        def warn():
+            for index in range(300):
+                handler.handle(logging.makeLogRecord(dict(name='SO3LR', msg=f'worker-{index:03d}',
+                    levelno=logging.WARNING, levelname='WARNING')))
+        worker = threading.Thread(target=warn, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive(), 'worker output deadlocked'
+        text = output.getvalue()
+        assert all(f'worker-{index:03d}' in text for index in range(300))
+        records = [json.loads(line) for line in reporter.journal.path.read_text().splitlines()]
+        assert sum(event['type'] == 'warning' for event in records) == 300
+        reporter.phase('Running')
+        assert reporter.renderer._state.diagnostic == ('warning', 'worker-299')
+
+
+@pytest.mark.parametrize('ending', ['complete', 'failed', 'close'])
+def test_finalization_warning_stays_in_live_and_journal(monkeypatch, ending):
+    import json
+    monkeypatch.setattr(sys, 'stderr', Terminal())
+    ui.configure(display='rich')
+    with ui.run_display({}) as reporter:
+        handler = ui.make_console_handler()
+        shown = []
+        monkeypatch.setattr(reporter.renderer, 'print_log', lambda record, message: shown.append(message))
+        target = reporter.renderer if ending == 'close' else reporter.run_log
+        method = 'close' if ending == 'close' else 'finish'
+        original = getattr(target, method)
+        def finish(*args):
+            if ending != 'close':
+                original(*args)
+            handler.handle(logging.makeLogRecord(dict(name='SO3LR', msg='summary disk failure',
+                levelno=logging.WARNING, levelname='WARNING')))
+            if ending == 'close':
+                original(*args)
+        monkeypatch.setattr(target, method, finish)
+        if ending == 'complete':
+            reporter.finish()
+        elif ending == 'failed':
+            reporter.fail('calculation failure')
+        else:
+            reporter.finish()
+            reporter.close()
+            monkeypatch.setattr(target, method, original)
+        assert shown == ['summary disk failure']
+        records = [json.loads(line) for line in reporter.journal.path.read_text().splitlines()]
+        warning, terminal = (records[-1], records[-2]) if ending == 'close' else (records[-2], records[-1])
+        assert warning['type'] == 'warning'
+        assert warning['data']['message'] == 'summary disk failure'
+        assert terminal['type'] == ('run_failed' if ending == 'failed' else 'run_completed')
+
+
+@pytest.mark.parametrize('collect_previous', [False, True])
+def test_reused_handler_binds_to_current_invocation(monkeypatch, collect_previous):
+    import gc
+    import json
+    ui.configure(display='plain')
+    with ui.run_display({}) as previous:
+        handler = ui.make_console_handler()
+    old_path = previous.journal.path
+    if collect_previous:
+        del previous
+        gc.collect()
+        assert handler._reporter() is None
+    with ui.run_display({}) as current:
+        handler.handle(logging.makeLogRecord(dict(name='SO3LR', msg='new invocation diagnostic',
+            levelno=logging.WARNING, levelname='WARNING')))
+    old = [json.loads(line) for line in old_path.read_text().splitlines()]
+    new = [json.loads(line) for line in current.journal.path.read_text().splitlines()]
+    assert [event['type'] for event in old] == ['run_started', 'run_completed']
+    assert [event['type'] for event in new] == ['run_started', 'warning', 'run_completed']
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX signal dispositions')
@@ -301,7 +403,7 @@ def test_signal_scope_preserves_custom_ignored_and_worker_dispositions():
     try:
         signal.signal(signal.SIGTERM, custom)
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
-        with ui.run_display({}):
+        with ui._termination_signals():
             assert signal.getsignal(signal.SIGTERM) is custom
             assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
         assert signal.getsignal(signal.SIGTERM) is custom
@@ -309,7 +411,7 @@ def test_signal_scope_preserves_custom_ignored_and_worker_dispositions():
         failures = []
         def worker():
             try:
-                with ui.run_display({}):
+                with ui._termination_signals():
                     assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
             except BaseException as exc:
                 failures.append(exc)
@@ -317,7 +419,7 @@ def test_signal_scope_preserves_custom_ignored_and_worker_dispositions():
         thread.start()
         thread.join(timeout=3)
         assert not thread.is_alive() and not failures
-        with ui.run_display({}):
+        with ui._termination_signals():
             assert callable(signal.getsignal(signal.SIGTERM))
         assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
     finally:
@@ -331,6 +433,7 @@ def test_signal_installation_is_owned_before_it_can_be_interrupted(monkeypatch, 
     import signal
     original_signal = signal.signal
     previous = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGHUP)}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
     redelivered = []
     try:
         for number in previous:
@@ -348,6 +451,7 @@ def test_signal_installation_is_owned_before_it_can_be_interrupted(monkeypatch, 
             with ui._termination_signals():
                 pytest.fail('interrupted installation must not enter the body')
         assert all(signal.getsignal(number) == signal.SIG_DFL for number in previous)
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == previous_mask
         if interruption == 'termination':
             assert redelivered == [signal.SIGTERM]
             assert caught.value.code == 128 + signal.SIGTERM
@@ -356,6 +460,238 @@ def test_signal_installation_is_owned_before_it_can_be_interrupted(monkeypatch, 
     finally:
         for number, handler in previous.items():
             original_signal(number, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX signal dispositions and masks')
+@pytest.mark.parametrize('interruption', ['before', 'after', 'termination'])
+def test_signal_restore_completes_all_dispositions_and_restores_prior_mask(monkeypatch, interruption):
+    import signal
+    original_signal = signal.signal
+    numbers = (signal.SIGTERM, signal.SIGHUP)
+    previous = {number: signal.getsignal(number) for number in numbers}
+    initial_mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    expected_mask = initial_mask | {signal.SIGUSR1}
+    redelivered, injected = [], False
+    try:
+        signal.pthread_sigmask(signal.SIG_SETMASK, expected_mask)
+        for number in numbers:
+            original_signal(number, signal.SIG_DFL)
+        with pytest.raises(SystemExit if interruption == 'termination' else KeyboardInterrupt):
+            with ui._termination_signals():
+                hup_handler = signal.getsignal(signal.SIGHUP)
+                def restore(number, handler):
+                    nonlocal injected
+                    if number == signal.SIGTERM and handler == signal.SIG_DFL and not injected:
+                        injected = True
+                        if interruption == 'before':
+                            raise KeyboardInterrupt
+                        result = original_signal(number, handler)
+                        if interruption == 'after':
+                            raise KeyboardInterrupt
+                        # HUP is still a Python handler at this point; TERM has
+                        # already become native SIG_DFL (the review swapped them).
+                        hup_handler(signal.SIGHUP, None)
+                        return result
+                    return original_signal(number, handler)
+                monkeypatch.setattr(signal, 'signal', restore)
+                monkeypatch.setattr(signal, 'raise_signal', redelivered.append)
+        assert injected
+        assert all(signal.getsignal(number) == signal.SIG_DFL for number in numbers)
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == expected_mask
+        assert redelivered == ([signal.SIGHUP] if interruption == 'termination' else [])
+    finally:
+        for number, handler in previous.items():
+            original_signal(number, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, initial_mask)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX pending signals and masks')
+@pytest.mark.parametrize('when', ['before', 'after'])
+def test_interrupted_mask_restoration_reapplies_saved_mask(monkeypatch, when):
+    import signal
+    from so3lr.cli.terminal import _blocked_signals
+    original_mask = signal.pthread_sigmask
+    initial_mask = original_mask(signal.SIG_BLOCK, [])
+    expected_mask = initial_mask | {signal.SIGUSR1}
+    interrupted = False
+    def mask(how, values):
+        nonlocal interrupted
+        if how == signal.SIG_SETMASK and not interrupted:
+            interrupted = True
+            if when == 'after':
+                original_mask(how, values)
+            raise KeyboardInterrupt
+        return original_mask(how, values)
+    try:
+        original_mask(signal.SIG_SETMASK, expected_mask)
+        monkeypatch.setattr(signal, 'pthread_sigmask', mask)
+        with pytest.raises(KeyboardInterrupt):
+            with _blocked_signals({signal.SIGTERM, signal.SIGHUP}):
+                pass
+        assert interrupted and original_mask(signal.SIG_BLOCK, []) == expected_mask
+    finally:
+        original_mask(signal.SIG_SETMASK, initial_mask)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX pending signals and masks')
+def test_worker_sigint_cannot_leave_main_signal_mask_blocked(tmp_path):
+    import json
+    code = '''
+import json, os, signal, threading
+from pathlib import Path
+from so3lr.cli.terminal import termination_signals
+original = signal.pthread_sigmask
+prior = original(signal.SIG_BLOCK, [])
+injected = False
+def unmask(how, values):
+    global injected
+    if how == signal.SIG_SETMASK and not injected:
+        injected = True
+        def interrupt():
+            original(signal.SIG_UNBLOCK, {signal.SIGINT})
+            os.kill(os.getpid(), signal.SIGINT)
+        thread = threading.Thread(target=interrupt)
+        thread.start()
+        thread.join(2)
+    return original(how, values)
+try:
+    with termination_signals():
+        signal.pthread_sigmask = unmask
+except KeyboardInterrupt:
+    Path('restore.json').write_text(json.dumps({
+        'mask_restored': original(signal.SIG_BLOCK, []) == prior,
+        'defaults': all(signal.getsignal(n) == signal.SIG_DFL for n in (signal.SIGTERM, signal.SIGHUP))}))
+finally:
+    signal.pthread_sigmask = original
+    original(signal.SIG_SETMASK, prior)
+'''
+    result = subprocess.run([sys.executable, '-c', code], cwd=tmp_path,
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert json.loads((tmp_path/'restore.json').read_text()) == {'mask_restored': True, 'defaults': True}
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX pending signals and masks')
+@pytest.mark.parametrize('signal_name', ['SIGTERM', 'SIGHUP'])
+def test_real_signal_during_restore_waits_until_all_dispositions_are_restored(tmp_path, signal_name):
+    import json
+    import signal
+    code = '''
+import json, os, pathlib, signal, sys
+from so3lr.cli.terminal import termination_signals
+original_signal, original_mask = signal.signal, signal.pthread_sigmask
+original_mask(signal.SIG_BLOCK, {signal.SIGUSR1})
+prior_mask = original_mask(signal.SIG_BLOCK, [])
+injected = False
+with termination_signals():
+    def restore(number, handler):
+        global injected
+        result = original_signal(number, handler)
+        if number == signal.SIGTERM and handler == signal.SIG_DFL and not injected:
+            injected = True
+            os.kill(os.getpid(), getattr(signal, sys.argv[1]))
+        return result
+    def mask(how, values):
+        if injected and how == signal.SIG_SETMASK:
+            pathlib.Path('restore.json').write_text(json.dumps({
+                'defaults': all(signal.getsignal(n) == signal.SIG_DFL for n in (signal.SIGTERM, signal.SIGHUP)),
+                'mask_restored': set(values) == prior_mask}))
+        return original_mask(how, values)
+    signal.signal, signal.pthread_sigmask = restore, mask
+'''
+    result = subprocess.run([sys.executable, '-c', code, signal_name], cwd=tmp_path,
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == -getattr(signal, signal_name), result.stderr
+    assert json.loads((tmp_path/'restore.json').read_text()) == {'defaults': True, 'mask_restored': True}
+    assert 'Traceback' not in result.stderr
+
+
+@pytest.fixture(scope='module')
+def native_signal_blocker(tmp_path_factory):
+    """A native call with no Python signal checkpoints, bounded by child kill."""
+    import shutil
+    compiler = shutil.which('cc')
+    if os.name == 'nt' or compiler is None:
+        pytest.skip('POSIX C compiler required for native-blocking signal probe')
+    directory = tmp_path_factory.mktemp('native-signal-blocker')
+    source = directory / 'block.c'
+    source.write_text('#include <unistd.h>\nvoid block_forever(int fd) {\n'
+                      '  volatile unsigned long counter = 0;\n'
+                      '  write(fd, "ready", 5);\n'
+                      '  for (;;) { counter++; }\n}\n')
+    library = directory / ('block.dylib' if sys.platform == 'darwin' else 'block.so')
+    subprocess.run([compiler, '-dynamiclib' if sys.platform == 'darwin' else '-shared',
+                    '-fPIC', str(source), '-o', str(library)], check=True, capture_output=True)
+    return library
+
+
+def _wait_for_native_marker(process, path):
+    deadline = time.monotonic() + 5
+    while not path.exists() or path.stat().st_size == 0:
+        assert process.poll() is None, 'signal probe exited before entering native code'
+        assert time.monotonic() < deadline, 'signal probe did not enter native code'
+        time.sleep(.01)
+
+
+@pytest.mark.parametrize('display,quiet', [('plain', False), ('auto', False), ('rich', True), ('rich', False)])
+def test_nonterminal_run_retains_native_termination_during_blocked_c_call(tmp_path, native_signal_blocker, display, quiet):
+    import signal
+    code = '''
+import ctypes, sys
+from so3lr.cli import presentation as ui
+library = ctypes.PyDLL(sys.argv[1])
+library.block_forever.argtypes = [ctypes.c_int]
+ui.configure(display=sys.argv[2], quiet=sys.argv[3] == 'True')
+with ui.run_display({'log_file': 'run.log'}):
+    with open('native-ready', 'wb') as marker:
+        library.block_forever(marker.fileno())
+'''
+    process = subprocess.Popen([sys.executable, '-c', code, str(native_signal_blocker), display, str(quiet)],
+                               cwd=tmp_path, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    try:
+        _wait_for_native_marker(process, tmp_path / 'native-ready')
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=2) == -signal.SIGTERM
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+@pytest.mark.parametrize('second_signal', ['SIGTERM', 'SIGHUP'])
+def test_second_termination_is_native_after_first_exception_is_swallowed(tmp_path, native_signal_blocker, second_signal):
+    import signal
+    code = '''
+import ctypes, pathlib, sys, time
+from so3lr.cli.terminal import TerminationSignal, termination_signals
+library = ctypes.PyDLL(sys.argv[1])
+library.block_forever.argtypes = [ctypes.c_int]
+with termination_signals():
+    try:
+        pathlib.Path('first-ready').write_text('ready')
+        while True:
+            time.sleep(.05)
+    except TerminationSignal:
+        # A callback/finalizer can swallow the first exception. Later signals
+        # must remain native even while the main thread is blocked in C.
+        with open('native-ready', 'wb') as marker:
+            library.block_forever(marker.fileno())
+'''
+    process = subprocess.Popen([sys.executable, '-c', code, str(native_signal_blocker)], cwd=tmp_path,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        _wait_for_native_marker(process, tmp_path / 'first-ready')
+        process.send_signal(signal.SIGTERM)
+        _wait_for_native_marker(process, tmp_path / 'native-ready')
+        number = getattr(signal, second_signal)
+        process.send_signal(number)
+        assert process.wait(timeout=2) == -number
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX PTY and termination signals')

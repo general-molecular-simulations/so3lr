@@ -423,10 +423,12 @@ def test_show_cycles_overview_and_runs_and_returns_directly(tmp_path, monkeypatc
     frames = []
     class Live:
         def __init__(self, **kwargs):
-            pass
+            self.console = kwargs['console']
         def __enter__(self):
             return self
         def __exit__(self, *args):
+            pass
+        def stop(self):
             pass
         def update(self, view, **kwargs):
             output = io.StringIO()
@@ -682,6 +684,206 @@ def test_real_pty_application_arrows_preserve_shortcuts_and_restore_input(monkey
         stream.close()
         os.close(master)
         os.close(slave)
+
+
+@pytest.mark.parametrize('surface', ['show', 'prompt'])
+@pytest.mark.parametrize('kind', ['keyboard', 'termination'])
+def test_live_start_interruption_restores_cursor_before_context_entry(tmp_path, monkeypatch, surface, kind):
+    from rich.console import Console
+    from rich.live import Live
+    from so3lr.cli import prompts
+    from so3lr.cli.terminal import TerminationSignal
+    class Terminal(io.StringIO):
+        def isatty(self):
+            return True
+    output = Terminal()
+    monkeypatch.setattr(sys, 'stdout', output)
+    monkeypatch.setattr(sys, 'stdin', Terminal())
+    monkeypatch.setenv('TERM', 'xterm')
+    closed = []
+    class Keyboard:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            closed.append(True)
+    monkeypatch.setattr(monitor, '_Keyboard', Keyboard)
+    original_start, original_refresh = Live.start, Live.refresh
+    seen = []
+    exception = KeyboardInterrupt() if kind == 'keyboard' else TerminationSignal(15)
+    def refresh(self):
+        if not seen:
+            seen.append(self)
+            raise exception
+        return original_refresh(self)
+    monkeypatch.setattr(Live, 'refresh', refresh)
+    monkeypatch.setattr(Live, 'start', lambda self, refresh=False: original_start(self, refresh=True))
+    def run():
+        if surface == 'show':
+            monitor.show(tmp_path)
+        else:
+            prompts.choose(Console(file=output), 'Model', ['M', 'S'])
+    if surface == 'show' and kind == 'keyboard':
+        run()  # the viewer intentionally treats Ctrl+C as detach
+    else:
+        with pytest.raises(type(exception)) as raised:
+            run()
+        assert raised.value is exception
+    assert '\x1b[?25l' in output.getvalue() and '\x1b[?25h' in output.getvalue()
+    assert seen and not seen[0]._started
+    if surface == 'show':
+        assert closed == [True]
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX terminal mode side effects')
+def test_live_cursor_restored_when_start_interrupts_before_render_hook(monkeypatch):
+    from rich.console import Console
+    from rich.live import Live
+    from so3lr.cli.terminal import live_display
+    monkeypatch.setenv('TERM', 'xterm')
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=True)
+    original_cursor = console.show_cursor
+    interruption = KeyboardInterrupt()
+    def cursor(show=True):
+        original_cursor(show)
+        if not show:
+            raise interruption
+    monkeypatch.setattr(console, 'show_cursor', cursor)
+    live = Live('Starting', console=console, auto_refresh=False)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        with live_display(live):
+            pytest.fail('interrupted start must not enter the body')
+    assert caught.value is interruption
+    assert '\x1b[?25l' in output.getvalue() and '\x1b[?25h' in output.getvalue()
+    assert not live._started
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX terminal mode side effects')
+@pytest.mark.parametrize('owner', ['show', 'attached'])
+def test_keyboard_cleanup_is_owned_before_entry_returns(tmp_path, monkeypatch, owner):
+    import pty
+    import termios
+    from so3lr.cli import presentation as ui
+    class Terminal(io.StringIO):
+        def isatty(self):
+            return True
+    master, slave = pty.openpty()
+    before = termios.tcgetattr(slave)
+    stream = os.fdopen(os.dup(slave), 'r')
+    monkeypatch.setattr(sys, 'stdin', stream)
+    monkeypatch.setattr(sys, 'stdout', Terminal())
+    monkeypatch.setattr(sys, 'stderr', Terminal())
+    monkeypatch.setenv('TERM', 'xterm')
+    original_enter = monitor._Keyboard.__enter__
+    def enter(self):
+        original_enter(self)
+        raise KeyboardInterrupt
+    monkeypatch.setattr(monitor._Keyboard, '__enter__', enter)
+    ui.configure(display='rich')
+    try:
+        if owner == 'show':
+            monitor.show(tmp_path)
+        else:
+            with pytest.raises(KeyboardInterrupt):
+                with ui.run_display({'log_file': str(tmp_path/'run.log')}) as reporter:
+                    reporter.start_md(0, 10, .5)
+        after = termios.tcgetattr(slave)
+        pending = getattr(termios, 'PENDIN', 0)
+        assert before[:3] == after[:3] and before[4:] == after[4:]
+        assert before[3] & ~pending == after[3] & ~pending
+    finally:
+        ui.reset()
+        stream.close()
+        os.close(master)
+        os.close(slave)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX signal and terminal ownership')
+@pytest.mark.parametrize('surface', ['show', 'prompt'])
+@pytest.mark.parametrize('signal_name', ['SIGTERM', 'SIGHUP'])
+def test_interactive_viewer_and_prompt_restore_terminal_before_termination(tmp_path, surface, signal_name):
+    import fcntl
+    import pty
+    import select
+    import signal
+    import struct
+    import termios
+    import time
+    code = '''
+from contextlib import contextmanager
+import fcntl, json, pathlib, sys, termios
+from rich.console import Console
+from so3lr.cli import monitor, prompts
+fcntl.ioctl(sys.stdin.fileno(), termios.TIOCSCTTY, 0)
+before = termios.tcgetattr(sys.stdin.fileno())
+def check_restored():
+    after = termios.tcgetattr(sys.stdin.fileno())
+    pending = getattr(termios, 'PENDIN', 0)
+    restored = (before[:3] == after[:3] and before[4:] == after[4:]
+                and before[3] & ~pending == after[3] & ~pending)
+    pathlib.Path('terminal.json').write_text(json.dumps({'restored': restored}))
+if sys.argv[1] == 'show':
+    original_exit, original_read = monitor._Keyboard.__exit__, monitor._Keyboard.read
+    def leave(self, *args):
+        try:
+            return original_exit(self, *args)
+        finally:
+            check_restored()
+    def read(self, timeout=.1):
+        pathlib.Path('ready').write_text('ready')
+        return original_read(self, timeout)
+    monitor._Keyboard.__exit__, monitor._Keyboard.read = leave, read
+    monitor.show('.')
+else:
+    original_keys, original_next = prompts.terminal_keys, prompts._Keys.next
+    @contextmanager
+    def keys():
+        try:
+            with original_keys() as value:
+                yield value
+        finally:
+            check_restored()
+    def next_key(self):
+        pathlib.Path('ready').write_text('ready')
+        return original_next(self)
+    prompts.terminal_keys, prompts._Keys.next = keys, next_key
+    prompts.choose(Console(), 'Select model', ['M', 'S', 'L'])
+'''
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
+    process = subprocess.Popen([sys.executable, '-c', code, surface], cwd=tmp_path,
+                               stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                               env=dict(os.environ, TERM='xterm', COLUMNS='80', LINES='24'))
+    capture, sent = bytearray(), False
+    deadline = time.monotonic() + 10
+    def read():
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:
+            return False
+        capture.extend(chunk)
+        return bool(chunk)
+    try:
+        while process.poll() is None:
+            assert time.monotonic() < deadline, 'terminal termination cleanup timed out'
+            if select.select([master], [], [], .05)[0] and not read():
+                process.wait(timeout=2)
+                break
+            if not sent and (tmp_path/'ready').exists():
+                process.send_signal(getattr(signal, signal_name))
+                sent = True
+        while time.monotonic() < deadline and select.select([master], [], [], .05)[0] and read():
+            pass
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(master)
+        os.close(slave)
+    assert sent and process.returncode == -getattr(signal, signal_name)
+    assert json.loads((tmp_path/'terminal.json').read_text())['restored']
+    assert b'\x1b[?25l' in capture and b'\x1b[?25h' in capture
+    assert b'Traceback' not in capture
 
 
 def test_incomplete_unknown_escape_cannot_grow_without_bound(monkeypatch):

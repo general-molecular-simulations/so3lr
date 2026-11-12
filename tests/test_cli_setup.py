@@ -313,18 +313,20 @@ assert 'so3lr.cli.so3lr_md' not in sys.modules
 
 
 @pytest.mark.parametrize('flag', ['--help', '-h'])
-def test_public_init_help_never_launches_the_wizard(monkeypatch, flag):
+@pytest.mark.parametrize('command', ['start', 'init'])
+def test_public_start_and_compatibility_alias_help_never_launch_setup(monkeypatch, flag, command):
     from so3lr.cli.so3lr_cli import cli
     def unexpected():
         raise AssertionError('Help must not start setup')
     monkeypatch.setattr(setup, 'launch_setup', unexpected)
-    result = CliRunner().invoke(cli, ['init', flag])
+    result = CliRunner().invoke(cli, [command, flag])
     assert result.exit_code == 0, result.output
     assert 'settings.yaml' in result.output
 
 
 @pytest.mark.parametrize('fails', [False, True])
-def test_local_run_uses_bundle_directory_and_restores_cwd(tmp_path, monkeypatch, fails):
+@pytest.mark.parametrize('command', ['start', 'init'])
+def test_local_run_uses_bundle_directory_and_restores_cwd(tmp_path, monkeypatch, fails, command):
     from so3lr.cli import so3lr_cli
     bundle = tmp_path / 'run bundle'
     bundle.mkdir()
@@ -338,7 +340,7 @@ def test_local_run_uses_bundle_directory_and_restores_cwd(tmp_path, monkeypatch,
         if fails:
             raise RuntimeError('deliberate run failure')
     monkeypatch.setattr(so3lr_cli, '_run_settings_file', run)
-    result = CliRunner().invoke(so3lr_cli.cli, ['init'])
+    result = CliRunner().invoke(so3lr_cli.cli, [command])
     assert result.exit_code == (1 if fails else 0)
     assert captured == [(bundle, settings_path)]
     assert Path.cwd() == original

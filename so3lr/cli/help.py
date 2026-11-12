@@ -53,12 +53,12 @@ def format_overview(command, ctx, formatter, version):
     formatter.write_paragraph()
     formatter.write_usage(ctx.command_path, '[OPTIONS] [COMMAND] [ARGS]...')
     groups = (
-        ('Prepare and monitor', ('init', 'show')),
+        ('Prepare and monitor', ('start', 'show')),
         ('Simulate', ('nvt', 'nvt-langevin', 'npt', 'nve', 'opt')),
         ('Evaluate and train', ('eval', 'train', 'finetune', 'tune-ewald')),
     )
     descriptions = {
-        'init': 'Choose a structure, review settings, then start or save',
+        'start': 'Choose a structure, review settings, then start or save',
         'show': 'Browse a run folder and inspect simulation plots',
         'nvt': 'NVT dynamics with a Nose–Hoover thermostat',
         'nvt-langevin': 'NVT dynamics with a Langevin thermostat',
@@ -90,7 +90,7 @@ def format_overview(command, ctx, formatter, version):
         with formatter.section('Other commands'):
             formatter.write_dl(extras)
     with formatter.section('Start here'):
-        formatter.write_text('\b\nso3lr init\n'
+        formatter.write_text('\b\nso3lr start\n'
                              'so3lr --settings run.yaml\n'
                              'so3lr show runs/\n'
                              'so3lr nvt --input molecule.xyz --lr-cutoff 100\n'
