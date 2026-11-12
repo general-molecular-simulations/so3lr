@@ -202,6 +202,13 @@ def test_params_only_checkpoint_has_no_training_state(tmp_path):
     loaded = checkpoint_utils.load_params_from_checkpoint(tmp_path)
     assert float(loaded['w']) == pytest.approx(1.0)
 
+    # With no saved loss to rank by, inference loads the latest checkpoint.
+    manager = checkpoint_utils.make_checkpoint_manager(tmp_path)
+    manager.save(5, args=ocp.args.Composite(params=ocp.args.StandardSave({'w': jnp.array(2.0)})))
+    manager.wait_until_finished()
+    manager.close()
+    assert float(checkpoint_utils.load_params_from_checkpoint(tmp_path)['w']) == pytest.approx(2.0)
+
     training_manager = checkpoint_utils.make_training_checkpoint_manager(tmp_path)
     assert _restore_tfds_training_state(
         training_manager, step=4, optimizer=optax.sgd(1e-2)
@@ -301,7 +308,9 @@ def test_fit_from_iterator_restart_matches_uninterrupted_updates(
             batch_max_num_pairs=0,
             num_epochs=epochs,
             ckpt_dir=checkpoint_dir,
-            ckpt_manager_options={'max_to_keep': 10},
+            # The validation loss rises every step, so the newest checkpoint is
+            # never the best one: the restart must still resume from it.
+            ckpt_manager_options={'max_to_keep': 1},
             eval_every_num_steps=eval_every,
             allow_restart=allow_restart,
             use_wandb=False,

@@ -1,5 +1,4 @@
 """Utilities for checkpointing."""
-import dataclasses
 import pickle
 import orbax.checkpoint as ocp
 
@@ -11,6 +10,10 @@ from .logging_utils import suppress_absl_warnings
 
 def _validation_loss(metrics):
     return metrics['loss']
+
+
+# Training ranks its checkpoints by the saved validation loss, lowest first.
+_RANK_BY_LOSS = dict(step_prefix='ckpt', best_fn=_validation_loss, best_mode='min')
 
 
 def load_params_from_checkpoint(
@@ -44,15 +47,11 @@ def load_params_from_checkpoint(
 
     loaded_mngr = make_checkpoint_manager(
         ckpt_dir=ckpt_dir_cleaned,
-        ckpt_mngr_options=ocp.CheckpointManagerOptions(
-            step_prefix='ckpt', best_fn=_validation_loss, best_mode='min'),
+        ckpt_mngr_options=ocp.CheckpointManagerOptions(**_RANK_BY_LOSS),
     )
     if step is None:
-        # Training keeps the newest checkpoint besides the best ones, so the
-        # latest step is not necessarily the one to deploy.
+        # None when no checkpoint saved a loss; restore(None) then takes the latest.
         step = loaded_mngr.best_step()
-    if step is None:
-        step = loaded_mngr.latest_step()
 
     with suppress_absl_warnings():
         mngr_state = loaded_mngr.restore(
@@ -133,45 +132,25 @@ def make_checkpoint_manager(
 
 
 def make_training_checkpoint_options(ckpt_manager_options: Optional[dict] = None):
-    """CheckpointManagerOptions for training: keep the ``max_to_keep`` checkpoints
-    with the lowest validation loss and always the newest one.
+    """CheckpointManagerOptions for training: keep the ``max_to_keep`` (default 3)
+    checkpoints with the lowest validation loss and always the newest one.
 
     orbax's own policy for a ``best_fn`` keeps only the best N, so it deletes the
     newest checkpoint as soon as its loss is not among them, and a restart (which
     resumes from ``latest_step()``) silently goes back to an older step.
     """
-    if ckpt_manager_options is None:
-        ckpt_manager_options = {'max_to_keep': 3}
-    options = ocp.CheckpointManagerOptions(
-        best_fn=_validation_loss,
-        best_mode='min',
-        step_prefix='ckpt',
-        **ckpt_manager_options
-    )
-    if options.preservation_policy is not None:
-        return options
-
+    options = {'max_to_keep': 3} if ckpt_manager_options is None else dict(ckpt_manager_options)
+    # orbax refuses max_to_keep next to a preservation_policy.
+    max_to_keep = options.pop('max_to_keep', None)
     policies = ocp.checkpoint_managers
-    keep = [
-        policies.BestN(
-            get_metric_fn=options.best_fn,
-            reverse=True,  # lowest loss is best (orbax's default for best_mode='min')
-            n=options.max_to_keep,
-            keep_checkpoints_without_metrics=options.keep_checkpoints_without_metrics,
-        ),
-        policies.LatestN(n=1),
-    ]
-    if options.keep_period is not None:
-        keep.append(policies.EveryNSteps(options.keep_period))
-    if options.keep_time_interval is not None:
-        keep.append(policies.EveryNSeconds(int(options.keep_time_interval.total_seconds())))
-    # orbax refuses a preservation_policy next to the options it replaces.
-    return dataclasses.replace(
-        options,
-        max_to_keep=None,
-        keep_period=None,
-        keep_time_interval=None,
-        preservation_policy=policies.AnyPreservationPolicy(keep),
+    return ocp.CheckpointManagerOptions(
+        **_RANK_BY_LOSS,
+        preservation_policy=policies.AnyPreservationPolicy([
+            # reverse=True sorts the lowest loss last, as orbax does for best_mode='min'.
+            policies.BestN(get_metric_fn=_validation_loss, reverse=True, n=max_to_keep),
+            policies.LatestN(n=1),
+        ]),
+        **options
     )
 
 
