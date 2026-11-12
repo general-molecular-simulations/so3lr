@@ -87,14 +87,13 @@ def test_mesh_kspace_matches_calculator(method):
 
 
 # the calculator has no dispersion in k-space: the reference is the potential so3lr md integrates
-@pytest.mark.parametrize("electrostatics", [None, "pme"])
-def test_dispersion_kspace_matches_md(electrostatics):
+# (which takes this 6 A cutoff only with the electrostatics in k-space too)
+def test_dispersion_kspace_matches_md():
     from so3lr.cli.so3lr_cli import YAML_DEFAULTS
     from test_pme import _cli_md_energy_and_forces
     atoms = _water()
-    kspace = dict(kspace_dispersion="pme", kspace_dispersion_smearing=2.0, kspace_dispersion_spacing=1.5)
-    if electrostatics:
-        kspace.update(kspace_electrostatics=electrostatics, kspace_smearing=2.0, kspace_spacing=1.0)
+    kspace = dict(kspace_electrostatics="pme", kspace_smearing=2.0, kspace_spacing=1.0,
+                  kspace_dispersion="pme", kspace_dispersion_smearing=2.0, kspace_dispersion_spacing=1.5)
     settings = {**YAML_DEFAULTS, "model_path": MODEL, "lr_cutoff": LR, "precision": "float64", **kspace}
     engine = _engine(atoms, **kspace)
     result = engine(atoms.positions, _box(atoms))
