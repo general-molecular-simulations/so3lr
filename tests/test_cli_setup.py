@@ -2,6 +2,7 @@
 import io
 from contextlib import contextmanager
 from dataclasses import replace
+from decimal import Decimal
 import os
 from pathlib import Path
 import subprocess
@@ -23,9 +24,16 @@ def structure_file(tmp_path):
     return path
 
 
-def answers(source, output, action='2', *, ensemble='1', dt='0.5', duration='5', cadence='100'):
-    return '\n'.join([str(len(setup.available_presets()) + 2), str(source), ensemble, '1', '300', dt, duration, cadence,
-                      '0', '0', '52', 'y', '100', str(output), action]) + '\n'
+def answers(source, output, action='2', *, ensemble='1', duration='5', frame='0.05'):
+    # Path source, path, dynamics, model, temperature, duration, frame interval,
+    # charge, unpaired electrons, output directory, review action.
+    return '\n'.join([str(len(setup.available_presets()) + 2), str(source), ensemble, '1', '300', duration, frame,
+                      '0', '0', str(output), action]) + '\n'
+
+
+def edit(group, *values):
+    """Review action 'Edit settings…', one group, then its answers."""
+    return ['3', str(setup.EDIT_CHOICES.index(group) + 1), *values]
 
 
 @click.command()
@@ -103,9 +111,10 @@ def test_npt_setup_proposes_margin_and_retries_an_unsafe_custom_cutoff(tmp_path,
     source = tmp_path / 'periodic.xyz'
     source.write_text('2\nLattice="24 0 0 0 24 0 0 0 24" pbc="T T T"\nH 0 0 0\nH 0 0 .74\n')
     destination = tmp_path / 'npt-margin'
+    # NPT with defaults, then edit the cutoff: 12 Å is unsafe, Enter accepts the proposal.
     text = '\n'.join([str(len(setup.available_presets()) + 2), str(source),
-                      '4', '1', '300', '1', '0.5', '0.01', '10', '0', '0', '52', 'n',
-                      '12', '', str(destination), '2']) + '\n'
+                      '4', '1', '300', '1', '0.01', '0.005', '0', '0', str(destination),
+                      *edit('Long-range cutoff', '12', ''), '2']) + '\n'
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
     assert '3% NPT contraction margin' in ' '.join(result.output.split())
@@ -527,11 +536,11 @@ def test_browser_lists_xyz_files_and_navigates_up_and_back(tmp_path, structure_f
 
 def test_presets_are_checkout_relative_and_absent_in_an_installed_package(tmp_path, monkeypatch):
     presets = setup.available_presets()
-    assert [path.name for _, path in presets] == ['ac.xyz', 'dha.xyz']
+    assert [path.name for _, path in presets] == ['ala4.xyz', 'dha.xyz', 'water_64.xyz']
+    # Shipped next to the code, so installed wheels offer them as well; never cwd files.
+    assert all(path.parent == Path(setup.__file__).resolve().parent / 'examples' for _, path in presets)
     monkeypatch.chdir(tmp_path)
     assert setup.available_presets() == presets
-    monkeypatch.setattr(setup, '__file__', str(tmp_path / 'site-packages/so3lr/cli/setup.py'))
-    assert setup.available_presets() == []
 
 
 def test_multiframe_picker_exports_only_explicit_selection(tmp_path, structure_file, monkeypatch):
@@ -571,8 +580,11 @@ def test_velocity_reinitialization_is_explicit_and_source_is_unchanged(tmp_path,
 
 def test_example_structures_report_actual_frames_pbc_and_cell():
     presets = {path.name: path for _, path in setup.available_presets()}
-    ala4 = setup.inspect_structure(presets['ac.xyz'], frame_index=0)
-    assert (ala4.atoms, ala4.frame_count, ala4.periodic) == (42, 100, False)
+    ala4 = setup.inspect_structure(presets['ala4.xyz'])
+    assert (ala4.atoms, ala4.frame_count, ala4.periodic) == (42, 1, False)
+    water = setup.inspect_structure(presets['water_64.xyz'])
+    assert (water.atoms, water.periodic, water.has_momenta) == (192, True, False)
+    assert water.minimum_cell_height == pytest.approx(12.4)
     dha = setup.inspect_structure(presets['dha.xyz'])
     assert dha.atoms == 56 and dha.periodic
     assert dha.cell_lengths == pytest.approx((999.900024,) * 3)
@@ -590,10 +602,11 @@ def test_manual_water_input_reviews_pme_and_explicit_velocity_choice(tmp_path, m
     original = source.read_bytes()
     destination = tmp_path / 'water'
     # Manual path, NPT, default model, target T, velocity decision, pressure,
-    # timestep, duration, cadence, charge, spin, seed, relax, cutoff, save.
+    # duration, frame interval, charge, spin, directory; then edit the cutoff and start.
     text = '\n'.join([str(len(setup.available_presets()) + 2), str(source),
                       '4', '1', '300', '2' if retain else '1', '1',
-                      '0.5', '0.01', '10', '0', '0', '52', 'n', '5.5', str(destination), '1']) + '\n'
+                      '0.01', '0.005', '0', '0', str(destination),
+                      *edit('Long-range cutoff', '5.5'), '1']) + '\n'
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
     assert '1008.8 K before center-of-mass removal' in result.output
@@ -618,8 +631,8 @@ def test_dha_isolation_is_chosen_and_only_changes_exported_copy(tmp_path, monkey
     source = dict((path.name, path) for _, path in setup.available_presets())['dha.xyz']
     original = source.read_bytes()
     destination = tmp_path / 'isolated-dha'
-    text = '\n'.join(['2', '2', '1', '1', '300', '0.5', '0.01', '10',
-                      '0', '0', '52', 'n', '100', str(destination), '1']) + '\n'
+    text = '\n'.join(['2', '2', '1', '1', '300', '0.01', '0.005',
+                      '0', '0', str(destination), '1']) + '\n'
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
     assert '999.9' in result.output
@@ -689,3 +702,149 @@ print(f'RESULT:{result};RESTORED:{before == after}')
             process.wait()
         os.close(master)
         os.close(slave)
+
+
+@pytest.mark.parametrize('info, expected', [
+    ({'charge': 0}, (0, None)),
+    ({'total_charge': -1.0, 'charge': 3}, (-1, None)),
+    ({'charge': 0.5}, (None, None)),
+    ({'multiplicity': 3}, (None, 2)),
+    ({'num_unpaired_electrons': 1, 'multiplicity': 5}, (None, 1)),
+    ({'spin': 1}, (None, None)),  # ambiguous convention: never guessed
+    ({'charge': True, 'multiplicity': 0}, (None, None)),
+])
+def test_structure_charge_and_unpaired_reads_unambiguous_keys(info, expected):
+    assert setup.structure_charge_and_unpaired(info) == expected
+
+
+@pytest.mark.parametrize('electrons, charge, unpaired, fragment', [
+    (10, 0, 0, ''),
+    (10, 1, 1, ''),
+    (10, 1, 0, '9 electrons (an odd number)'),
+    (10, 0, 1, '10 electrons (an even number)'),
+    (10, 11, 0, 'removes more than the 10 electrons'),
+    (10, 0, 12, 'exceed the 10 electrons'),
+])
+def test_electron_count_problem_explains_impossible_states(electrons, charge, unpaired, fragment):
+    problem = setup.electron_count_problem(electrons, charge, unpaired)
+    assert (fragment in problem) if fragment else problem == ''
+
+
+def test_wizard_defaults_to_recorded_charge_and_rejects_impossible_parity(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup, '_interactive', lambda: True)
+    source = tmp_path / 'hydroxide.extxyz'
+    source.write_text('2\nProperties=species:S:1:pos:R:3 charge=-1 multiplicity=1 pbc="F F F"\n'
+                      'O 0 0 0\nH 0.97 0 0\n')
+    destination = tmp_path / 'run'
+    # Path, NVT, model, T, dt, duration, cadence; accept recorded charge -1 and
+    # multiplicity 1; then try charge 0 with no unpaired electron, refuse to
+    # keep it, and fall back to the recorded values.
+    text = '\n'.join([str(len(setup.available_presets()) + 2), str(source), '1', '1', '300', '5', '0.05',
+                      '0', '', 'n', '-1', '0', str(destination), '2']) + '\n'
+    result = CliRunner().invoke(wizard, input=text)
+    assert result.exit_code == 0, result.output
+    output = ' '.join(result.output.split())
+    assert 'Default total charge and multiplicity read from the structure file.' in output
+    assert 'Total charge (e) [-1]:' in output
+    assert 'Charge +0 leaves 9 electrons (an odd number), which cannot have 0 unpaired electrons.' in output
+    exported = yaml.safe_load((destination / 'settings.yaml').read_text())
+    assert (exported['total_charge'], exported['num_unpaired_electrons']) == (-1, 0)
+
+
+def test_gas_phase_review_omits_cell_and_spells_out_relaxation(tmp_path, structure_file, monkeypatch):
+    monkeypatch.setattr(setup, '_interactive', lambda: True)
+    result = CliRunner().invoke(wizard, input=answers(structure_file, tmp_path / 'run'))
+    assert result.exit_code == 0, result.output
+    assert 'Cell lengths' not in result.output
+    assert 'Seed / initial relaxation 52 / yes' in ' '.join(result.output.split())
+
+
+def test_example_preset_exports_a_single_frame_without_a_frame_menu(tmp_path, monkeypatch):
+    presets = setup.available_presets()
+    monkeypatch.setattr(setup, '_interactive', lambda: True)
+    preset = str(1 + [path.name for _, path in presets].index('ala4.xyz'))
+    destination = tmp_path / 'ala4'
+    text = '\n'.join([preset, '1', '1', '300', '5', '0.05', '0', '0', str(destination), '2']) + '\n'
+    result = CliRunner().invoke(wizard, input=text)
+    assert result.exit_code == 0, result.output
+    assert 'choose the frame to copy' not in result.output
+    assert 'Example · Ala4 peptide' in result.output
+    assert len((destination / 'structure.extxyz').read_text().splitlines()) == 44
+
+
+def test_default_output_directory_skips_existing_runs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert setup._unused_directory('so3lr-run') == 'so3lr-run'
+    (tmp_path / 'so3lr-run').mkdir()
+    (tmp_path / 'so3lr-run-2').write_text('')
+    assert setup._unused_directory('so3lr-run') == 'so3lr-run-3'
+    (tmp_path / 'runs').mkdir()
+    (tmp_path / 'runs' / 'water').mkdir()
+    assert setup._unused_directory(str(Path('runs') / 'water')) == str(Path('runs') / 'water-2')
+
+
+@pytest.mark.parametrize('duration, frame, dt, expected', [
+    ('5', '0.05', '0.5', (100, 100)),
+    ('5.01', '0.05', '0.5', (101, 100)),
+    ('0.001', '0.05', '1', (1, 50)),
+])
+def test_frame_plan_rounds_duration_up_to_whole_frames(duration, frame, dt, expected):
+    assert setup.frame_plan(duration, frame, dt) == expected
+
+
+def test_frame_interval_must_be_whole_timesteps():
+    with pytest.raises(ValueError, match='whole number of 0.5 fs timesteps'):
+        setup.frame_plan('5', '0.0003', '0.5')
+
+
+def test_rounded_duration_is_announced_and_exported_exactly(tmp_path, structure_file, monkeypatch):
+    monkeypatch.setattr(setup, '_interactive', lambda: True)
+    destination = tmp_path / 'rounded'
+    result = CliRunner().invoke(wizard, input=answers(structure_file, destination, duration='5.01'))
+    assert result.exit_code == 0, result.output
+    assert 'Duration rounded up to 5.05 ps (101 whole frames).' in result.output
+    exported = yaml.safe_load((destination / 'settings.yaml').read_text())
+    assert (exported['md_cycles'], exported['md_steps']) == (101, 100)
+
+
+def test_first_pass_uses_advanced_defaults_and_review_edits_one_group(tmp_path, structure_file, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup, '_interactive', lambda: True)
+    destination = tmp_path / 'edited'
+    text = '\n'.join([str(len(setup.available_presets()) + 2), str(structure_file), '1', '1', '300', '5', '0.05',
+                      '0', '0', str(destination),
+                      *edit('Seed and initial relaxation', '7', 'n'),
+                      *edit('Timestep', '0.25'),
+                      *edit('Temperature and pressure', '310'),
+                      '2']) + '\n'
+    result = CliRunner().invoke(wizard, input=text)
+    assert result.exit_code == 0, result.output
+    output = ' '.join(result.output.split())
+    assert 'Defaults: 0.5 fs timestep · seed 52 · relaxation on · 100 Å cutoff.' in output
+    assert 'Random seed' not in result.output.split('Edit settings')[0]
+    exported = yaml.safe_load((destination / 'settings.yaml').read_text())
+    assert (exported['seed'], exported['relax_before_run']) == (7, False)
+    # A 0.25 fs timestep keeps the 0.05 ps frame interval: twice the steps per frame.
+    assert (exported['md_dt'], exported['md_steps'], exported['md_cycles']) == (0.25, 200, 100)
+    assert exported['md_T'] == 310
+
+
+def test_start_over_keeps_previous_answers_as_defaults(tmp_path, structure_file, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup, '_interactive', lambda: True)
+    destination = tmp_path / 'again'
+    first = answers(structure_file, destination, action='X').split('\n')[:-2]  # drop the action
+    # Start over: keep the previous structure, then accept every remembered answer.
+    text = '\n'.join([*first, *edit('Structure, dynamics and model (start over)'),
+                      '1', '', '', '', '', '', '', '', '', '2']) + '\n'
+    result = CliRunner().invoke(wizard, input=text)
+    assert result.exit_code == 0, result.output
+    assert 'Keep previous' in result.output
+    exported = yaml.safe_load((destination / 'settings.yaml').read_text())
+    assert exported['md_cycles'] == 100 and exported['md_T'] == 300
+
+
+@pytest.mark.parametrize('value, text', [('5.00', '5'), (Decimal('0.050'), '0.05'), (100.0, '100'),
+                                         (Decimal('1E+1'), '10'), ('abc', 'abc')])
+def test_prompt_defaults_are_plain_numbers(value, text):
+    assert setup._plain_number(value) == text

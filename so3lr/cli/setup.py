@@ -11,6 +11,8 @@ import sys
 import click
 import yaml
 
+from . import theme
+
 from so3lr.md_settings_validation import DEFAULT_PRECISION, DEFAULT_PRESSURE, validate_md_counts
 from so3lr.model_registry import DEFAULT_MODEL, canonical_models, model_aliases
 
@@ -18,8 +20,10 @@ from so3lr.model_registry import DEFAULT_MODEL, canonical_models, model_aliases
 _SCHEDULER_VARIABLES = ('SLURM_JOB_ID', 'SLURM_JOBID', 'PBS_JOBID', 'LSB_JOBID',
                         'JOB_ID', 'COBALT_JOBID')
 _ENSEMBLES = ('nvt', 'nvt-langevin', 'nve', 'npt')
-_PRESETS = (('Ala4 · ac.xyz', 'ac.xyz'), ('DHA · dha.xyz', 'dha.xyz'))
-REVIEW_ACTIONS = ('Save setup and start MD now', 'Save setup for later', 'Back', 'Cancel')
+_PRESETS = (('Example · Ala4 peptide · 42 atoms · gas phase', 'ala4.xyz'),
+            ('Example · DHA · 56 atoms', 'dha.xyz'),
+            ('Example · water box · 192 atoms · periodic', 'water_64.xyz'))
+REVIEW_ACTIONS = ('Save setup and start MD now', 'Save setup for later', 'Edit settings…', 'Cancel')
 _LAUNCHER = '''#!/bin/sh
 set -eu
 run_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -59,6 +63,55 @@ class Structure:
     input_temperature: float | None = None
     keep_input_momenta: bool = True
     isolated: bool = False
+    electrons: int = 0
+    input_charge: int | None = None
+    input_unpaired: int | None = None
+
+
+def _info_integer(info, *keys):
+    """Return the first integral value stored under one of ``keys``."""
+    for key in keys:
+        value = info.get(key)
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number) and number == int(number):
+            return int(number)
+    return None
+
+
+def structure_charge_and_unpaired(info):
+    """Read total charge and unpaired electrons recorded in an XYZ comment line.
+
+    ``spin`` is deliberately ignored: datasets disagree on whether it means S,
+    2S or the multiplicity, and a wrong guess would silently change the physics.
+    """
+    charge = _info_integer(info, 'total_charge', 'charge')
+    unpaired = _info_integer(info, 'num_unpaired_electrons', 'unpaired_electrons')
+    if unpaired is None:
+        multiplicity = _info_integer(info, 'multiplicity')
+        if multiplicity is not None and multiplicity >= 1:
+            unpaired = multiplicity - 1
+    return charge, (unpaired if unpaired is None or unpaired >= 0 else None)
+
+
+def electron_count_problem(electrons, charge, unpaired):
+    """Explain an impossible charge/multiplicity combination, or return ''."""
+    if electrons <= 0:
+        return ''
+    count = electrons - charge
+    if count < 0:
+        return f'A total charge of {charge:+d} removes more than the {electrons} electrons of the neutral structure.'
+    if unpaired > count:
+        return f'{unpaired} unpaired electrons exceed the {count} electrons at charge {charge:+d}.'
+    if (count - unpaired) % 2:
+        parity = 'an odd' if count % 2 else 'an even'
+        return (f'Charge {charge:+d} leaves {count} electrons ({parity} number), which cannot have '
+                f'{unpaired} unpaired electrons. Check the total charge or the multiplicity.')
+    return ''
 
 
 def _digest(path):
@@ -118,10 +171,12 @@ def inspect_structure(path, frame_index=None):
     if periodic:
         height = float(np.min(cell_heights(cell))) if np.linalg.matrix_rank(cell) == 3 else 0.0
     has_momenta = first.has('momenta') and bool(np.any(first.get_momenta()))
+    charge, unpaired = structure_charge_and_unpaired(first.info)
     return Structure(path, len(first), first.get_chemical_formula(),
                      periodic, _digest(path), frame_index or 0, count,
                      tuple(float(length) for length in first.cell.lengths()), height,
-                     has_momenta, float(first.get_temperature()) if has_momenta else None)
+                     has_momenta, float(first.get_temperature()) if has_momenta else None,
+                     electrons=int(first.numbers.sum()), input_charge=charge, input_unpaired=unpaired)
 
 
 def _decimal(value, label):
@@ -213,14 +268,33 @@ def export_run(directory, structure, settings):
     return settings_path
 
 
+def _prompt(label, **kwargs):
+    # Indent answers under their section rule.
+    return click.prompt('  ' + label, **kwargs)
+
+
+def _confirm(label, **kwargs):
+    return click.confirm('  ' + label, **kwargs)
+
+
 def _say(console, text, style=''):
     from rich.text import Text
     from .prompts import terminal_text
     console.print(Text(terminal_text(text), style=style))
 
 
+def _stage_rule(number, title):
+    from rich.rule import Rule
+    from rich.text import Text
+    from . import theme
+    from .prompts import terminal_text
+    return Rule(Text(terminal_text(f'{number}/3 · {title}'), style=theme.ACCENT_BOLD),
+                align='left', style=theme.FAINT)
+
+
 def _stage(console, number, title):
-    _say(console, f'{number}/3 · {title}', 'bold yellow')
+    console.print()
+    console.print(_stage_rule(number, title))
 
 
 def _choose(console, title, choices, default=1):
@@ -254,11 +328,8 @@ def _select_model(console, previous=DEFAULT_MODEL):
 
 
 def available_presets():
-    """Return only presets belonging to this source checkout, never to cwd."""
-    checkout = Path(__file__).resolve().parents[2]
-    if not (checkout / 'pyproject.toml').is_file():
-        return []
-    data = checkout / 'tests' / 'test_data'
+    """Small example structures shipped with the package, never read from cwd."""
+    data = Path(__file__).resolve().parent / 'examples'
     return [(label, data / filename) for label, filename in _PRESETS if (data / filename).is_file()]
 
 
@@ -276,7 +347,7 @@ def _entered_path(value):
 def _path_prompt(default=None, *, allow_directory=False):
     from .prompts import terminal_text
     while True:
-        answer = click.prompt('Structure path (.xyz or .extxyz)', default=default, type=str)
+        answer = _prompt('Structure path (.xyz or .extxyz)', default=default, type=str)
         try:
             path = _entered_path(answer)
             if allow_directory and path.is_dir():
@@ -300,7 +371,7 @@ def browse_structure(console, start=None):
             files = sorted((path for path in children if path.is_file()
                             and path.suffix.lower() in ('.xyz', '.extxyz')), key=lambda path: path.name.casefold())
         except OSError as exc:
-            _say(console, f'Cannot list this directory: {exc}', 'red')
+            _say(console, f'Cannot list this directory: {exc}', theme.DANGER)
             folders, files = [], []
         choices = ['↑ Up one directory', '← Back to structure sources', 'Enter or paste a path']
         choices += [f'{path.name}/' for path in folders] + [path.name for path in files]
@@ -370,9 +441,12 @@ def _select_structure(console, old):
             else:
                 raise click.Abort()
         try:
-            structure = _pick_frame(console, source, old)
+            # A bundled example is a demo input: copy its first frame without a frame menu.
+            preset = any(source == path for _, path in presets)
+            structure = (inspect_structure(source, frame_index=0) if preset
+                         else _pick_frame(console, source, old))
         except (ValueError, OSError, IndexError, AssertionError) as exc:
-            _say(console, exc, 'red')
+            _say(console, exc, theme.DANGER)
             continue
         dha_path = next((path for _, path in presets if path.name == 'dha.xyz'), None)
         if structure.path == dha_path and structure.periodic:
@@ -386,129 +460,294 @@ def _select_structure(console, old):
                 _say(console, 'The exported copy will use gas-phase boundaries; the source stays unchanged.')
         _say(console, f'{structure.formula} · {structure.atoms} atoms · '
              f'{"PBC: all three axes" if structure.periodic else "PBC: off (gas phase)"}')
-        _say(console, 'Cell lengths: ' + ', '.join(f'{length:.6g}' for length in structure.cell_lengths) + ' Å')
+        if structure.periodic:
+            _say(console, 'Cell lengths: ' + ', '.join(f'{length:.6g}' for length in structure.cell_lengths) + ' Å')
         if structure.frame_count > 1:
             _say(console, f'Copying frame {structure.frame_index + 1} of {structure.frame_count}; source stays unchanged.')
         return structure
 
 
+def _unused_directory(name):
+    """Suggest ``name``, or ``name-2``, ``name-3``, ... when it already exists."""
+    base = Path(name).expanduser()
+    candidate, number = base, 2
+    while candidate.exists() or candidate.is_symlink():
+        candidate = base.with_name(f'{base.name}-{number}')
+        number += 1
+    return name if candidate == base else str(Path(name).with_name(candidate.name))
+
+
+def _plain_number(value):
+    """'5.00' -> '5', '0.050' -> '0.05', without scientific notation."""
+    try:
+        number = Decimal(str(value)).normalize()
+    except (InvalidOperation, ValueError):
+        return str(value)
+    return format(number, 'f')
+
+
 def _positive(console, label, default):
     while True:
-        answer = click.prompt(label, default=str(default), type=str)
+        answer = _prompt(label, default=_plain_number(default), type=str)
         try:
             value = _decimal(answer, label)
             if not float(value) > 0 or not math.isfinite(float(value)):
                 raise ValueError(f'{label} is outside the supported numeric range.')
             return value
         except (ValueError, OverflowError) as exc:
-            _say(console, exc, 'red')
+            _say(console, exc, theme.DANGER)
+
+
+def frame_plan(duration_ps, frame_ps, dt_fs):
+    """Whole frames covering at least ``duration_ps``; frames are whole timesteps.
+
+    Returns ``(frames, steps_per_frame)``. The duration is rounded up to a
+    whole number of frames, and the caller shows the exact result.
+    """
+    duration = _decimal(duration_ps, 'Duration')
+    frame = _decimal(frame_ps, 'Frame interval')
+    dt = _decimal(dt_fs, 'Timestep')
+    steps = frame * 1000 / dt
+    if steps != steps.to_integral_value():
+        raise ValueError(f'The frame interval must be a whole number of {dt:g} fs timesteps '
+                         f'(for example {dt * 100 / 1000:g} ps).')
+    frames = int((duration / frame).to_integral_value(rounding='ROUND_CEILING'))
+    return max(1, frames), int(steps)
+
+
+EDIT_CHOICES = ('Structure, dynamics and model (start over)', 'Temperature and pressure',
+                'Duration and frame interval', 'Timestep', 'Charge and multiplicity',
+                'Seed and initial relaxation', 'Long-range cutoff', 'Output directory', '← Back to review')
+
+
+class _Draft:
+    """Answers of one guided setup; each group can be asked again from the review."""
+
+    def __init__(self, console, old):
+        from .so3lr_cli import (DEFAULT_MD_CYCLES, DEFAULT_MD_STEPS_PER_CYCLE, DEFAULT_SAVE_BUFFER,
+                                DEFAULT_SEED, DEFAULT_TEMPERATURE, DEFAULT_TIMESTEP)
+        self.console, self.old = console, old
+        self.default_seed, self.default_temperature = DEFAULT_SEED, DEFAULT_TEMPERATURE
+        self.default_dt, self.default_buffer = Decimal(str(DEFAULT_TIMESTEP)), DEFAULT_SAVE_BUFFER
+        self.default_frame = self.default_dt * DEFAULT_MD_STEPS_PER_CYCLE / 1000
+        self.default_duration = self.default_frame * DEFAULT_MD_CYCLES
+
+    # -- groups ---------------------------------------------------------
+    def ask_system(self):
+        from .setup_physics import long_range_settings
+        console, old = self.console, self.old
+        while True:
+            _stage(console, 1, 'Structure')
+            self.structure = _select_structure(console, old)
+            _stage(console, 2, 'Dynamics')
+            while True:
+                self.ensemble = _ENSEMBLES[_choose(console, 'Dynamics',
+                    ('NVT · Nosé–Hoover', 'NVT · Langevin', 'NVE', 'NPT'),
+                    _ENSEMBLES.index(old.get('ensemble', 'nvt')) + 1)]
+                if self.ensemble != 'npt' or self.structure.periodic:
+                    break
+                _say(console, 'NPT requires a fully periodic, positive, axis-aligned orthorhombic cell.', theme.DANGER)
+            self.model = _select_model(console, old.get('model', DEFAULT_MODEL))
+            try:
+                self.proposal = long_range_settings(self.structure.periodic, self.structure.minimum_cell_height,
+                                                    self.model, ensemble=self.ensemble)
+                return
+            except ValueError as exc:
+                _say(console, exc, theme.DANGER)
+                _say(console, 'Choose another structure or model to continue.')
+
+    def ask_conditions(self):
+        console, old = self.console, self.old
+        self.temperature = _positive(console, 'Initial temperature (K)' if self.ensemble == 'nve' else 'Temperature (K)',
+                                     getattr(self, 'temperature', old.get('temperature', self.default_temperature)))
+        if self.structure.has_momenta:
+            keep = _choose(console, 'The input contains velocities',
+                           (f'Initialize velocities at {self.temperature:g} K',
+                            f'Retain input velocities ({self.structure.input_temperature:.1f} K '
+                            'before center-of-mass removal)'),
+                           2 if old.get('keep_input_momenta') else 1) == 1
+            self.structure = replace(self.structure, keep_input_momenta=keep)
+        self.pressure = None
+        if self.ensemble == 'npt':
+            self.pressure = _positive(console, 'Pressure (bar)', old.get('pressure') or DEFAULT_PRESSURE)
+
+    def ask_length(self):
+        console, old = self.console, self.old
+        while True:
+            self.duration = _positive(console, 'Duration (ps)',
+                                      getattr(self, 'duration', old.get('duration', self.default_duration)))
+            self.frame = _positive(console, 'Save a trajectory frame every (ps)',
+                                   getattr(self, 'frame', old.get('frame', self.default_frame)))
+            try:
+                self._plan()
+                return
+            except ValueError as exc:
+                _say(console, exc, theme.DANGER)
+
+    def ask_timestep(self):
+        while True:
+            self.dt = _positive(self.console, 'Timestep (fs)', self.dt)
+            try:
+                self._plan()
+                return
+            except ValueError as exc:
+                _say(self.console, exc, theme.DANGER)
+                self.ask_length()
+                return
+
+    def ask_chemistry(self):
+        console, old, structure = self.console, self.old, self.structure
+        same_source = old.get('source') == str(structure.path)
+        charge_default = getattr(self, 'charge', old['charge'] if same_source and 'charge' in old
+                                 else (structure.input_charge or 0))
+        spin_default = getattr(self, 'spin', old['spin'] if same_source and 'spin' in old
+                               else (structure.input_unpaired or 0))
+        recorded = [label for value, label in ((structure.input_charge, 'total charge'),
+                                               (structure.input_unpaired, 'multiplicity')) if value is not None]
+        if recorded and not same_source and not hasattr(self, 'charge'):
+            _say(console, f'Default {" and ".join(recorded)} read from the structure file.', theme.MUTED)
+        while True:
+            self.charge = _prompt('Total charge (e)', default=charge_default, type=int)
+            self.spin = _prompt('Unpaired electrons (multiplicity minus one)', default=spin_default,
+                                type=click.IntRange(min=0))
+            problem = electron_count_problem(structure.electrons, self.charge, self.spin)
+            if not problem:
+                return
+            _say(console, problem, theme.DANGER)
+            if _confirm('Keep these values anyway?', default=False):
+                return
+            charge_default, spin_default = self.charge, self.spin
+
+    def ask_seed_and_relaxation(self):
+        self.seed = _prompt('Random seed', default=self.seed, type=click.IntRange(min=0))
+        self.relax = _confirm('Relax the geometry before MD?', default=self.relax)
+
+    def ask_cutoff(self):
+        from .setup_physics import long_range_settings
+        self._announce_pme()
+        while True:
+            cutoff = _positive(self.console, 'Long-range cutoff (Å)', self.cutoff)
+            try:
+                long_range_settings(self.structure.periodic, self.structure.minimum_cell_height, self.model,
+                                    cutoff=float(cutoff), ensemble=self.ensemble)
+                self.cutoff = cutoff
+                return
+            except ValueError as exc:
+                _say(self.console, exc, theme.DANGER)
+
+    def ask_directory(self):
+        default = getattr(self, 'directory', None)
+        default = str(default) if default is not None else _unused_directory(self.old.get('directory', 'so3lr-run'))
+        while True:
+            answer = _prompt('New output directory', default=default, type=str)
+            try:
+                destination = _entered_path(answer).absolute()
+                if destination.exists() or destination.is_symlink():
+                    raise ValueError('That path already exists. Choose a new output directory.')
+                if not destination.parent.is_dir():
+                    raise ValueError('The parent directory must already exist.')
+                self.directory = destination.resolve()
+                return
+            except (OSError, ValueError, RuntimeError) as exc:
+                _say(self.console, exc, theme.DANGER)
+
+    def use_advanced_defaults(self):
+        old, structure = self.old, self.structure
+        self.dt = Decimal(str(old.get('dt', self.default_dt)))
+        self.seed = old.get('seed', self.default_seed)
+        self.relax = old.get('relax', True)
+        same_input = (old.get('source') == str(structure.path) and old.get('model') == self.model
+                      and old.get('isolated', False) == structure.isolated)
+        self.cutoff = Decimal(str(old['cutoff'])) if same_input and 'cutoff' in old else \
+            Decimal(str(self.proposal['lr_cutoff']))
+
+    def _announce_pme(self):
+        proposal = self.proposal
+        if 'kspace_electrostatics' in proposal:
+            _say(self.console, f'Proposed for this cell: {proposal["lr_cutoff"]:g} Å real-space cutoff, '
+                 'PME electrostatics and PME dispersion. '
+                 f'Electrostatics: {proposal["kspace_smearing"]:g} Å smearing, '
+                 f'{proposal["kspace_spacing"]:g} Å mesh spacing; '
+                 f'dispersion: {proposal["kspace_dispersion_smearing"]:g} Å smearing, '
+                 f'{proposal["kspace_dispersion_spacing"]:g} Å mesh spacing. '
+                 'These are starting settings; convergence depends on the system.')
+
+    def _plan(self):
+        frames, steps = frame_plan(self.duration, self.frame, getattr(self, 'dt', self.default_dt))
+        self.frames, self.steps_per_frame = frames, steps
+        exact = Decimal(frames) * self.frame
+        if exact != self.duration:
+            _say(self.console, f'Duration rounded up to {exact:g} ps ({frames:,} whole frames).', theme.MUTED)
+
+    # -- the full first pass ------------------------------------------------
+    def collect(self):
+        self.ask_system()
+        self.use_advanced_defaults()
+        self.ask_conditions()
+        self.ask_length()
+        self.ask_chemistry()
+        self._announce_pme()
+        _say(self.console, f'Defaults: {float(self.dt):g} fs timestep · seed {self.seed} · relaxation '
+             f'{"on" if self.relax else "off"} · {float(self.cutoff):g} Å cutoff. '
+             'Change them with Edit settings in the review.', theme.MUTED)
+        self.ask_directory()
+        return self
+
+    def edit(self, choice):
+        """Ask one group again; return False when the whole setup restarts."""
+        if choice == 0:
+            return False
+        if choice == 1:
+            self.ask_conditions()
+        elif choice == 2:
+            self.ask_length()
+        elif choice == 3:
+            self.ask_timestep()
+        elif choice == 4:
+            self.ask_chemistry()
+        elif choice == 5:
+            self.ask_seed_and_relaxation()
+        elif choice == 6:
+            self.ask_cutoff()
+        elif choice == 7:
+            self.ask_directory()
+        return True
+
+    # -- results ------------------------------------------------------------
+    def result(self):
+        from .setup_physics import long_range_settings
+        structure = self.structure
+        long_range = long_range_settings(structure.periodic, structure.minimum_cell_height, self.model,
+                                         cutoff=float(self.cutoff), ensemble=self.ensemble)
+        settings = dict(input_file='structure.extxyz', output_file='trajectory.extxyz', log_file='run.log',
+                        restart_save_path='restart.npz', overwrite=False, model=self.model,
+                        engine='auto', precision=DEFAULT_PRECISION, ensemble=self.ensemble,
+                        md_T=float(self.temperature), md_dt=float(self.dt), md_cycles=self.frames,
+                        md_steps=self.steps_per_frame, save_buffer=min(self.default_buffer, self.frames),
+                        total_charge=self.charge, num_unpaired_electrons=self.spin, seed=self.seed,
+                        relax_before_run=self.relax)
+        settings.update(long_range)
+        if self.ensemble == 'nve':
+            settings['init_T'] = float(self.temperature)
+        if self.pressure is not None:
+            settings['md_P'] = float(self.pressure)
+        validate_md_counts(settings)
+        return structure, self.directory, settings
+
+    def memory(self):
+        """Answers to prefill a fresh setup after 'start over'."""
+        structure = self.structure
+        return dict(source=str(structure.path), frame_index=structure.frame_index,
+                    keep_input_momenta=structure.keep_input_momenta, isolated=structure.isolated,
+                    ensemble=self.ensemble, model=self.model, temperature=str(self.temperature),
+                    pressure=str(self.pressure) if self.pressure is not None else None,
+                    dt=str(self.dt), duration=str(self.duration), frame=str(self.frame),
+                    charge=self.charge, spin=self.spin, seed=self.seed, relax=self.relax,
+                    cutoff=str(self.cutoff), directory=str(self.directory))
 
 
 def _collect(console, previous):
-    # Read authoritative CLI defaults only after entering the wizard. There
-    # is no runtime import from the MD implementation and no duplicated table.
-    from .so3lr_cli import (DEFAULT_MD_CYCLES, DEFAULT_MD_STEPS_PER_CYCLE, DEFAULT_SAVE_BUFFER,
-                            DEFAULT_SEED, DEFAULT_TEMPERATURE, DEFAULT_TIMESTEP)
-    from .setup_physics import long_range_settings
-    old = previous or {}
-    while True:
-        _stage(console, 1, 'Structure')
-        structure = _select_structure(console, old)
-        _stage(console, 2, 'Dynamics')
-        while True:
-            ensemble = _ENSEMBLES[_choose(console, 'Dynamics',
-                ('NVT · Nosé–Hoover', 'NVT · Langevin', 'NVE', 'NPT'),
-                _ENSEMBLES.index(old.get('ensemble', 'nvt')) + 1)]
-            if ensemble != 'npt' or structure.periodic:
-                break
-            _say(console, 'NPT requires a fully periodic, positive, axis-aligned orthorhombic cell.', 'red')
-        model = _select_model(console, old.get('model', DEFAULT_MODEL))
-        try:
-            proposal = long_range_settings(structure.periodic, structure.minimum_cell_height, model,
-                                           ensemble=ensemble)
-            break
-        except ValueError as exc:
-            _say(console, exc, 'red')
-            _say(console, 'Choose another structure or model to continue.')
-    temperature = _positive(console, 'Initial temperature (K)' if ensemble == 'nve' else 'Temperature (K)',
-                            old.get('temperature', DEFAULT_TEMPERATURE))
-    if structure.has_momenta:
-        keep = _choose(console, 'The input contains velocities',
-                       (f'Initialize velocities at {temperature:g} K',
-                        f'Retain input velocities ({structure.input_temperature:.1f} K before center-of-mass removal)'),
-                       2 if old.get('keep_input_momenta') else 1) == 1
-        structure = replace(structure, keep_input_momenta=keep)
-    pressure = None
-    if ensemble == 'npt':
-        pressure = _positive(console, 'Pressure (bar)', old.get('pressure') or DEFAULT_PRESSURE)
-    default_ps = Decimal(str(DEFAULT_TIMESTEP)) * DEFAULT_MD_CYCLES * DEFAULT_MD_STEPS_PER_CYCLE / 1000
-    while True:
-        dt = _positive(console, 'Timestep (fs)', old.get('dt', DEFAULT_TIMESTEP))
-        duration = _positive(console, 'Duration (ps)', old.get('duration', default_ps))
-        cadence = click.prompt('Steps per cycle (one trajectory frame per cycle)',
-                               default=old.get('cadence', DEFAULT_MD_STEPS_PER_CYCLE),
-                               type=click.IntRange(min=1))
-        try:
-            cycles = duration_cycles(duration, dt, cadence)
-            break
-        except ValueError as exc:
-            _say(console, exc, 'red')
-    charge = click.prompt('Total charge (e)', default=old.get('charge', 0), type=int)
-    spin = click.prompt('Unpaired electrons (multiplicity minus one)', default=old.get('spin', 0),
-                        type=click.IntRange(min=0))
-    seed = click.prompt('Random seed', default=old.get('seed', DEFAULT_SEED), type=click.IntRange(min=0))
-    relax = click.confirm('Relax the geometry before MD?', default=old.get('relax', True))
-    if 'kspace_electrostatics' in proposal:
-        _say(console, f'Proposed for this cell: {proposal["lr_cutoff"]:g} Å real-space cutoff, '
-             'PME electrostatics and PME dispersion. '
-             f'Electrostatics: {proposal["kspace_smearing"]:g} Å smearing, '
-             f'{proposal["kspace_spacing"]:g} Å mesh spacing; '
-             f'dispersion: {proposal["kspace_dispersion_smearing"]:g} Å smearing, '
-             f'{proposal["kspace_dispersion_spacing"]:g} Å mesh spacing. '
-             'These are starting settings; convergence depends on the system.')
-    same_input = (old.get('source') == str(structure.path) and old.get('model') == model
-                  and old.get('isolated', False) == structure.isolated)
-    cutoff_default = old.get('cutoff', proposal['lr_cutoff']) if same_input else proposal['lr_cutoff']
-    while True:
-        cutoff = _positive(console, 'Long-range cutoff (Å)', cutoff_default)
-        try:
-            long_range = long_range_settings(structure.periodic, structure.minimum_cell_height, model,
-                                             cutoff=float(cutoff), ensemble=ensemble)
-            break
-        except ValueError as exc:
-            _say(console, exc, 'red')
-    while True:
-        answer = click.prompt('New output directory', default=old.get('directory', 'so3lr-run'), type=str)
-        try:
-            destination = _entered_path(answer).absolute()
-            if destination.exists() or destination.is_symlink():
-                raise ValueError('That path already exists. Choose a new output directory.')
-            if not destination.parent.is_dir():
-                raise ValueError('The parent directory must already exist.')
-            destination = destination.resolve()
-            break
-        except (OSError, ValueError, RuntimeError) as exc:
-            _say(console, exc, 'red')
-    settings = dict(input_file='structure.extxyz', output_file='trajectory.extxyz', log_file='run.log',
-                    restart_save_path='restart.npz', overwrite=False, model=model,
-                    engine='auto', precision=DEFAULT_PRECISION, ensemble=ensemble,
-                    md_T=float(temperature), md_dt=float(dt), md_cycles=cycles,
-                    md_steps=cadence, save_buffer=min(DEFAULT_SAVE_BUFFER, cycles),
-                    total_charge=charge, num_unpaired_electrons=spin, seed=seed,
-                    relax_before_run=relax)
-    settings.update(long_range)
-    if ensemble == 'nve':
-        settings['init_T'] = float(temperature)
-    if pressure is not None:
-        settings['md_P'] = float(pressure)
-    validate_md_counts(settings)
-    draft = dict(source=str(structure.path), frame_index=structure.frame_index,
-                 keep_input_momenta=structure.keep_input_momenta, isolated=structure.isolated,
-                 ensemble=ensemble, model=model, temperature=str(temperature),
-                 pressure=str(pressure) if pressure is not None else None, dt=str(dt), duration=str(duration),
-                 cadence=cadence, charge=charge, spin=spin, seed=seed, relax=relax,
-                 cutoff=str(cutoff), directory=str(destination))
-    return structure, destination, settings, draft
+    return _Draft(console, previous or {}).collect()
 
 
 def review_view(structure, destination, settings):
@@ -516,50 +755,59 @@ def review_view(structure, destination, settings):
     from rich.console import Group
     from rich.table import Table
     from rich.text import Text
-    from .formatting import precision_label
+    from .formatting import home_path, precision_label
     from .prompts import terminal_text
     precision = precision_label(settings['precision'])
-    rows = [('Structure', f'{structure.path} ({structure.atoms} atoms; {structure.formula})'),
-            ('Boundary', 'Gas phase · input cell removed from exported copy' if structure.isolated
-             else 'Periodic' if structure.periodic else 'Gas phase'),
-            ('Cell lengths', ', '.join(f'{length:.6g}' for length in structure.cell_lengths) + ' Å'),
-            ('Source frame', f'{structure.frame_index + 1} of {structure.frame_count}'),
-            ('Model', settings['model']), ('Dynamics', settings['ensemble'].upper()),
-            ('Initial temperature' if settings['ensemble'] == 'nve' else 'Target temperature',
-             f"{settings['md_T']:g} K"),
-            ('Run length', f"{settings['md_cycles'] * settings['md_steps']:,} steps · "
-             f"{settings['md_dt']:g} fs · "
-             f"{settings['md_cycles'] * settings['md_steps'] * settings['md_dt'] / 1000:g} ps"),
-            ('Trajectory cadence', f"Every {settings['md_steps']} steps"),
-            ('Checkpoint cadence', f"Every {settings['save_buffer']} cycles · "
-             f"{settings['save_buffer'] * settings['md_steps']:,} steps · "
-             f"{settings['save_buffer'] * settings['md_steps'] * settings['md_dt'] / 1000:g} ps; also at completion"),
-            ('Charge / unpaired electrons', f"{settings['total_charge']} / {settings['num_unpaired_electrons']}"),
-            ('Seed / initial relaxation', f"{settings['seed']} / {settings['relax_before_run']}"),
-            ('Long-range cutoff', f"{settings['lr_cutoff']:g} Å"),
-            ('Engine / precision', f'auto (checked at launch) / {precision}'),
-            ('Output directory', str(destination)),
-            ('Files', 'structure.extxyz, settings.yaml, run.sh, trajectory.extxyz, run.log, restart.npz')]
-    if structure.has_momenta:
-        rows.insert(5, ('Initial velocities',
-                    f'Retain input ({structure.input_temperature:.1f} K before center-of-mass removal)'
-                    if structure.keep_input_momenta else f"Initialize at {settings['md_T']:g} K"))
+    steps = settings['md_cycles'] * settings['md_steps']
+    system = [('Structure', f'{home_path(structure.path)} ({structure.atoms} atoms; {structure.formula})'),
+              ('Boundary', 'Gas phase · input cell removed from exported copy' if structure.isolated
+               else 'Periodic' if structure.periodic else 'Gas phase'),
+              *([('Cell lengths', ', '.join(f'{length:.6g}' for length in structure.cell_lengths) + ' Å')]
+                if structure.periodic else []),
+              ('Source frame', f'{structure.frame_index + 1} of {structure.frame_count}'),
+              ('Charge / unpaired electrons', f"{settings['total_charge']} / {settings['num_unpaired_electrons']}")]
+    dynamics = [('Model', settings['model']), ('Dynamics', settings['ensemble'].upper()),
+                ('Initial temperature' if settings['ensemble'] == 'nve' else 'Target temperature',
+                 f"{settings['md_T']:g} K")]
     if 'md_P' in settings:
-        rows.insert(5, ('Target pressure', f"{settings['md_P']:g} bar"))
+        dynamics.append(('Target pressure', f"{settings['md_P']:g} bar"))
+    if structure.has_momenta:
+        dynamics.append(('Initial velocities',
+                         f'Retain input ({structure.input_temperature:.1f} K before center-of-mass removal)'
+                         if structure.keep_input_momenta else f"Initialize at {settings['md_T']:g} K"))
+    dynamics += [('Run length', f"{steps:,} steps · {settings['md_dt']:g} fs · "
+                  f"{steps * settings['md_dt'] / 1000:g} ps"),
+                 ('Trajectory frames', f"Every {settings['md_steps'] * settings['md_dt'] / 1000:g} ps "
+                  f"({settings['md_steps']:,} steps) · {settings['md_cycles']:,} frames"),
+                 ('Checkpoint cadence', f"Every {settings['save_buffer']} cycles · "
+                  f"{settings['save_buffer'] * settings['md_steps']:,} steps · "
+                  f"{settings['save_buffer'] * settings['md_steps'] * settings['md_dt'] / 1000:g} ps; also at completion"),
+                 ('Seed / initial relaxation', f"{settings['seed']} / {'yes' if settings['relax_before_run'] else 'no'}"),
+                 ('Long-range cutoff', f"{settings['lr_cutoff']:g} Å")]
     if settings.get('kspace_electrostatics') == 'pme':
-        rows.insert(-3, ('Electrostatics', f"PME · {settings['kspace_smearing']:g} Å smearing · "
+        dynamics.append(('Electrostatics', f"PME · {settings['kspace_smearing']:g} Å smearing · "
                          f"{settings['kspace_spacing']:g} Å mesh spacing"))
     if settings.get('kspace_dispersion') == 'pme':
-        rows.insert(-3, ('Dispersion', f"PME · {settings['kspace_dispersion_smearing']:g} Å smearing · "
+        dynamics.append(('Dispersion', f"PME · {settings['kspace_dispersion_smearing']:g} Å smearing · "
                          f"{settings['kspace_dispersion_spacing']:g} Å mesh spacing"))
+    dynamics.append(('Engine / precision', f'auto (checked at launch) / {precision}'))
+    produced = ['trajectory.extxyz', 'run.log', 'restart.npz']
+    if settings.get('relax_before_run'):
+        produced.insert(1, 'trajectory_opt.xyz')
+    output = [('Output directory', home_path(destination)),
+              ('Files', 'structure.extxyz, settings.yaml, run.sh; the run adds ' + ', '.join(produced))]
+    # No border: paths and values must stay copyable as plain text.
     table = Table.grid(padding=(0, 2))
-    table.add_column(style='dim')
+    table.add_column(style=theme.MUTED, no_wrap=True)
     table.add_column(overflow='fold')
-    for label, value in rows:
-        table.add_row(Text(label), Text(terminal_text(value)))
-    return Group(Text('3/3 · Review and start', style='bold yellow'), table,
+    for index, (heading, rows) in enumerate((('System', system), ('Dynamics', dynamics), ('Output', output))):
+        table.add_row(Text(heading, style=theme.ACCENT_BOLD), '')
+        for label, value in rows:
+            table.add_row(Text(label), Text(terminal_text(value)))
+    return Group(Text(''), _stage_rule(3, 'Review and start'), table,
                  Text('Start now saves structure.extxyz, settings.yaml and run.sh, then runs MD in this terminal.'),
-                 Text('Save for later writes those files only. Start later with sh run.sh from the output directory.', style='dim'))
+                 Text('Save for later writes those files only. Start later with sh run.sh from the output directory.',
+                      style=theme.MUTED))
 
 
 def _review(console, structure, destination, settings):
@@ -576,19 +824,27 @@ def launch_setup():
         raise click.ClickException('Guided setup needs an interactive input and output terminal. '
                                    'Use so3lr --settings settings.yaml for noninteractive runs.')
     from rich.console import Console
+    from rich.text import Text
     context = click.get_current_context(silent=True)
     console = Console(file=sys.stdout, markup=False, highlight=False,
                       no_color='NO_COLOR' in os.environ or (context is not None and context.color is False))
-    _say(console, 'SO3LR TAURI · New MD run', 'bold yellow')
-    _say(console, 'Choose a structure, set the dynamics, then review and start or save.')
-    _say(console, '↑/↓ and Enter select · Esc in a menu cancels setup · Ctrl+C cancels anywhere', 'dim')
-    previous = None
+    from .prompts import terminal_text
+    ascii_only = not console.encoding.lower().replace('-', '').startswith('utf')
+    title = Text(terminal_text(f'{theme.BRAND} SO3LR TAURI', ascii_only), style=theme.ACCENT_BOLD)
+    title.append(terminal_text(' · New MD run', ascii_only), style=theme.STRONG)
+    console.print(title)
+    _say(console, 'Choose a structure, set the dynamics, then review and start or save.', theme.MUTED)
+    console.print(theme.controls('↑/↓: move · Enter: select · Esc: cancel setup · Ctrl+C: cancel anywhere',
+                                 ascii_only))
     try:
+        draft = _collect(console, None)
         while True:
-            structure, destination, settings, previous = _collect(console, previous)
+            structure, destination, settings = draft.result()
             _review(console, structure, destination, settings)
             action = _choose(console, 'Next action · Enter starts MD now', REVIEW_ACTIONS)
             if action == 2:
+                if not draft.edit(_choose(console, 'Edit settings', EDIT_CHOICES)):
+                    draft = _collect(console, draft.memory())
                 continue
             if action == 3:
                 _say(console, 'Setup cancelled. No files written.')
@@ -596,9 +852,10 @@ def launch_setup():
             try:
                 settings_path = export_run(destination, structure, settings)
             except (OSError, ValueError) as exc:
-                _say(console, f'Could not save the run: {exc}', 'red')
+                _say(console, f'Could not save the run: {exc}', theme.DANGER)
                 continue
-            _say(console, f'Saved run: {destination}', 'green')
+            from .formatting import home_path
+            _say(console, f'{theme.status_glyph("completed")} Saved run: {home_path(destination)}', theme.SUCCESS)
             if action == 0:
                 _say(console, 'Starting MD now in this terminal.')
                 return settings_path
