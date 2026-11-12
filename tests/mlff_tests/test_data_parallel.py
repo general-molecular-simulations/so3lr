@@ -97,6 +97,7 @@ def test_fit_from_iterator_data_parallel_matches_single_device(tmp_path):
     single-device run on the averaged batches, writes single-device checkpoints,
     and resumes from them."""
     out = _run_on_simulated_devices(f"""
+        import functools
         import jax, jax.numpy as jnp, numpy as np, optax
         import orbax.checkpoint as ocp
         from so3lr.mlff.utils import checkpoint_utils, training_utils
@@ -142,6 +143,11 @@ def test_fit_from_iterator_data_parallel_matches_single_device(tmp_path):
                 use_ema=True, ema_decay=0.5, data_parallel=data_parallel)
             return it
 
+        # tree.map also checks that the two trees have the same structure
+        # (a zip over the leaves passes vacuously when one side is empty).
+        assert_trees_equal = functools.partial(
+            jax.tree.map, functools.partial(np.testing.assert_allclose, rtol=0, atol=1e-6))
+
         def restored(path):
             manager = checkpoint_utils.make_training_checkpoint_manager(path)
             step = manager.latest_step()
@@ -160,8 +166,7 @@ def test_fit_from_iterator_data_parallel_matches_single_device(tmp_path):
         step_single, single = restored('single')
         assert step_dp == step_single == 2, (step_dp, step_single)
         for key in ('raw_params', 'ema_params', 'optimizer_state'):
-            for a, b in zip(jax.tree_util.tree_leaves(dp[key]), jax.tree_util.tree_leaves(single[key])):
-                np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=0, atol=1e-6)
+            assert_trees_equal(dp[key], single[key])
 
         # Checkpoints hold ordinary single-device arrays.
         params = checkpoint_utils.load_params_from_checkpoint(ckpt_dir='dp')
@@ -180,9 +185,7 @@ def test_fit_from_iterator_data_parallel_matches_single_device(tmp_path):
         step_dp, dp = restored('dp')
         step_single, single = restored('single2')
         assert step_dp == step_single == 4
-        for a, b in zip(jax.tree_util.tree_leaves(dp['raw_params']),
-                        jax.tree_util.tree_leaves(single['raw_params'])):
-            np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=0, atol=1e-6)
+        assert_trees_equal(dp['raw_params'], single['raw_params'])
         print('OK')
     """, tmp_path=tmp_path)
     assert 'OK' in out
