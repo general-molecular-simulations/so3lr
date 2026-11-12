@@ -17,8 +17,9 @@ from statistics import median
 import sys
 import time
 
-from .formatting import finite_number as _finite, optimization_status, precision_label, throughput_label, terminal_text
+from .formatting import finite_number as _finite, home_path, optimization_status, show_command, precision_label, throughput_label, terminal_text
 from .terminal import input_mode, live_display, termination_signals
+from . import theme
 
 
 ENERGIES = {
@@ -39,6 +40,15 @@ def _stamp(value):
         return result.replace(tzinfo=timezone.utc) if result.tzinfo is None else result
     except (ValueError, TypeError):
         return None
+
+
+def _checkpoint_step(checkpoint):
+    step = _finite(checkpoint.get('step'))
+    return f'{int(step):,}' if step is not None and step == int(step) else '?'
+
+
+def _show_command(path):
+    return show_command(path)
 
 
 def _age(timestamp, now):
@@ -94,6 +104,10 @@ def observation_status(reader, now):
         age = _age_seconds(observation_timestamp(state), now)
         if age is not None and age > stale_after_seconds(state):
             return 'Stale?'
+    if status == 'Failed' and str(getattr(state, 'message', '') or '').startswith(
+            ('KeyboardInterrupt', 'Terminated by SIG')):
+        # Stopped on request: a user or scheduler decision, not a numerical failure.
+        return 'Interrupted'
     return status
 
 
@@ -514,13 +528,34 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
     from rich.console import Group
     from rich.text import Text
 
-    heading = Text(f'{title} [{unit}]', style='bold')
+    from rich.cells import cell_len
+
+    trace = theme.series_style(key)
+    heading = Text()
+    heading.append(f'{title} [{unit}]', style=theme.STRONG)
     scale = _plot_scale(samples, key, target, reference, label_budget=max(8, width - 10))
     if scale is None:
-        return Group(heading, Text(empty_message, style='dim'))
+        return Group(heading, Text(empty_message, style=theme.MUTED))
     points, decimals, low, high, ylabels = scale
-    heading.append(f'  {points[-1][1]:.{decimals}f}', style='yellow')
+    heading.append(f'  {points[-1][1]:.{decimals}f}', style=f'bold {trace}')
     target, reference = _finite(target), _finite(reference)
+    caption = None
+    if target is not None:
+        caption = f'Thermostat target {target:g} {unit}'
+    elif reference is not None:
+        separator = ' | ' if ascii_only else ' · '
+        approximate = ('~ ' if ascii_only else '≈ ') if reference_approximate else ''
+        suffix = ' (binned)' if reference_approximate else ''
+        caption = f'Reference{separator}latter half: {approximate}{reference:.{decimals}f} {unit}{suffix}'
+    if caption is not None:
+        # The guide's exact value sits on the heading row when it fits.
+        guide_mark = '- ' if ascii_only else '─ '
+        gap = width - cell_len(heading.plain) - cell_len(guide_mark + caption)
+        if gap >= 2:
+            heading.append(' ' * gap)
+            heading.append(guide_mark, style=theme.FAINT)
+            heading.append(caption, style=theme.MUTED)
+            caption = None
     guide = target if target is not None else reference
     left, right = time_bounds or (min(0, min(x for x, _ in points)), max(x for x, _ in points))
     span = right - left or 1.0
@@ -561,18 +596,19 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
     result = [heading]
     for row in range(rows):
         label = ylabels[{0: 0, rows // 2: 1, rows - 1: 2}[row]] if row in (0, rows // 2, rows - 1) else ''
-        line = Text(label.rjust(label_width) + (' |' if ascii_only else ' │'), style='dim')
+        line = Text(label.rjust(label_width), style=theme.MUTED)
+        line.append(' |' if ascii_only else ' │', style=theme.FAINT)
         cells = []
         for mask in grid[row]:
             if mask:
-                cells.append(('*' if ascii_only else chr(0x2800 + mask), 'yellow not dim'))
+                cells.append(('*' if ascii_only else chr(0x2800 + mask), trace))
             elif row == target_row:
                 # A quiet, solid line behind the recorded trace. Do not merge
                 # guide pixels into orange data cells: that makes the guide
                 # change color and invents horizontal pieces in the trace.
                 # The exact reference value is retained in the caption;
                 # this line is positioned at terminal-character resolution.
-                cells.append(('-' if ascii_only else '─', 'dim'))
+                cells.append(('-' if ascii_only else '─', theme.FAINT))
             else:
                 cells.append((' ', None))
         # One span per run of equal style, not one per terminal cell.
@@ -585,16 +621,13 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
         axis[position] = '+' if ascii_only else '┬'
         start = max(0, min(columns - len(label), position - len(label) // 2))
         labels[start:start + len(label)] = label
-    result.append(Text(' ' * label_width + (' +' if ascii_only else ' └') + ''.join(axis), style='dim'))
-    result.append(Text(' ' * (label_width + 2) + ''.join(labels).rstrip(), style='dim'))
-    result.append(Text('Time [ps] (current segment)', style='dim'))
-    if target is not None:
-        result.append(Text(f'Thermostat target {target:g} {unit}', style='dim'))
-    elif reference is not None:
-        separator = ' | ' if ascii_only else ' · '
-        approximate = ('~ ' if ascii_only else '≈ ') if reference_approximate else ''
-        suffix = ' (binned)' if reference_approximate else ''
-        result.append(Text(f'Reference{separator}latter half: {approximate}{reference:.{decimals}f} {unit}{suffix}', style='dim'))
+    result.append(Text(' ' * label_width + (' +' if ascii_only else ' └') + ''.join(axis), style=theme.FAINT))
+    # The time unit sits in the label gutter, under the value axis.
+    tick_row = Text('ps'.rjust(label_width) + '  ', style=theme.FAINT)
+    tick_row.append(''.join(labels).rstrip(), style=theme.MUTED)
+    result.append(tick_row)
+    if caption is not None:
+        result.append(Text(caption, style=theme.MUTED))
     return Group(*result)
 
 
@@ -633,13 +666,63 @@ def _state_plot(state, key, title, unit, width, target, ascii_only, rows=7, labe
                  label_width=label_width, time_bounds=bounds, empty_message=message)
 
 
+def _attached_header(state, width, ascii_only):
+    """Brand and status, a progress bar, then wall-clock facts: three rows."""
+    from rich.cells import cell_len
+    from rich.text import Text
+
+    def label(value):
+        return terminal_text(value, ascii_only)
+
+    status = str(state.status)
+    glyph = theme.status_glyph(status)
+    title = Text(no_wrap=True, overflow='ellipsis')
+    title.append(label(f'{theme.BRAND} SO3LR TAURI'), style=theme.ACCENT_BOLD)
+    title.append(label(f'  {glyph} {status}' if glyph else f'  {status}'),
+                 style=f'bold {theme.status_style(status)}')
+    model = state.info.get('model', state.settings.get('model', state.settings.get('model_path', '')))
+    details = [str(state.settings.get('ensemble', '')).upper(),
+               f"{state.info['atoms']:,} atoms" if isinstance(state.info.get('atoms'), int) else '',
+               str(model or '')]
+    precision = state.info.get('precision', state.settings.get('precision'))
+    if precision is not None:
+        details.append(precision_label(precision))
+    rows = [title]
+    right = label(' · '.join(item for item in details if item))
+    gap = width - cell_len(title.plain) - cell_len(right)
+    if gap >= 3:
+        title.append(' ' * gap)
+        title.append(right, style=theme.MUTED)
+    elif right:
+        rows.append(Text(right, style=theme.MUTED, no_wrap=True, overflow='ellipsis'))
+    progress = label(state.info.get('_attached_compact_progress', ''))
+    ratio = _finite(state.info.get('_attached_ratio'))
+    if progress:
+        line = Text(no_wrap=True, overflow='ellipsis')
+        if ratio is not None:
+            bar_width = max(10, min(40, width - cell_len(progress) - 2))
+            line.append_text(theme.bar(ratio, bar_width, ascii_only))
+            line.append('  ')
+        percent, separator, rest = progress.partition(' | ' if ascii_only else ' · ')
+        line.append(percent, style=theme.STRONG)
+        line.append(separator + rest, style=theme.MUTED)
+        rows.append(line)
+    timing = state.info.get('_attached_timing', '')
+    cycle_seconds = _finite(state.samples[-1].get('seconds_per_step')) if state.samples else None
+    throughput = throughput_label(cycle_seconds, state.dt_fs, state.info.get('atoms'))
+    timing = ' · '.join(item for item in (timing, throughput) if item)
+    if timing:
+        rows.append(Text(label(timing), style=theme.MUTED, no_wrap=True, overflow='ellipsis'))
+    return rows
+
+
 def _controls(state, attached=False, paged=False, multiple=False):
     if attached:
         if state.status in ('Completed', 'Failed'):
             if state.info.get('_journal_enabled') is False:
                 return 'Saved graphs unavailable: SO3LR_JOURNAL=0. Text log retained.'
             # Escape the path here: the paged view keeps layout newlines.
-            return 'View saved graphs: so3lr show ' + terminal_text(shlex.quote(str(state.path.parent)))
+            return 'View saved graphs: so3lr show ' + terminal_text(_show_command(state.path.parent))
         if not state.info.get('_attached_keyboard'):
             if state.info.get('_journal_enabled') is False:
                 return 'Ctrl+C: interrupt MD · saved graphs disabled (SO3LR_JOURNAL=0)'
@@ -667,28 +750,28 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
 
     state = reader.state
     now = now or datetime.now(timezone.utc)
-    style = 'red' if state.status == 'Failed' else 'green' if state.status == 'Completed' else 'yellow'
+    style = theme.DANGER if state.status == 'Failed' else theme.SUCCESS if state.status == 'Completed' else theme.WARNING
     rows, priorities = [], []
 
     def add(value, style='', priority=20):
         rows.append(Text(value, style))
         priorities.append(priority)
 
-    add('SO3LR TAURI  optimization' + (' snapshot' if static else ''), 'bold yellow', 3)
+    add(f'{theme.BRAND} SO3LR TAURI  optimization' + (' snapshot' if static else ''), theme.ACCENT_BOLD, 3)
     add(f'Run {selected + 1}/{count} · {reader.path.parent.name}', priority=9)
     add(f'Last reported state: {state.status}', style, 4)
-    add(_observation_line(reader, now), 'yellow' if observation_status(reader, now) == 'Stale?' else 'dim', 2)
+    add(_observation_line(reader, now), theme.WARNING if observation_status(reader, now) == 'Stale?' else theme.MUTED, 2)
     if origin := origin_label(state):
-        add(origin, 'dim', 9)
-    add('Optimization · latest recorded cycle', 'dim', 13)
+        add(origin, theme.MUTED, 9)
+    add('Optimization · latest recorded cycle', theme.MUTED, 13)
     model = state.info.get('model', state.settings.get('model', state.settings.get('model_path')))
     precision = state.info.get('precision', state.settings.get('precision'))
     if model is not None:
         add(f'Model      {model}', priority=11)
     if precision is not None:
-        add(f'Precision  {precision_label(precision)}', 'dim', 12)
+        add(f'Precision  {precision_label(precision)}', theme.MUTED, 12)
     if state.phase:
-        add(f'Phase      {state.phase}' + (f' · {state.detail}' if state.detail else ''), 'dim', 10)
+        add(f'Phase      {state.phase}' + (f' · {state.detail}' if state.detail else ''), theme.MUTED, 10)
     step, total = (_finite(state.info.get(key)) for key in ('opt_step', 'opt_total_steps'))
     if step is not None:
         progress = f'{int(step):,}/{int(total):,} steps' if total is not None else f'{int(step):,} steps'
@@ -696,27 +779,27 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
     energy, force, target = (_finite(state.info.get(key))
                              for key in ('opt_energy_eV', 'opt_force_max_eVA', 'opt_force_target_eVA'))
     if energy is not None:
-        add(f'Potential energy  {energy:.6f} eV', 'yellow', 8)
+        add(f'Potential energy  {energy:.6f} eV', theme.WARNING, 8)
     if force is not None:
-        add(f'Maximum force     {force:.6g} eV/Å', 'yellow', 6)
+        add(f'Maximum force     {force:.6g} eV/Å', theme.WARNING, 6)
     if target is not None:
-        add(f'Force target      {target:.6g} eV/Å', 'dim', 7)
+        add(f'Force target      {target:.6g} eV/Å', theme.MUTED, 7)
     criterion = optimization_status(state.info, state.status)
-    add(criterion, 'green' if criterion == 'Force criterion met' else 'dim', 1)
+    add(criterion, theme.SUCCESS if criterion == 'Force criterion met' else theme.MUTED, 1)
     if step is None:
-        add('Waiting for the first recorded optimization cycle.', 'dim', 2)
+        add('Waiting for the first recorded optimization cycle.', theme.MUTED, 2)
     if state.message:
         add(state.message, style, 2 if state.status == 'Failed' else 14)
     if state.diagnostic:
         kind, message = state.diagnostic
-        add(f'{kind.upper()}: {message}', 'red' if kind == 'error' else 'yellow', 2)
+        add(f'{kind.upper()}: {message}', theme.DANGER if kind == 'error' else theme.WARNING, 2)
     if reader.error:
-        add('Read error: ' + reader.error, 'yellow', 2)
+        add('Read error: ' + reader.error, theme.WARNING, 2)
     if not compact:
         for key, label in (('output_file', 'Structure path'), ('log_file', 'Log path')):
             if state.settings.get(key):
-                add(f'{label}  {state.settings[key]}', 'dim')
-        add(f'Journal  {reader.path}', 'dim')
+                add(f'{label}  {state.settings[key]}', theme.MUTED)
+        add(f'Journal  {reader.path}', theme.MUTED)
     controls = _controls(state, multiple=count > 1)
     if compact:
         # Quit comes first, so horizontal truncation cannot hide the escape
@@ -725,7 +808,11 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
         if count > 1:
             controls += ' · ←/→: run · o: overview'
     if not static:
-        add(controls, 'dim', 0)
+        hint = theme.controls(controls, ascii_only)
+        if compact:
+            hint.no_wrap, hint.overflow = True, 'crop' if ascii_only else 'ellipsis'
+        rows.append(hint)
+        priorities.append(0)
     if compact and height is not None and len(rows) > height:
         # Every compact Text is exactly one row. Keep controls and the honest
         # outcome before optional metadata, while preserving their display order.
@@ -745,11 +832,11 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
         return RichText(terminal_text(value, ascii_only), style=style)
 
     now = now or datetime.now(timezone.utc)
-    rows = [Text('SO3LR TAURI  live MD' if attached else 'SO3LR TAURI  snapshot' if static else 'SO3LR TAURI  monitor', style='bold yellow')]
+    rows = [Text(theme.BRAND + (' SO3LR TAURI  live MD' if attached else ' SO3LR TAURI  snapshot' if static else ' SO3LR TAURI  monitor'), style=theme.ACCENT_BOLD)]
     if not readers:
-        rows.append(Text('No *.events.jsonl journals found.' if static else 'Waiting for *.events.jsonl journals.', style='dim'))
+        rows.append(Text('No *.events.jsonl journals found.' if static else 'Waiting for *.events.jsonl journals.', style=theme.MUTED))
         if not static:
-            rows.append(Text('Esc/q: close observer', style='dim'))
+            rows.append(Text('Esc/q: close observer', style=theme.MUTED))
         return Group(*rows)
     reader = readers[selected % len(readers)]
     state = reader.state
@@ -760,14 +847,14 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
         run_name = run_name[:-(len(state.run_id) + 1)]
     short_id = f' · {state.run_id[:8]}' if state.run_id else ''
     rows.append(Text(('Run · ' if attached else f'Run {selected + 1}/{len(readers)} · ') + run_name + short_id))
-    status_style = 'green' if state.status == 'Completed' else 'red' if state.status == 'Failed' else 'yellow'
+    status_style = theme.SUCCESS if state.status == 'Completed' else theme.DANGER if state.status == 'Failed' else theme.WARNING
     rows.append(Text(f'{"State" if attached else "Last reported state"}: {state.status}', style=status_style))
     if not attached:
-        rows.append(Text(_observation_line(reader, now), style='dim'))
+        rows.append(Text(_observation_line(reader, now), style=theme.MUTED))
         if origin := origin_label(state):
-            rows.append(Text(origin, style='dim'))
+            rows.append(Text(origin, style=theme.MUTED))
     metadata = Table.grid(padding=(0, 2))
-    metadata.add_column(style='dim', no_wrap=True)
+    metadata.add_column(style=theme.MUTED, no_wrap=True)
     metadata.add_column(overflow='fold')
     model = state.info.get('model', state.settings.get('model', state.settings.get('model_path')))
     if model is not None:
@@ -794,7 +881,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
         metadata.add_row(Text('Message'), Text(state.message))
     rows.append(metadata)
     if attached:
-        rows.extend(Text(state.info.get(key, ''), style='dim')
+        rows.extend(Text(state.info.get(key, ''), style=theme.MUTED)
                     for key in ('_attached_progress', '_attached_time', '_attached_timing'))
     elif state.samples:
         last = state.samples[-1]
@@ -802,9 +889,9 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
         segment = _finite(last.get('segment_step'))
         segment = segment if segment is not None else step - state.start_step
         progress = f'Segment {int(segment):,}/{state.total_steps:,} steps' if state.total_steps else f'Segment step {int(segment):,}'
-        rows.append(Text(f'{progress} · step counter {int(step):,}', style='dim'))
+        rows.append(Text(f'{progress} · step counter {int(step):,} · plots show the current segment', style=theme.MUTED))
     else:
-        rows.append(Text('No MD samples yet.', style='dim'))
+        rows.append(Text('No MD samples yet.', style=theme.MUTED))
     rows.append(Text(''))
     specs = _plot_specs(state, energy, ascii_only)
     label_width = _shared_label_width(state, specs, width)
@@ -812,16 +899,16 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
         if index:
             rows.append(Text(''))
         rows.append(_state_plot(state, key, title, unit, max(24, width), target, ascii_only, label_width=label_width))
-    rows.append(Text(f'{state.sample_count:,} samples · {len(state.samples):,} retained · lines connect recorded samples', style='dim'))
+    rows.append(Text(f'{state.sample_count:,} samples · {len(state.samples):,} retained · lines connect recorded samples', style=theme.MUTED))
     cycle_seconds = _finite(state.samples[-1].get('seconds_per_step')) if state.samples else None
     throughput = throughput_label(cycle_seconds, state.dt_fs, state.info.get('atoms'))
     if throughput:
-        rows.append(Text(f'Cycle throughput {throughput} (excludes startup/I/O)', style='dim'))
+        rows.append(Text(f'Cycle throughput {throughput} (excludes startup/I/O)', style=theme.MUTED))
     if state.checkpoint:
-        rows.append(Text(f"Saved checkpoint · step {state.checkpoint.get('step', '?')} · "
-                         f"{state.checkpoint['path']} · age {_age(state.checkpoint_timestamp, now)}", style='dim'))
+        rows.append(Text(f"Saved checkpoint · step {_checkpoint_step(state.checkpoint)} · "
+                         f"{state.checkpoint['path']} · age {_age(state.checkpoint_timestamp, now)}", style=theme.MUTED))
     artifacts = Table.grid(padding=(0, 2))
-    artifacts.add_column(style='dim', no_wrap=True)
+    artifacts.add_column(style=theme.MUTED, no_wrap=True)
     artifacts.add_column(overflow='fold')
     for key, label in (('output_file', 'Trajectory path'), ('log_file', 'Log path')):
         if state.settings.get(key):
@@ -831,13 +918,13 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     rows.append(artifacts)
     if state.diagnostic:
         kind, message = state.diagnostic
-        rows.append(Text(f'{kind.upper()}: {message}', style='red' if kind == 'error' else 'yellow'))
+        rows.append(Text(f'{kind.upper()}: {message}', style=theme.DANGER if kind == 'error' else theme.WARNING))
     if reader.error:
-        rows.append(Text('Read error: ' + reader.error, style='yellow'))
+        rows.append(Text('Read error: ' + reader.error, style=theme.WARNING))
     if state.malformed or state.unsupported:
-        rows.append(Text(f'Skipped {state.malformed} malformed and {state.unsupported} unsupported events.', style='yellow'))
+        rows.append(Text(f'Skipped {state.malformed} malformed and {state.unsupported} unsupported events.', style=theme.WARNING))
     if not static:
-        rows.append(Text(_controls(state, attached, multiple=len(readers) > 1), style='dim'))
+        rows.append(theme.controls(_controls(state, attached, multiple=len(readers) > 1), ascii_only))
     return Group(*rows)
 
 
@@ -862,46 +949,49 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
     if state.run_id and name.endswith('.' + state.run_id):
         name = name[:-(len(state.run_id) + 1)]
     if attached:
-        model = state.info.get('model', state.settings.get('model', state.settings.get('model_path', '')))
-        header = [Text(f'SO3LR TAURI · {state.status} · {model}', 'bold yellow')]
-        precision = state.info.get('precision', state.settings.get('precision'))
-        if precision is not None:
-            header.append(Text('Precision ' + precision_label(precision), 'dim'))
-        header.extend(Text(state.info.get(key, ''), 'dim')
-                      for key in ('_attached_compact_progress', '_attached_timing'))
+        header = _attached_header(state, width, ascii_only)
     else:
         qualifier = observation_status(reader, now)
         observation = f' · {"Reading history" if qualifier == "Reading" else qualifier}' if qualifier != state.status else ''
-        header = [Text(f'SO3LR TAURI · Run {selected + 1}/{len(readers)} · {name}', 'bold yellow'),
+        header = [Text(f'{theme.BRAND} SO3LR TAURI · Run {selected + 1}/{len(readers)} · {name}', theme.ACCENT_BOLD),
                   Text(f'Last reported state: {state.status}{observation} · {state.phase}',
-                       'red' if state.status == 'Failed' else 'green' if state.status == 'Completed' else 'yellow')]
+                       theme.DANGER if state.status == 'Failed' else theme.SUCCESS if state.status == 'Completed' else theme.WARNING)]
         if origin := origin_label(state):
-            header.append(Text(origin, 'dim'))
+            header.append(Text(origin, theme.MUTED))
     if state.samples and not attached:
         last = state.samples[-1]
         segment = _finite(last.get('segment_step'))
         segment = segment if segment is not None else last['step'] - state.start_step
         progress = f'{int(segment):,}/{state.total_steps:,} steps' if state.total_steps else f'{int(segment):,} steps'
-        header.append(Text(f"Age {_age(observation_timestamp(state), now)} · {str(state.settings.get('ensemble', '')).upper()} · {progress}", 'dim'))
+        header.append(Text(f"Age {_age(observation_timestamp(state), now)} · {str(state.settings.get('ensemble', '')).upper()} · {progress}", theme.MUTED))
     elif not attached:
-        header.append(Text(f'Age {_age(observation_timestamp(state), now)} · ' + (state.detail or 'Waiting for MD samples.'), 'dim'))
+        header.append(Text(f'Age {_age(observation_timestamp(state), now)} · ' + (state.detail or 'Waiting for MD samples.'), theme.MUTED))
     summary = []
     cycle_seconds = _finite(state.samples[-1].get('seconds_per_step')) if state.samples else None
     throughput = throughput_label(cycle_seconds, state.dt_fs, state.info.get('atoms'))
-    if throughput:
+    if throughput and not attached:  # the attached header already shows throughput
         summary.append(f'Cycle {throughput}')
-    if state.checkpoint and not attached:
-        summary.append(f"Checkpoint step {state.checkpoint.get('step', '?')} · age {_age(state.checkpoint_timestamp, now)}")
-    if not summary:
+    if state.checkpoint:
+        summary.append(f"Checkpoint step {_checkpoint_step(state.checkpoint)} · age {_age(state.checkpoint_timestamp, now)}")
+    if not summary and not attached:
         summary.append(f'{state.sample_count:,} recorded samples · lines connect recorded values')
-    footer = [Text(' · '.join(summary), 'dim')]
-    if attached and state.checkpoint:
-        footer.append(Text(f"Checkpoint step {state.checkpoint.get('step', '?')} · age {_age(state.checkpoint_timestamp, now)}", 'dim'))
+    footer = [Text(' · '.join(summary), theme.MUTED)] if summary else []
+    if attached and state.status in ('Completed', 'Failed'):
+        # The final frame stays in scrollback: say where the results are.
+        saved = [str(state.settings[key]) for key in ('output_file', 'log_file') if state.settings.get(key)]
+        if state.checkpoint and state.checkpoint.get('path'):
+            checkpoint = Path(str(state.checkpoint['path']))
+            # Writers report resolved paths; name files inside the run folder relatively.
+            if checkpoint.is_absolute() and checkpoint.parent == state.path.parent.resolve():
+                checkpoint = Path(checkpoint.name)
+            saved.append(str(checkpoint))
+        if saved:
+            footer.append(Text(terminal_text('Saved: ' + ' · '.join(dict.fromkeys(saved))), theme.MUTED))
     if reader.error or state.diagnostic:
         message = 'Read error: ' + reader.error if reader.error else state.diagnostic[0].upper() + ': ' + state.diagnostic[1]
-        footer.append(Text(message, 'yellow'))
+        footer.append(Text(message, theme.WARNING))
     if state.status == 'Failed' and state.message:
-        footer.append(Text(state.message, 'red'))
+        footer.append(Text(state.message, theme.DANGER))
     controls_text = _controls(state, attached, paged=True, multiple=len(readers) > 1)
     if (cell_len(terminal_text(controls_text, ascii_only)) > width
             and not (attached and state.status in ('Completed', 'Failed'))):
@@ -917,21 +1007,23 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
         if any(cell_len(terminal_text(line, ascii_only)) > width for line in controls_text.splitlines()):
             # Keep the close/hide action complete on narrow terminals, too.
             controls_text = controls_text.replace(' · Esc/q:', '\nEsc/q:')
-    controls = Text(controls_text, 'dim', allow_newlines=True)
+    controls = theme.controls(controls_text, ascii_only)
+    controls.no_wrap, controls.overflow = True, 'crop' if ascii_only else 'ellipsis'
     if attached and state.status in ('Completed', 'Failed'):
         # The saved-directory command must stay copyable even for long paths.
         controls.no_wrap, controls.overflow = False, 'fold'
-    budget = height - line_count(Group(*header, *footer, Text('Plot page 1/1'), controls))
+    # Reserve the spacer under the header and a pager row for multi-page views.
+    budget = height - line_count(Group(*header, Text(''), *footer, Text('Plot page 1/1'), controls))
     if budget < 7:
-        compact = [Text('SO3LR live MD' if attached else 'SO3LR monitor', 'bold yellow')]
+        compact = [Text('SO3LR live MD' if attached else 'SO3LR monitor', theme.ACCENT_BOLD)]
         if not attached:
-            compact.append(Text(_observation_line(reader, now), 'dim'))
+            compact.append(Text(_observation_line(reader, now), theme.MUTED))
             if origin := origin_label(state):
-                compact.append(Text(origin, 'dim'))
+                compact.append(Text(origin, theme.MUTED))
         compact.append(Text('Enlarge terminal for plots, or use so3lr show --once.'))
         if not attached:
             if line_count(controls) > height:
-                controls = Text('Esc/q: close observer', 'dim')
+                controls = Text('Esc/q: close observer', theme.MUTED)
             available = max(0, height - line_count(controls))
             # Even a tiny terminal keeps its exit and event age before optional
             # title/origin details. Each candidate is a single cropped row.
@@ -939,12 +1031,11 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
             keep = sorted(sorted(range(len(compact)), key=lambda i: priorities[i])[:available])
             compact = [compact[index] for index in keep]
         return Group(*compact, controls)
-    plot_rows = max(2, min(4, budget - 5))
-    if budget >= 14:
-        # Keep temperature and energy together at 80x24 when possible, while
-        # retaining real axes and the progress/throughput/reference rows.
-        reference_row = int(state.reference(energy)[0] is not None)
-        plot_rows = max(2, min(4, (budget - 10 - reference_row) // 2))
+    # A plot block is its heading, the rows, the axis and the tick labels.
+    plot_rows = max(2, min(12, budget - 3))
+    if budget >= 12:
+        # Keep temperature and energy together on one page when possible.
+        plot_rows = max(2, min(12, (budget - 7) // 2))
     blocks = []
     specs = _plot_specs(state, energy, ascii_only)
     label_width = _shared_label_width(state, specs, width)
@@ -968,8 +1059,9 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
             content.append(Text(''))
         content.append(block)
     names = ' + '.join(title for title, _ in pages[page_index])
-    return Group(*header, *content, *footer,
-                 Text(f'Plot page {page_index + 1}/{len(pages)} · {names}', 'dim'), controls)
+    # A single page needs no pager; its reserved row separates plots from the footer.
+    pager = [Text(f'Plot page {page_index + 1}/{len(pages)} · {names}', theme.MUTED) if len(pages) > 1 else Text('')]
+    return Group(*header, Text(''), *content, *footer, *pager, controls)
 
 
 class _MonitorView:

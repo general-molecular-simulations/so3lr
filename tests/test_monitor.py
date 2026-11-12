@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from so3lr.cli import monitor
+from so3lr.cli import monitor, theme
 
 
 def event(seq, kind, **data):
@@ -346,7 +346,7 @@ def test_cycle_throughput_and_checkpoint_age_are_explicit(tmp_path):
     assert 'restart.npz · age 12s' in text
     compact = render(reader, now=now, height=24)
     assert 'Cycle 30.857 ns/day · 1.56e-04 s/atom/step' in compact
-    assert 'Checkpoint step 3000 · age 12s' in compact
+    assert 'Checkpoint step 3,000 · age 12s' in compact
     assert len(compact.splitlines()) <= 24
 
 
@@ -416,8 +416,10 @@ def test_short_npt_terminal_pages_preserve_complete_plots_and_quit(tmp_path, hei
         assert len(text.splitlines()) <= height
         assert '↑/↓: plot page' in text and 'q: detach' in text
         chart_count = sum(title in text for title in ('Temperature [K]', 'Total energy [eV]', 'Volume [Å³]'))
-        assert sum('│' in line for line in text.splitlines()) == chart_count * (4 if height == 18 else 3)
-        assert text.count('Time [ps] (current segment)') == chart_count
+        plot_rows = sum('│' in line for line in text.splitlines())
+        # Every chart on a page gets the same, readable height.
+        assert plot_rows % chart_count == 0 and plot_rows // chart_count >= 3
+        assert sum(line.lstrip().startswith('ps ') for line in text.splitlines()) == chart_count
     if height == 24:
         assert 'Temperature [K]' in pages[0] and 'Total energy [eV]' in pages[0]
         assert 'Plot page 1/2' in pages[0]
@@ -626,9 +628,9 @@ def test_time_axis_includes_intermediate_numbered_ticks():
         plot = monitor._plot([{'time_ps': 0, 'temperature_K': 300},
                               {'time_ps': 5, 'temperature_K': 301}],
                              'temperature_K', 'Temperature', 'K', 80, ascii_only=ascii_only)
-        axis, labels = plot.renderables[-3:-1]
+        axis, labels = plot.renderables[-2:]
         assert axis.plain.count('+' if ascii_only else '┬') == (6 if ascii_only else 5)
-        assert labels.plain.split() == ['0', '1.25', '2.5', '3.75', '5']
+        assert labels.plain.split() == ['ps', '0', '1.25', '2.5', '3.75', '5']
 
 
 @pytest.mark.parametrize('columns', [8, 12, 20, 30])
@@ -647,7 +649,7 @@ def test_time_ticks_adapt_without_overlapping_labels(columns, right):
 
 def test_time_zero_axis_has_no_invented_elapsed_time():
     plot = monitor._plot([{'time_ps': 0, 'energy_eV': -39}], 'energy_eV', 'Total energy', 'eV', 80)
-    assert plot.renderables[-2].plain.split() == ['0']
+    assert plot.renderables[-1].plain.split() == ['ps', '0']
     assert monitor._time_ticks(0, 0, 60) == [(0, '0')]
 
 
@@ -694,7 +696,7 @@ def test_energy_mean_survives_plot_decimation_without_extrema_bias(tmp_path):
         assert estimated and abs(value - (expected + offset)) < 0.02
         assert len(state.property_means[key].bins) <= monitor.MAX_MEAN_BINS
     plot = monitor._state_plot(state, 'energy_eV', 'Total energy', 'eV', 80, None, False)
-    assert '≈' in plot.renderables[-1].plain and '(binned)' in plot.renderables[-1].plain
+    assert '≈' in plot.renderables[0].plain and '(binned)' in plot.renderables[0].plain
 
 
 def test_whole_time_bins_still_give_exact_sample_mean(monkeypatch):
@@ -728,13 +730,13 @@ def test_attached_total_energy_reference_and_checkpoint_fit_short_terminal(tmp_p
     reader.state.samples[-1]['seconds_per_step'] = 0.0014
     reader.state.info.update(_attached_keyboard=True,
                              _attached_compact_progress='50% · 1,000/2,000 steps · 0.500 / 1.000 ps this run',
-                             _attached_timing='Elapsed 00:01 · ETA 00:01')
+                             _attached_timing='MD elapsed 00:01 · ETA 00:01')
     reader.state.consume(event(200, 'checkpoint', step=3000, path='restart.npz'))
     text = render(reader, energy='energy_eV', height=24, attached=True)
     assert 'Temperature [K]' in text and 'Total energy [eV]' in text
     assert 'Reference · latter half' in text
     assert 'Checkpoint' in text and 'q: hide plots' in text
-    assert 's/atom/step' in text and 'Elapsed' in text
+    assert 's/atom/step' in text and 'MD elapsed' in text
     assert len(text.splitlines()) <= 24
 
 
@@ -1106,6 +1108,7 @@ def test_solid_guide_preserves_trace_and_never_colors_guide_as_data():
     bare = monitor._plot(rows, 'energy_eV', 'Total energy', 'eV', 60)
     guided = monitor._plot(rows, 'energy_eV', 'Total energy', 'eV', 60, reference=0.5)
     # Bounds are unchanged; 0.5 maps to pixel14 (the third dot of row3).
+    trace_style = theme.series_style('energy_eV')
     base = bare.renderables[4].plain.split('│')[1]
     guide = guided.renderables[4]
     trace = guide.plain.split('│')[1]
@@ -1117,11 +1120,11 @@ def test_solid_guide_preserves_trace_and_never_colors_guide_as_data():
         else:
             assert new == '─'
             offset = guide.plain.index('│') + 1 + index
-            assert not any(span.start <= offset < span.end and 'yellow' in str(span.style)
+            assert not any(span.start <= offset < span.end and str(span.style) == trace_style
                            for span in guide.spans)
     assert crosses
-    assert any('dim' == str(span.style) for span in guide.spans)
-    assert any('yellow not dim' == str(span.style) for span in guide.spans)
+    assert any(theme.FAINT == str(span.style) for span in guide.spans)
+    assert any(trace_style == str(span.style) for span in guide.spans)
     ascii_plot = monitor._plot(rows, 'energy_eV', 'Total energy', 'eV', 60, reference=0.5, ascii_only=True)
     assert '---' in ascii_plot.renderables[4].plain
     assert '*' in ascii_plot.renderables[4].plain
@@ -1160,8 +1163,8 @@ def test_all_stacked_plot_axes_align_with_wide_values_and_missing_tail(tmp_path,
                     continue
                 positions.add(line.index(axis))
                 right_edges.add(len(line))
-            if line.startswith('Time [ps]'):
-                time_labels.add(lines[index - 1])
+            if line.lstrip().startswith('ps '):
+                time_labels.add(line)
         if height is not None:
             assert len(lines) <= height
             assert 'q' in lines[-1]
@@ -1338,3 +1341,25 @@ def test_short_optimization_views_keep_controls_and_outcome(tmp_path, height, st
     assert text.splitlines()[-1].startswith('Esc/q:')
     if height >= 3:
         assert monitor.optimization_status(reader.state.info, status) in text
+
+
+def test_completed_attached_paged_view_lists_saved_files(tmp_path):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, [*samples(), event(200, 'run_completed')])
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    reader.state.settings.update(output_file='trajectory.extxyz', log_file='run.log')
+    reader.state.consume(event(201, 'checkpoint', step=2000, path=str(tmp_path.resolve() / 'restart.npz')))
+    text = render(reader, height=24, attached=True)
+    assert 'Saved: trajectory.extxyz · run.log · restart.npz' in text
+    assert 'Checkpoint step 2,000' in text
+    assert len(text.splitlines()) <= 24
+
+
+def test_show_command_abbreviates_home_and_stays_shell_safe(monkeypatch, tmp_path):
+    home = tmp_path / 'home'
+    monkeypatch.setenv('HOME', str(home))
+    assert monitor._show_command(home / 'runs' / 'water 300K') == "~/'runs/water 300K'"
+    assert monitor._show_command(home / 'runs') == '~/runs'
+    assert monitor._show_command(home) == '~'
+    assert monitor._show_command(tmp_path / 'home2' / 'x') == str(tmp_path / 'home2' / 'x')

@@ -144,17 +144,22 @@ def selection_view(title, choices, selected=0, height=24):
     visible = max(3, min(14, height - 6))
     start = max(0, min(selected - visible // 2, len(choices) - visible))
     end = min(len(choices), start + visible)
-    lines = [Text(terminal_text(title), style='bold', no_wrap=True, overflow='ellipsis'),
-             Text('↑/↓ move · Enter choose · Esc cancel', style='dim')]
+    from . import theme
+    hint = theme.controls('↑/↓: move · Enter: choose · Esc: cancel')
+    hint.no_wrap, hint.overflow = True, 'ellipsis'
+    lines = [Text(terminal_text(title), style=theme.STRONG, no_wrap=True, overflow='ellipsis'), hint]
     if start:
-        lines.append(Text(f'  ↑ {start} more', style='dim'))
+        lines.append(Text(f'  ↑ {start} more', style=theme.MUTED))
     for index in range(start, end):
-        marker = '›' if index == selected else ' '
-        lines.append(Text(f'{marker} {terminal_text(choices[index])}',
-                          style='bold yellow' if index == selected else '',
-                          no_wrap=True, overflow='ellipsis'))
+        line = Text(no_wrap=True, overflow='ellipsis')
+        if index == selected:
+            line.append('› ', style=theme.ACCENT_BOLD)
+            line.append(terminal_text(choices[index]), style=theme.ACCENT_BOLD)
+        else:
+            line.append('  ' + terminal_text(choices[index]))
+        lines.append(line)
     if end < len(choices):
-        lines.append(Text(f'  ↓ {len(choices) - end} more', style='dim'))
+        lines.append(Text(f'  ↓ {len(choices) - end} more', style=theme.MUTED))
     return Group(*lines)
 
 
@@ -199,5 +204,9 @@ def choose(console, title, choices, default=0):
                 elif event == 'page_down':
                     selected = min(len(choices) - 1, selected + visible)
                 live.update(render(), refresh=True)
-    console.print(Text(terminal_text(f'{title}: {choices[selected]}')))
+    from . import theme
+    # Answered questions recede; the next question keeps the focus.
+    summary = Text('✓ ' if console.encoding.lower().startswith('utf') else '+ ', style=theme.SUCCESS)
+    summary.append(terminal_text(f'{title}: {choices[selected]}'), style=theme.MUTED)
+    console.print(summary)
     return selected

@@ -171,7 +171,7 @@ def test_resumed_progress_measures_only_new_steps(monkeypatch):
         assert '0/4,000 steps' in initial
         assert 'ETA estimating' in initial
         assert 'ns/day' not in initial
-        assert 'Saved restart' not in initial
+        assert 'Checkpoint step' not in initial
         reporter.progress(12_000, temperature=300.2, potential_energy=-12.3, energy=-11.8,
                           time_per_step=0.065)
         text = render(reporter)
@@ -191,7 +191,7 @@ def test_paths_are_literal_and_saved_only_after_notification(monkeypatch):
     path = '/tmp/[red]water[/red].npz'
     with ui.run_display({'input_file': '[bold]input.xyz'}) as reporter:
         assert '[bold]input.xyz' in render(reporter)
-        assert 'Saved restart' not in render(reporter)
+        assert 'Checkpoint step' not in render(reporter)
         reporter.checkpoint(1_000, path)
         assert path in render(reporter)
 
@@ -890,7 +890,7 @@ def test_attached_plots_update_before_completion_without_reading_journal(monkeyp
         assert 'mixed (float32 model; float64 dynamics)' in frames[1]
         assert 'CPU 0' in frames[1] and 'Pallas' in frames[1]
         assert 'ns/day' in frames[1] and 's/atom/step' in frames[1]
-        assert '50%' in frames[1] and 'Elapsed' in frames[1] and 'ETA' in frames[1]
+        assert '50%' in frames[1] and 'MD elapsed' in frames[1] and 'ETA' in frames[1]
         assert reporter._state.samples[-1]['energy_eV'] == -37
         assert reporter._state.samples[-1]['conserved_energy_eV'] == -36
         assert 'detach' not in frames[1]
@@ -952,7 +952,7 @@ def test_activity_updates_time_without_advancing_simulation(monkeypatch, unicode
         clock[0] = 10.0 + tick * 0.5
         console.print(activity)
     text = output.getvalue()
-    assert '00:00 elapsed' in text and '00:05 elapsed' in text
+    assert '00:00 since launch' in text and '00:05 since launch' in text
     assert 'last update 00:05 ago' in text
     assert '%' not in text and 'steps' not in text
     assert len({line[0] for line in text.splitlines()}) >= 3
@@ -995,7 +995,7 @@ def test_attached_keyboard_pages_selects_energy_and_toggles_plots_without_stoppi
         first_page = render(reporter, height=24)
         assert len(first_page.splitlines()) <= 24
         assert 'Temperature [K]' in first_page and 'Total energy [eV]' in first_page
-        assert 'Elapsed' in first_page and 'ETA' in first_page and '10%' in first_page
+        assert 'MD elapsed' in first_page and 'ETA' in first_page and '10%' in first_page
         assert 'mixed (float32 model; float64 dynamics)' in first_page
         assert 'ns/day' in first_page and 's/atom/step' in first_page
         assert 'q: hide plots' in first_page and 'Ctrl+C: interrupt MD' in first_page
@@ -1249,7 +1249,7 @@ finally:
                     and b'Total energy [eV]' in capture):
                 sent_at_step = int(marker.read_text() or 0)
                 os.write(master, key.encode())
-            elif key == 'q' and restore_offset is None and b'q: show plots' in capture:
+            elif key == 'q' and restore_offset is None and b'show plots' in capture:
                 restore_offset = len(capture)
                 os.write(master, b'q')
         drain_deadline = time.monotonic() + 1
@@ -1270,7 +1270,7 @@ finally:
     if key == 'q':
         assert process.returncode == 0
         assert int(marker.read_text()) == 60 > sent_at_step
-        assert b'q: show plots' in capture
+        assert b'show plots' in capture
         assert restore_offset is not None
         assert b'Temperature [K]' in capture[restore_offset:]
     else:
@@ -1392,3 +1392,11 @@ def test_ascii_activity_truncates_without_adding_unicode():
     console = Console(file=output, width=20, color_system=None)
     console.print(ui._Activity('Compiling a long molecular force field', 0, 0, unicode=False))
     assert output.getvalue().isascii()
+
+
+@pytest.mark.parametrize('seconds, label', [(0, '00:00'), (75, '01:15'), (3725, '1:02:05'),
+                                            (86400 * 2 + 3 * 3600 + 4 * 60 + 5, '2d 03:04:05')])
+def test_duration_label_spells_out_days(seconds, label):
+    from so3lr.cli.formatting import duration_label
+    assert duration_label(seconds) == label
+

@@ -116,3 +116,12 @@ def test_prompt_choices_use_the_same_control_escaping():
         selection_view('Choose molecule', ['[bold]ethanol\x1b[2J\nα.xyz']))
     assert '\x1b' not in output.getvalue()
     assert '[bold]ethanol\\x1b[2J\\x0aα.xyz' in output.getvalue()
+
+
+def test_relaxation_that_used_its_budget_is_not_shown_as_still_relaxing():
+    from so3lr.cli.formatting import optimization_status
+    info = {'opt_step': 100, 'opt_total_steps': 100, 'opt_force_max_eVA': 0.03}
+    assert optimization_status(info, 'Running') == 'Step budget finished (no force target)'
+    assert optimization_status({**info, 'opt_step': 40}, 'Running') == 'Relaxing geometry'
+    assert optimization_status({**info, 'opt_force_target_eVA': 0.01}, 'Running') == (
+        'Step budget reached; force criterion not met')

@@ -16,9 +16,44 @@ def terminal_text(value, ascii_only=False, *, allow_newlines=False):
         return text
     for glyph, replacement in (('←/→', 'left/right'), ('↑/↓', 'up/down'),
                                ('Å³', 'A^3'), ('Å', 'A'), ('≤', '<='),
-                               ('━', '-'), ('─', '-'), ('·', '|'), ('≈', '~')):
+                               ('━', '-'), ('─', '-'), ('┄', '-'), ('╸', '-'), ('·', '|'), ('≈', '~'),
+                               ('◆', '*'), ('●', '*'), ('○', 'o'), ('◌', 'o'), ('✓', '+'), ('✕', 'x'), ('■', '#'),
+                               ('✦', '*'), ('✧', '*'), ('›', '>'), ('×', 'x')):
         text = text.replace(glyph, replacement)
     return text.encode('ascii', errors='backslashreplace').decode('ascii')
+
+
+def home_path(path):
+    """Abbreviate the home directory as ``~`` for display."""
+    import os
+    text = str(path)
+    home = os.path.expanduser('~').rstrip(os.sep)
+    if home and home != '~' and (text == home or text.startswith(home + os.sep)):
+        return '~' + text[len(home):]
+    return text
+
+
+def show_command(path):
+    """A copyable ``so3lr show`` argument; a leading ``~`` stays unquoted for the shell."""
+    import os
+    import shlex
+    text = home_path(path)
+    if text == '~':
+        return text
+    if text.startswith('~' + os.sep):
+        return '~' + os.sep + shlex.quote(text[2:])
+    return shlex.quote(text)
+
+
+def duration_label(seconds):
+    """Wall time as mm:ss, h:mm:ss, or 2d 03:04:05 for multi-day runs."""
+    value = max(0, int(seconds))
+    days, value = divmod(value, 86400)
+    hours, value = divmod(value, 3600)
+    minutes, seconds = divmod(value, 60)
+    if days:
+        return f'{days}d {hours:02d}:{minutes:02d}:{seconds:02d}'
+    return f'{hours:d}:{minutes:02d}:{seconds:02d}' if hours else f'{minutes:02d}:{seconds:02d}'
 
 
 def precision_label(value):
@@ -78,7 +113,11 @@ def optimization_status(info, status):
     force = finite_number(info.get('opt_force_max_eVA'))
     if target is not None and force is not None and 0 <= force <= target:
         return 'Force criterion met'
-    if str(status).lower() in ('complete', 'completed'):
+    step = finite_number(info.get('opt_step'))
+    total = finite_number(info.get('opt_total_steps'))
+    # A relaxation before MD finishes while the run itself is still running.
+    budget_used = step is not None and total is not None and total > 0 and step >= total
+    if str(status).lower() in ('complete', 'completed') or budget_used:
         return ('Step budget reached; force criterion not met' if target is not None
                 else 'Step budget finished (no force target)')
     return 'Relaxing geometry'

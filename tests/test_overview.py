@@ -237,3 +237,32 @@ def test_empty_overview_and_unknown_state_are_renderable():
 def test_overview_import_is_numerically_cheap():
     code = "from so3lr.cli import overview; import sys; assert not {'jax', 'flax', 'ase'} & sys.modules.keys()"
     subprocess.run([sys.executable, '-c', code], check=True)
+
+
+@pytest.mark.parametrize('ascii_only', [False, True])
+def test_wide_overview_draws_progress_bars_and_narrow_keeps_percentages(ascii_only):
+    readers = [reader('/runs/half/run.events.jsonl'),
+               reader('/runs/new/run.events.jsonl', status='Started', samples=[])]
+    wide = render(readers, width=110, ascii_only=ascii_only)
+    assert 'Progress' in wide
+    half = next(line for line in wide.splitlines() if 'half' in line)
+    assert ('###' if ascii_only else '━━━') in half and '50%' in half
+    new = next(line for line in wide.splitlines() if ' new ' in line)
+    assert '%' not in new
+    narrow = render(readers, width=80, ascii_only=ascii_only)
+    assert 'Progress' not in narrow and '50%' in narrow
+
+
+def test_overview_folder_abbreviates_home(monkeypatch, tmp_path):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    readers = [reader(tmp_path / 'runs' / name / 'run.events.jsonl') for name in ('a', 'b')]
+    assert 'Folder: ~/runs' in render(readers)
+
+
+def test_interrupted_runs_are_not_counted_as_failures():
+    readers = [reader('/runs/a/run.events.jsonl', status='Failed', message='KeyboardInterrupt: interrupted'),
+               reader('/runs/b/run.events.jsonl', status='Failed', message='Terminated by SIGTERM'),
+               reader('/runs/c/run.events.jsonl', status='Failed', message='RuntimeError: diverged')]
+    text = render(readers)
+    assert '1 failed' in text and '2 interrupted' in text
+    assert text.count('Interrupted') == 2

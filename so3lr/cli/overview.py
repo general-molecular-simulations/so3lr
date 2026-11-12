@@ -5,7 +5,8 @@ import math
 import os
 from pathlib import Path
 
-from .formatting import finite_number as _number, terminal_text as _literal
+from . import theme
+from .formatting import finite_number as _number, home_path, terminal_text as _literal
 from .monitor import observation_status, observation_timestamp, origin_label
 
 
@@ -94,6 +95,17 @@ def _metric(value, width, decimals):
     return label if len(label) <= width else f'{value:.4g}'
 
 
+def _progress_cell(percent, ascii_only):
+    from rich.text import Text
+    try:
+        ratio = float(percent.rstrip('%')) / 100
+    except ValueError:
+        return Text(percent, style=theme.MUTED)
+    cell = theme.bar(ratio, 7, ascii_only)
+    cell.append(f' {percent:>4}')
+    return cell
+
+
 def _age(timestamp, now):
     if not isinstance(timestamp, datetime):
         return '?'
@@ -127,42 +139,47 @@ def _render(readers, width, height, now, ascii_only, page, static):
         return Text(_literal(value, ascii_only), style=style, no_wrap=True,
                     overflow='crop' if ascii_only else 'ellipsis')
 
+    def keys(value):
+        text = theme.controls(value, ascii_only)
+        text.no_wrap, text.overflow = True, 'crop' if ascii_only else 'ellipsis'
+        return text
+
     count_label = f'{len(states)} run' + ('' if len(states) == 1 else 's')
     title = 'Run overview snapshot' if static else 'Run overview'
-    header = [line(f'SO3LR TAURI{separator}{title}{separator}{count_label}', 'bold yellow')]
+    header = [line(f'{theme.BRAND} SO3LR TAURI{separator}{title}{separator}{count_label}', theme.ACCENT_BOLD)]
     statuses = [observation_status(reader, now) for reader in readers]
     counts = Counter(statuses)
     waiting = counts['Started']
     classified = sum(counts[status] for status in ('Running', 'Completed', 'Failed')) + waiting
     summary = [f'{counts[status]} {status.lower()}' for status in ('Running', 'Completed', 'Failed')]
     summary.append(f'{waiting} started/waiting' if has_optimization else f'{waiting} waiting for MD')
-    for status, label in (('Stale?', 'stale?'), ('Reading', 'reading history'),
+    for status, label in (('Interrupted', 'interrupted'), ('Stale?', 'stale?'), ('Reading', 'reading history'),
                           ('Read error', 'read errors'), ('Unknown', 'unknown')):
         if counts[status]:
             summary.append(f'{counts[status]} {label}')
             classified += counts[status]
     if len(states) > classified:
         summary.append(f'{len(states) - classified} other')
-    header.append(line('Reported: ' + separator.join(summary), 'dim'))
+    header.append(line('Reported: ' + separator.join(summary), theme.MUTED))
     if folder is not None:
-        header.append(line('Folder: ' + str(folder), 'dim'))
+        header.append(line('Folder: ' + home_path(folder), theme.MUTED))
 
     progress_note = ('Steps: MD segment / optimization iteration; restart offsets excluded.' if has_optimization
                      else 'Steps/%: current segment; restart offsets excluded.')
-    footer = [line(progress_note, 'dim')]
+    footer = [line(progress_note, theme.MUTED)]
     if counts['Stale?']:
-        footer.append(line('Stale? = no recent update; current job status unknown.', 'yellow'))
+        footer.append(line('Stale? = no recent update; current job status unknown.', theme.WARNING))
     if counts['Reading']:
-        footer.append(line('Reading history: latest recorded state has not been read yet.', 'dim'))
-    footer.append(line('Age: last journal event (? unknown); job liveness unverified.', 'dim'))
+        footer.append(line('Reading history: latest recorded state has not been read yet.', theme.MUTED))
+    footer.append(line('Age: last journal event (? unknown); job liveness unverified.', theme.MUTED))
     read_errors = sum(bool(getattr(reader, 'error', '')) for reader in readers)
     if read_errors:
         label = 'error' if read_errors == 1 else 'errors'
-        footer.append(line(f'{read_errors} journal read {label}; cached values may be outdated.', 'red'))
+        footer.append(line(f'{read_errors} journal read {label}; cached values may be outdated.', theme.DANGER))
     controls = ('Esc/q: close | Left/Right: individual runs | Up/Down: overview page' if ascii_only else
                 'Esc/q: close · ←/→: individual runs · ↑/↓: overview page')
     if not states:
-        return Group(*header, line('No run journals found.'), *([] if static else [line(controls, 'dim')]))
+        return Group(*header, line('No run journals found.'), *([] if static else [keys(controls)]))
 
     # Every table row has a fixed one-line height. Reserve a header, column
     # labels and footer before choosing the page; never cut a row in half.
@@ -173,7 +190,7 @@ def _render(readers, width, height, now, ascii_only, page, static):
             compact.append(header[0])
         if height >= 2:
             compact.append(line(f'Age {_age(observation_timestamp(states[0]), now)} (run 1); enlarge for all rows.'))
-        compact.append(line(controls, 'dim'))
+        compact.append(keys(controls))
         return Group(*compact)
     capacity = len(states) if height is None else max(1, int(height) - overhead)
     pages = max(1, math.ceil(len(states) / capacity))
@@ -185,11 +202,13 @@ def _render(readers, width, height, now, ascii_only, page, static):
     if has_optimization and width >= 76:
         columns.append(('Mode', 4, 'left'))
     has_origin = any(origin_label(state) for state in states)
-    columns.extend([('State', 10, 'left'), ('Age', 6, 'right')])
+    columns.extend([('State', 11, 'left'), ('Age', 6, 'right')])
     if width >= 52:
         columns.append((progress_title, 15 if width >= 76 else 12, 'right'))
+    # Wide terminals get a bar next to the percentage; narrower ones keep the number.
+    bar_column = width >= (120 if has_origin else 100)
     if width >= (100 if has_origin else 76):
-        columns.append(('%', 5, 'right'))
+        columns.append(('Progress', 12, 'left') if bar_column else ('%', 5, 'right'))
     if width >= (100 if has_origin else 76):
         columns.append(('T [K]', 7, 'right'))
     if width >= (140 if has_origin else 100):
@@ -208,8 +227,9 @@ def _render(readers, width, height, now, ascii_only, page, static):
         sample = {} if optimization else _sample(state)
         steps, percent = _steps(state, sample)
         status = statuses[index]
-        style = {'Running': 'yellow', 'Completed': 'green', 'Failed': 'red',
-                 'Stale?': 'yellow', 'Read error': 'red'}.get(status, 'dim')
+        style = {'Running': theme.WARNING, 'Completed': theme.SUCCESS, 'Failed': theme.DANGER,
+                 'Interrupted': theme.WARNING, 'Stale?': theme.WARNING,
+                 'Read error': theme.DANGER}.get(status, theme.MUTED)
         name = _literal(names[index], ascii_only)
         if has_optimization and width < 76:
             prefix = 'OPT:' if optimization else 'MD:'
@@ -219,15 +239,17 @@ def _render(readers, width, height, now, ascii_only, page, static):
         values = {'#': str(index + 1), 'Run': name,
                   'Mode': 'OPT' if optimization else 'MD',
                   'State': _literal(status, ascii_only), progress_title: steps, '%': percent,
+                  'Progress': _progress_cell(percent, ascii_only),
                   'T [K]': _metric(sample.get('temperature_K'), 7, 1),
                   'Total E [eV]': _metric(sample.get('energy_eV'), 12, 6),
                   'Age': _age(observation_timestamp(state), now),
                   'Host / Slurm': _literal(origin_label(state, compact=True) or '-', ascii_only)}
-        table.add_row(*(Text(values[title], style=style if title == 'State' else '')
+        table.add_row(*(values[title] if isinstance(values[title], Text)
+                        else Text(values[title], style=style if title == 'State' else '')
                         for title, _, _ in columns))
     if not static:
-        footer.append(line(f'Overview page {page_index + 1}/{pages}{separator}Runs {first + 1}-{last} of {len(states)}', 'dim'))
-        footer.append(line(controls, 'dim'))
+        footer.append(line(f'Overview page {page_index + 1}/{pages}{separator}Runs {first + 1}-{last} of {len(states)}', theme.MUTED))
+        footer.append(keys(controls))
     return Group(*header, table, *footer)
 
 

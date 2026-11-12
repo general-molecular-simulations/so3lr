@@ -19,7 +19,8 @@ from types import SimpleNamespace
 
 from .telemetry import EventJournal
 from .run_log import RunLog
-from .formatting import finite_number as _finite, precision_label, throughput_label, optimization_status, terminal_text
+from . import theme
+from .formatting import duration_label, finite_number as _finite, home_path, precision_label, throughput_label, optimization_status, terminal_text
 from .terminal import TerminationSignal as _TerminationSignal, termination_signals as _termination_signals, stop_live
 
 
@@ -117,11 +118,17 @@ def failure_details(exc):
     return terminal_text(f'Full traceback: {path}')
 
 
+def _display_path(path):
+    """A path relative to the working directory when inside it, else with ~ for home."""
+    try:
+        relative = os.path.relpath(path)
+    except ValueError:
+        relative = str(path)
+    return home_path(path if relative.startswith('..') else relative)
+
+
 def _seconds(value):
-    value = max(0, int(value))
-    hours, remainder = divmod(value, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f'{hours:d}:{minutes:02d}:{seconds:02d}' if hours else f'{minutes:02d}:{seconds:02d}'
+    return duration_label(value)
 
 
 @dataclass(frozen=True)
@@ -139,13 +146,13 @@ class _Activity:
         # calm during long compilations and is visible at our 2 Hz refresh.
         frames = '+×✧✦✧×' if self.unicode else '+x*x+'
         marker = frames[int(max(0, now - self.started) * len(frames) / 5) % len(frames)]
-        text = Text(marker, style='yellow', no_wrap=True,
+        text = Text(marker, style=theme.ACCENT, no_wrap=True,
                     overflow='ellipsis' if self.unicode else 'crop')
         text.append(terminal_text(f' {self.phase}', not self.unicode), style='default')
-        timing = f' · {_seconds(now - self.started)} elapsed'
+        timing = f' · {_seconds(now - self.started)} since launch'
         if now - self.reported >= 2:
             timing += f' · last update {_seconds(now - self.reported)} ago'
-        text.append(terminal_text(timing, not self.unicode), style='dim default')
+        text.append(terminal_text(timing, not self.unicode), style=theme.MUTED)
         yield text
 
 
@@ -281,11 +288,12 @@ class _Reporter:
             progress = f'{ratio:.0%} · {completed:,}/{self.total_steps:,} steps'
             segment_time = (f'{completed * self.dt_fs / 1000:.3f} / '
                             f'{self.total_steps * self.dt_fs / 1000:.3f} ps this run') if self.dt_fs is not None else ''
-            timing = f'Elapsed {_seconds(time.monotonic() - self.started_at)}'
+            timing = f'MD elapsed {_seconds(time.monotonic() - self.started_at)}'
             if self.status == 'running':
                 timing += (f' · ETA {_seconds((self.total_steps - completed) * self.time_per_step)}'
                            if completed and self.time_per_step is not None and self.time_per_step > 0
                            else ' · ETA estimating')
+            self._state.info['_attached_ratio'] = ratio
             self._state.info['_attached_progress'] = progress + f' · step counter {self.step:,}'
             self._state.info['_attached_time'] = segment_time
             self._state.info['_attached_compact_progress'] = progress + (' · ' + segment_time if segment_time else '')
@@ -296,11 +304,12 @@ class _Reporter:
                                   ascii_only=self._ascii_only,
                                   page=self._plot_page, attached=True)
 
-        title = self._text('SO3LR TAURI', 'bold yellow')
-        title.append(f'  v{__version__}', style='dim')
-        rows = [title]
+        title = self._text('')
+        title.append(self._label(f'{theme.BRAND} SO3LR TAURI'), style=theme.ACCENT_BOLD)
+        title.append(f'  v{__version__}', style=theme.MUTED)
+        rows = [title, self._text('')]
         metadata = Table.grid(padding=(0, 2))
-        metadata.add_column(style='dim', no_wrap=True)
+        metadata.add_column(style=theme.MUTED, no_wrap=True)
         metadata.add_column(overflow='fold')
         labels = (('input', 'Input'), ('model', 'Model'), ('engine', 'Engine'),
                   ('kernels', 'Kernels'), ('precision', 'Precision'),
@@ -319,20 +328,19 @@ class _Reporter:
                 value += ' (requested)'
             metadata.add_row(self._text(label), self._text(value))
         rows.extend((metadata, self._text('')))
-        style = 'red' if self.status == 'failed' else 'green' if self.status == 'complete' else 'yellow'
-        phase = self._text(self.phase_name, style)
+        style = theme.DANGER if self.status == 'failed' else theme.SUCCESS if self.status == 'complete' else theme.WARNING
+        glyph = theme.status_glyph(self.status) or theme.status_glyph('running')
+        phase = self._text(f'{glyph} {self.phase_name}', f'bold {style}')
         if self.detail:
-            phase.append(self._label(f'  {self.detail}'))
+            phase.append(self._label(f'  {self.detail}'), style=theme.MUTED)
         rows.append(phase)
         if self.info.get('operation') == 'optimization':
             step, total = (_finite(self.info.get(key)) for key in ('opt_step', 'opt_total_steps'))
             if step is not None and total is not None and total > 0:
                 ratio = max(0.0, min(1.0, step / total))
-                width = min(24, max(8, self.console.width - 40))
-                filled = round(width * ratio)
-                bar = self._text('━' * filled, style)
-                bar.append(self._label('─' * (width - filled)), style='dim')
-                bar.append(f'  {int(step):,}/{int(total):,} optimization steps')
+                width = min(40, max(8, self.console.width - 40))
+                bar = theme.bar(ratio, width, self._ascii_only)
+                bar.append(f'  {int(step):,}/{int(total):,} optimization steps', style=theme.MUTED)
                 rows.append(bar)
             energy, force, target = (_finite(self.info.get(key)) for key in
                                     ('opt_energy_eV', 'opt_force_max_eVA', 'opt_force_target_eVA'))
@@ -344,23 +352,23 @@ class _Reporter:
                     detail += f' · target ≤ {target:g} eV/Å'
                 rows.append(self._text(detail))
                 outcome = optimization_status(self.info, self.status)
-                rows.append(self._text(outcome, 'green' if outcome == 'Force criterion met' else 'yellow'))
+                if outcome != 'Relaxing geometry':  # the phase row already says so
+                    rows.append(self._text(outcome, theme.SUCCESS if outcome == 'Force criterion met' else theme.MUTED))
         if self.started_at is not None:
             completed = max(0, min(self.step - self.start_step, self.total_steps))
             ratio = completed / self.total_steps if self.total_steps else 0
-            width = min(24, max(8, self.console.width - 40))
-            filled = round(width * ratio)
-            bar = self._text('━' * filled, style)
-            bar.append(self._label('─' * (width - filled)), style='dim')
-            bar.append(f'  {ratio:.0%}  {completed:,}/{self.total_steps:,} steps')
+            width = min(40, max(8, self.console.width - 40))
+            bar = theme.bar(ratio, width, self._ascii_only)
+            bar.append(f'  {ratio:.0%}', style=theme.STRONG)
+            bar.append(f'  {completed:,}/{self.total_steps:,} steps', style=theme.MUTED)
             rows.append(bar)
             if self.start_step:
-                rows.append(self._text(f'Restart counter {self.start_step:,} · step counter {self.step:,}', 'dim'))
+                rows.append(self._text(f'Restart counter {self.start_step:,} · step counter {self.step:,}', theme.MUTED))
             if self.dt_fs is not None:
                 rows.append(self._text(f'{completed * self.dt_fs / 1000:.3f} / '
-                                       f'{self.total_steps * self.dt_fs / 1000:.3f} ps this run', 'dim'))
+                                       f'{self.total_steps * self.dt_fs / 1000:.3f} ps this run', theme.MUTED))
             elapsed = time.monotonic() - self.started_at
-            timing = f'Elapsed {_seconds(elapsed)}'
+            timing = f'MD elapsed {_seconds(elapsed)}'
             # No ETA is invented during compilation or at the restored step.
             if completed and self.time_per_step is not None and self.time_per_step > 0:
                 if self.status == 'running':
@@ -370,27 +378,30 @@ class _Reporter:
                     timing += f' · {rate}'
             elif self.status == 'running':
                 timing += ' · ETA estimating'
-            rows.append(self._text(timing, 'dim'))
+            rows.append(self._text(timing, theme.MUTED))
             metrics = []
             if self.temperature is not None:
                 metrics.append(f'T {self.temperature:.1f} K')
             if self.potential_energy is not None:
                 metrics.append(f'Epot {self.potential_energy:,.6f} eV')
             if metrics:
-                rows.append(self._text(' · '.join(metrics)))
+                rows.append(self._text(' · '.join(metrics), theme.STRONG))
         if self.saved is not None:
             step, path = self.saved
-            rows.append(self._text(f'Saved restart · step {step:,} · {path}', 'dim'))
+            rows.append(self._text(f'Checkpoint step {step:,} · {_display_path(path)}', theme.MUTED))
         for label, path in self.artifacts:
-            rows.append(self._text(f'{label} · {path}', 'dim'))
+            rows.append(self._text(f'{label} · {path}', theme.MUTED))
+        hint = None
         if self.info.get('operation') == 'optimization' and self.status != 'running':
             from .monitor import _controls
-            rows.append(self._text(_controls(self._state, attached=True), 'dim'))
+            hint = _controls(self._state, attached=True)
         if self._graphs_hidden and self.status == 'running' and self._keyboard is not None:
-            rows.append(self._text('q: show plots · Ctrl+C: interrupt MD', 'dim'))
+            hint = 'q: show plots · Ctrl+C: interrupt MD'
         elif self._graphs_hidden and self.status != 'running':
             from .monitor import _controls
-            rows.append(self._text(_controls(self._state, attached=True), 'dim'))
+            hint = _controls(self._state, attached=True)
+        if hint:
+            rows.append(theme.controls(hint, self._ascii_only))
         return Group(*rows)
 
     def attach_journal(self, path, run_id, *, enabled=True):
@@ -574,7 +585,7 @@ class _Reporter:
 
     def print_log(self, record, message):
         """Print through Rich's synchronized console without mutating run state."""
-        style = 'red' if record.levelno >= logging.ERROR else 'yellow' if record.levelno >= logging.WARNING else 'dim'
+        style = theme.DANGER if record.levelno >= logging.ERROR else theme.WARNING if record.levelno >= logging.WARNING else theme.MUTED
         label = f'{record.levelname}: ' if record.levelno >= logging.WARNING else ''
         self.console.print(self._text(label + message, style))
 
@@ -805,7 +816,7 @@ def run_display(settings):
             try:
                 reporter.close()
                 if reporter.enabled and failure_detail:
-                    renderer.console.print(renderer._text(failure_detail, 'dim'))
+                    renderer.console.print(renderer._text(failure_detail, theme.MUTED))
             finally:
                 _active.reset(token)
 
