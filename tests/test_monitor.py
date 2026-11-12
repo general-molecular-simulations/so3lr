@@ -1,5 +1,5 @@
 """The monitor is an offline observer with bounded, incremental journal reads."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
@@ -41,6 +41,7 @@ def render(reader, width=80, **kwargs):
     from rich.console import Console
     output = io.StringIO()
     console = Console(file=output, width=width, color_system=None)
+    kwargs.setdefault('now', datetime(2026, 1, 1, 0, 0, 30, tzinfo=timezone.utc))
     console.print(monitor.render_monitor([reader], width=width, **kwargs))
     return output.getvalue()
 
@@ -131,6 +132,7 @@ def test_explicit_status_is_not_inferred_from_age_or_completed_steps(tmp_path):
     reader.snapshot()
     text = render(reader, now=datetime(2026, 11, 11, tzinfo=timezone.utc))
     assert 'Last reported state: Running' in text
+    assert 'stale?' in text and 'Job status unknown' in text
     assert 'Completed' not in text and 'Failed' not in text
     reader.state.consume(event(100, 'error', message='warning-like diagnostic'))
     assert reader.state.status == 'Running'
@@ -140,6 +142,75 @@ def test_explicit_status_is_not_inferred_from_age_or_completed_steps(tmp_path):
     assert 'Last reported state: Completed' in render(reader)
     assert reader.state.phase == 'Complete'
     assert reader.state.detail == ''
+
+
+def test_freshness_uses_bounded_median_cadence_and_last_event_not_process_liveness(tmp_path):
+    reader = monitor.JournalReader(tmp_path / 'run.events.jsonl')
+    origin = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    def consume(seq, kind, seconds, **data):
+        item = event(seq, kind, **data)
+        item['timestamp'] = (origin + timedelta(seconds=seconds)).isoformat()
+        reader.state.consume(item)
+    consume(0, 'run_started', 0, settings={}, host='mel2024',
+            scheduler={'SLURM_JOB_ID': '5450148'})
+    consume(1, 'md_started', 0, start_step=0, total_steps=1000, dt_fs=0.5)
+    for index in range(140):
+        consume(index + 2, 'sample', index * 60, step=index, time_ps=index * 0.0005)
+    assert len(reader.state.sample_intervals) == 128
+    last = reader.state.event_timestamp
+    assert monitor.stale_after_seconds(reader.state) == 1200
+    assert monitor.observation_status(reader, last + timedelta(seconds=1200)) == 'Running'
+    assert monitor.observation_status(reader, last + timedelta(seconds=1201)) == 'Stale?'
+    assert reader.state.status == 'Running'
+    text = render(reader, now=last + timedelta(hours=2))
+    assert 'Host mel2024' in text and 'Slurm job 5450148' in text
+    assert 'Job status unknown' in text
+    # A new checkpoint or phase is evidence of a newer update, even without a sample.
+    consume(200, 'phase', 140 * 60 + 4000, name='Saving')
+    assert monitor.observation_status(reader, reader.state.event_timestamp) == 'Running'
+    consume(201, 'run_completed', 140 * 60 + 4001)
+    assert monitor.observation_status(reader, origin + timedelta(days=300)) == 'Completed'
+
+
+def test_freshness_handles_missing_timestamps_and_loading_without_inventing_death(tmp_path):
+    reader = monitor.JournalReader(tmp_path / 'run.events.jsonl')
+    started = event(0, 'run_started', settings={})
+    started['timestamp'] = 'not a timestamp'
+    reader.state.consume(started)
+    text = render(reader, height=10)
+    assert 'Age unknown' in text and 'job status unknown' in text
+    assert monitor.observation_status(reader, datetime.now(timezone.utc)) == 'Started'
+    assert 'Failed' not in text and 'dead' not in text
+    reader.state.consume(event(1, 'phase', name='Compiling'))
+    now = datetime(2026, 1, 1, 0, 10, 1, tzinfo=timezone.utc)
+    assert monitor.observation_status(reader, now) == 'Stale?'
+    reader.state.sample_intervals.extend([1, 1, 999999, float('nan'), -1])
+    assert monitor.stale_after_seconds(reader.state) == 600
+    reader.state.consume(event(2, 'sample', step=0, time_ps=0))
+    invalid = event(3, 'phase', name='Saving')
+    invalid['timestamp'] = None
+    reader.state.consume(invalid)
+    assert 'Age unknown' in render(reader)
+
+
+def test_unread_history_is_not_mistaken_for_current_or_stale_running_state(tmp_path):
+    from so3lr.cli.overview import render_overview
+    from rich.console import Console
+    path = tmp_path / 'run.events.jsonl'
+    initial = samples(1)
+    write(path, initial + [event(100, 'run_completed')])
+    prefix = ''.join(json.dumps(item) + '\n' for item in initial).encode()
+    reader = monitor.JournalReader(path)
+    reader.poll(max_bytes=len(prefix))
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    assert reader.state.status == 'Running'
+    assert monitor.observation_status(reader, now) == 'Reading'
+    assert 'reading history' in render(reader, now=now)
+    output = io.StringIO()
+    Console(file=output, width=100, color_system=None).print(render_overview([reader], now=now))
+    assert '1 reading history' in output.getvalue() and 'Stale?' not in output.getvalue()
+    reader.snapshot()
+    assert monitor.observation_status(reader, now) == 'Completed'
 
 
 def test_plot_connects_samples_without_changing_numeric_readout():
@@ -380,6 +451,34 @@ def test_discovery_is_bounded_and_does_not_follow_directory_links(tmp_path):
     assert len(monitor.discover_journals(root, max_files=1)) == 1
 
 
+def test_discovery_order_is_stable_when_writers_touch_journals(tmp_path):
+    paths = [tmp_path / name for name in ('z.events.jsonl', 'a.events.jsonl', 'm.events.jsonl')]
+    for index, path in enumerate(paths):
+        write(path, samples(1))
+        os.utime(path, (100 + index, 100 + index))
+    expected = sorted(paths)
+    assert monitor.discover_journals(tmp_path) == expected
+    for index, path in enumerate(reversed(paths)):
+        os.utime(path, (10000 + index, 10000 + index))
+        assert monitor.discover_journals(tmp_path) == expected
+
+
+@pytest.mark.parametrize('name', ['run.log', 'trajectory.xyz', 'other.jsonl'])
+def test_explicit_nonjournal_file_has_actionable_neighbor_hint(tmp_path, name):
+    path = tmp_path / name
+    path.write_text('original content\n')
+    journal = tmp_path / 'run.abc.events.jsonl'
+    write(journal, samples(1))
+    with pytest.raises(ValueError, match=r'Expected a \*\.events\.jsonl journal') as exc:
+        monitor.discover_journals(path)
+    assert f'so3lr show {journal}' in str(exc.value)
+    assert path.read_text() == 'original content\n'
+    journal.unlink()
+    with pytest.raises(ValueError) as exc:
+        monitor.discover_journals(path)
+    assert f'so3lr show {tmp_path}' in str(exc.value)
+
+
 def test_non_tty_show_is_one_plain_snapshot(tmp_path, monkeypatch):
     path = tmp_path / 'run.events.jsonl'
     write(path, samples(1))
@@ -389,6 +488,8 @@ def test_non_tty_show_is_one_plain_snapshot(tmp_path, monkeypatch):
     monitor.show(path)
     assert '\x1b' not in output.getvalue()
     assert 'Temperature' in output.getvalue()
+    assert 'snapshot' in output.getvalue()
+    assert 'Esc/q' not in output.getvalue() and 'e: energy' not in output.getvalue()
 
 
 def test_show_existing_parent_folder_opens_all_run_overview(tmp_path, monkeypatch):
@@ -402,7 +503,8 @@ def test_show_existing_parent_folder_opens_all_run_overview(tmp_path, monkeypatc
     text = output.getvalue()
     assert 'Run overview' in text and '2 runs' in text
     assert 'ala4' in text and 'dha' in text
-    assert 'Total E [eV]' in text
+    assert 'Age' in text and 'snapshot' in text
+    assert 'Esc/q' not in text and 'Overview page' not in text
     assert '\x1b' not in text
 
 
@@ -466,6 +568,36 @@ def test_once_is_ansi_free_even_in_a_terminal(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, 'stdout', output)
     monitor.show(path, once=True)
     assert '\x1b' not in output.getvalue()
+    assert 'snapshot' in output.getvalue()
+    assert 'Esc/q' not in output.getvalue() and 'Plot page' not in output.getvalue()
+
+
+@pytest.mark.parametrize('kind', ['run_completed', 'run_failed'])
+def test_valid_once_snapshot_returns_normally_regardless_recorded_outcome(tmp_path, monkeypatch, kind):
+    path = tmp_path / 'run.events.jsonl'
+    write(path, samples(1) + [event(100, kind, message='recorded outcome')])
+    output = io.StringIO()
+    monkeypatch.setattr(sys, 'stdout', output)
+    assert monitor.show(path, once=True) is None
+    assert 'recorded outcome' in output.getvalue()
+    assert 'Esc/q' not in output.getvalue() and 'Plot page' not in output.getvalue()
+
+
+@pytest.mark.parametrize('width,height', [(32, 3), (32, 6), (32, 10), (40, 24), (80, 24)])
+def test_compact_view_keeps_age_and_recorded_origin(tmp_path, width, height):
+    path = tmp_path / 'run.events.jsonl'
+    entries = samples(1)
+    entries[0]['data'].update(host='mel2024', scheduler={'SLURM_JOB_ID': '5450148'})
+    write(path, entries)
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    text = render(reader, width=width, height=height)
+    assert 'Age 30s' in text
+    if height >= 6:
+        assert 'Host mel2024' in text
+    if width >= 40:
+        assert '5450148' in text
+    assert len(text.splitlines()) <= height
 
 
 @pytest.mark.parametrize('width', [32, 80])

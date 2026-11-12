@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import shlex
+from statistics import median
 import sys
 import time
 
@@ -41,9 +42,10 @@ def _stamp(value):
 
 
 def _age(timestamp, now):
-    if timestamp is None:
+    seconds = _age_seconds(timestamp, now)
+    if seconds is None:
         return 'unknown'
-    seconds = max(0, int((now - timestamp).total_seconds()))
+    seconds = int(seconds)
     if seconds < 60:
         return f'{seconds}s'
     if seconds < 3600:
@@ -53,10 +55,83 @@ def _age(timestamp, now):
     return f'{seconds // 86400}d {(seconds % 86400) // 3600}h'
 
 
+def _age_seconds(timestamp, now):
+    if not isinstance(timestamp, datetime):
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - timestamp).total_seconds())
+
+
+def observation_timestamp(state):
+    """Age describes the last recorded event, not a remote process heartbeat."""
+    return getattr(state, 'event_timestamp', getattr(state, 'sample_timestamp', None))
+
+
+def stale_after_seconds(state):
+    intervals = [value for item in getattr(state, 'sample_intervals', ())
+                 if (value := _finite(item)) is not None and value > 0]
+    return max(600.0, 20 * median(intervals)) if intervals else 600.0
+
+
+def reading_history(reader):
+    return getattr(reader, 'file_size', 0) > getattr(reader, 'offset', 0)
+
+
+def observation_status(reader, now):
+    """Qualify cached lifecycle evidence without changing its recorded state."""
+    if getattr(reader, 'error', ''):
+        return 'Read error'
+    if reading_history(reader):
+        return 'Reading'
+    state = reader.state
+    status = str(getattr(state, 'status', None) or 'Unknown')
+    if status == 'No lifecycle event yet':
+        return 'Unknown'
+    if status in ('Started', 'Running'):
+        age = _age_seconds(observation_timestamp(state), now)
+        if age is not None and age > stale_after_seconds(state):
+            return 'Stale?'
+    return status
+
+
+def _observation_line(reader, now):
+    age = _age(observation_timestamp(reader.state), now)
+    qualifier = observation_status(reader, now)
+    if qualifier == 'Reading':
+        return f'Age {age} · reading history; latest state not read yet'
+    if qualifier == 'Read error':
+        return f'Age {age} · read error; current job status unknown'
+    if qualifier == 'Stale?':
+        return f'Age {age} · no recent update; stale? Job status unknown'
+    if reader.state.status not in ('Completed', 'Failed'):
+        return f'Age {age} · last journal event; current job status unknown'
+    return f'Age {age} · last journal event'
+
+
+def origin_label(state, compact=False):
+    host = getattr(state, 'host', '')
+    scheduler = getattr(state, 'scheduler', {})
+    scheduler = scheduler if isinstance(scheduler, dict) else {}
+    job = scheduler.get('SLURM_JOB_ID') or scheduler.get('SLURM_JOBID')
+    if not host and not job:
+        return ''
+    if compact:
+        return f'{host or "?"} / {job or "-"}'
+    return f'Host {host or "unknown"}' + (f' · Slurm job {job}' if job else '')
+
+
 def discover_journals(path, max_depth=3, max_files=128, max_dirs=512):
     """Discover journals in a bounded subtree without following directory links."""
     path = Path(path).expanduser()
     if path.is_file():
+        if not path.name.endswith('.events.jsonl'):
+            neighbors = discover_journals(path.parent, max_depth=0, max_files=2)
+            target = neighbors[0] if len(neighbors) == 1 else path.parent
+            raise ValueError(f'Expected a *.events.jsonl journal, not {path.name}. '
+                             f'Try: so3lr show {shlex.quote(str(target))}')
         return [path]
     if not path.is_dir():
         raise FileNotFoundError(f'Journal or directory does not exist: {path}')
@@ -75,7 +150,7 @@ def discover_journals(path, max_depth=3, max_files=128, max_dirs=512):
                         continue
                     try:
                         if entry.is_file(follow_symlinks=False) and entry.name.endswith('.events.jsonl'):
-                            found.append((entry.stat().st_mtime_ns, Path(entry.path)))
+                            found.append(Path(entry.path))
                             if len(found) >= max_files:
                                 break
                         elif depth < max_depth and entry.is_dir(follow_symlinks=False):
@@ -85,7 +160,8 @@ def discover_journals(path, max_depth=3, max_files=128, max_dirs=512):
                         continue
         except OSError:
             continue
-    return [item[1] for item in sorted(found, key=lambda item: (item[0], str(item[1])), reverse=True)]
+    # Writer activity must not reshuffle row numbers or next/previous navigation.
+    return sorted(found, key=str)
 
 
 def _compact(samples):
@@ -204,6 +280,9 @@ class RunState:
     settings: dict = field(default_factory=dict)
     info: dict = field(default_factory=dict)
     host: str = ''
+    scheduler: dict = field(default_factory=dict)
+    event_timestamp: datetime | None = None
+    sample_intervals: deque = field(default_factory=lambda: deque(maxlen=128))
     start_step: int = 0
     total_steps: int = 0
     dt_fs: float | None = None
@@ -248,7 +327,8 @@ class RunState:
         if kind == 'run_started':
             self.status = 'Started'
             self.settings = data.get('settings') if isinstance(data.get('settings'), dict) else {}
-            self.host = str(data.get('host', ''))
+            self.host = str(data.get('host') or '')
+            self.scheduler = data.get('scheduler') if isinstance(data.get('scheduler'), dict) else {}
         elif kind == 'info':
             self.info.update(data)
         elif kind == 'phase':
@@ -261,6 +341,7 @@ class RunState:
             self.start_step, self.total_steps = int(start), int(total)
             self.dt_fs = _finite(data.get('dt_fs'))
             self.samples, self.sample_count, self.sample_timestamp = [], 0, None
+            self.sample_intervals.clear()
             self.energy_mean = _LatterHalfMean()
             self.property_means = {key: _LatterHalfMean() for key in PLOT_FIELDS if key != 'energy_eV'}
             if self.status not in ('Completed', 'Failed'):
@@ -277,7 +358,12 @@ class RunState:
             for key, mean in self.property_means.items():
                 mean.add(sample['time_ps'], sample[key])
             self.sample_count += 1
-            self.sample_timestamp = _stamp(event.get('timestamp'))
+            timestamp = _stamp(event.get('timestamp'))
+            if timestamp is not None and self.sample_timestamp is not None:
+                interval = (timestamp - self.sample_timestamp).total_seconds()
+                if interval > 0:
+                    self.sample_intervals.append(interval)
+            self.sample_timestamp = timestamp
             if len(self.samples) > MAX_HISTORY:
                 self.samples = _compact(self.samples)
         elif kind == 'checkpoint':
@@ -294,6 +380,8 @@ class RunState:
             self.diagnostic = (kind, str(data.get('message', '')))
         else:
             self.unsupported += 1
+            return
+        self.event_timestamp = _stamp(event.get('timestamp'))
 
 
 class JournalReader:
@@ -302,6 +390,7 @@ class JournalReader:
         self.path = Path(path)
         self.state = RunState(self.path)
         self.offset = 0
+        self.file_size = 0
         self.pending = b''
         self.identity = None
         self.discarding = False
@@ -310,6 +399,7 @@ class JournalReader:
     def poll(self, max_bytes=READ_BUDGET):
         try:
             stat = self.path.stat()
+            self.file_size = stat.st_size
             identity = (stat.st_dev, stat.st_ino)
             if self.identity != identity or stat.st_size < self.offset:
                 self.state = RunState(self.path)
@@ -561,11 +651,12 @@ def _controls(state, attached=False, paged=False, multiple=False):
     if multiple:
         return ('↑/↓: plots · ' if paged else '') + '←/→: run · o: overview · e: energy · ' + close
     if state.status not in ('Completed', 'Failed'):
-        close += ' (job continues)'
+        close += ' (observer only)'
     return ('↑/↓: plot page · ' if paged else '') + 'j/k or ←/→: run · e: energy · ' + close
 
 
-def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=False, height=None):
+def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=False, height=None,
+                         now=None, static=False):
     """Show recorded optimization measurements without inventing MD samples."""
     from rich.console import Group
     from rich.text import Text as RichText
@@ -575,6 +666,7 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
                         overflow=('crop' if ascii_only else 'ellipsis') if compact else 'fold')
 
     state = reader.state
+    now = now or datetime.now(timezone.utc)
     style = 'red' if state.status == 'Failed' else 'green' if state.status == 'Completed' else 'yellow'
     rows, priorities = [], []
 
@@ -582,9 +674,12 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
         rows.append(Text(value, style))
         priorities.append(priority)
 
-    add('SO3LR TAURI  optimization', 'bold yellow', 3)
+    add('SO3LR TAURI  optimization' + (' snapshot' if static else ''), 'bold yellow', 3)
     add(f'Run {selected + 1}/{count} · {reader.path.parent.name}', priority=9)
     add(f'Last reported state: {state.status}', style, 4)
+    add(_observation_line(reader, now), 'yellow' if observation_status(reader, now) == 'Stale?' else 'dim', 2)
+    if origin := origin_label(state):
+        add(origin, 'dim', 9)
     add('Optimization · latest recorded cycle', 'dim', 13)
     model = state.info.get('model', state.settings.get('model', state.settings.get('model_path')))
     precision = state.info.get('precision', state.settings.get('precision'))
@@ -629,7 +724,8 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
         controls = 'Esc/q: close viewer' if state.status in ('Completed', 'Failed') else 'Esc/q: detach'
         if count > 1:
             controls += ' · ←/→: run · o: overview'
-    add(controls, 'dim', 0)
+    if not static:
+        add(controls, 'dim', 0)
     if compact and height is not None and len(rows) > height:
         # Every compact Text is exactly one row. Keep controls and the honest
         # outcome before optional metadata, while preserving their display order.
@@ -638,7 +734,8 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
     return Group(*rows)
 
 
-def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None, ascii_only=False, height=None, attached=False):
+def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None, ascii_only=False, height=None, attached=False,
+                    static=False):
     """Build the native view after Rich has supplied the available width."""
     from rich.console import Group
     from rich.table import Table
@@ -648,14 +745,16 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
         return RichText(terminal_text(value, ascii_only), style=style)
 
     now = now or datetime.now(timezone.utc)
-    rows = [Text('SO3LR TAURI  live MD' if attached else 'SO3LR TAURI  monitor', style='bold yellow')]
+    rows = [Text('SO3LR TAURI  live MD' if attached else 'SO3LR TAURI  snapshot' if static else 'SO3LR TAURI  monitor', style='bold yellow')]
     if not readers:
-        return Group(*rows, Text('Waiting for *.events.jsonl journals.', style='dim'),
-                     Text('Esc/q: close observer', style='dim'))
+        rows.append(Text('No *.events.jsonl journals found.' if static else 'Waiting for *.events.jsonl journals.', style='dim'))
+        if not static:
+            rows.append(Text('Esc/q: close observer', style='dim'))
+        return Group(*rows)
     reader = readers[selected % len(readers)]
     state = reader.state
     if state.info.get('operation') == 'optimization':
-        return _render_optimization(reader, selected, len(readers), ascii_only)
+        return _render_optimization(reader, selected, len(readers), ascii_only, now=now, static=static)
     run_name = reader.path.parent.name or reader.path.name.removesuffix('.events.jsonl')
     if state.run_id and run_name.endswith('.' + state.run_id):
         run_name = run_name[:-(len(state.run_id) + 1)]
@@ -663,6 +762,10 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     rows.append(Text(('Run · ' if attached else f'Run {selected + 1}/{len(readers)} · ') + run_name + short_id))
     status_style = 'green' if state.status == 'Completed' else 'red' if state.status == 'Failed' else 'yellow'
     rows.append(Text(f'{"State" if attached else "Last reported state"}: {state.status}', style=status_style))
+    if not attached:
+        rows.append(Text(_observation_line(reader, now), style='dim'))
+        if origin := origin_label(state):
+            rows.append(Text(origin, style='dim'))
     metadata = Table.grid(padding=(0, 2))
     metadata.add_column(style='dim', no_wrap=True)
     metadata.add_column(overflow='fold')
@@ -699,7 +802,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
         segment = _finite(last.get('segment_step'))
         segment = segment if segment is not None else step - state.start_step
         progress = f'Segment {int(segment):,}/{state.total_steps:,} steps' if state.total_steps else f'Segment step {int(segment):,}'
-        rows.append(Text(f'{progress} · step counter {int(step):,} · sample age {_age(state.sample_timestamp, now)}', style='dim'))
+        rows.append(Text(f'{progress} · step counter {int(step):,}', style='dim'))
     else:
         rows.append(Text('No MD samples yet.', style='dim'))
     rows.append(Text(''))
@@ -733,11 +836,13 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
         rows.append(Text('Read error: ' + reader.error, style='yellow'))
     if state.malformed or state.unsupported:
         rows.append(Text(f'Skipped {state.malformed} malformed and {state.unsupported} unsupported events.', style='yellow'))
-    rows.append(Text(_controls(state, attached, multiple=len(readers) > 1), style='dim'))
+    if not static:
+        rows.append(Text(_controls(state, attached, multiple=len(readers) > 1), style='dim'))
     return Group(*rows)
 
 
-def _paged_monitor(console, options, readers, selected, energy, width, height, page, now, ascii_only, attached=False):
+def _paged_monitor(console, options, readers, selected, energy, width, height, page, now, ascii_only, attached=False,
+                   static=False):
     """Pack complete plot blocks into short screens; keep controls visible."""
     from rich.cells import cell_len
     from rich.console import Group
@@ -765,17 +870,21 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
         header.extend(Text(state.info.get(key, ''), 'dim')
                       for key in ('_attached_compact_progress', '_attached_timing'))
     else:
+        qualifier = observation_status(reader, now)
+        observation = f' · {"Reading history" if qualifier == "Reading" else qualifier}' if qualifier != state.status else ''
         header = [Text(f'SO3LR TAURI · Run {selected + 1}/{len(readers)} · {name}', 'bold yellow'),
-                  Text(f'Last reported state: {state.status} · {state.phase}',
+                  Text(f'Last reported state: {state.status}{observation} · {state.phase}',
                        'red' if state.status == 'Failed' else 'green' if state.status == 'Completed' else 'yellow')]
+        if origin := origin_label(state):
+            header.append(Text(origin, 'dim'))
     if state.samples and not attached:
         last = state.samples[-1]
         segment = _finite(last.get('segment_step'))
         segment = segment if segment is not None else last['step'] - state.start_step
         progress = f'{int(segment):,}/{state.total_steps:,} steps' if state.total_steps else f'{int(segment):,} steps'
-        header.append(Text(f"{str(state.settings.get('ensemble', '')).upper()} · {progress} · sample age {_age(state.sample_timestamp, now)}", 'dim'))
+        header.append(Text(f"Age {_age(observation_timestamp(state), now)} · {str(state.settings.get('ensemble', '')).upper()} · {progress}", 'dim'))
     elif not attached:
-        header.append(Text(state.detail or 'Waiting for MD samples.', 'dim'))
+        header.append(Text(f'Age {_age(observation_timestamp(state), now)} · ' + (state.detail or 'Waiting for MD samples.'), 'dim'))
     summary = []
     cycle_seconds = _finite(state.samples[-1].get('seconds_per_step')) if state.samples else None
     throughput = throughput_label(cycle_seconds, state.dt_fs, state.info.get('atoms'))
@@ -814,9 +923,22 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
         controls.no_wrap, controls.overflow = False, 'fold'
     budget = height - line_count(Group(*header, *footer, Text('Plot page 1/1'), controls))
     if budget < 7:
-        return Group(Text('SO3LR live MD' if attached else 'SO3LR monitor', 'bold yellow'),
-                     Text('Enlarge terminal for plots, or use so3lr show --once.'),
-                     controls)
+        compact = [Text('SO3LR live MD' if attached else 'SO3LR monitor', 'bold yellow')]
+        if not attached:
+            compact.append(Text(_observation_line(reader, now), 'dim'))
+            if origin := origin_label(state):
+                compact.append(Text(origin, 'dim'))
+        compact.append(Text('Enlarge terminal for plots, or use so3lr show --once.'))
+        if not attached:
+            if line_count(controls) > height:
+                controls = Text('Esc/q: close observer', 'dim')
+            available = max(0, height - line_count(controls))
+            # Even a tiny terminal keeps its exit and event age before optional
+            # title/origin details. Each candidate is a single cropped row.
+            priorities = [3, 0, *([2] if origin_label(state) else []), 1]
+            keep = sorted(sorted(range(len(compact)), key=lambda i: priorities[i])[:available])
+            compact = [compact[index] for index in keep]
+        return Group(*compact, controls)
     plot_rows = max(2, min(4, budget - 5))
     if budget >= 14:
         # Keep temperature and energy together at 80x24 when possible, while
@@ -868,17 +990,19 @@ class _MonitorView:
             reader = self.readers[kwargs['selected'] % len(self.readers)]
             if reader.state.info.get('operation') == 'optimization':
                 yield _render_optimization(reader, kwargs['selected'], len(self.readers), kwargs['ascii_only'],
-                                           compact=True, height=height)
+                                           compact=True, height=height, now=kwargs['now'], static=kwargs['static'])
             else:
                 yield _paged_monitor(console, options, self.readers, page=page, **kwargs)
         else:
             yield full
 
 
-def render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None, ascii_only=False, height=None, page=0, attached=False):
+def render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None, ascii_only=False, height=None, page=0, attached=False,
+                   static=False):
     """Return an adaptive Rich view without touching the simulation process."""
     return _MonitorView(readers, selected=selected, energy=energy, width=width,
-                        now=now, ascii_only=ascii_only, height=height, page=page, attached=attached)
+                        now=now, ascii_only=ascii_only, height=None if static else height, page=page,
+                        attached=attached, static=static)
 
 
 class _Keyboard(AbstractContextManager):
@@ -972,10 +1096,10 @@ def show(path, once=False, interval=1.0, no_color=False):
         for reader in readers:
             reader.snapshot()
         render = render_overview if len(readers) > 1 else render_monitor
-        console.print(render(readers, width=console.width, ascii_only=ascii_only))
+        console.print(render(readers, width=console.width, ascii_only=ascii_only, static=True))
         return
     # The overview is an extra navigation stop, not a synthetic run. Keep the
-    # selected file stable when discovery reorders journals by modification time.
+    # selected file stable when new journals appear or old ones are removed.
     selected, energy_index, plot_page = (-1 if len(readers) > 1 else 0), list(ENERGIES).index('energy_eV'), 0
     next_refresh = next_discovery = 0.0
     try:

@@ -35,9 +35,9 @@ def test_yaml_missing_input_file_raises(runner, tmp_path):
     y = tmp_path / "run.yaml"
     y.write_text(yaml.safe_dump({"md_T": 300}))
     result = runner.invoke(cli, ["--settings", str(y)])
-    assert result.exit_code != 0
-    assert isinstance(result.exception, ValueError)
-    assert "input_file" in str(result.exception)
+    assert result.exit_code == 2
+    assert "input_file" in result.output
+    assert "Traceback" not in result.output
 
 
 @pytest.mark.parametrize("output", ["out.hdf5", "out.h5"])
@@ -86,9 +86,9 @@ def test_md_yaml_rejects_zero_count_settings(runner, tmp_xyz, tmp_path, key):
         key: 0,
     }))
     result = runner.invoke(cli, ["--settings", str(y)])
-    assert result.exit_code != 0
-    assert isinstance(result.exception, ValueError)
-    assert key in str(result.exception)
+    assert result.exit_code == 2
+    assert key in result.output
+    assert "Traceback" not in result.output
 
 
 def test_eval_refuses_overwrite(runner, tmp_xyz, tmp_path):

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from .formatting import finite_number as _number, terminal_text as _literal
+from .monitor import observation_status, observation_timestamp, origin_label
 
 
 def _shorten(value, width, ascii_only):
@@ -95,7 +96,7 @@ def _metric(value, width, decimals):
 
 def _age(timestamp, now):
     if not isinstance(timestamp, datetime):
-        return '-'
+        return '?'
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=timezone.utc)
     if now.tzinfo is None:
@@ -110,11 +111,13 @@ def _age(timestamp, now):
     return f'{seconds // 86400}d'
 
 
-def _render(readers, width, height, now, ascii_only, page):
+def _render(readers, width, height, now, ascii_only, page, static):
     from rich.console import Group
     from rich.table import Table
     from rich.text import Text
 
+    if static:
+        height = None
     states = [reader.state for reader in readers]
     has_optimization = any(_optimization(state) for state in states)
     names, folder = _names(states)
@@ -125,12 +128,19 @@ def _render(readers, width, height, now, ascii_only, page):
                     overflow='crop' if ascii_only else 'ellipsis')
 
     count_label = f'{len(states)} run' + ('' if len(states) == 1 else 's')
-    header = [line(f'SO3LR TAURI{separator}Run overview{separator}{count_label}', 'bold yellow')]
-    counts = Counter(str(getattr(state, 'status', '') or '-') for state in states)
-    waiting = counts['Started'] + counts['No lifecycle event yet']
+    title = 'Run overview snapshot' if static else 'Run overview'
+    header = [line(f'SO3LR TAURI{separator}{title}{separator}{count_label}', 'bold yellow')]
+    statuses = [observation_status(reader, now) for reader in readers]
+    counts = Counter(statuses)
+    waiting = counts['Started']
     classified = sum(counts[status] for status in ('Running', 'Completed', 'Failed')) + waiting
     summary = [f'{counts[status]} {status.lower()}' for status in ('Running', 'Completed', 'Failed')]
     summary.append(f'{waiting} started/waiting' if has_optimization else f'{waiting} waiting for MD')
+    for status, label in (('Stale?', 'stale?'), ('Reading', 'reading history'),
+                          ('Read error', 'read errors'), ('Unknown', 'unknown')):
+        if counts[status]:
+            summary.append(f'{counts[status]} {label}')
+            classified += counts[status]
     if len(states) > classified:
         summary.append(f'{len(states) - classified} other')
     header.append(line('Reported: ' + separator.join(summary), 'dim'))
@@ -140,6 +150,11 @@ def _render(readers, width, height, now, ascii_only, page):
     progress_note = ('Steps: MD segment / optimization iteration; restart offsets excluded.' if has_optimization
                      else 'Steps/%: current segment; restart offsets excluded.')
     footer = [line(progress_note, 'dim')]
+    if counts['Stale?']:
+        footer.append(line('Stale? = no recent update; current job status unknown.', 'yellow'))
+    if counts['Reading']:
+        footer.append(line('Reading history: latest recorded state has not been read yet.', 'dim'))
+    footer.append(line('Age: last journal event (? unknown); job liveness unverified.', 'dim'))
     read_errors = sum(bool(getattr(reader, 'error', '')) for reader in readers)
     if read_errors:
         label = 'error' if read_errors == 1 else 'errors'
@@ -147,17 +162,17 @@ def _render(readers, width, height, now, ascii_only, page):
     controls = ('Esc/q: close | Left/Right: individual runs | Up/Down: overview page' if ascii_only else
                 'Esc/q: close · ←/→: individual runs · ↑/↓: overview page')
     if not states:
-        return Group(*header, line('No run journals found.'), line(controls, 'dim'))
+        return Group(*header, line('No run journals found.'), *([] if static else [line(controls, 'dim')]))
 
     # Every table row has a fixed one-line height. Reserve a header, column
     # labels and footer before choosing the page; never cut a row in half.
-    overhead = len(header) + len(footer) + 3
+    overhead = len(header) + len(footer) + (1 if static else 3)
     if height is not None and height <= overhead:
         compact = []
         if height >= 3:
             compact.append(header[0])
         if height >= 2:
-            compact.append(line('Enlarge the terminal to view run rows.'))
+            compact.append(line(f'Age {_age(observation_timestamp(states[0]), now)} (run 1); enlarge for all rows.'))
         compact.append(line(controls, 'dim'))
         return Group(*compact)
     capacity = len(states) if height is None else max(1, int(height) - overhead)
@@ -169,13 +184,18 @@ def _render(readers, width, height, now, ascii_only, page):
     columns = [('#', max(2, len(str(len(states)))), 'right'), ('Run', None, 'left')]
     if has_optimization and width >= 76:
         columns.append(('Mode', 4, 'left'))
-    columns.extend([('State', 10, 'left'), (progress_title, 15 if width >= 76 else 12, 'right')])
-    if width >= 76:
-        columns.append(('%', 5, 'right'))
+    has_origin = any(origin_label(state) for state in states)
+    columns.extend([('State', 10, 'left'), ('Age', 6, 'right')])
     if width >= 52:
-        columns.extend([('T [K]', 7, 'right'), ('Total E [eV]', 12, 'right')])
-    if width >= 100:
-        columns.append(('Age', 6, 'right'))
+        columns.append((progress_title, 15 if width >= 76 else 12, 'right'))
+    if width >= (100 if has_origin else 76):
+        columns.append(('%', 5, 'right'))
+    if width >= (100 if has_origin else 76):
+        columns.append(('T [K]', 7, 'right'))
+    if width >= (140 if has_origin else 100):
+        columns.append(('Total E [eV]', 12, 'right'))
+    if has_origin and width >= 76:
+        columns.append(('Host / Slurm', 18, 'left'))
     name_width = max(1, width - sum(size or 0 for _, size, _ in columns) - 2 * (len(columns) - 1))
     table = Table(box=None, padding=(0, 1), pad_edge=False, expand=False, show_edge=False,
                   width=width, highlight=False)
@@ -187,10 +207,9 @@ def _render(readers, width, height, now, ascii_only, page):
         optimization = _optimization(state)
         sample = {} if optimization else _sample(state)
         steps, percent = _steps(state, sample)
-        status = str(getattr(state, 'status', None) or '-')
-        style = {'Running': 'yellow', 'Completed': 'green', 'Failed': 'red'}.get(status, 'dim')
-        if getattr(readers[index], 'error', ''):
-            status, style = 'Read error', 'red'
+        status = statuses[index]
+        style = {'Running': 'yellow', 'Completed': 'green', 'Failed': 'red',
+                 'Stale?': 'yellow', 'Read error': 'red'}.get(status, 'dim')
         name = _literal(names[index], ascii_only)
         if has_optimization and width < 76:
             prefix = 'OPT:' if optimization else 'MD:'
@@ -202,31 +221,34 @@ def _render(readers, width, height, now, ascii_only, page):
                   'State': _literal(status, ascii_only), progress_title: steps, '%': percent,
                   'T [K]': _metric(sample.get('temperature_K'), 7, 1),
                   'Total E [eV]': _metric(sample.get('energy_eV'), 12, 6),
-                  'Age': _age(getattr(state, 'sample_timestamp', None), now)}
+                  'Age': _age(observation_timestamp(state), now),
+                  'Host / Slurm': _literal(origin_label(state, compact=True) or '-', ascii_only)}
         table.add_row(*(Text(values[title], style=style if title == 'State' else '')
                         for title, _, _ in columns))
-    footer.append(line(f'Overview page {page_index + 1}/{pages}{separator}Runs {first + 1}-{last} of {len(states)}', 'dim'))
-    footer.append(line(controls, 'dim'))
+    if not static:
+        footer.append(line(f'Overview page {page_index + 1}/{pages}{separator}Runs {first + 1}-{last} of {len(states)}', 'dim'))
+        footer.append(line(controls, 'dim'))
     return Group(*header, table, *footer)
 
 
 class _OverviewView:
-    def __init__(self, readers, width, height, now, ascii_only, page):
+    def __init__(self, readers, width, height, now, ascii_only, page, static):
         self.readers, self.width, self.height = readers, width, height
         self.now, self.ascii_only, self.page = now, ascii_only, page
+        self.static = static
 
     def __rich_console__(self, console, options):
         # Rich may constrain the width after the caller measures its terminal.
         # Build the table using that final width so data columns stay aligned.
         width = max(1, min(self.width, options.max_width))
         yield _render(self.readers, width, self.height,
-                      self.now or datetime.now(timezone.utc), self.ascii_only, self.page)
+                      self.now or datetime.now(timezone.utc), self.ascii_only, self.page, self.static)
 
 
-def render_overview(readers, width=80, height=None, now=None, ascii_only=False, page=0):
+def render_overview(readers, width=80, height=None, now=None, ascii_only=False, page=0, static=False):
     """Render in-memory states in caller order; never poll or read a journal.
 
     With no height limit, include every supplied reader in one snapshot. A
     bounded height pages rows; positive or negative page indices wrap around.
     """
-    return _OverviewView(readers, width, height, now, ascii_only, page)
+    return _OverviewView(readers, width, height, now, ascii_only, page, static)

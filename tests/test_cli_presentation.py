@@ -381,7 +381,38 @@ def test_preamble_failure_retains_traceback_or_proves_it_was_saved(failure_cli, 
 
 
 @pytest.mark.parametrize('operation', ['md', 'opt'])
-def test_failed_traceback_file_write_keeps_original_exception(failure_cli, monkeypatch, operation):
+def test_multiline_saved_failure_prints_one_verified_log_pointer(failure_cli, monkeypatch, capsys, operation):
+    app, log_path, invoke = failure_cli
+    def runtime(settings):
+        raise RuntimeError('first line\nsecond line')
+    monkeypatch.setattr(app, 'run', runtime)
+    monkeypatch.setattr(app, 'perform_min', runtime)
+    with pytest.raises(SystemExit) as caught:
+        invoke(operation)
+    assert caught.value.code == 1
+    err = capsys.readouterr().err
+    assert err.count('Error: RuntimeError: first line') == 1
+    assert err.count(f'Full traceback: {log_path.resolve()}') == 1
+    assert 'second line' not in err
+    assert 'Traceback (most recent call last)' not in err
+    assert 'RuntimeError: first line\nsecond line' in log_path.read_text()
+
+
+def test_optimization_step_budget_completion_remains_a_successful_command(failure_cli, monkeypatch):
+    app, log_path, invoke = failure_cli
+    def finish_budget(settings):
+        presentation.get_reporter().update_info(
+            operation='optimization', opt_step=10, opt_total_steps=10,
+            opt_force_max_eVA=0.5, opt_force_target_eVA=0.01)
+    monkeypatch.setattr(app, 'perform_min', finish_budget)
+    assert invoke('opt') is None  # command completion remains success, not convergence
+    text = log_path.read_text()
+    assert 'Execution: complete' in text
+    assert 'Step budget reached; force criterion not met' in text
+
+
+@pytest.mark.parametrize('operation', ['md', 'opt'])
+def test_failed_traceback_file_write_keeps_original_exception(failure_cli, monkeypatch, capsys, operation):
     import logging
     app, log_path, invoke = failure_cli
     monkeypatch.setattr(logging, 'raiseExceptions', False)
@@ -405,6 +436,8 @@ def test_failed_traceback_file_write_keeps_original_exception(failure_cli, monke
         invoke(operation)
     assert not getattr(caught.value, '_so3lr_traceback_preserved', False)
     assert 'Traceback (most recent call last)' not in log_path.read_text()
+    assert 'Full traceback:' not in capsys.readouterr().err
+    assert not getattr(caught.value, '_so3lr_traceback_path', None)
 
 
 @pytest.mark.parametrize('operation', ['md', 'opt'])
@@ -438,7 +471,7 @@ def test_traceback_rollover_still_produces_one_compact_terminal_error(
     assert 'Traceback (most recent call last)' not in err
 
 
-def test_filtered_traceback_does_not_claim_preservation(failure_cli, monkeypatch):
+def test_filtered_traceback_does_not_claim_preservation(failure_cli, monkeypatch, capsys):
     import logging
     app, log_path, invoke = failure_cli
 
@@ -454,6 +487,8 @@ def test_filtered_traceback_does_not_claim_preservation(failure_cli, monkeypatch
         invoke('md')
     assert not getattr(caught.value, '_so3lr_traceback_preserved', False)
     assert 'Traceback (most recent call last)' not in log_path.read_text()
+    assert 'Full traceback:' not in capsys.readouterr().err
+    assert not getattr(caught.value, '_so3lr_traceback_path', None)
 
 
 @pytest.mark.parametrize('failure', [KeyboardInterrupt(), SystemExit(7),

@@ -23,6 +23,7 @@ def reader(path, **overrides):
 
 def render(readers, width=80, **kwargs):
     output = io.StringIO()
+    kwargs.setdefault('now', datetime(2026, 1, 1, 0, 0, 30, tzinfo=timezone.utc))
     Console(file=output, width=width, color_system=None).print(
         render_overview(readers, width=width, **kwargs))
     return output.getvalue()
@@ -41,7 +42,9 @@ def test_overview_reports_all_states_and_segment_progress():
     assert '1,050' not in text
     assert 'restart offsets excluded' in text
     assert 'T [K]' in text and '298.5' in text
-    assert 'Total E [eV]' in text and '-38.123456' in text
+    assert 'Age' in text and '30s' in text
+    wide = render(readers, width=100)
+    assert 'Total E [eV]' in wide and '-38.123456' in wide
     assert 'Folder: /runs' in text
     assert all(name in text for name in ('ethanol', 'ala4', 'dha', 'new'))
     assert '←/→: individual runs' in text
@@ -52,7 +55,8 @@ def test_missing_segment_uses_restart_offset_without_inventing_completion():
                   samples=[dict(step=1100, temperature_K=300)], status='Running')
     text = render([item], width=100, now=datetime(2026, 11, 1, tzinfo=timezone.utc))
     assert '100/100' in text and '100%' in text
-    assert 'Running' in text and '0 completed' in text
+    assert 'Stale?' in text and '0 completed' in text
+    assert 'current job status unknown' in text
     assert 'Total E [eV]' in text
     assert '304d' in text
     assert item.state.status == 'Running'
@@ -67,7 +71,7 @@ def test_missing_or_malformed_values_remain_unavailable():
              reader('/runs/waiting/run.events.jsonl', status='No lifecycle event yet', samples=[]),
              reader('/runs/bad-row/run.events.jsonl', status=None, samples=[None])]
     text = render(items, width=100)
-    assert '2 other' in text and '1 waiting for MD' in text
+    assert '1 other' in text and '2 unknown' in text
     assert '-12345' not in text  # Do not substitute potential for total energy.
     assert 'nan' not in text.lower() and 'inf' not in text.lower()
     assert text.count('-') >= 10
@@ -90,8 +94,9 @@ def test_overview_stays_inside_terminal_width_and_height(width):
     assert all(cell_len(line) <= width for line in text.splitlines())
     assert 'Overview page 1/4' in text
     if width >= 80:
-        assert 'Total E [eV]' in text and 'T [K]' in text
+        assert 'Age' in text and 'T [K]' in text
         assert 'q: close' in text
+    assert 'Age' in text
 
 
 def test_paging_wraps_and_full_snapshot_includes_every_reader():
@@ -99,8 +104,8 @@ def test_paging_wraps_and_full_snapshot_includes_every_reader():
     first = render(readers, height=24)
     second = render(readers, height=24, page=1)
     last = render(readers, height=24, page=-1)
-    assert 'Runs 1-17 of 64' in first and 'run-016' in first and 'run-017' not in first
-    assert 'Runs 18-34 of 64' in second and 'run-017' in second
+    assert 'Runs 1-16 of 64' in first and 'run-015' in first and 'run-016' not in first
+    assert 'Runs 17-32 of 64' in second and 'run-016' in second
     assert 'Overview page 4/4' in last and 'run-063' in last
     assert render(readers, height=24, page=4) == first
     snapshot = render(readers)
@@ -115,13 +120,46 @@ def test_all_128_discovered_runs_fit_one_unbounded_snapshot():
     assert all(f'run-{index:03d}' in text for index in range(128))
 
 
+def test_static_snapshot_includes_all_runs_without_interactive_or_page_hints():
+    items = [reader(f'/runs/run-{index:03d}/run.events.jsonl') for index in range(128)]
+    text = render(items, static=True, height=2, page=12)
+    assert 'snapshot' in text and '128 runs' in text
+    assert all(f'run-{index:03d}' in text for index in range(128))
+    assert 'Esc/q' not in text and 'page' not in text and 'individual runs' not in text
+    assert 'Age' in text
+
+
+@pytest.mark.parametrize('width', [32, 40, 80, 120])
+def test_age_remains_visible_and_origin_is_available_at_standard_width(width):
+    item = reader('/runs/ethanol/run.events.jsonl', host='mel2024',
+                  scheduler={'SLURM_JOB_ID': '5450148'})
+    text = render([item], width=width, height=24)
+    assert 'Age' in text and '30s' in text
+    if width >= 80:
+        assert 'Host / Slurm' in text and 'mel2024 / 5450148' in text
+    assert all(cell_len(line) <= width for line in text.splitlines())
+    assert len(text.splitlines()) <= 24
+
+
+def test_stale_unknown_and_terminal_states_remain_distinct():
+    items = [reader('/runs/stale/run.events.jsonl'),
+             reader('/runs/completed/run.events.jsonl', status='Completed'),
+             reader('/runs/unknown/run.events.jsonl', status='No lifecycle event yet', sample_timestamp=None)]
+    text = render(items, width=100, now=datetime(2026, 2, 1, tzinfo=timezone.utc))
+    assert '1 stale?' in text and '1 completed' in text and '1 unknown' in text
+    assert '31d' in text and 'Stale?' in text
+    assert 'current job status unknown' in text
+    assert items[0].state.status == 'Running'
+    assert 'Failed' not in text
+
+
 def test_final_console_width_and_small_height_are_respected():
     items = [reader(f'/runs/sample-{index}/run.events.jsonl') for index in range(20)]
     output = io.StringIO()
     Console(file=output, width=80, color_system=None).print(
         render_overview(items, width=120, height=24))
     text = output.getvalue()
-    assert 'Total E [eV]' in text and 'Age' not in text
+    assert 'Age' in text and 'Total E [eV]' not in text
     assert max(map(cell_len, text.splitlines())) <= 80
     for height in (3, 6, 12):
         compact = render(items, height=height)
@@ -157,7 +195,7 @@ def test_read_errors_are_visible_without_changing_reported_simulation_state():
     text = render([item], height=24)
     assert 'Read error' in text
     assert '1 journal read error; cached values may be outdated.' in text
-    assert '1 running' in text and '0 failed' in text
+    assert '1 read errors' in text and '0 failed' in text
     assert '50/100' in text  # Explicitly marked cached data remains useful.
     assert item.state.status == 'Running'
     assert len(text.splitlines()) <= 24

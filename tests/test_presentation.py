@@ -48,7 +48,8 @@ def render(reporter, width=80, height=100):
     (False, 'xterm', 'auto', False, False),
     (True, 'dumb', 'auto', False, False),
     (True, 'xterm', 'plain', False, False),
-    (False, 'dumb', 'rich', False, True),
+    (False, 'dumb', 'rich', False, False),
+    (True, 'dumb', 'rich', False, True),
     (True, 'xterm', 'rich', True, False),
 ])
 def test_display_selection(monkeypatch, tty, term, display, quiet, enabled):
@@ -58,7 +59,78 @@ def test_display_selection(monkeypatch, tty, term, display, quiet, enabled):
     ui.configure(display=display, quiet=quiet)
     with ui.run_display({}) as reporter:
         assert reporter.enabled is enabled
-    assert bool(output.getvalue()) is enabled
+    fallback_warning = display == 'rich' and not tty and not quiet
+    assert bool(output.getvalue()) is (enabled or fallback_warning)
+
+
+@pytest.mark.parametrize('quiet', [False, True])
+def test_forced_rich_redirect_uses_plain_output_and_warns_once(monkeypatch, quiet):
+    output = io.StringIO()
+    monkeypatch.setattr(sys, 'stderr', output)
+    monkeypatch.setenv('TERM', 'xterm-256color')
+    ui.configure(display='rich', quiet=quiet)
+    with ui.run_display({}) as reporter:
+        assert not reporter.enabled and reporter.observing
+        reporter.start_md(0, 100, .5)
+        reporter.progress(50, temperature=300, energy=-38)
+        with ui.run_display({}) as nested:
+            assert nested is reporter
+        handler = ui.make_console_handler(logging.INFO)
+        handler.handle(logging.LogRecord('SO3LR', logging.WARNING, '', 0, 'plain diagnostic', (), None))
+        handler.close()
+    text = output.getvalue()
+    assert '\x1b' not in text and 'SO3LR TAURI' not in text
+    assert text.count('--display rich requires a terminal') == (0 if quiet else 1)
+    assert text.count('plain diagnostic') == 1
+
+
+@pytest.mark.parametrize('preserved,path,expected', [
+    (False, '/tmp/run.log', ''),
+    (True, None, ''),
+    (True, '/tmp/run.log', 'Full traceback: /tmp/run.log'),
+    (True, '/tmp/[red]run\n\x1b.log', 'Full traceback: /tmp/[red]run\\x0a\\x1b.log'),
+])
+def test_failure_details_require_verified_path_and_escape_controls(preserved, path, expected):
+    error = RuntimeError('failure')
+    error._so3lr_traceback_preserved = preserved
+    error._so3lr_traceback_path = path
+    assert ui.failure_details(error) == expected
+
+
+def test_rich_failure_footer_follows_cleanup_and_keeps_full_journal_message(monkeypatch, tmp_path):
+    import json
+
+    output = Terminal()
+    monkeypatch.setattr(sys, 'stderr', output)
+    ui.configure(display='rich')
+    error = RuntimeError('first line\nsecond XLA diagnostic')
+    error._so3lr_traceback_preserved = True
+    error._so3lr_traceback_path = '/tmp/verified-run.log'
+    with pytest.raises(RuntimeError) as caught:
+        with ui.run_display({'log_file': str(tmp_path / 'run.log')}) as reporter:
+            raise error
+    assert caught.value is error
+    assert reporter.renderer.detail == 'RuntimeError: first line'
+    text = output.getvalue()
+    assert text.count('Full traceback: /tmp/verified-run.log') == 1
+    assert text.rfind('Full traceback:') > text.rfind('\x1b[?25h')
+    assert 'second XLA diagnostic' not in text and '\\x0a' not in text
+    events = [json.loads(line) for line in reporter.journal.path.read_text().splitlines()]
+    failure = next(event for event in events if event['type'] == 'run_failed')
+    assert failure['data']['message'] == 'RuntimeError: first line\nsecond XLA diagnostic'
+
+
+def test_unverified_failure_does_not_hide_diagnostics_or_offer_traceback_file(monkeypatch):
+    output = Terminal()
+    monkeypatch.setattr(sys, 'stderr', output)
+    ui.configure(display='rich')
+    error = RuntimeError('first line\nsecond diagnostic')
+    error._so3lr_traceback_path = '/tmp/not-verified.log'
+    with pytest.raises(RuntimeError):
+        with ui.run_display({}) as reporter:
+            raise error
+    assert reporter.renderer.detail == 'RuntimeError: first line\nsecond diagnostic'
+    assert 'Full traceback:' not in output.getvalue()
 
 
 def test_module_and_plain_runs_do_not_import_rich_or_jax():

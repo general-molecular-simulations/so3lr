@@ -466,6 +466,21 @@ class CustomCommandClass(click.Group):
         format_overview(self, ctx, formatter, __version__)
 
 
+def _help_or_require_input(help_requested, **required_options):
+    """Keep bare-command help, but do not silently accept incomplete launchers."""
+    missing = [option for option, value in required_options.items() if not value]
+    if not help_requested and not missing:
+        return False
+    ctx = click.get_current_context()
+    supplied = any(ctx.get_parameter_source(name) == click.core.ParameterSource.COMMANDLINE
+                   for name in ctx.params)
+    if help_requested or not supplied:
+        click.echo(ctx.get_help())
+        return True
+    label = 'option' if len(missing) == 1 else 'options'
+    raise click.UsageError(f"Missing required {label}: {', '.join(missing)}.", ctx=ctx)
+
+
 # Default values applied to the settings dict when using the YAML pathway.
 # These mirror the CLI option defaults so that omitting a key from the YAML
 # produces the same result as not passing the corresponding CLI flag.
@@ -673,6 +688,11 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     if no_color or 'NO_COLOR' in os.environ:
         ctx.color = False
 
+    if settings is not None and ctx.invoked_subcommand is not None:
+        raise click.UsageError(
+            '--settings cannot be combined with a subcommand. '
+            'Use `so3lr --settings FILE`, or pass options directly to the subcommand.')
+
     if help or help_full:
         click.echo(ctx.get_help())
         return
@@ -693,7 +713,9 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
 
 def _run_settings_file(settings):
     """Use the same YAML path for scripts and explicitly launched setup runs."""
-    settings_path, raw_settings = _read_settings_file(settings)
+    settings_path, raw_settings = _read_settings_file(settings, cli_errors=True)
+    if not isinstance(raw_settings, dict) or any(not isinstance(key, str) for key in raw_settings):
+        raise click.UsageError(f'{settings_path.name} must contain a YAML mapping with string setting names.')
     if 'operation' in raw_settings:
         if raw_settings['operation'] != 'optimization':
             raise click.UsageError(f"Unsupported settings operation {raw_settings['operation']!r}. "
@@ -707,15 +729,24 @@ def _run_settings_file(settings):
         with fire_optimization.make_context('opt' if parent is not None else 'so3lr opt',
                                              argv, parent=parent) as context:
             return fire_optimization.invoke(context)
-    settings_dict = load_md_settings(settings_path, loaded_settings=raw_settings)
+    try:
+        settings_dict = load_md_settings(settings_path, loaded_settings=raw_settings)
+    except (ValueError, TypeError, OverflowError) as exc:
+        # Only loading/normalization errors are usage errors. Numerical execution
+        # below must retain its original exceptions for library callers and logs.
+        raise click.UsageError(f'Invalid settings in {settings_path.name}: {exc}') from exc
     _execute_md(settings_dict, settings_source=settings)
 
 
-def _read_settings_file(settings):
+def _read_settings_file(settings, *, cli_errors=False):
     try:
         settings_path = Path(settings).expanduser().resolve()
         settings_dict = load_settings_yaml(settings_path)
-    except (FileNotFoundError, yaml.YAMLError) as e:
+    except (OSError, UnicodeError, yaml.YAMLError) as e:
+        if cli_errors:
+            raise click.UsageError(f'Error loading settings file: {e}') from e
+        if not isinstance(e, (FileNotFoundError, yaml.YAMLError)):
+            raise
         logger.error(f"Error loading settings file: {str(e)}")
         sys.exit(1)
     return settings_path, settings_dict
@@ -822,8 +853,11 @@ def init_command():
 @click.pass_context
 def show_command(ctx, path, once, interval):
     from .monitor import show
-    show(path, once=once, interval=interval,
-          no_color=ctx.find_root().params.get('no_color', False))
+    try:
+        show(path, once=once, interval=interval,
+             no_color=ctx.find_root().params.get('no_color', False))
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint='PATH') from exc
 
 
 def _record_run_failure(exc, message, log_file):
@@ -835,6 +869,7 @@ def _record_run_failure(exc, message, log_file):
     """
     try:
         exc._so3lr_traceback_preserved = False
+        exc._so3lr_traceback_path = None
         if not log_file:
             return
         path = Path(log_file).resolve()
@@ -862,7 +897,9 @@ def _record_run_failure(exc, message, log_file):
             if (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino):
                 return
             stream.seek(offset)
-            exc._so3lr_traceback_preserved = expected in stream.read(size)
+            if expected in stream.read(size):
+                exc._so3lr_traceback_path = str(path)
+                exc._so3lr_traceback_preserved = True
     except Exception:
         # No saved-traceback claim when the file is unavailable, the formatter
         # fails, or an unusual exception cannot hold the marker.
@@ -1058,9 +1095,7 @@ def run_md_simulation(
     flash_kernels: str = 'auto',
 ) -> None:
     """Shared runner for NVT, NVT-Langevin, NPT, and NVE MD simulations."""
-    if not input_file or help:
-        ctx = click.get_current_context()
-        click.echo(ctx.get_help())
+    if _help_or_require_input(help, **{'--input': input_file}):
         return
 
     # Default output filename: <input stem>_<ensemble with '_'>.xyz
@@ -1218,8 +1253,7 @@ def fire_optimization(
         so3lr opt --input geometry.xyz
     """
     # Print help
-    if not input_file or help:
-        click.echo(fire_optimization.get_help(click.get_current_context()))
+    if _help_or_require_input(help, **{'--input': input_file}):
         return
 
     # HDF5 output is not supported for `opt` (the writer falls back to xyz
@@ -1525,8 +1559,7 @@ def eval_model(
         so3lr eval --datafile dataset.extxyz --save-to predictions.extxyz
     """
     # Print help if needed
-    if not datafile or help:
-        click.echo(eval_model.get_help(click.get_current_context()))
+    if _help_or_require_input(help, **{'--datafile': datafile}):
         return
 
     # Set default output file name if needed
@@ -1670,8 +1703,7 @@ def finetune_model(
     """
     # Print help if needed (and reject the trivial `--workdir foo` invocation
     # that previously crashed with TypeError because `datafile` was None).
-    if not datafile or not workdir or help:
-        click.echo(finetune_model.get_help(click.get_current_context()))
+    if _help_or_require_input(help, **{'--datafile': datafile, '--workdir': workdir}):
         return
 
     # Generate default log file name based on output file if not explicitly provided
@@ -1740,8 +1772,7 @@ def train_model(
     Example:
         so3lr train --config config.yaml
     """
-    if help or not config_path:
-        click.echo(train_model.get_help(click.get_current_context()))
+    if _help_or_require_input(help, **{'--config': config_path}):
         return
 
     # Validate file existence
@@ -1833,8 +1864,7 @@ def tune_ewald(
     """
      # Print help if needed (and handle the no-args invocation that
      # previously fell through and crashed when input_file was None).
-    if (not input_file and not settings) or help:
-        click.echo(tune_ewald.get_help(click.get_current_context()))
+    if _help_or_require_input(help, **{'--input or --settings': input_file or settings}):
         return
 
     # Load settings from file if provided
@@ -1940,7 +1970,11 @@ def main() -> None:
         if not getattr(exc, '_so3lr_traceback_preserved', False):
             raise
         if not getattr(exc, '_so3lr_reported', False):
-            click.ClickException(presentation.exception_message(exc)).show()
+            message = presentation.exception_message(exc).splitlines()[0]
+            click.ClickException(presentation.terminal_text(message)).show()
+            details = presentation.failure_details(exc)
+            if details:
+                click.echo(details, err=True)
         sys.exit(1)
 
 

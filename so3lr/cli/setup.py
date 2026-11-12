@@ -581,7 +581,7 @@ def launch_setup():
                       no_color='NO_COLOR' in os.environ or (context is not None and context.color is False))
     _say(console, 'SO3LR TAURI · New MD run', 'bold yellow')
     _say(console, 'Choose a structure, set the dynamics, then review and start or save.')
-    _say(console, '↑/↓ and Enter select · Esc cancels a menu · Ctrl+C cancels anywhere', 'dim')
+    _say(console, '↑/↓ and Enter select · Esc in a menu cancels setup · Ctrl+C cancels anywhere', 'dim')
     previous = None
     try:
         while True:

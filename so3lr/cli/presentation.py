@@ -52,9 +52,9 @@ def reset():
 def _rich_enabled():
     if _configuration.quiet or _configuration.display == 'plain':
         return False
-    if _configuration.display == 'rich':
-        return True
-    return bool(getattr(sys.stderr, 'isatty', lambda: False)()) and os.environ.get('TERM') != 'dumb'
+    if not bool(getattr(sys.stderr, 'isatty', lambda: False)()):
+        return False
+    return _configuration.display == 'rich' or os.environ.get('TERM') != 'dumb'
 
 
 class _NullReporter:
@@ -107,6 +107,14 @@ def exception_message(exc):
         parts.append(type(exc).__name__ + (f': {detail}' if detail else ''))
         exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
     return ' (caused by '.join(parts) + ')' * (len(parts) - 1)
+
+
+def failure_details(exc):
+    """Point to a traceback only after the CLI verified this failure's write."""
+    path = getattr(exc, '_so3lr_traceback_path', None)
+    if not getattr(exc, '_so3lr_traceback_preserved', False) or not path:
+        return ''
+    return terminal_text(f'Full traceback: {path}')
 
 
 def _seconds(value):
@@ -729,7 +737,7 @@ class _RunReporter:
             self.renderer.artifacts.append(('Metrics', str(self.journal.path)))
         self.renderer.finish()
 
-    def fail(self, message):
+    def fail(self, message, *, display_message=None):
         with self._log_lock:
             if self.status != 'running':
                 return
@@ -737,7 +745,7 @@ class _RunReporter:
         self._drain_logs()
         self.run_log.finish('failed', str(message))
         self.journal.emit('run_failed', {'message': str(message)})
-        self.renderer.fail(message)
+        self.renderer.fail(message if display_message is None else display_message)
 
     def close(self):
         self._drain_logs()
@@ -762,6 +770,8 @@ def run_display(settings):
         yield current
         return
     rich_enabled = _rich_enabled()
+    if _configuration.display == 'rich' and not _configuration.quiet and not rich_enabled:
+        print('Warning: --display rich requires a terminal; using plain output.', file=sys.stderr)
     owns_terminal = rich_enabled and bool(getattr(sys.stderr, 'isatty', lambda: False)())
     with _termination_signals(enabled=owns_terminal):
         renderer = _Reporter(settings) if rich_enabled else _null
@@ -774,13 +784,16 @@ def run_display(settings):
                 renderer.close()
             raise
         token = _active.set(reporter)
+        failure_detail = ''
         try:
             yield reporter
         except BaseException as exc:
             if isinstance(exc, SystemExit) and exc.code in (None, 0):
                 reporter.finish()
             else:
-                reporter.fail(exception_message(exc))
+                message = exception_message(exc)
+                failure_detail = failure_details(exc) if isinstance(exc, Exception) else ''
+                reporter.fail(message, display_message=message.splitlines()[0] if failure_detail else None)
                 try:
                     exc._so3lr_reported = reporter.enabled
                 except (AttributeError, TypeError):
@@ -791,6 +804,8 @@ def run_display(settings):
         finally:
             try:
                 reporter.close()
+                if reporter.enabled and failure_detail:
+                    renderer.console.print(renderer._text(failure_detail, 'dim'))
             finally:
                 _active.reset(token)
 
