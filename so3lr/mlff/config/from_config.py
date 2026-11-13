@@ -985,9 +985,9 @@ def run_fine_tuning(
             # alpha/scale, leaving 'adaptive' robust loss fixed at its init.
             trainable_subset_keys = list(trainable_subset_keys) + ['adaptive_robust_loss']
 
-    print("=" * 50)
-    print_param_shapes(params)
-    print("=" * 50)
+    logger.info("=" * 50)
+    print_param_shapes(params, emit=logger.info)
+    logger.info("=" * 50)
 
     total_params = count_params(params)
     trainable_params = count_trainable_params(
@@ -996,16 +996,16 @@ def run_fine_tuning(
         frozen_keys=frozen_subset_keys
     )
 
-    print(f"\nTotal number of parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
+    logger.info(f"Total number of parameters: {total_params:,}")
+    logger.info(f"Trainable parameters: {trainable_params:,}")
     if trainable_params != total_params:
-        print(f"Frozen parameters: {total_params - trainable_params:,}")
-        print(f"Fine-tuning strategy: {strategy}")
+        logger.info(f"Frozen parameters: {total_params - trainable_params:,}")
+        logger.info(f"Fine-tuning strategy: {strategy}")
         if trainable_subset_keys:
-            print(f"Trainable modules: {trainable_subset_keys}")
+            logger.info(f"Trainable modules: {trainable_subset_keys}")
     if frozen_subset_keys:
-        print(f"Fine-tuning strategy: {strategy}")
-        print(f"Frozen modules: {frozen_subset_keys}")
+        logger.info(f"Fine-tuning strategy: {strategy}")
+        logger.info(f"Frozen modules: {frozen_subset_keys}")
 
     # Get data filepath.
     data_filepath = data_path_from_config(config=config)

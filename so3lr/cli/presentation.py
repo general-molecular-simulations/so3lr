@@ -89,8 +89,44 @@ class _NullReporter:
     def print_hint(self, line):
         pass
 
+    def task_progress(self, done, total, unit):
+        pass
+
+    def results(self, title, rows):
+        pass
+
 
 _null = _NullReporter()
+
+
+class _NoJournal:
+    """Stands in for EventJournal when a command keeps no run journal (eval, tuning, training)."""
+    enabled = active = False
+    path = run_id = None
+
+    def emit(self, *args, **kwargs):
+        return None
+
+    def flush_initial_warning(self):
+        pass
+
+    def _warn(self, *args, **kwargs):
+        pass
+
+    def close(self):
+        pass
+
+
+class _NoRunLog:
+    """Stands in for RunLog: those commands keep their own text logs."""
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
+# What a completed command's main output file is called on screen.
+OUTPUT_LABELS = {'optimization': 'Optimization trajectory', 'evaluation': 'Predictions',
+                 'training': 'Model directory'}
 
 
 PLAIN_PROGRESS_INTERVAL = 600  # seconds between plain progress lines without a checkpoint
@@ -224,6 +260,9 @@ class _Reporter:
             markup=False, highlight=False,
         )
         self.info = {}
+        self._task = None
+        self._task_origin = None
+        self._results = []
         self.requested = set()
         for key in ('model', 'precision', 'engine'):
             if settings.get(key) is not None:
@@ -380,6 +419,30 @@ class _Reporter:
                 outcome = optimization_status(self.info, self.status)
                 if outcome != 'Relaxing geometry':  # the phase row already says so
                     rows.append(self._text(outcome, theme.SUCCESS if outcome == 'Force criterion met' else theme.MUTED))
+        if self._task is not None:
+            done, total, unit = self._task
+            ratio = done / total if total else 0.0
+            width = min(40, max(8, self.console.width - 40))
+            bar = theme.bar(ratio, width, self._ascii_only)
+            bar.append(f'  {ratio:.0%}', style=theme.STRONG)
+            bar.append(self._label(f'  {done:,}/{total:,} {unit}'), style=theme.MUTED)
+            rows.append(bar)
+            started, first, _ = self._task_origin
+            elapsed = time.monotonic() - started
+            timing = f'Elapsed {duration_label(elapsed)}'
+            if self.status == 'running' and done > first and elapsed > 0:
+                rate = (done - first) / elapsed
+                timing += f' · ETA {duration_label((total - done) / rate)} · {rate:.3g} {unit}/s'
+            rows.append(self._text(timing, theme.MUTED))
+        for title, items in self._results:
+            rows.append(self._text(''))
+            rows.append(self._text(title, theme.STRONG))
+            table = Table.grid(padding=(0, 2))
+            table.add_column(style=theme.MUTED, no_wrap=True)
+            table.add_column(overflow='fold')
+            for label, value in items:
+                table.add_row(self._text(label), self._text(value))
+            rows.append(table)
         if self.started_at is not None:
             live = self._live_progress()
             width = min(40, max(8, self.console.width - 40))
@@ -407,6 +470,8 @@ class _Reporter:
         if self.saved is not None:
             step, path = self.saved
             rows.append(self._text(f'Checkpoint step {step:,} · {_display_path(path)}', theme.MUTED))
+        if self._results and self.artifacts:
+            rows.append(self._text(''))
         for label, path in self.artifacts:
             rows.append(self._text(f'{label} · {_display_path(path)}', theme.MUTED))
         hint = None
@@ -516,6 +581,8 @@ class _Reporter:
         phase = (str(name), str(detail))
         if phase == (self.phase_name, self.detail):
             return
+        if name != self.phase_name:
+            self._task = None  # a progress bar belongs to the phase that reported it
         self.phase_name, self.detail = phase
         self._reported_at = time.monotonic()
         self._state.phase, self._state.detail = phase
@@ -524,6 +591,23 @@ class _Reporter:
         first_preparation = phase not in self._seen_phases and name in ('Loading', 'Compiling', 'Relaxing')
         self._seen_phases.add(phase)
         self._refresh(force=first_preparation)
+
+    def task_progress(self, done, total, unit):
+        """Generic progress for non-MD work: structures evaluated, training steps, candidates."""
+        now = time.monotonic()
+        # The clock and rate survive a phase that hides the bar (training's validations).
+        origin = self._task_origin
+        if origin is None or str(unit) != origin[2] or done < origin[1]:
+            self._task_origin = (now, int(done), str(unit))
+        self._task = (int(done), int(total), str(unit))
+        self._reported_at = now
+        self._refresh(force=done >= total)
+
+    def results(self, title, rows):
+        """A titled table of (label, value) rows, replaced when the same title comes again."""
+        self._results = [item for item in self._results if item[0] != title] + [(str(title), list(rows))]
+        self._reported_at = time.monotonic()
+        self._refresh(force=True)
 
     def update_info(self, **kwargs):
         self._reported_at = time.monotonic()
@@ -574,12 +658,12 @@ class _Reporter:
         self.status = 'complete'
         self.phase_name, self.detail = 'Complete', ''
         self._observe('run_completed', {'message': 'Run completed successfully.'})
-        output_label = 'Optimization trajectory' if self.info.get('operation') == 'optimization' else 'Trajectory'
+        output_label = OUTPUT_LABELS.get(self.info.get('operation'), 'Trajectory')
         for key, label in (('output_file', output_label), ('log_file', 'Log')):
             path = self.settings.get(key)
             if path:
                 try:
-                    if os.path.isfile(path):
+                    if os.path.exists(path):  # a training run's output is its model directory
                         self.artifacts.append((label, str(path)))
                 except (OSError, TypeError, ValueError):
                     pass
@@ -627,15 +711,16 @@ class _RunReporter:
 
     observing = True
 
-    def __init__(self, settings, renderer):
+    def __init__(self, settings, renderer, record=True):
         self.renderer = renderer
         self._settings = settings
         self._last_checkpoint = None
         # enabled continues to mean terminal rendering, not journal availability.
         self.enabled = renderer.enabled
-        self.journal = EventJournal(settings)
+        # Only MD and optimization keep a run journal and run-log blocks for so3lr show.
+        self.journal = EventJournal(settings) if record else _NoJournal()
         try:
-            self.run_log = RunLog(settings, self.journal)
+            self.run_log = RunLog(settings, self.journal) if record else _NoRunLog()
             if self.enabled:
                 self.renderer.attach_journal(self.journal.path, self.journal.run_id,
                                              enabled=self.journal.enabled)
@@ -667,6 +752,14 @@ class _RunReporter:
         self.journal.emit('phase', {'name': phase[0], 'detail': phase[1]})
         self.run_log.phase(phase[0])
         self.renderer.phase(*phase)
+
+    def task_progress(self, done, total, unit):
+        self._drain_logs()
+        self.renderer.task_progress(done, total, unit)
+
+    def results(self, title, rows):
+        self._drain_logs()
+        self.renderer.results(title, rows)
 
     def update_info(self, **kwargs):
         self._drain_logs()
@@ -839,7 +932,7 @@ class _RunReporter:
 
 
 @contextmanager
-def run_display(settings):
+def run_display(settings, *, record=True):
     """Own one CLI journal/display and restore both, including on Ctrl+C."""
     current = _active.get()
     if current is not None:
@@ -853,7 +946,7 @@ def run_display(settings):
         renderer = (_Reporter(settings) if rich_enabled
                     else _null if _configuration.quiet else _PlainReporter())
         try:
-            reporter = _RunReporter(settings, renderer)
+            reporter = _RunReporter(settings, renderer, record=record)
         except BaseException:
             # A journal may block on a remote filesystem and be interrupted after
             # Live has already hidden the cursor. Own that renderer immediately.

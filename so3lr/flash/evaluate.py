@@ -13,6 +13,7 @@ from collections import defaultdict
 
 import numpy as np
 
+from so3lr.cli.presentation import get_reporter
 from so3lr.structure_info import charge_and_multiplicity
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported, supported_atomic_numbers_for_model)
@@ -70,6 +71,7 @@ def evaluate_flash(frames, settings, targets, keep_predictions=False):
     t_first = t_rest = 0.0
     n_rest = 0
     points = None
+    reporter = get_reporter()
     for k, i in enumerate(order):
         atoms, (charge, spin) = frames[i], systems[i]
         t0 = time.time()
@@ -102,4 +104,5 @@ def evaluate_flash(frames, settings, targets, keep_predictions=False):
             if labels.get("forces") is not None:
                 atoms.arrays["forces"] = np.asarray(labels["forces"], np.float64)
             atoms.info["charge"] = int(charge)
+        reporter.task_progress(k + 1, len(order), "structures")
     return (tot_abs, tot_sq, tot_n), (t_first, t_rest, n_rest)

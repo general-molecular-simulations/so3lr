@@ -1523,3 +1523,49 @@ def test_resume_hint_counts_remaining_cycles_and_avoids_tilde(tmp_path, monkeypa
     assert 'runs/restart.npz' in err
     # 5,000 of 10,000 steps remain from step 6,000: 50 cycles of 100 steps.
     assert 'also set --md-cycles 50 (YAML: md_cycles: 50); md_cycles counts from the checkpoint.' in err
+
+
+def test_task_progress_and_results_render_without_a_run_journal(monkeypatch, tmp_path):
+    """eval, tune-ewald and training share the display but keep no journal for so3lr show."""
+    monkeypatch.setattr(sys, 'stderr', Terminal())
+    ui.configure(display='rich')
+    log = tmp_path / 'eval.log'
+    log.write_text('started\n')
+    with ui.run_display({'input_file': 'data.xyz', 'output_file': None, 'log_file': log},
+                        record=False) as reporter:
+        reporter.update_info(operation='evaluation')
+        reporter.phase('Evaluating')
+        reporter.task_progress(5, 20, 'structures')
+        text = render(reporter)
+        assert '25%' in text and '5/20 structures' in text
+        reporter.results('Timing', [('Evaluation', '1.000 s')])
+        reporter.results('Timing', [('Evaluation', '2.000 s')])  # same title replaces
+        text = render(reporter)
+        assert text.count('Timing') == 1 and 'Evaluation  2.000 s' in text
+        reporter.phase('Saving', 'Writing predictions')
+        assert 'structures' not in render(reporter)  # a bar belongs to the phase that reported it
+    assert reporter.journal.path is None
+    assert reporter.artifacts == [('Log', str(log))]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ['eval.log']
+
+
+def test_task_clock_survives_a_phase_that_hides_the_bar(monkeypatch):
+    monkeypatch.setattr(sys, 'stderr', Terminal())
+    ui.configure(display='rich')
+    with ui.run_display({}, record=False) as reporter:
+        reporter.phase('Training')
+        reporter.task_progress(1, 10, 'epochs')
+        origin = reporter._task_origin
+        reporter.phase('Compiling')
+        reporter.phase('Training')
+        reporter.task_progress(2, 10, 'epochs')
+        assert reporter._task_origin == origin
+        reporter.task_progress(1, 5, 'candidates')  # another task starts its own clock
+        assert reporter._task_origin != origin
+
+
+def test_library_callers_get_a_reporter_that_ignores_task_events():
+    reporter = ui.get_reporter()
+    assert not reporter.enabled
+    reporter.task_progress(1, 2, 'structures')
+    reporter.results('Timing', [('Evaluation', '1 s')])

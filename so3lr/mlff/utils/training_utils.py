@@ -267,6 +267,28 @@ def print_metrics_header(eval_metrics):
     return f"\n{header}\n{sep}"
 
 
+def _reporter():
+    """The CLI's live display, or a reporter that does nothing for library callers."""
+    from so3lr.cli.presentation import get_reporter
+    return get_reporter()
+
+
+def _report_step(reporter, step, start_step, epoch, num_epochs):
+    """Phase and epoch bar on the live display; the first step compiles."""
+    if step == start_step:
+        reporter.phase('Compiling', 'The first training step')
+        return
+    reporter.phase('Training', f'Epoch {epoch + 1:,} of {num_epochs:,} · step {step:,}')
+    reporter.task_progress(epoch, num_epochs, 'epochs')
+
+
+def _report_validation(step, epoch, eval_metrics):
+    """The latest validation metrics as a table on the live display."""
+    rows = [('Step', f'{step:,} · epoch {epoch + 1:,}')]
+    rows += [(key.removeprefix('eval_'), f'{eval_metrics[key]:.4g}') for key in _display_metric_keys(eval_metrics)]
+    _reporter().results('Latest validation', rows)
+
+
 def print_metrics_row(epoch, step, eval_metrics):
     """Print one table row for a validation checkpoint."""
     vals = [f'{epoch:>14d}', f'{step:>14d}'] + [
@@ -1119,6 +1141,7 @@ def _log_and_checkpoint(ckpt_mngr, step, epoch, eval_params, eval_metrics, print
     if print_header:
         logger.info(print_metrics_header(eval_metrics))
     logger.info(print_metrics_row(epoch, step, eval_metrics))
+    _report_validation(step, epoch, eval_metrics)
     eval_loss = eval_metrics['eval_loss']
     if jnp.isfinite(eval_loss):
         ckpt_mngr.save(
@@ -1344,6 +1367,7 @@ def fit(
         )
 
     start_step = step
+    reporter = _reporter()
     for epoch in range(num_epochs):
         # Switch to the stage-two loss at the configured epoch boundary.
         if (stage_two_start_epoch is not None and stage_two_loss_fn is not None
@@ -1395,13 +1419,13 @@ def fit(
                         init_scale=adaptive_robust_loss_init_scale
                     )
                     params = {**params, **adaptive_params}
-                    print(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
+                    logger.info(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
                     alpha, scale = transform_adaptive_robust_params(
                         adaptive_params['adaptive_robust_loss']['alpha_raw'],
                         adaptive_params['adaptive_robust_loss']['scale_raw']
                     )
-                    print(f"  Initial alpha: {alpha}")
-                    print(f"  Initial scale: {scale}")
+                    logger.info(f"  Initial alpha: {alpha}")
+                    logger.info(f"  Initial scale: {scale}")
 
             # If optimizer state is None (in the first step), initialize from the parameter pyTree.
             if opt_state is None:
@@ -1426,6 +1450,7 @@ def fit(
                         "reduce_lr_on_plateau=True. Disabling plateau LR scaling.")
                     reduce_lr_on_plateau = False
 
+            _report_step(reporter, step, start_step, epoch, num_epochs)
             params, opt_state, train_metrics = training_step_fn(params, opt_state, batch_training)
             step += 1
             if use_ema:
@@ -1443,6 +1468,7 @@ def fit(
             if step % eval_every_num_steps == 0:
                 # Validate the deployed weights (the EMA copy when EMA is on).
                 eval_params = ema_params if use_ema else params
+                reporter.phase('Training', f'Validating at step {step:,}')  # keeps the epoch bar
                 eval_metrics = _validation_metrics(
                     validation_step_fn, eval_params, validation_batches(), graph_to_batch_fn)
                 _log_and_checkpoint(ckpt_mngr, step, epoch, eval_params, eval_metrics,
@@ -1480,6 +1506,7 @@ def fit(
             if stop_training:
                 break  # exit the batch loop
 
+        reporter.task_progress(epoch + 1, num_epochs, 'epochs')
         if stop_training:
             break  # exit the epoch loop
 
@@ -1730,13 +1757,15 @@ def fit_from_iterator(
             'Restored TFDS training state from %s at step %s.',
             ckpt_dir, latest_step,
         )
-        print(
+        logger.info(
             f'Re-start training from step {latest_step} at epoch {start_epoch}.'
         )
 
     if on_training_ready is not None:
         on_training_ready()
 
+    reporter = _reporter()
+    start_step = step
     for epoch in range(start_epoch, num_epochs):
         if stop_training:
             logger.info(
@@ -1764,7 +1793,7 @@ def fit_from_iterator(
 
         if use_wandb:
             _wandb_log({"epoch": epoch})
-        print(f'Epoch {epoch} of {num_epochs}')
+        logger.info(f'Epoch {epoch} of {num_epochs}')
         training_iterator_loop = training_iterator.next_epoch(
             split='train',
             mode='train',
@@ -1781,7 +1810,7 @@ def fit_from_iterator(
 
             # If params are None (in the first step), initialize the parameters or load from existing checkpoint.
             if params is None:
-                print(f'Initialize new parameters.')
+                logger.info('Initialize new parameters.')
                 params = model.init(jax_rng, batch_training)
 
                 # Initialize adaptive robust loss parameters if enabled
@@ -1792,13 +1821,13 @@ def fit_from_iterator(
                         init_scale=adaptive_robust_loss_init_scale
                     )
                     params = {**params, **adaptive_params}
-                    print(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
+                    logger.info(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
                     alpha, scale = transform_adaptive_robust_params(
                         adaptive_params['adaptive_robust_loss']['alpha_raw'],
                         adaptive_params['adaptive_robust_loss']['scale_raw']
                     )
-                    print(f"  Initial alpha: {alpha}")
-                    print(f"  Initial scale: {scale}")
+                    logger.info(f"  Initial alpha: {alpha}")
+                    logger.info(f"  Initial scale: {scale}")
 
             # If optimizer state is None (in the first step), initialize from the parameter pyTree.
             if opt_state is None:
@@ -1821,6 +1850,7 @@ def fit_from_iterator(
                         "reduce_lr_on_plateau=True. Disabling plateau LR scaling.")
                     reduce_lr_on_plateau = False
 
+            _report_step(reporter, step, start_step, epoch, num_epochs)
             params, opt_state, train_metrics = training_step_fn(params, opt_state, batch_training)
             step += 1
             if use_ema:
@@ -1846,6 +1876,7 @@ def fit_from_iterator(
             if step % eval_every_num_steps == 0:
                 # Use the EMA (deployed) weights for validation when enabled.
                 eval_params = ema_params if use_ema else params
+                reporter.phase('Training', f'Validating at step {step:,}')  # keeps the epoch bar
                 # Start iteration over validation batches.
                 eval_totals = {}
                 eval_counts = {}
@@ -1874,6 +1905,7 @@ def fit_from_iterator(
                     logger.info(print_metrics_header(eval_metrics))
                     header_printed = True
                 logger.info(print_metrics_row(epoch, step, eval_metrics))
+                _report_validation(step, epoch, eval_metrics)
                 eval_loss = eval_metrics['eval_loss']
 
                 # Log to weights and bias.
@@ -1947,7 +1979,7 @@ def fit_from_iterator(
                     if checkpoint_started:
                         ckpt_mngr.wait_until_finished()
                 else:
-                    print(
+                    logger.warning(
                         f"Skipping checkpoint at step {step} because "
                         f"eval_loss={eval_loss}"
                     )
@@ -1961,6 +1993,7 @@ def fit_from_iterator(
                     close_training_iterator()
                 break  # exit the batch loop
 
+        reporter.task_progress(epoch + 1, num_epochs, 'epochs')
         if stop_training:
             break  # exit the epoch loop
 

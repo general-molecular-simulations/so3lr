@@ -266,7 +266,7 @@ def test_eval_reports_binding_energies_for_dimer_files(tmp_path, caplog):
     from ase import Atoms
     from ase.io import write
     from so3lr.binding_energies import KCAL_PER_EV
-    from so3lr.cli.so3lr_eval import _report_binding_energies
+    from so3lr.cli.so3lr_eval import _dimer_pairs, _report_binding_energies
     pairs = []
     for reference in (-2.0, -6.0):
         for kind in ('dimer_original', 'dimer_translated'):
@@ -279,7 +279,7 @@ def test_eval_reports_binding_energies_for_dimer_files(tmp_path, caplog):
         bound = Atoms('He2', info={'energy_so3lr': -1.0 + binding / KCAL_PER_EV})
         predicted += [bound, Atoms('He2', info={'energy_so3lr': -1.0})]
     with caplog.at_level(logging.INFO, logger='SO3LR'):
-        summary = _report_binding_energies(data, predicted)
+        summary = _report_binding_energies(_dimer_pairs(data), predicted)
     assert summary['mae'] == pytest.approx(0.25)
     assert 'Binding energies (dimer - separated) for 2 dimers' in caplog.text
-    assert _report_binding_energies(data, predicted[:2]) is None
+    assert _report_binding_energies(_dimer_pairs(data), predicted[:2]) is None

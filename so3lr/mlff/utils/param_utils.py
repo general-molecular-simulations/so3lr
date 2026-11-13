@@ -10,15 +10,16 @@ import numpy as np
 MAX_NUM_THEORY_LEVELS = 16
 
 
-def print_param_shapes(params, prefix=''):
+def print_param_shapes(params, prefix='', emit=print):
+    """Write the parameter tree's shapes, one line each, through emit (print or a logger)."""
     if isinstance(params, dict):
         for key, value in params.items():
             if isinstance(value, (dict, jnp.ndarray, np.ndarray)):
                 if isinstance(value, (jnp.ndarray, np.ndarray)):
-                    print(f"{prefix}{key}: {value.shape}")
+                    emit(f"{prefix}{key}: {value.shape}")
                 else:
-                    print(f"{prefix}{key}:")
-                    print_param_shapes(value, prefix + '  ')
+                    emit(f"{prefix}{key}:")
+                    print_param_shapes(value, prefix + '  ', emit)
 
 
 def count_params(params_dict):

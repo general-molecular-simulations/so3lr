@@ -1594,9 +1594,53 @@ def eval_model(
         # Use with_suffix so the log file lands next to --output, not in CWD.
         log_file = str(Path(output_file).with_suffix('.log'))
 
-    # Setup logging with default levels
-    setup_logger(log_file)
+    # Checked before the display opens: a usage problem is one line, not a stopped run.
+    if not Path(datafile).exists():
+        raise click.ClickException(f"Dataset file not found: {datafile}")
+    # Honors --overwrite so eval, opt, MD and finetune all use the same opt-in
+    # policy (refuse by default; pass --overwrite to truncate). The downstream
+    # evaluate_so3lr_on() repeats this check for callers that bypass the CLI.
+    if save_to and Path(save_to).exists() and not overwrite:
+        raise click.ClickException(
+            f"Output file already exists: {save_to}. Refusing to overwrite. "
+            f"Pass --overwrite to overwrite, or choose a different --save-to.")
 
+    settings = dict(
+        datafile=datafile, batch_size=batch_size, lr_cutoff=lr_cutoff, dispersion_damping=dispersion_damping,
+        jit_compile=jit_compile, save_to=save_to, model_path=model_path, precision=precision, targets=targets,
+        log_file=log_file, total_charge=total_charge, num_unpaired_electrons=num_unpaired_electrons,
+        overwrite=overwrite, charge_embed_total_charge=charge_embed_total_charge,
+        charge_equilibration_total_charge=charge_equilibration_total_charge,
+        kspace_electrostatics=kspace_electrostatics, kspace_smearing=kspace_smearing,
+        kspace_spacing=kspace_spacing, kspace_interp_nodes=kspace_interp_nodes,
+        kspace_dispersion=kspace_dispersion, kspace_dispersion_smearing=kspace_dispersion_smearing,
+        kspace_dispersion_spacing=kspace_dispersion_spacing,
+        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
+        engine=engine, flash_mode=flash_mode, flash_mixed=flash_mixed, flash_devices=flash_devices, flash_kernels=flash_kernels)
+    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    _model = model_path or DEFAULT_MODEL
+    _kind = 'bundled' if _model in available_models() else 'custom path'
+    # Evaluation shows the live display like MD, but keeps no run journal.
+    display_settings = dict(settings, input_file=datafile, output_file=save_to)
+    with presentation.run_display(display_settings, record=False) as reporter:
+        reporter.update_info(operation='evaluation', model=_model)
+        if save_to:
+            Path(save_to).parent.mkdir(parents=True, exist_ok=True)
+        setup_logger(log_file)
+        try:
+            _evaluate(settings, model=_model, kind=_kind, output_file=output_file)
+        except Exception as exc:
+            _record_run_failure(exc, 'Evaluation failed', log_file)
+            raise
+
+
+def _evaluate(settings, *, model, kind, output_file):
+    """The logged banner and the evaluation itself, inside the display."""
+    datafile, save_to, log_file = settings['datafile'], settings['save_to'], settings['log_file']
+    batch_size, precision, targets = settings['batch_size'], settings['precision'], settings['targets']
+    lr_cutoff, dispersion_damping = settings['lr_cutoff'], settings['dispersion_damping']
+    total_charge, num_unpaired_electrons = settings['total_charge'], settings['num_unpaired_electrons']
+    jit_compile, overwrite = settings['jit_compile'], settings['overwrite']
     # Log ASCII art
     logger.info(SO3LR_ASCII)
 
@@ -1611,10 +1655,7 @@ def eval_model(
     # Mirror the MD-side banner: show the resolved short name (so the user knows
     # which bundled checkpoint actually loaded — so3lr-tauri-s/m/l/so3lr — instead of
     # the generic 'SO3LR' label) and tag it as bundled vs. a custom-path model.
-    from so3lr.model_registry import DEFAULT_MODEL, available_models
-    _model = model_path or DEFAULT_MODEL
-    _kind = 'bundled' if _model in available_models() else 'custom path'
-    logger.info(f"Force field:               {_model} ({_kind})")
+    logger.info(f"Force field:               {model} ({kind})")
     logger.info(f"Precision:                 {precision}")
     logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
     logger.info(f"Dispersion damping:        {dispersion_damping} Å")
@@ -1627,42 +1668,10 @@ def eval_model(
     logger.info(f"Targets:                   {targets}")
     logger.info("=" * 60)
 
-    settings = dict(
-        datafile=datafile, batch_size=batch_size, lr_cutoff=lr_cutoff, dispersion_damping=dispersion_damping,
-        jit_compile=jit_compile, save_to=save_to, model_path=model_path, precision=precision, targets=targets,
-        log_file=log_file, total_charge=total_charge, num_unpaired_electrons=num_unpaired_electrons,
-        overwrite=overwrite, charge_embed_total_charge=charge_embed_total_charge,
-        charge_equilibration_total_charge=charge_equilibration_total_charge,
-        kspace_electrostatics=kspace_electrostatics, kspace_smearing=kspace_smearing,
-        kspace_spacing=kspace_spacing, kspace_interp_nodes=kspace_interp_nodes,
-        kspace_dispersion=kspace_dispersion, kspace_dispersion_smearing=kspace_dispersion_smearing,
-        kspace_dispersion_spacing=kspace_dispersion_spacing,
-        kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
-        engine=engine, flash_mode=flash_mode, flash_mixed=flash_mixed, flash_devices=flash_devices, flash_kernels=flash_kernels)
     # before JAX starts: what flash may run (the structures are checked once read)
     reserve_gpu(settings, task='eval')
     # Log hardware info
     get_hardware_info()
-
-    # Validate file existence
-    if not Path(datafile).exists():
-        logger.error(f"Error: Dataset file not found: {datafile}")
-        sys.exit(1)
-
-    # Validate output path. Honors --overwrite so eval, opt, MD and finetune
-    # all use the same opt-in policy (refuse by default; pass --overwrite to
-    # truncate). The downstream evaluate_so3lr_on() repeats this check for
-    # callers that bypass the CLI.
-    if save_to:
-        save_path = Path(save_to)
-        if save_path.exists() and not overwrite:
-            logger.error(
-                f"Output file already exists: {save_to}. Refusing to overwrite. "
-                f"Pass --overwrite to overwrite, or choose a different --save-to."
-            )
-            sys.exit(1)
-        # Create parent directory if it doesn't exist
-        save_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Call the evaluate_so3lr_on function from so3lr_eval.py
     evaluate_so3lr_on(**settings)
@@ -1730,49 +1739,57 @@ def finetune_model(
     if log_file is None:
         log_file = Path(workdir).resolve() / "finetuning.log"
 
-    # Setup logging with default levels. The log file creates the workdir.
-    setup_logger(log_file)
-
-    # Log ASCII art
-    logger.info(SO3LR_ASCII)
-
-    # Log all settings
-    logger.info("=" * 60)
-    logger.info(f"SO3LR Model Finetuning (v{__version__})")
-    logger.info("=" * 60)
-    logger.info(f"Dataset file:              {datafile}")
-    logger.info(f"Workdir:                   {workdir}")
-    logger.info(f"Finetuning strategy:       {strategy}")
-    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
-    if model_path is not None:
-        logger.info(f"Model path:            {model_path}")
-    logger.info(f"Config:                    {'Custom' if config_path else 'Default'}")
-    if config_path is not None:
-        logger.info(f"Config path:           {config_path}")
-    logger.info(f"Number training points:    {num_train}")
-    logger.info(f"Number validation points:  {num_valid}")
-    logger.info("=" * 60)
-
-    # Log hardware info
-    get_hardware_info()
-
-    # Validate file existence
+    # Checked before the display opens: a usage problem is one line, not a stopped run.
     if not Path(datafile).exists():
-        logger.error(f"Error: Dataset file not found: {datafile}")
-        sys.exit(1)
+        raise click.ClickException(f"Dataset file not found: {datafile}")
 
-    finetune_so3lr(
-        datafile=datafile,
-        workdir=workdir,
-        strategy=strategy,
-        num_train=num_train,
-        num_valid=num_valid,
-        model_path=model_path,
-        config_path=config_path,
-        log_file=log_file
-    )
-    logger.info("=" * 60)
-    logger.info("finetuning completed successfully!")
+    from so3lr.model_registry import DEFAULT_MODEL
+    # Fine-tuning shows the live display like MD, without a run journal.
+    display_settings = dict(input_file=datafile, output_file=workdir, log_file=str(log_file))
+    with presentation.run_display(display_settings, record=False) as reporter:
+        reporter.update_info(operation='training', model=model_path or DEFAULT_MODEL,
+                             plan=f'fine-tune · {strategy} strategy')
+        # Setup logging with default levels. The log file creates the workdir.
+        setup_logger(log_file)
+        try:
+            # Log ASCII art
+            logger.info(SO3LR_ASCII)
+
+            # Log all settings
+            logger.info("=" * 60)
+            logger.info(f"SO3LR Model Finetuning (v{__version__})")
+            logger.info("=" * 60)
+            logger.info(f"Dataset file:              {datafile}")
+            logger.info(f"Workdir:                   {workdir}")
+            logger.info(f"Finetuning strategy:       {strategy}")
+            logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
+            if model_path is not None:
+                logger.info(f"Model path:            {model_path}")
+            logger.info(f"Config:                    {'Custom' if config_path else 'Default'}")
+            if config_path is not None:
+                logger.info(f"Config path:           {config_path}")
+            logger.info(f"Number training points:    {num_train}")
+            logger.info(f"Number validation points:  {num_valid}")
+            logger.info("=" * 60)
+
+            # Log hardware info
+            get_hardware_info()
+
+            finetune_so3lr(
+                datafile=datafile,
+                workdir=workdir,
+                strategy=strategy,
+                num_train=num_train,
+                num_valid=num_valid,
+                model_path=model_path,
+                config_path=config_path,
+                log_file=log_file
+            )
+            logger.info("=" * 60)
+            logger.info("finetuning completed successfully!")
+        except Exception as exc:
+            _record_run_failure(exc, 'Fine-tuning failed', log_file)
+            raise
 
 
 @cli.command(name='train', help="Train a SO3krates model from a config file with `so3lr train --config config.yaml`.")
@@ -1795,39 +1812,44 @@ def train_model(
     if _help_or_require_input(help, **{'--config': config_path}):
         return
 
-    # Validate file existence
+    # Checked before the display opens: a usage problem is one line, not a stopped run.
     if not Path(config_path).exists():
-        logger.error(f"Error: Config file not found: {config_path}")
-        sys.exit(1)
+        raise click.ClickException(f"Config file not found: {config_path}")
 
     # Setup logging: default the log file to the config name with a .log
     # extension (e.g. `config.yaml` -> `config.log`).
     if log_file is None:
         log_file = str(Path(config_path).with_suffix('.log'))
 
-    setup_logger(log_file)
+    # Training shows the live display like MD, without a run journal.
+    with presentation.run_display(dict(input_file=config_path, log_file=log_file), record=False) as reporter:
+        reporter.update_info(operation='training', plan='train from the config file')
+        setup_logger(log_file)
+        try:
+            # Log ASCII art
+            logger.info(SO3LR_ASCII)
 
-    # Log ASCII art
-    logger.info(SO3LR_ASCII)
+            # Log all settings
+            logger.info("=" * 60)
+            logger.info(f"SO3LR Model Training (v{__version__})")
+            logger.info("=" * 60)
+            logger.info(f"Config file:               {config_path}")
+            logger.info(f"Log file:                  {log_file}")
+            logger.info("=" * 60)
 
-    # Log all settings
-    logger.info("=" * 60)
-    logger.info(f"SO3LR Model Training (v{__version__})")
-    logger.info("=" * 60)
-    logger.info(f"Config file:               {config_path}")
-    logger.info(f"Log file:                  {log_file}")
-    logger.info("=" * 60)
+            # Log hardware info
+            get_hardware_info()
 
-    # Log hardware info
-    get_hardware_info()
-
-    # Run training
-    time_start = time.time()
-    train_so3lr(config_path=config_path, log_file=log_file)
-    time_end = time.time()
-    logger.info("=" * 60)
-    logger.info("Training completed successfully!")
-    logger.info(f"Total runtime: {_format_runtime(time_end - time_start)}")
+            # Run training
+            time_start = time.time()
+            train_so3lr(config_path=config_path, log_file=log_file)
+            time_end = time.time()
+            logger.info("=" * 60)
+            logger.info("Training completed successfully!")
+            logger.info(f"Total runtime: {_format_runtime(time_end - time_start)}")
+        except Exception as exc:
+            _record_run_failure(exc, 'Training failed', log_file)
+            raise
 
 
 # Define the 'tune-ewald' subcommand
@@ -1942,37 +1964,45 @@ def tune_ewald(
         else:
             settings_dict['log_file'] = f"{Path(input_file).stem}_tune-kspace.log"
 
-    # Setup logging with default levels
-    setup_logger(settings_dict.get('log_file'))
+    # tune-ewald shows the live display like MD, without a run journal; it writes no output file.
+    display_settings = dict(settings_dict, output_file=None)
+    with presentation.run_display(display_settings, record=False) as reporter:
+        method = settings_dict.get('kspace_electrostatics') or settings_dict.get('kspace_dispersion')
+        from so3lr.model_registry import DEFAULT_MODEL
+        reporter.update_info(operation='tuning', model=settings_dict.get('model_path') or DEFAULT_MODEL,
+                             plan=f'tune {str(method).upper()} long-range settings')
+        setup_logger(settings_dict.get('log_file'))
+        try:
+            # Log the ASCII art
+            logger.info(SO3LR_ASCII)
+            model_path = settings_dict.get('model_path')
+            logger.info("=" * 60)
+            logger.info(f"Tuner for k-space electrostatics for SO3LR (v{__version__})")
+            logger.info("=" * 60)
+            logger.info(f"Initial geometry:          {settings_dict.get('input_file')}")
+            logger.info(f"Log file:                  {settings_dict.get('log_file')}")
+            logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
+            if model_path is not None:
+                logger.info(f"Model path:                {model_path}")
+            logger.info(f"Precision:                 {settings_dict.get('precision')}")
+            logger.info(f"Long-range cutoff:         {settings_dict.get('lr_cutoff')} Å")
+            logger.info(f"Total charge:              {settings_dict.get('total_charge')}")
+            logger.info(f"Spin (unpaired e-):        {settings_dict.get('num_unpaired_electrons')}")
+            logger.info(f"JIT compilation:           {'Enabled' if settings_dict.get('jit_compile') else 'Disabled'}")
 
-    # Log the ASCII art
-    logger.info(SO3LR_ASCII)
-    model_path = settings_dict.get('model_path')
-    logger.info("=" * 60)
-    logger.info(f"Tuner for k-space electrostatics for SO3LR (v{__version__})")
-    logger.info("=" * 60)
-    logger.info(f"Initial geometry:          {settings_dict.get('input_file')}")
-    logger.info(f"Log file:                  {settings_dict.get('log_file')}")
-    logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
-    if model_path is not None:
-        logger.info(f"Model path:                {model_path}")
-    logger.info(f"Precision:                 {settings_dict.get('precision')}")
-    logger.info(f"Long-range cutoff:         {settings_dict.get('lr_cutoff')} Å")
-    logger.info(f"Total charge:              {settings_dict.get('total_charge')}")
-    logger.info(f"Spin (unpaired e-):        {settings_dict.get('num_unpaired_electrons')}")
-    logger.info(f"JIT compilation:           {'Enabled' if settings_dict.get('jit_compile') else 'Disabled'}")
+            # Log hardware info
+            get_hardware_info()
 
-
-    # Log hardware info
-    get_hardware_info()
-
-    # Run tuning
-    time_start = time.time()
-    tune(settings_dict)
-    time_end = time.time()
-    logger.info("=" * 60)
-    logger.info('Tuning completed successfully!')
-    logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
+            # Run tuning
+            time_start = time.time()
+            tune(settings_dict)
+            time_end = time.time()
+            logger.info("=" * 60)
+            logger.info('Tuning completed successfully!')
+            logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
+        except Exception as exc:
+            _record_run_failure(exc, 'Tuning failed', settings_dict.get('log_file'))
+            raise
 
 
 def main() -> None:

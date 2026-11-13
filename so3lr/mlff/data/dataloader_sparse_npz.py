@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
 from ..utils.jraph_utils import with_uniform_periodic_fields
+from .dataloader_sparse_ase import _display_active
 from tqdm import tqdm
 from typing import Optional
 
@@ -103,7 +104,7 @@ class NpzDataLoaderSparse:
             np_data = np.load(file_path)
             keys = list(np_data.keys())
             data_iterator = zip(*(np_data[k] for k in keys))
-            for tup in tqdm(data_iterator):
+            for tup in tqdm(data_iterator, disable=_display_active()):
                 if keep(i):
                     entry = {k: v for (k, v) in zip(keys, tup)}
                     result = entry_to_jraph(
