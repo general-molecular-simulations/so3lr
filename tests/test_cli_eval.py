@@ -242,14 +242,14 @@ def test_cli_eval_reports_binding_energies_without_saving(eval_dir):
     """A prepare_dimer_xyz file reports binding energies even without --save-to:
     the predictions are kept in memory for them, and nothing is written."""
     project_root = pathlib.Path(__file__).resolve().parent.parent
-    datafile = project_root / 'so3lr' / 'cli' / 'examples' / 'sapt10k_20_dimers.xyz'
+    datafile = project_root / 'so3lr' / 'cli' / 'examples' / 'sapt10k_10_dimers.xyz'
     result = subprocess.run(
         ['so3lr', 'eval', '--datafile', str(datafile), '--lr-cutoff', '100', '--targets', 'energy'],
         capture_output=True, text=True, timeout=600, cwd=eval_dir, env=so3lr_subprocess_env(),
     )
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert 'Binding energies (dimer - separated) for 20 dimers' in output
+    assert 'Binding energies (dimer - separated) for 10 dimers' in output
     mae = float(re.search(r'MAE ([0-9.]+) kcal/mol', output).group(1))
     assert 0 < mae < 3, output
     assert list(eval_dir.iterdir()) == []

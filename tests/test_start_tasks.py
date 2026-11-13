@@ -240,7 +240,7 @@ def test_esc_steps_back_in_optimization_and_evaluation(tmp_path, structure_file,
     assert seen == ['What would you like to do?', 'Choose a dataset', 'Model (canonical release)',
                     'Choose a dataset', 'Model (canonical release)', 'Next action · Enter starts now']
     launcher = (tmp_path / 'ev' / 'run.sh').read_text()
-    assert 'sapt10k_20_dimers.xyz' in launcher and '--targets energy' in launcher
+    assert 'sapt10k_10_dimers.xyz' in launcher and '--targets energy' in launcher
     assert (tmp_path / 'ev' / 'run.sh').is_file()
 
 
@@ -265,8 +265,8 @@ def test_bundled_dimer_example_is_paired_and_bound():
     import numpy as np
     from ase.io import iread
     from so3lr.binding_energies import dimer_references
-    frames = list(iread(str(Path(setup_tasks.__file__).parent / 'examples' / 'sapt10k_20_dimers.xyz'), index=':'))
-    assert len(dimer_references(atoms.info for atoms in frames)) == 20
+    frames = list(iread(str(Path(setup_tasks.__file__).parent / 'examples' / 'sapt10k_10_dimers.xyz'), index=':'))
+    assert len(dimer_references(atoms.info for atoms in frames)) == 10
     for bound in frames[0::2]:
         cut = bound.info['num_a']
         gap = np.min(np.linalg.norm(bound.positions[:cut, None] - bound.positions[None, cut:], axis=-1))

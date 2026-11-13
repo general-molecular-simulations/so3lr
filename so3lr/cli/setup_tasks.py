@@ -164,7 +164,7 @@ def _dataset_prompt(console, default=None):
             _say(console, exc, theme.DANGER)
 
 
-EVAL_EXAMPLES = (('Example · SAPT10k binding energies · 20 dimers', 'sapt10k_20_dimers.xyz'),)
+EVAL_EXAMPLES = (('Example · SAPT10k binding energies · 10 dimers', 'sapt10k_10_dimers.xyz'),)
 
 
 def _dataset_kind(path):
