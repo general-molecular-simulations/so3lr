@@ -134,8 +134,9 @@ def test_one_engine_goes_between_free_space_and_a_box():
     cluster = atoms.copy()
     cluster.pbc = False
     cluster.set_cell(np.zeros(3))
-    # one calculator for each: a So3lrCalculator keeps the neighbour list of its first system
-    references = {False: _reference(cluster), True: _reference(atoms)}
+    # one calculator for both, free space first: it must allocate a periodic list for the box
+    calc = _calculator()
+    references = {False: _reference(cluster, calc=calc), True: _reference(atoms, calc=calc)}
     engine = _engine(atoms)
     for periodic in (False, True, False):
         _assert_close(engine(atoms.positions, _box(atoms) if periodic else None), references[periodic])

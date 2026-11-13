@@ -344,6 +344,7 @@ class AseCalculatorSparse(Calculator):
         self.calculate_fn = calculate_fn
         self.neighbors = None
         self.spatial_partitioning = None
+        self._glp_periodic = None   # whether glp's list was allocated with a cell
         self.capacity_multiplier = capacity_multiplier
         self.buffer_size_multiplier = buffer_size_multiplier
         self.skin = skin
@@ -496,8 +497,10 @@ class AseCalculatorSparse(Calculator):
 
 
     def _glp_neighbors(self, system, cell):
-        """glp's minimum-image neighbour list, (re)allocated when it is incomplete."""
-        if self.spatial_partitioning is not None:
+        """glp's minimum-image neighbour list, (re)allocated when it is incomplete or the
+        structure goes between free space and a box (glp's update keeps the periodicity of
+        the allocation: a list allocated without a cell takes no periodic images)."""
+        if self.spatial_partitioning is not None and self._glp_periodic == (cell is not None):
             neighbors = self.spatial_partitioning.update_fn(system.R, self.neighbors, new_cell=cell)
             # On update glp folds an over-full or too-small cell list into overflow.
             if not neighbors.overflow:
@@ -513,6 +516,7 @@ class AseCalculatorSparse(Calculator):
             buffer_size_multiplier=self.buffer_size_multiplier,
             lr_cutoff=self.lr_cutoff,
         )
+        self._glp_periodic = cell is not None
         # On allocation it does not, so check the cell list here as well.
         cell_list = self.neighbors.cell_list
         if self.neighbors.overflow or (cell_list is not None and cell_list.reallocate):
