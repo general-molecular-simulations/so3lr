@@ -889,7 +889,7 @@ def _controls(state, attached=False, paged=False, multiple=False, keyboard=False
 
 
 def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=False, height=None,
-                         now=None, static=False, width=80):
+                         now=None, static=False, width=80, plot_rows=5):
     """Show recorded optimization measurements without inventing MD samples."""
     from rich.console import Group
     from rich.text import Text as RichText
@@ -946,7 +946,7 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
     if reader.error:
         add('Read error: ' + reader.error, theme.WARNING, 2)
     if not compact:
-        plots = optimization_plots(state, max(24, width), ascii_only, rows=5)
+        plots = optimization_plots(state, max(24, width), ascii_only, rows=plot_rows) if plot_rows else None
         if plots is not None:
             rows.extend((Text(''), plots, Text('')))
             priorities.extend((20, 20, 20))
@@ -1242,6 +1242,14 @@ class _MonitorView:
                 full is None or len(console.render_lines(full, options, pad=False)) > height):
             reader = self.readers[kwargs['selected'] % len(self.readers)]
             if reader.state.info.get('operation') == 'optimization':
+                # smaller graphs, then the full view without them, before the compact view
+                for plot_rows in (3, 0):
+                    view = _render_optimization(reader, kwargs['selected'], len(self.readers), kwargs['ascii_only'],
+                                                now=kwargs['now'], static=kwargs['static'], width=kwargs['width'],
+                                                plot_rows=plot_rows)
+                    if len(console.render_lines(view, options, pad=False)) <= height:
+                        yield view
+                        return
                 yield _render_optimization(reader, kwargs['selected'], len(self.readers), kwargs['ascii_only'],
                                            compact=True, height=height, now=kwargs['now'], static=kwargs['static'])
             else:

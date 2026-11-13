@@ -210,7 +210,15 @@ def reading_progress(total):
     reporter = get_reporter()
     if not reporter.enabled:
         return None
-    return lambda read: reporter.task_progress(read, total, 'structures read')
+    last = [float('-inf')]
+
+    def report(read):
+        # at most 10 updates a second: reading can be far faster than the display needs
+        now = time.monotonic()
+        if read >= total or now - last[0] >= 0.1:
+            last[0] = now
+            reporter.task_progress(read, total, 'structures read')
+    return report
 
 
 class _TaskCounter:
@@ -315,7 +323,9 @@ class _Reporter:
         )
         self.info = {}
         self._task = None
-        self._task_origin = None
+        self._task_origin = None   # (wall clock, done) the rate is measured from
+        self._task_started = None  # wall clock of the task's first report
+        self._task_seen = None     # (unit, done) of the last report, shown or not
         self._results = []
         self._finish_level = 'complete'
         self.requested = set()
@@ -422,9 +432,9 @@ class _Reporter:
         if self.started_at is not None:
             eta = self._live_progress().eta
             return None if eta is None else (eta, False)
-        if self._task is not None and self.status == 'running':
+        if self._task is not None and self._task_origin is not None and self.status == 'running':
             done, total, _ = self._task
-            started, first, _ = self._task_origin
+            started, first = self._task_origin
             if first < done < total and now > started:
                 # an optimization with a force target may stop before its step budget
                 bound = (self.info.get('operation') == 'optimization'
@@ -488,13 +498,13 @@ class _Reporter:
             bar.append(f'  {ratio:.0%}', style=theme.STRONG)
             bar.append(self._label(f'  {done:,}/{total:,} {unit}'), style=theme.MUTED)
             rows.append(bar)
-            started, first, _ = self._task_origin
-            elapsed = time.monotonic() - started
-            timing = f'Elapsed {duration_label(elapsed)}'
+            now = time.monotonic()
+            timing = f'Elapsed {duration_label(now - self._task_started)}'
             eta = self._eta()
-            if eta is not None:  # the rate is measured, so elapsed > 0 here
+            if eta is not None:  # only once a rate is measured
                 seconds, bound = eta
-                timing += f" · ETA {'≤ ' if bound else ''}{duration_label(seconds)} · {(done - first) / elapsed:.3g} {unit}/s"
+                started, first = self._task_origin
+                timing += f" · ETA {'≤ ' if bound else ''}{duration_label(seconds)} · {(done - first) / (now - started):.3g} {unit}/s"
             rows.append(self._text(timing, theme.MUTED))
         if self.info.get('operation') == 'optimization':
             energy, force, target = (_finite(self.info.get(key)) for key in
@@ -697,10 +707,15 @@ class _Reporter:
     def task_progress(self, done, total, unit):
         """Generic progress for non-MD work: structures evaluated, training steps, candidates."""
         now = time.monotonic()
-        origin = self._task_origin
-        if origin is None or str(unit) != origin[2] or done < origin[1]:
-            self._task_origin = (now, int(done), str(unit))
-        self._task = (int(done), int(total), str(unit))
+        done, total, unit = int(done), int(total), str(unit)
+        seen = self._task_seen
+        if seen is None or unit != seen[0] or done < seen[1] or (done == 0 and seen[1] > 0):
+            self._task_started, self._task_origin = now, None  # a new task, or one restarted at 0
+        elif self._task_origin is None and done > seen[1]:
+            # The rate starts after the first finished unit, which often includes compilation.
+            self._task_origin = (now, done)
+        self._task_seen = (unit, done)
+        self._task = (done, total, unit)
         self._reported_at = now
         self._refresh(force=done >= total)
 

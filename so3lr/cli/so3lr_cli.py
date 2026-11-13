@@ -849,15 +849,13 @@ def _interactive_setup():
     from .setup_tasks import Action
     settings_path = launch_setup()
     if isinstance(settings_path, Action):
-        if settings_path.kind == 'show':
-            from .monitor import show
-            show(Path(settings_path.argv[0]))
-            return
-        # A saved evaluation: run the same command its run.sh holds, from its folder.
-        with chdir(settings_path.directory):
-            command = cli.commands[settings_path.argv[0]]
-            with command.make_context(settings_path.argv[0], list(settings_path.argv[1:]),
-                                      parent=click.get_current_context(silent=True)) as context:
+        # Run the command itself, as typed (its usage errors stay one line): show
+        # from here, a saved evaluation from its folder, as its run.sh does.
+        name, args = (('show', list(settings_path.argv)) if settings_path.kind == 'show'
+                      else (settings_path.argv[0], list(settings_path.argv[1:])))
+        with chdir(settings_path.directory or Path.cwd()):
+            command = cli.commands[name]
+            with command.make_context(name, args, parent=click.get_current_context(silent=True)) as context:
                 command.invoke(context)
         return
     if settings_path is not None:

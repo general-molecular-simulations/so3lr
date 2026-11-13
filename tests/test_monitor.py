@@ -1451,3 +1451,12 @@ def test_log_axis_skips_values_it_cannot_place():
     rows = [{'step': 0, 'f': 1.0}, {'step': 1, 'f': 0.0}, {'step': 2, 'f': 0.01}]
     points, *_ = monitor._plot_scale(rows, 'f', x_key='step', log=True)
     assert [x for x, _ in points] == [0, 2]
+
+
+def test_short_terminals_get_smaller_optimization_graphs_before_losing_paths(tmp_path):
+    reader = _optimization_journal(tmp_path / 'opt.events.jsonl', [2.0, 0.5, 0.1, 0.02])
+    reader.state.settings['log_file'] = 'opt.log'
+    tall = render(reader, height=60)
+    short = render(reader, height=34)
+    assert 'Maximum force [' in tall and 'Log path' in tall
+    assert len(short.splitlines()) <= 34 and 'Log path' in short  # paths kept, graphs shrink or go

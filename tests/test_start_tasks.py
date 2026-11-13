@@ -100,6 +100,8 @@ def test_watch_and_other_tasks(tmp_path):
 def test_cli_runs_the_chosen_action_from_its_folder(tmp_path, monkeypatch):
     from so3lr.cli import monitor, so3lr_cli
     seen = []
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / 'runs').mkdir()
     monkeypatch.setattr(monitor, 'show', lambda path, **kwargs: seen.append(('show', path)))
     monkeypatch.setattr(setup, 'launch_setup', lambda: setup_tasks.Action('show', ('runs',)))
     assert CliRunner().invoke(so3lr_cli.cli, ['start']).exit_code == 0
@@ -110,6 +112,16 @@ def test_cli_runs_the_chosen_action_from_its_folder(tmp_path, monkeypatch):
     result = CliRunner().invoke(so3lr_cli.cli, ['start'])
     assert result.exit_code == 0 and '--datafile' in result.output
     assert Path.cwd() == tmp_path  # restored
+
+
+def test_watching_a_file_that_is_not_a_journal_is_a_one_line_error(tmp_path, monkeypatch):
+    from so3lr.cli import so3lr_cli
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / 'settings.yaml').write_text('input_file: x.xyz\n')
+    monkeypatch.setattr(setup, 'launch_setup', lambda: setup_tasks.Action('show', ('settings.yaml',)))
+    result = CliRunner().invoke(so3lr_cli.cli, ['start'])
+    assert result.exit_code == 2 and 'Traceback' not in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 # -- release notice --------------------------------------------------------------------
@@ -282,3 +294,13 @@ def test_eval_reports_binding_energies_for_dimer_files(tmp_path, caplog):
     assert summary['mae'] == pytest.approx(0.25)
     assert 'Binding energies (dimer - separated) for 2 dimers' in caplog.text
     assert _report_binding_energies(_dimer_pairs(data), energies[:2]) is None
+
+
+def test_training_progress_lines_print_when_a_script_set_up_no_logging(capsys, monkeypatch):
+    import logging
+    from so3lr.mlff.utils.console import say
+    logger = logging.getLogger('SO3LR')
+    monkeypatch.setattr(logger, 'handlers', [])
+    monkeypatch.setattr(logger, 'propagate', False)
+    say('Epoch 1 of 2')
+    assert capsys.readouterr().out == 'Epoch 1 of 2\n'

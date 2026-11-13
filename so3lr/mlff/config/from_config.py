@@ -23,6 +23,7 @@ import jax.numpy as jnp
 from flax import traverse_util
 from flax.core.frozen_dict import unfreeze
 
+from ..utils.console import say
 from ..utils import checkpoint_utils
 from ..utils.param_utils import (
     count_params,
@@ -985,9 +986,9 @@ def run_fine_tuning(
             # alpha/scale, leaving 'adaptive' robust loss fixed at its init.
             trainable_subset_keys = list(trainable_subset_keys) + ['adaptive_robust_loss']
 
-    logger.info("=" * 50)
-    print_param_shapes(params, emit=logger.info)
-    logger.info("=" * 50)
+    say("=" * 50)
+    print_param_shapes(params, emit=say)
+    say("=" * 50)
 
     total_params = count_params(params)
     trainable_params = count_trainable_params(
@@ -996,16 +997,16 @@ def run_fine_tuning(
         frozen_keys=frozen_subset_keys
     )
 
-    logger.info(f"Total number of parameters: {total_params:,}")
-    logger.info(f"Trainable parameters: {trainable_params:,}")
+    say(f"Total number of parameters: {total_params:,}")
+    say(f"Trainable parameters: {trainable_params:,}")
     if trainable_params != total_params:
-        logger.info(f"Frozen parameters: {total_params - trainable_params:,}")
-        logger.info(f"Fine-tuning strategy: {strategy}")
+        say(f"Frozen parameters: {total_params - trainable_params:,}")
+        say(f"Fine-tuning strategy: {strategy}")
         if trainable_subset_keys:
-            logger.info(f"Trainable modules: {trainable_subset_keys}")
+            say(f"Trainable modules: {trainable_subset_keys}")
     if frozen_subset_keys:
-        logger.info(f"Fine-tuning strategy: {strategy}")
-        logger.info(f"Frozen modules: {frozen_subset_keys}")
+        say(f"Fine-tuning strategy: {strategy}")
+        say(f"Frozen modules: {frozen_subset_keys}")
 
     # Get data filepath.
     data_filepath = data_path_from_config(config=config)

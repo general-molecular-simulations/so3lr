@@ -1556,19 +1556,25 @@ def test_task_progress_and_results_render_without_a_run_journal(monkeypatch, tmp
     assert sorted(path.name for path in tmp_path.iterdir()) == ['eval.log']
 
 
-def test_task_clock_survives_a_phase_that_hides_the_bar(monkeypatch):
+def test_task_rate_starts_after_the_first_unit_and_restarts_with_the_task(monkeypatch):
     monkeypatch.setattr(sys, 'stderr', Terminal())
     ui.configure(display='rich')
+    clock = [0.0]
+    monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
     with ui.run_display({}, record=False) as reporter:
-        reporter.phase('Training')
-        reporter.task_progress(1, 10, 'epochs')
-        origin = reporter._task_origin
         reporter.phase('Compiling')
-        reporter.phase('Training')
-        reporter.task_progress(2, 10, 'epochs')
-        assert reporter._task_origin == origin
-        reporter.task_progress(1, 5, 'candidates')  # another task starts its own clock
-        assert reporter._task_origin != origin
+        reporter.task_progress(0, 10, 'optimization steps')
+        clock[0] = 60.0                                      # the first step compiles
+        reporter.task_progress(1, 10, 'optimization steps')
+        assert reporter._task_origin == (60.0, 1) and reporter._eta() is None
+        reporter.phase('Validating')                         # the bar and its clock stay
+        clock[0] = 62.0
+        reporter.task_progress(3, 10, 'optimization steps')
+        assert reporter._eta() == (7.0, False)               # 1 step/s, not 3 steps per 62 s
+        reporter.task_progress(0, 10, 'optimization steps')  # a new optimization
+        assert reporter._task_origin is None and reporter._task_started == 62.0
+        reporter.task_progress(1, 5, 'candidates')           # another task starts its own clock
+        assert reporter._task_origin is None
 
 
 def test_library_callers_get_a_reporter_that_ignores_task_events():
@@ -1696,6 +1702,8 @@ def test_activity_line_counts_down_an_eta_from_the_measured_rate(monkeypatch):
         clock = [100.0]
         monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
         reporter.task_progress(0, 100, 'structures')
+        clock[0] = 105.0
+        reporter.task_progress(5, 100, 'structures')   # the rate is measured from here
         clock[0] = 110.0
         reporter.task_progress(10, 100, 'structures')  # 1 structure/s
         assert reporter._eta() == (90.0, False)
@@ -1713,6 +1721,8 @@ def test_optimization_eta_is_a_bound_when_a_force_target_can_stop_it_early(monke
         monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
         reporter.update_info(operation='optimization', opt_step=0, opt_total_steps=400,
                              opt_energy_eV=-1.0, opt_force_max_eVA=1.0, opt_force_target_eVA=0.05)
+        clock[0] = 55.0
+        reporter.update_info(opt_step=50, opt_energy_eV=-1.05, opt_force_max_eVA=0.7)
         clock[0] = 60.0
         reporter.update_info(opt_step=100, opt_energy_eV=-1.1, opt_force_max_eVA=0.5)
         assert reporter._eta() == (30.0, True)

@@ -16,6 +16,7 @@ from ..utils.param_utils import (
     MAX_NUM_THEORY_LEVELS,
     path_matches_key,
 )
+from .console import say
 from .jraph_utils import dynamically_batch_with_lr
 
 from .robust_loss_jax import distribution as robust_loss_dist
@@ -1423,13 +1424,13 @@ def fit(
                         init_scale=adaptive_robust_loss_init_scale
                     )
                     params = {**params, **adaptive_params}
-                    logger.info(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
+                    say(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
                     alpha, scale = transform_adaptive_robust_params(
                         adaptive_params['adaptive_robust_loss']['alpha_raw'],
                         adaptive_params['adaptive_robust_loss']['scale_raw']
                     )
-                    logger.info(f"  Initial alpha: {alpha}")
-                    logger.info(f"  Initial scale: {scale}")
+                    say(f"  Initial alpha: {alpha}")
+                    say(f"  Initial scale: {scale}")
 
             # If optimizer state is None (in the first step), initialize from the parameter pyTree.
             if opt_state is None:
@@ -1761,7 +1762,7 @@ def fit_from_iterator(
             'Restored TFDS training state from %s at step %s.',
             ckpt_dir, latest_step,
         )
-        logger.info(
+        say(
             f'Re-start training from step {latest_step} at epoch {start_epoch}.'
         )
 
@@ -1798,7 +1799,7 @@ def fit_from_iterator(
 
         if use_wandb:
             _wandb_log({"epoch": epoch})
-        logger.info(f'Epoch {epoch} of {num_epochs}')
+        say(f'Epoch {epoch} of {num_epochs}')
         training_iterator_loop = training_iterator.next_epoch(
             split='train',
             mode='train',
@@ -1815,7 +1816,7 @@ def fit_from_iterator(
 
             # If params are None (in the first step), initialize the parameters or load from existing checkpoint.
             if params is None:
-                logger.info('Initialize new parameters.')
+                say('Initialize new parameters.')
                 params = model.init(jax_rng, batch_training)
 
                 # Initialize adaptive robust loss parameters if enabled
@@ -1826,13 +1827,13 @@ def fit_from_iterator(
                         init_scale=adaptive_robust_loss_init_scale
                     )
                     params = {**params, **adaptive_params}
-                    logger.info(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
+                    say(f"Initialized adaptive robust loss params for targets: {adaptive_robust_loss_targets}")
                     alpha, scale = transform_adaptive_robust_params(
                         adaptive_params['adaptive_robust_loss']['alpha_raw'],
                         adaptive_params['adaptive_robust_loss']['scale_raw']
                     )
-                    logger.info(f"  Initial alpha: {alpha}")
-                    logger.info(f"  Initial scale: {scale}")
+                    say(f"  Initial alpha: {alpha}")
+                    say(f"  Initial scale: {scale}")
 
             # If optimizer state is None (in the first step), initialize from the parameter pyTree.
             if opt_state is None:
