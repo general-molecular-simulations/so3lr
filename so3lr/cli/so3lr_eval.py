@@ -834,7 +834,9 @@ def _finish_evaluation(*, target_list, tot_abs, tot_sq, tot_n, total_time, compi
     }
     # Targets that actually have ground-truth counts (skip observables
     # which have no MAE/RMSE because no label is available).
-    _scored_targets = [t for t in target_list if t in tot_n and tot_n[t] > 0]
+    # A target whose labels were all missing (NaN-filled) has no meaningful error.
+    _scored_targets = [t for t in target_list if t in tot_n and tot_n[t] > 0
+                       and np.isfinite(metrics.get(f'{t}_mae', float('nan')))]
     logger.info('Evaluation metrics:')
     if _scored_targets:
         _hdr = f"  {'target':<20}  {'MAE':>12}  {'RMSE':>12}  {'N':>10}  unit"
@@ -849,7 +851,7 @@ def _finish_evaluation(*, target_list, tot_abs, tot_sq, tot_n, total_time, compi
                 f"  {t:<20}  {mae:>12.3e}  {rmse:>12.3e}  {n:>10d}  {unit}"
             )
     else:
-        logger.info('  (no labelled targets evaluated)')
+        logger.info('  (no reference labels in the dataset: predictions only)')
     logger.info(
         f"  Timing: total={metrics['time_evaluation']:.3f}s, "
         f"compile={metrics['time_compile']:.3f}s, "
@@ -857,6 +859,8 @@ def _finish_evaluation(*, target_list, tot_abs, tot_sq, tot_n, total_time, compi
         f"per-structure={metrics['time_per_structure']:.3f}s"
     )
     logger.info('-' * 50)
+
+    _report_binding_energies(datafile, predicted, energy_scored='energy' in _scored_targets)
 
     # Save predictions if requested
     if save_to is not None:
@@ -867,6 +871,39 @@ def _finish_evaluation(*, target_list, tot_abs, tot_sq, tot_n, total_time, compi
     logger.info('Evaluation completed successfully')
 
     return metrics
+
+
+def _report_binding_energies(datafile, predicted, energy_scored=False):
+    """For prepare_dimer_xyz files, report binding energies against benchmark_Eint.
+
+    Uses the full-precision predicted energies (the saved file rounds them).
+    The per-frame 'energy' row above compares against interaction-energy labels
+    in such files, so it is not a binding-energy error.
+    """
+    from ase.io import iread, read
+    from so3lr.binding_energies import BOUND, binding_energy_summary, dimer_references
+    try:
+        if read(str(datafile), index=0).info.get('structure_type') not in BOUND:
+            return None
+        references = dimer_references(atoms.info for atoms in iread(str(datafile), index=':'))
+    except Exception:
+        return None
+    if references is None or len(predicted) != 2 * len(references):
+        return None
+    energies = []
+    for graph in predicted:
+        atoms = graph if isinstance(graph, Atoms) else jraph_to_ase_atoms(graph)
+        energies.append(float(np.asarray(atoms.info['energy_so3lr']).reshape(-1)[0]))
+    summary = binding_energy_summary(energies, references)
+    logger.info(f"Binding energies (dimer - separated) for {summary['n']} dimers, "
+                "against benchmark_Eint in kcal/mol:")
+    logger.info(f"  MAE {summary['mae']:.3f} kcal/mol · RMSE {summary['rmse']:.3f} kcal/mol · "
+                f"max |error| {summary['max_abs']:.3f} kcal/mol")
+    if energy_scored:
+        logger.info("  The 'energy' row above compares against interaction-energy labels; "
+                    "use the binding energies instead.")
+    logger.info('-' * 50)
+    return summary
 
 
 def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:

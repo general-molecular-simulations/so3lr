@@ -173,30 +173,76 @@ def _dataset_prompt(console, default=None):
             _say(console, exc, theme.DANGER)
 
 
+EVAL_EXAMPLES = (('Example · SAPT10k binding energies · 20 dimers', 'sapt10k_20_dimers.xyz'),)
+
+
+def _dataset_kind(path):
+    """('dimers' | 'molecules' | 'periodic', frame count) from a quick look at the dataset."""
+    from ase.io import read
+    from so3lr.binding_energies import BOUND
+    first = read(str(path), index=0)
+    if first.info.get('structure_type') in BOUND:
+        return 'dimers'
+    return 'periodic' if first.pbc.any() else 'molecules'
+
+
+def _select_dataset(console, previous=None):
+    """Bundled example, file browser or pasted path, like the MD structure menu."""
+    from .setup import browse_structure
+    examples = [(label, Path(__file__).resolve().parent / 'examples' / name) for label, name in EVAL_EXAMPLES]
+    while True:
+        choices = [label for label, _ in examples] + ['Browse files', 'Enter or paste a path']
+        if previous is not None:
+            choices.insert(0, f'Keep previous · {Path(previous).name}')
+        selection = _choose(console, 'Choose a dataset', choices)
+        if previous is not None:
+            if selection == 0:
+                return Path(previous)
+            selection -= 1
+        if selection < len(examples):
+            return examples[selection][1]
+        if selection == len(examples):
+            path = browse_structure(console, Path(previous).parent if previous else None)
+            if path is not None:
+                return Path(path).resolve()
+            continue
+        return _dataset_prompt(console)
+
+
 def eval_setup(console):
     """Draft, review and save an evaluation launcher; return the command to run now."""
     from .formatting import home_path
-    state = {'model': DEFAULT_MODEL, 'cutoff': '12', 'dataset': None}
+    state = {'model': DEFAULT_MODEL, 'cutoff': None, 'dataset': None, 'kind': 'molecules'}
 
     def dataset():
         _stage(console, 1, 'Dataset')
-        state['dataset'] = _dataset_prompt(console, state['dataset'])
+        state['dataset'] = _select_dataset(console, state['dataset'])
+        try:
+            state['kind'] = _dataset_kind(state['dataset'])
+        except Exception as exc:  # unreadable file: say so and ask again
+            _say(console, f'Cannot read {state["dataset"].name}: {exc}', theme.DANGER)
+            state['dataset'] = None
+            raise Back() from None
+        if state['kind'] == 'dimers':
+            _say(console, 'Dimer pairs found: the evaluation reports binding energies against benchmark_Eint '
+                 '(kcal/mol).', theme.MUTED)
 
     def model():
         _stage(console, 2, 'Model')
         state['model'] = _select_model(console, state['model'])
 
     def details():
+        default = state['cutoff'] or ('12' if state['kind'] == 'periodic' else '100')
         _say(console, 'Use 12 Å for periodic data; gas-phase molecules need a long cutoff such as 100 Å.',
              theme.MUTED)
-        state['cutoff'] = _positive(console, 'Long-range cutoff (Å)', state['cutoff'])
+        state['cutoff'] = _positive(console, 'Long-range cutoff (Å)', default)
         state['destination'] = _new_directory(console, 'so3lr-eval')
 
     def review():
         destination = state['destination']
         argv = ('eval', '--datafile', str(state['dataset']), '--model', state['model'],
                 '--lr-cutoff', f"{float(state['cutoff']):g}", '--save-to', 'predictions.extxyz',
-                '--log-file', 'eval.log')
+                '--log-file', 'eval.log', *(('--targets', 'energy') if state['kind'] == 'dimers' else ()))
         rows = [('Dataset', home_path(state['dataset'])), ('Model', state['model']),
                 ('Long-range cutoff', f"{float(state['cutoff']):g} Å"),
                 ('Output directory', home_path(destination)),

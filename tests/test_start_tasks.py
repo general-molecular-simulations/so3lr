@@ -69,14 +69,19 @@ def test_optimization_start_now_returns_the_settings_path(tmp_path, structure_fi
     assert (settings['force_convergence'], settings['min_cycles']) == (0.01, 20)
 
 
+PASTE_DATASET = str(len(setup_tasks.EVAL_EXAMPLES) + 2)  # 'Enter or paste a path'
+
+
 def test_eval_saves_a_launcher_and_can_start_now(tmp_path, structure_file):
     destination = tmp_path / 'eval'
-    text = '\n'.join([task('eval'), str(structure_file), '1', '', str(destination), '1']) + '\n'
+    text = '\n'.join([task('eval'), PASTE_DATASET, str(structure_file), '1', '', str(destination), '1']) + '\n'
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
     launcher = (destination / 'run.sh').read_text()
     assert 'exec so3lr eval --datafile' in launcher and str(structure_file) in launcher
-    assert '--save-to predictions.extxyz' in launcher and '--lr-cutoff 12' in launcher
+    # A gas-phase dataset defaults to the long cutoff; ordinary data evaluates every target.
+    assert '--save-to predictions.extxyz' in launcher and '--lr-cutoff 100' in launcher
+    assert '--targets' not in launcher
     assert "RETURN:Action(kind='eval'" in result.output
     assert list(destination.iterdir()) == [destination / 'run.sh']
 
@@ -215,11 +220,66 @@ def test_esc_steps_back_in_optimization_and_evaluation(tmp_path, structure_file,
                     'Next action · Enter starts now']
     assert (tmp_path / 'opt2' / 'settings.yaml').is_file() and not destination.exists()
 
-    seen = scripted(monkeypatch, [2, 'back', 0, 1])
-    text = '\n'.join([str(structure_file), '', '', str(tmp_path / 'ev')]) + '\n'
+    seen = scripted(monkeypatch, [2, 0, 'back', 0, 0, 1])
+    text = '\n'.join(['', str(tmp_path / 'ev')]) + '\n'
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
-    # Back from the model re-asks the dataset, with the previous answer as default.
-    assert seen == ['What would you like to do?', 'Model (canonical release)', 'Model (canonical release)',
-                    'Next action · Enter starts now']
+    # Back from the model returns to the dataset menu, which offers the previous choice.
+    assert seen == ['What would you like to do?', 'Choose a dataset', 'Model (canonical release)',
+                    'Choose a dataset', 'Model (canonical release)', 'Next action · Enter starts now']
+    launcher = (tmp_path / 'ev' / 'run.sh').read_text()
+    assert 'sapt10k_20_dimers.xyz' in launcher and '--targets energy' in launcher
     assert (tmp_path / 'ev' / 'run.sh').is_file()
+
+
+# -- binding energies -------------------------------------------------------------------
+
+def test_dimer_pairs_and_binding_energy_errors():
+    from so3lr.binding_energies import KCAL_PER_EV, binding_energy_summary, dimer_references
+    infos = [{'structure_type': 'dimer_original', 'benchmark_Eint': -5.0},
+             {'structure_type': 'dimer_translated', 'benchmark_Eint': -5.0},
+             {'structure_type': 'dimer', 'benchmark_Eint': -1.0},
+             {'structure_type': 'dimer_translated'}]
+    assert dimer_references(infos) == [-5.0, -1.0]
+    assert dimer_references(infos[:3]) is None
+    assert dimer_references([infos[1], infos[0]]) is None
+    energies = [-10.0, -10.0 + 4.0 / KCAL_PER_EV, -3.0, -3.0 + 1.5 / KCAL_PER_EV]  # -4 and -1.5 kcal/mol
+    summary = binding_energy_summary(energies, [-5.0, -1.0])
+    assert summary['binding_kcal'] == pytest.approx([-4.0, -1.5])
+    assert (summary['n'], summary['mae'], summary['max_abs']) == (2, pytest.approx(0.75), pytest.approx(1.0))
+
+
+def test_bundled_dimer_example_is_paired_and_bound():
+    import numpy as np
+    from ase.io import iread
+    from so3lr.binding_energies import dimer_references
+    frames = list(iread(str(Path(setup_tasks.__file__).parent / 'examples' / 'sapt10k_20_dimers.xyz'), index=':'))
+    assert len(dimer_references(atoms.info for atoms in frames)) == 20
+    for bound in frames[0::2]:
+        cut = bound.info['num_a']
+        gap = np.min(np.linalg.norm(bound.positions[:cut, None] - bound.positions[None, cut:], axis=-1))
+        assert gap < 5.0  # really in contact, not already separated
+
+
+def test_eval_reports_binding_energies_for_dimer_files(tmp_path, caplog):
+    import logging
+    from ase import Atoms
+    from ase.io import write
+    from so3lr.binding_energies import KCAL_PER_EV
+    from so3lr.cli.so3lr_eval import _report_binding_energies
+    pairs = []
+    for reference in (-2.0, -6.0):
+        for kind in ('dimer_original', 'dimer_translated'):
+            pairs.append(Atoms('He2', positions=[[0, 0, 0], [0, 0, 3]],
+                               info={'structure_type': kind, 'benchmark_Eint': reference}))
+    data = tmp_path / 'pairs.xyz'
+    write(data, pairs, format='extxyz')
+    predicted = []
+    for index, binding in enumerate((-2.5, -6.0)):
+        bound = Atoms('He2', info={'energy_so3lr': -1.0 + binding / KCAL_PER_EV})
+        predicted += [bound, Atoms('He2', info={'energy_so3lr': -1.0})]
+    with caplog.at_level(logging.INFO, logger='SO3LR'):
+        summary = _report_binding_energies(data, predicted)
+    assert summary['mae'] == pytest.approx(0.25)
+    assert 'Binding energies (dimer - separated) for 2 dimers' in caplog.text
+    assert _report_binding_energies(data, predicted[:2]) is None
