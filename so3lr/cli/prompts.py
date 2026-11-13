@@ -218,7 +218,8 @@ def choose(console, title, choices, default=0):
     # Answered questions recede; the next question keeps the focus.
     from .formatting import ascii_only_console
     ascii_only = ascii_only_console(console)
-    summary = Text(terminal_text(theme.status_glyph('completed') + ' ', ascii_only), style=theme.SUCCESS)
+    # Grey, not green: green is kept for a run that met its goal.
+    summary = Text(terminal_text(theme.status_glyph('completed') + ' ', ascii_only), style=theme.FAINT)
     summary.append(terminal_text(f'{title}: {choices[selected]}', ascii_only), style=theme.MUTED)
     console.print(summary)
     return selected

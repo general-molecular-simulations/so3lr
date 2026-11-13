@@ -286,7 +286,10 @@ def _report_validation(step, epoch, eval_metrics):
     """The latest validation metrics as a table on the live display."""
     rows = [('Step', f'{step:,} · epoch {epoch + 1:,}')]
     rows += [(key.removeprefix('eval_'), f'{eval_metrics[key]:.4g}') for key in _display_metric_keys(eval_metrics)]
-    _reporter().results('Latest validation', rows)
+    reporter = _reporter()
+    reporter.results('Latest validation', rows)
+    if 'eval_loss' in eval_metrics:
+        reporter.outcome(f"validation loss {eval_metrics['eval_loss']:.4g}", key='validation')
 
 
 def print_metrics_row(epoch, step, eval_metrics):

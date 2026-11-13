@@ -875,6 +875,9 @@ def _finish_evaluation(*, target_list, tot_abs, tot_sq, tot_n, total_time, compi
     else:
         logger.info('  (no reference labels in the dataset: predictions only)')
     reporter = get_reporter()
+    if _scored_targets:
+        first = _scored_targets[0]
+        reporter.outcome(f"{first} MAE {metrics[f'{first}_mae']:.3g} {_UNIT_MAP.get(first, '')}".rstrip())
     if _scored_targets or references is None:  # a dimer file's result is its binding energies
         reporter.results('Errors against the dataset labels', [
             (t, f"MAE {metrics[f'{t}_mae']:.4g} · RMSE {metrics[f'{t}_rmse']:.4g} {_UNIT_MAP.get(t, '')}".rstrip()
@@ -946,6 +949,7 @@ def _report_binding_energies(references, predicted, energy_scored=False):
         rows.append(('Note', "the energy row compares against interaction-energy labels; "
                              "use these binding energies"))
     get_reporter().results('Binding energies (dimer − separated)', rows)
+    get_reporter().outcome(f"binding-energy MAE {summary['mae']:.2f} kcal/mol")
     logger.info('-' * 50)
     return summary
 

@@ -59,8 +59,10 @@ def test_display_selection(monkeypatch, tty, term, display, quiet, enabled):
     ui.configure(display=display, quiet=quiet)
     with ui.run_display({}) as reporter:
         assert reporter.enabled is enabled
-    fallback_warning = display == 'rich' and not tty and not quiet
-    assert bool(output.getvalue()) is (enabled or fallback_warning)
+    # Every display but --quiet ends with the closing line (plain output too, for batch logs).
+    assert bool(output.getvalue()) is not quiet
+    if not quiet:
+        assert re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', output.getvalue()).rstrip().endswith('✓ Run finished in 00:00')
 
 
 @pytest.mark.parametrize('quiet', [False, True])
@@ -276,7 +278,8 @@ def test_plain_console_preserves_rows_and_quiet_keeps_warnings(monkeypatch, quie
         reporter.phase('Hidden presentation event')
         handler.handle(logging.makeLogRecord({'msg': '2000\t300.2', 'levelno': logging.INFO}))
         handler.handle(logging.makeLogRecord({'msg': 'Warning remains', 'levelno': logging.WARNING}))
-    assert output.getvalue() == ('' if quiet else '2000\t300.2\n') + 'Warning remains\n'
+    assert output.getvalue() == (('' if quiet else '2000\t300.2\n') + 'Warning remains\n'
+                                 + ('' if quiet else '✓ Run finished in 00:00\n'))
 
 
 def test_verbose_rich_shows_info(monkeypatch):
@@ -1382,7 +1385,8 @@ def test_ascii_terminal_handles_startup_progress_and_outcome(monkeypatch, operat
             reporter.renderer._graphs_hidden = True
         reporter._refresh(force=True)
     assert output.getvalue().isascii()
-    assert 'SO3LR TAURI' in output.getvalue() and 'Complete' in output.getvalue()
+    # an optimization that missed its force target finishes in amber, not as Complete
+    assert 'SO3LR TAURI' in output.getvalue() and ('Complete' in output.getvalue() or 'target not met' in output.getvalue())
     assert '\\u2500' not in output.getvalue() and '\\u2501' not in output.getvalue()
 
 
@@ -1583,3 +1587,92 @@ def test_live_optimization_draws_graphs_once_three_cycles_are_known(monkeypatch)
         text = render(reporter, height=60)
         assert 'Potential energy [eV]' in text and 'Target 0.05 eV/Å' in text
         assert 'Maximum force [' not in render(reporter, height=20)  # no room: numbers only
+
+
+def _plain_lines(output):
+    return [line for line in output.getvalue().splitlines() if line]
+
+
+def test_closing_line_summarizes_md_and_names_the_output(monkeypatch, tmp_path):
+    output = io.StringIO()
+    monkeypatch.setattr(sys, 'stderr', output)
+    ui.configure(display='plain')
+    trajectory = tmp_path / 'water.xyz'
+    trajectory.write_text('1\n\nH 0 0 0\n')
+    with ui.run_display({'output_file': str(trajectory)}, record=False) as reporter:
+        reporter.start_md(1000, 200, 0.5)
+        reporter.progress(1200, temperature=300.0, potential_energy=-1.0)
+    level, head, details = reporter.verdict()
+    assert (level, head) == ('success', 'MD finished in 00:00')
+    assert details == ['200 steps', 'trajectory water.xyz']  # relative to the working directory
+    assert _plain_lines(output)[-1] == '✓ MD finished in 00:00 · 200 steps · trajectory water.xyz'
+
+
+@pytest.mark.parametrize('force,level', [(0.004, 'success'), (0.02, 'warning')])
+def test_optimization_is_green_only_when_the_force_target_is_met(monkeypatch, force, level):
+    monkeypatch.setattr(sys, 'stderr', io.StringIO())
+    ui.configure(display='plain')
+    with ui.run_display({}, record=False) as reporter:
+        reporter.update_info(operation='optimization', opt_step=400, opt_total_steps=400,
+                             opt_energy_eV=-1.0, opt_force_max_eVA=force, opt_force_target_eVA=0.005)
+    verdict = reporter.verdict()
+    assert verdict[0] == level
+    assert ('without meeting the force target' in verdict[1]) is (level == 'warning')
+    assert '400 steps' in verdict[2]
+
+
+def test_commands_add_details_and_warnings_to_the_closing_line(monkeypatch):
+    monkeypatch.setattr(sys, 'stderr', io.StringIO())
+    ui.configure(display='plain')
+    with ui.run_display({}, record=False) as reporter:
+        reporter.update_info(operation='training')
+        reporter.task_progress(6, 6, 'epochs')
+        reporter.outcome('validation loss 0.1', key='validation')
+        reporter.outcome('validation loss 0.01', key='validation')  # replaced, not repeated
+    assert reporter.verdict() == ('success', 'Training finished in 00:00', ['6 epochs', 'validation loss 0.01'])
+    with ui.run_display({}, record=False) as reporter:
+        reporter.update_info(operation='tuning')
+        reporter.outcome('smallest force error 0.02 eV/Å', warning='no candidate meets the 0.001 eV/Å target')
+    level, head, _ = reporter.verdict()
+    assert level == 'warning' and head.endswith('no candidate meets the 0.001 eV/Å target')
+
+
+@pytest.mark.parametrize('error,level,head', [
+    (ValueError('bad box'), 'failed', 'MD stopped at step 1,100 after 00:00'),
+    (KeyboardInterrupt(), 'interrupted', 'MD interrupted at step 1,100 after 00:00'),
+])
+def test_closing_line_after_a_failure(monkeypatch, error, level, head):
+    output = Terminal()
+    monkeypatch.setattr(sys, 'stderr', output)
+    ui.configure(display='rich')
+    with pytest.raises(type(error)):
+        with ui.run_display({}, record=False) as reporter:
+            reporter.start_md(1000, 200, 0.5)
+            reporter.progress(1100, temperature=300.0, potential_energy=-1.0)
+            raise error
+    verdict = reporter.verdict()
+    assert verdict[:2] == (level, head)
+    # the message is on the line for errors; Ctrl+C needs no repeating
+    assert verdict[2] == (['ValueError: bad box'] if level == 'failed' else [])
+    shown = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', output.getvalue()).splitlines()
+    # after the frame, before the resume hint
+    index = next(i for i, line in enumerate(shown) if head in line)
+    assert shown[index + 1].startswith('No checkpoint was saved')
+
+
+def test_answered_questions_are_not_green():
+    import inspect
+    from so3lr.cli import prompts
+    source = inspect.getsource(prompts)
+    assert "status_glyph('completed') + ' ', ascii_only), style=theme.FAINT" in source
+
+
+def test_plain_closing_line_falls_back_to_ascii_for_ascii_logs(monkeypatch):
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding='ascii')
+    monkeypatch.setattr(sys, 'stderr', stream)
+    ui.configure(display='plain')
+    with ui.run_display({}, record=False):
+        pass
+    stream.flush()
+    assert raw.getvalue().decode('ascii').strip() == '+ Run finished in 00:00'

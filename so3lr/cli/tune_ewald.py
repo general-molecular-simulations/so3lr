@@ -553,7 +553,13 @@ def _report_recommendation(rec, error, timing, accuracy, *, met, method, command
         rows.append(('Run MD', command))
     title = ('Fastest settings within the target' if met
              else 'No candidate meets the target: smallest error')
-    get_reporter().results(title, rows)
+    reporter = get_reporter()
+    reporter.results(title, rows)
+    if met:
+        reporter.outcome(f'force error {error:.2g} ≤ {accuracy:g} eV/Å')
+    else:
+        reporter.outcome(f'smallest force error {error:.2g} eV/Å',
+                         warning=f'no candidate meets the {accuracy:g} eV/Å target')
 
 
 def tune(

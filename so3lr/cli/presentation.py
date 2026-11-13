@@ -77,7 +77,7 @@ class _NullReporter:
     def checkpoint(self, step, path):
         pass
 
-    def finish(self):
+    def finish(self, level='success'):
         pass
 
     def fail(self, message, reason='error'):
@@ -90,6 +90,12 @@ class _NullReporter:
         pass
 
     def task_progress(self, done, total, unit):
+        pass
+
+    def outcome(self, detail=None, *, key=None, warning=None):
+        pass
+
+    def print_verdict(self, level, head, details):
         pass
 
     def results(self, title, rows):
@@ -125,6 +131,11 @@ class _NoRunLog:
 
 
 # What a completed command's main output file is called on screen.
+# The closing line's glyph and color by outcome; green only for a run that met its goal.
+VERDICTS = {'success': ('✓', theme.SUCCESS), 'warning': ('!', theme.WARNING),
+            'interrupted': ('■', theme.WARNING), 'failed': ('✕', theme.DANGER)}
+OPERATION_NAMES = {'md': 'MD', 'optimization': 'Optimization', 'evaluation': 'Evaluation',
+                   'tuning': 'Tuning', 'training': 'Training'}
 OUTPUT_LABELS = {'optimization': 'Optimization trajectory', 'evaluation': 'Predictions',
                  'training': 'Model directory'}
 
@@ -178,7 +189,23 @@ class _PlainReporter(_NullReporter):
         logging.getLogger('SO3LR').info('Progress ' + ' · '.join(parts))
 
     def print_hint(self, line):
-        print(terminal_text(line), file=sys.stderr)
+        print(terminal_text(line, _ascii_stream(sys.stderr)), file=sys.stderr)
+
+    def print_verdict(self, level, head, details):
+        line = ' · '.join([f'{VERDICTS[level][0]} {head}', *details])
+        print(terminal_text(line, _ascii_stream(sys.stderr)), file=sys.stderr)
+
+
+def _ascii_stream(stream):
+    """True for a stream that cannot encode the display's glyphs (batch logs in C/POSIX locales)."""
+    encoding = getattr(stream, 'encoding', None)
+    if not encoding:  # an in-memory text stream takes any character
+        return False
+    try:
+        '✓·Å≤'.encode(encoding)
+        return False
+    except (LookupError, UnicodeEncodeError):
+        return True
 
 
 def get_reporter():
@@ -395,6 +422,8 @@ class _Reporter:
         rows.extend((metadata, self._text('')))
         style = theme.status_style(self.status)
         glyph = theme.status_glyph(self.status) or theme.status_glyph('running')
+        if self.status == 'complete' and getattr(self, '_finish_level', 'success') != 'success':
+            glyph, style = VERDICTS[self._finish_level]
         phase = self._text(f'{glyph} {self.phase_name}', f'bold {style}')
         if self.detail:
             phase.append(self._label(f'  {self.detail}'), style=theme.MUTED)
@@ -508,6 +537,13 @@ class _Reporter:
 
     def print_hint(self, line):
         self.console.print(self._text(line, theme.MUTED))
+
+    def print_verdict(self, level, head, details):
+        glyph, color = VERDICTS[level]
+        line = self._text(f'{glyph} {head}', f'bold {color}')
+        for detail in details:
+            line.append(self._label(f' · {detail}'), style=theme.MUTED)
+        self.console.print(line)
 
     def _live_progress(self):
         """Progress known only to this process, handed to the view instead of the journal state."""
@@ -672,11 +708,13 @@ class _Reporter:
         self._observe('checkpoint', {'step': int(step), 'path': str(path)})
         self._refresh()
 
-    def finish(self):
+    def finish(self, level='success'):
         if self.status != 'running':
             return
         self.status = 'complete'
-        self.phase_name, self.detail = 'Complete', ''
+        # A run that finished without reaching its goal says so in amber, as its closing line does.
+        self.phase_name, self.detail = ('Complete', '') if level == 'success' else ('Finished', 'target not met')
+        self._finish_level = level
         self._observe('run_completed', {'message': 'Run completed successfully.'})
         output_label = OUTPUT_LABELS.get(self.info.get('operation'), 'Trajectory')
         for key, label in (('output_file', output_label), ('log_file', 'Log')):
@@ -758,6 +796,13 @@ class _RunReporter:
         self._start_step = None
         self._dt_fs = None
         self._total_steps = None
+        # what the closing line summarizes
+        self._opened = time.monotonic()
+        self._info = {}
+        self._last_step = None
+        self._task = None
+        self._failure = None
+        self._details, self._warning = {}, None
 
     def __getattr__(self, name):
         # Keep the renderer's inspection surface (live/render/artifacts) usable.
@@ -775,7 +820,63 @@ class _RunReporter:
 
     def task_progress(self, done, total, unit):
         self._drain_logs()
+        self._task = (int(done), int(total), str(unit))
         self.renderer.task_progress(done, total, unit)
+
+    def outcome(self, detail=None, *, key=None, warning=None):
+        """Add to the closing line: a detail (replaced when its key comes again), or why the
+        run finished without reaching its goal, which turns the line amber."""
+        if detail:
+            self._details[key or detail] = str(detail)
+        if warning:
+            self._warning = str(warning)
+
+    def verdict(self):
+        """The closing line as (level, head, details), once the run has finished or failed."""
+        info = self._info
+        name = OPERATION_NAMES.get(info.get('operation'), 'Run')
+        elapsed = duration_label(time.monotonic() - self._opened)
+        md = info.get('operation') == 'md' and self._last_step is not None
+        details = []
+        if self.status == 'failed':
+            message, reason = self._failure
+            level = 'interrupted' if reason in ('interrupt', 'signal') else 'failed'
+            head = f"{name} {'interrupted' if level == 'interrupted' else 'stopped'}"
+            if md:
+                head += f' at step {self._last_step:,}'
+            head += f' after {elapsed}'
+            # Plain output prints the error itself next; Ctrl+C needs no repeating.
+            if level == 'failed' and self.enabled and message:
+                details.append(str(message).splitlines()[0])
+            return level, head, details
+        level, head = 'success', f'{name} finished in {elapsed}'
+        if info.get('operation') == 'optimization':
+            force, target = (_finite(info.get(key)) for key in ('opt_force_max_eVA', 'opt_force_target_eVA'))
+            if force is not None and target is not None and force > target:
+                level = 'warning'
+                head = f'{name} finished without meeting the force target in {elapsed}'
+                details.append(f'max force {force:.3g} > {target:g} eV/Å')
+            elif force is not None:
+                details.append(f'max force {force:.3g}' + (f' ≤ {target:g}' if target is not None else '') + ' eV/Å')
+            step = _finite(info.get('opt_step'))
+            if step is not None:
+                details.append(f'{int(step):,} steps')
+        if self._warning:
+            level, head = 'warning', f'{name} finished in {elapsed}: {self._warning}'
+        if md:
+            details.append(f'{self._last_step - (self._start_step or 0):,} steps')
+        if self._task is not None:
+            done, total, unit = self._task
+            details.append(f'{done:,} {unit}' if done >= total else f'{done:,}/{total:,} {unit}')
+        details.extend(self._details.values())
+        output = self._settings.get('output_file')
+        try:
+            if output and os.path.exists(output):
+                label = OUTPUT_LABELS.get(info.get('operation'), 'Trajectory').lower()
+                details.append(f'{label} {_display_path(output)}')
+        except (OSError, TypeError, ValueError):
+            pass
+        return level, head, details
 
     def results(self, title, rows):
         self._drain_logs()
@@ -783,6 +884,7 @@ class _RunReporter:
 
     def update_info(self, **kwargs):
         self._drain_logs()
+        self._info.update({key: value for key, value in kwargs.items() if value is not None})
         self.journal.emit('info', kwargs)
         self.run_log.update_info(kwargs)
         self.renderer.update_info(**kwargs)
@@ -806,6 +908,7 @@ class _RunReporter:
     def progress(self, step, temperature=None, potential_energy=None, time_per_step=None, **optional):
         self._drain_logs()
         step = int(step)
+        self._last_step = step
         segment_step = step - self._start_step if self._start_step is not None else None
         data = {
             'step': step,
@@ -923,7 +1026,7 @@ class _RunReporter:
         self.journal.emit('run_completed', {'message': 'Run completed successfully.'})
         if self.enabled and self.journal.active:
             self.renderer.artifacts.append(('Metrics', str(self.journal.path)))
-        self.renderer.finish()
+        self.renderer.finish(self.verdict()[0])
 
     def fail(self, message, *, display_message=None, reason='error'):
         """Record a failure; ``reason`` is 'interrupt' (Ctrl+C), 'signal' or 'error'."""
@@ -931,6 +1034,7 @@ class _RunReporter:
             if self.status != 'running':
                 return
             self.status = 'failed'
+        self._failure = (message if display_message is None else display_message, reason)
         self._drain_logs()
         self.run_log.finish('failed', str(message))
         self.journal.emit('run_failed', {'message': str(message), 'reason': reason})
@@ -1002,6 +1106,8 @@ def run_display(settings, *, record=True):
         finally:
             try:
                 reporter.close()
+                if reporter.status != 'running':
+                    renderer.print_verdict(*reporter.verdict())
                 # One place prints the hints, whichever way the error is reported later;
                 # plain runs get the traceback pointer from the CLI's error line instead.
                 for line in ([failure_detail] if failure_detail and reporter.enabled else []) + resume:
