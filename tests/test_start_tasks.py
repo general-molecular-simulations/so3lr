@@ -5,7 +5,6 @@ from pathlib import Path
 import click
 from click.testing import CliRunner
 import pytest
-import yaml
 
 from so3lr.cli import setup, setup_tasks, updates
 
@@ -39,34 +38,35 @@ def test_menu_offers_md_first_then_the_other_tasks():
     assert setup_tasks.TASK_CHOICES[0] == 'Run molecular dynamics'
 
 
-def test_optimization_bundle_replays_through_the_opt_command(tmp_path, structure_file, monkeypatch):
-    from so3lr.cli.optimization_settings import optimization_argv
-    from so3lr.cli.so3lr_cli import fire_optimization
+def test_optimization_bundle_holds_a_valid_opt_command(tmp_path, structure_file, monkeypatch):
+    import shlex
+    from so3lr.cli.so3lr_cli import cli
     destination = tmp_path / 'opt'
     text = '\n'.join([task('opt'), str(len(setup.available_presets()) + 2), str(structure_file),
                       '1', '', '', '0', '0', str(destination), '2']) + '\n'
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
     assert 'RETURN:None' in result.output
-    settings = yaml.safe_load((destination / 'settings.yaml').read_text())
-    assert settings['operation'] == 'optimization'
-    assert (settings['force_convergence'], settings['min_steps'], settings['min_cycles']) == (0.05, 10, 100)
-    assert settings['lr_cutoff'] == 100.0  # gas phase
-    # Every exported key is accepted by the real opt options (run.sh runs from the bundle).
+    assert set(p.name for p in destination.iterdir()) == {'structure.extxyz', 'run.sh'}
+    command = (destination / 'run.sh').read_text().splitlines()[-1]
+    assert command.startswith('exec so3lr opt --input structure.extxyz --output optimization.extxyz')
+    argv = shlex.split(command)[2:]
+    assert argv[argv.index('--force-conv') + 1] == '0.05' and argv[argv.index('--min-cycles') + 1] == '100'
+    assert argv[argv.index('--lr-cutoff') + 1] == '100'  # gas phase
+    # run.sh runs from the bundle: the real opt command accepts every option.
     monkeypatch.chdir(destination)
-    optimization_argv({k: v for k, v in settings.items() if k != 'operation'}, fire_optimization)
-    assert set(p.name for p in destination.iterdir()) == {'structure.extxyz', 'settings.yaml', 'run.sh'}
+    with cli.commands['opt'].make_context('opt', argv[1:]) as context:
+        assert context.params['force_conv'] == 0.05 and context.params['min_steps'] == 10
 
 
-def test_optimization_start_now_returns_the_settings_path(tmp_path, structure_file):
+def test_optimization_start_now_returns_the_command(tmp_path, structure_file):
     destination = tmp_path / 'opt-now'
     text = '\n'.join([task('opt'), str(len(setup.available_presets()) + 2), str(structure_file),
                       '1', '0.01', '200', '0', '0', str(destination), '1']) + '\n'
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
-    assert f"RETURN:{(destination / 'settings.yaml')!r}" in result.output
-    settings = yaml.safe_load((destination / 'settings.yaml').read_text())
-    assert (settings['force_convergence'], settings['min_cycles']) == (0.01, 20)
+    assert "RETURN:Action(kind='opt', argv=('opt', '--input', 'structure.extxyz'" in result.output
+    assert "'--force-conv', '0.01', '--min-steps', '10', '--min-cycles', '20'" in result.output
 
 
 PASTE_DATASET = str(len(setup_tasks.EVAL_EXAMPLES) + 2)  # 'Enter or paste a path'
@@ -230,7 +230,7 @@ def test_esc_steps_back_in_optimization_and_evaluation(tmp_path, structure_file,
     assert seen == ['What would you like to do?', 'Choose a structure', 'Model (canonical release)',
                     'Choose a structure', 'Model (canonical release)', 'Next action · Enter starts now',
                     'Next action · Enter starts now']
-    assert (tmp_path / 'opt2' / 'settings.yaml').is_file() and not destination.exists()
+    assert (tmp_path / 'opt2' / 'run.sh').is_file() and not destination.exists()
 
     seen = scripted(monkeypatch, [2, 0, 'back', 0, 0, 1])
     text = '\n'.join(['', str(tmp_path / 'ev')]) + '\n'

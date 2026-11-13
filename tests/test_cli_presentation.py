@@ -137,52 +137,6 @@ def test_opt_owns_display_and_journal_before_initialization(tmp_path, monkeypatc
     assert presentation.get_reporter() is presentation._null
 
 
-def test_resolved_optimization_yaml_reuses_cli_validation_and_reads_once(tmp_path, monkeypatch):
-    import yaml
-    from so3lr.cli import so3lr_cli
-    source = tmp_path / 'input.xyz'
-    source.write_text('1\n\nH 0 0 0\n')
-    output = tmp_path / 'optimized.xyz'
-    settings = tmp_path / 'optimization.yaml'
-    settings.write_text(yaml.safe_dump(dict(
-        operation='optimization', input_file=str(source), output_file=str(output),
-        model_path='so3lr-tauri-m-2606', precision='float64', min_cycles=2, min_steps=3,
-        force_convergence=0.05, buffer_size_multiplier_sr=1.5, overwrite=False,
-        lr_cutoff=100.0, engine='standard')))
-    reads, captured = [], {}
-    original = so3lr_cli.load_settings_yaml
-    def load(path):
-        reads.append(path)
-        return original(path)
-    monkeypatch.setattr(so3lr_cli, 'load_settings_yaml', load)
-    monkeypatch.setattr(so3lr_cli, 'setup_logger', lambda *args: None)
-    monkeypatch.setattr(so3lr_cli, 'reserve_gpu', lambda *args, **kwargs: None)
-    monkeypatch.setattr(so3lr_cli, 'get_hardware_info', lambda: None)
-    monkeypatch.setattr(so3lr_cli, 'perform_min', lambda values: captured.update(values))
-    result = CliRunner().invoke(cli, ['--display', 'plain', '--settings', str(settings)])
-    assert result.exit_code == 0, result.output
-    assert reads == [settings]
-    assert captured['min_cycles'] == 2 and captured['min_steps'] == 3
-    assert captured['force_convergence'] == 0.05 and captured['buffer_size_multiplier_sr'] == 1.5
-    assert captured['precision'] == 'float64' and captured['overwrite'] is False
-    assert captured['model_path'] == 'so3lr-tauri-m-2606' and captured['engine'] == 'standard'
-    assert captured['output_format'] == 'extxyz'
-    assert 'md_dt' not in captured
-
-
-def test_optimization_yaml_model_validation_is_the_normal_click_callback(tmp_path, monkeypatch):
-    import yaml
-    from so3lr.cli import so3lr_cli
-    source = tmp_path / 'input.xyz'
-    source.write_text('1\n\nH 0 0 0\n')
-    settings = tmp_path / 'invalid-model.yaml'
-    settings.write_text(yaml.safe_dump(dict(operation='optimization', input_file=str(source), model='so3lr-mm')))
-    monkeypatch.setattr(so3lr_cli, 'perform_min', lambda *args: pytest.fail('Started invalid model'))
-    result = CliRunner().invoke(cli, ['--settings', str(settings)])
-    assert result.exit_code == 2
-    assert 'Did you mean' in result.output
-
-
 def test_unmarked_md_yaml_keeps_units_defaults_and_single_read(tmp_path, monkeypatch):
     import yaml
     from so3lr.cli import so3lr_cli
@@ -199,16 +153,6 @@ def test_unmarked_md_yaml_keeps_units_defaults_and_single_read(tmp_path, monkeyp
     assert result.exit_code == 0, result.output
     assert reads == [settings] and len(calls) == 1
     assert calls[0]['md_dt'] == 0.0005 and calls[0]['ensemble'] == 'nvt'
-
-
-def test_unknown_yaml_operation_fails_without_falling_back_to_md(tmp_path, monkeypatch):
-    from so3lr.cli import so3lr_cli
-    settings = tmp_path / 'unknown.yaml'
-    settings.write_text('operation: typo\ninput_file: input.xyz\n')
-    monkeypatch.setattr(so3lr_cli, '_execute_md', lambda *args, **kwargs: pytest.fail('Started MD'))
-    result = CliRunner().invoke(cli, ['--settings', str(settings)])
-    assert result.exit_code == 2
-    assert "Unsupported settings operation 'typo'" in result.output
 
 
 @pytest.mark.parametrize('error', [KeyError('forces'), AssertionError()])
@@ -248,47 +192,6 @@ def test_main_keeps_traceback_when_display_ownership_does_not_prove_a_saved_trac
         presentation.reset()
     assert caught.value.args == ('forces',)
     assert caught.traceback[-1].name == 'fail'
-
-
-def test_md_short_terminal_error_retains_complete_traceback_in_file(tmp_path, monkeypatch, capsys):
-    import logging
-    from so3lr.cli import so3lr_cli as app
-    logger = app.logger
-    old_level = logger.level
-    monkeypatch.setattr(logger, 'handlers', [])
-    monkeypatch.setattr(logger, 'propagate', False)
-    logger.setLevel(logging.INFO)
-    log_path = tmp_path / 'run.log'
-    presentation.configure(display='plain')
-    def setup(path):
-        logger.addHandler(presentation.make_console_handler())
-        logger.addHandler(logging.FileHandler(path))
-        presentation.get_reporter().logger_ready(path)
-    def runtime(settings):
-        raise AssertionError('runtime failure')
-    monkeypatch.setattr(app, 'setup_logger', setup)
-    monkeypatch.setattr(app, 'get_hardware_info', lambda: None)
-    monkeypatch.setattr(app, 'reserve_gpu', lambda *args, **kwargs: None)
-    monkeypatch.setattr(app, 'log_simulation_settings', lambda *args: None)
-    monkeypatch.setattr(app, 'run', runtime)
-    monkeypatch.setattr(app, 'cli', lambda: app._execute_md({'log_file': str(log_path)}))
-    try:
-        with pytest.raises(SystemExit) as caught:
-            app.main()
-    finally:
-        for handler in logger.handlers[:]:
-            logger.removeHandler(handler)
-            handler.close()
-        logger.setLevel(old_level)
-        presentation.reset()
-    assert caught.value.code == 1
-    terminal = capsys.readouterr().err
-    assert 'AssertionError: runtime failure' in terminal
-    assert 'Traceback (most recent call last)' not in terminal
-    durable = log_path.read_text()
-    assert 'Traceback (most recent call last)' in durable
-    assert 'AssertionError: runtime failure' in durable
-    assert 'Execution: failed' in durable
 
 
 @pytest.fixture
@@ -406,9 +309,6 @@ def test_optimization_step_budget_completion_remains_a_successful_command(failur
             opt_force_max_eVA=0.5, opt_force_target_eVA=0.01)
     monkeypatch.setattr(app, 'perform_min', finish_budget)
     assert invoke('opt') is None  # command completion remains success, not convergence
-    text = log_path.read_text()
-    assert 'Execution: complete' in text
-    assert 'Step budget reached; force criterion not met' in text
 
 
 @pytest.mark.parametrize('operation', ['md', 'opt'])

@@ -411,8 +411,8 @@ def test_worker_warning_burst_has_no_display_queue_loss(monkeypatch):
         assert reporter.renderer._state.diagnostic == ('warning', 'worker-299')
 
 
-@pytest.mark.parametrize('ending', ['complete', 'failed', 'close'])
-def test_finalization_warning_stays_in_live_and_journal(monkeypatch, ending):
+def test_finalization_warning_stays_in_live_and_journal(monkeypatch):
+    """A warning logged while the display closes after a completed run still shows and is journaled."""
     import json
     monkeypatch.setattr(sys, 'stderr', Terminal())
     ui.configure(display='rich')
@@ -420,31 +420,19 @@ def test_finalization_warning_stays_in_live_and_journal(monkeypatch, ending):
         handler = ui.make_console_handler()
         shown = []
         monkeypatch.setattr(reporter.renderer, 'print_log', lambda record, message: shown.append(message))
-        target = reporter.renderer if ending == 'close' else reporter.run_log
-        method = 'close' if ending == 'close' else 'finish'
-        original = getattr(target, method)
-        def finish(*args):
-            if ending != 'close':
-                original(*args)
+        original = reporter.renderer.close
+        def close(*args):
             handler.handle(logging.makeLogRecord(dict(name='SO3LR', msg='summary disk failure',
                 levelno=logging.WARNING, levelname='WARNING')))
-            if ending == 'close':
-                original(*args)
-        monkeypatch.setattr(target, method, finish)
-        if ending == 'complete':
-            reporter.finish()
-        elif ending == 'failed':
-            reporter.fail('calculation failure')
-        else:
-            reporter.finish()
-            reporter.close()
-            monkeypatch.setattr(target, method, original)
+            original(*args)
+        monkeypatch.setattr(reporter.renderer, 'close', close)
+        reporter.finish()
+        reporter.close()
+        monkeypatch.setattr(reporter.renderer, 'close', original)
         assert shown == ['summary disk failure']
         records = [json.loads(line) for line in reporter.journal.path.read_text().splitlines()]
-        warning, terminal = (records[-1], records[-2]) if ending == 'close' else (records[-2], records[-1])
-        assert warning['type'] == 'warning'
-        assert warning['data']['message'] == 'summary disk failure'
-        assert terminal['type'] == ('run_failed' if ending == 'failed' else 'run_completed')
+        assert records[-1]['type'] == 'warning' and records[-1]['data']['message'] == 'summary disk failure'
+        assert records[-2]['type'] == 'run_completed'
 
 
 @pytest.mark.parametrize('collect_previous', [False, True])
@@ -1315,29 +1303,6 @@ def test_initialization_failure_restores_started_terminal(monkeypatch, error):
     assert created[0]._closed and not created[0].live.is_started
     assert '\x1b[?25l' in output.getvalue() and '\x1b[?25h' in output.getvalue()
     assert not ui.get_reporter().enabled
-
-
-def test_interrupted_run_log_initialization_closes_its_journal(monkeypatch):
-    output = Terminal()
-    monkeypatch.setattr(sys, 'stderr', output)
-    ui.configure(display='rich')
-    original, journals = ui.EventJournal, []
-
-    def journal(settings, **_):
-        item = original(settings)
-        journals.append(item)
-        return item
-
-    def fail(*args):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(ui, 'EventJournal', journal)
-    monkeypatch.setattr(ui, 'RunLog', fail)
-    with pytest.raises(KeyboardInterrupt):
-        with ui.run_display({}):
-            pass
-    assert journals and not journals[0].active
-    assert '\x1b[?25h' in output.getvalue()
 
 
 def test_initial_live_start_failure_restores_cursor(monkeypatch):

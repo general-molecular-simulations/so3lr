@@ -18,7 +18,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .telemetry import EventJournal
-from .run_log import RunLog
 from . import theme
 from .formatting import ascii_only_console, display_path as _display_path, duration_label, finite_number as _finite, precision_label, throughput_label, optimization_status, terminal_text
 from .terminal import TerminationSignal as _TerminationSignal, termination_signals as _termination_signals, stop_live
@@ -103,13 +102,6 @@ class _NullReporter:
 
 
 _null = _NullReporter()
-
-
-class _NoRunLog:
-    """Stands in for RunLog: those commands keep their own text logs."""
-
-    def __getattr__(self, name):
-        return lambda *args, **kwargs: None
 
 
 # What a completed command's main output file is called on screen.
@@ -832,10 +824,9 @@ class _RunReporter:
         self._last_checkpoint = None
         # enabled continues to mean terminal rendering, not journal availability.
         self.enabled = renderer.enabled
-        # Only MD and optimization keep a run journal and run-log blocks for so3lr show.
+        # Only MD and optimization keep a run journal for so3lr show.
         self.journal = EventJournal(settings, enabled=record)
         try:
-            self.run_log = RunLog(settings, self.journal) if record else _NoRunLog()
             if self.enabled:
                 self.renderer.attach_journal(self.journal.path, self.journal.run_id,
                                              enabled=self.journal.enabled)
@@ -873,7 +864,6 @@ class _RunReporter:
             return
         self._phase = phase
         self.journal.emit('phase', {'name': phase[0], 'detail': phase[1]})
-        self.run_log.phase(phase[0])
         self.renderer.phase(*phase)
 
     def task_progress(self, done, total, unit):
@@ -943,13 +933,11 @@ class _RunReporter:
         self._drain_logs()
         self._info.update({key: value for key, value in kwargs.items() if value is not None})
         self.journal.emit('info', kwargs)
-        self.run_log.update_info(kwargs)
         self.renderer.update_info(**kwargs)
         self._optimization_progress(kwargs)
 
     def logger_ready(self, log_file):
         self._drain_logs()
-        self.run_log.logger_ready(log_file)
         self.journal.flush_initial_warning()
 
     def start_md(self, start_step, total_steps, dt_fs):
@@ -961,7 +949,6 @@ class _RunReporter:
         self._total_steps = int(total_steps)
         self.journal.emit('md_started', {'start_step': self._start_step,
                                        'total_steps': int(total_steps), 'dt_fs': self._dt_fs})
-        self.run_log.start_md(self._start_step, int(total_steps), self._dt_fs)
         self.renderer.start_md(start_step, total_steps, dt_fs)
 
     def progress(self, step, temperature=None, potential_energy=None, time_per_step=None, **optional):
@@ -986,7 +973,6 @@ class _RunReporter:
             if argument in optional:
                 data[field] = optional[argument]
         self.journal.emit('sample', data)
-        self.run_log.progress(data)
         self.renderer.progress(step, temperature=temperature, potential_energy=potential_energy,
                                time_per_step=time_per_step, _sample=data, **optional)
 
@@ -1020,7 +1006,6 @@ class _RunReporter:
     def checkpoint(self, step, path):
         self._drain_logs()
         self.journal.emit('checkpoint', {'step': int(step), 'path': str(path)})
-        self.run_log.checkpoint(step, path)
         self._last_checkpoint = (int(step), str(path))
         self.renderer.checkpoint(step, path)
 
@@ -1081,7 +1066,6 @@ class _RunReporter:
                 return
             self.status = 'complete'
         self._drain_logs()
-        self.run_log.finish('complete')
         self.journal.emit('run_completed', {'message': 'Run completed successfully.'})
         if self.enabled and self.journal.active:
             self.renderer.artifacts.append(('Metrics', str(self.journal.path)))
@@ -1098,7 +1082,6 @@ class _RunReporter:
         self._failure = (message if display_message is None else display_message, reason)
         self.final = self.verdict()
         self._drain_logs()
-        self.run_log.finish('failed', str(message))
         self.journal.emit('run_failed', {'message': str(message), 'reason': reason})
         self.renderer.fail(message if display_message is None else display_message, reason=reason)
 
@@ -1113,7 +1096,6 @@ class _RunReporter:
             with self._log_lock:
                 self._closed = True
             self._drain_logs()
-            self.run_log.close()
             self.journal.close()
 
 

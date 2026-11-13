@@ -745,19 +745,6 @@ def _run_settings_file(settings):
     settings_path, raw_settings = _read_settings_file(settings, cli_errors=True)
     if not isinstance(raw_settings, dict) or any(not isinstance(key, str) for key in raw_settings):
         raise click.UsageError(f'{settings_path.name} must contain a YAML mapping with string setting names.')
-    if 'operation' in raw_settings:
-        if raw_settings['operation'] != 'optimization':
-            raise click.UsageError(f"Unsupported settings operation {raw_settings['operation']!r}. "
-                                   "Use 'operation: optimization' for an optimization, "
-                                   'or omit operation for MD.')
-        from .optimization_settings import optimization_argv
-        argv = optimization_argv(raw_settings, fire_optimization)
-        parent = click.get_current_context(silent=True)
-        # Reuse the real option parser: types, defaults and model callbacks
-        # must match a direct opt invocation rather than bypassing validation.
-        with fire_optimization.make_context('opt' if parent is not None else 'so3lr opt',
-                                             argv, parent=parent) as context:
-            return fire_optimization.invoke(context)
     try:
         settings_dict = load_md_settings(settings_path, loaded_settings=raw_settings)
     except (ValueError, TypeError, OverflowError) as exc:
@@ -852,7 +839,7 @@ def _interactive_setup():
     settings_path = launch_setup()
     if isinstance(settings_path, Action):
         # Run the command itself, as typed (its usage errors stay one line): show
-        # from here, a saved evaluation from its folder, as its run.sh does.
+        # from here, a saved optimization or evaluation from its folder, as its run.sh does.
         name, args = (('show', list(settings_path.argv)) if settings_path.kind == 'show'
                       else (settings_path.argv[0], list(settings_path.argv[1:])))
         with chdir(settings_path.directory or Path.cwd()):
