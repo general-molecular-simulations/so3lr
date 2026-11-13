@@ -4,12 +4,14 @@ from ase.io.formats import ioformats
 from ase.neighborlist import neighbor_list
 from ase import Atoms
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 from tqdm import tqdm
 import numpy as np
 import jraph
 import os
 from pathlib import Path
+
+from so3lr.structure_info import charge_and_multiplicity
 
 from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
 from ..utils.jraph_utils import with_uniform_periodic_fields
@@ -84,8 +86,10 @@ class AseDataLoaderSparse:
             cutoff: float,
             calculate_neighbors_lr: bool = False,
             cutoff_lr: Optional[float] = None,
-            pick_idx: np.ndarray = None
+            pick_idx: np.ndarray = None,
+            progress: Optional[Callable[[int], None]] = None,
     ):
+        """progress, if given, is called with the number of structures read and replaces tqdm."""
         if pick_idx is None:
             def keep(idx: int):
                 return True
@@ -118,7 +122,8 @@ class AseDataLoaderSparse:
                 logger.info(
                     f"Calculate long-range neighbors within cutoff_lr={cutoff_lr} Ang."
                 )
-            for a in tqdm(iread(file_path), mininterval=60, maxinterval=600):
+            structures = iread(file_path)
+            for a in (structures if progress else tqdm(structures, mininterval=60, maxinterval=600)):
                 if keep(i):
                     result = ASE_to_jraph(
                         a,
@@ -140,6 +145,8 @@ class AseDataLoaderSparse:
                 else:
                     pass
                 i += 1
+                if progress:
+                    progress(i)
 
         if pick_idx is not None:
             if max(pick_idx) >= i:
@@ -156,20 +163,6 @@ class AseDataLoaderSparse:
         # Molecules and crystals in one data set must be able to share a batch.
         loaded_data = with_uniform_periodic_fields(loaded_data)
         return loaded_data, {'max_num_of_nodes': max_num_of_nodes, 'max_num_of_edges': max_num_of_edges, 'max_num_of_pairs': max_num_of_pairs}
-
-
-def charge_and_multiplicity(mol: Atoms):
-    """The total charge and spin multiplicity in ``mol.info``, None where absent.
-
-    Spin multiplicity (2S+1): OMol25/OPoly26 extxyz store it under `spin=`, other
-    datasets use `multiplicity=`. Prefer the canonical `multiplicity`, falling back
-    to `spin` so open-shell structures are not silently read as closed-shell
-    singlets (num_unpaired_electrons = multiplicity - 1).
-    """
-    multiplicity = mol.info.get('multiplicity')
-    if multiplicity is None:
-        multiplicity = mol.info.get('spin')
-    return mol.info.get('charge'), multiplicity
 
 
 def ASE_to_jraph(

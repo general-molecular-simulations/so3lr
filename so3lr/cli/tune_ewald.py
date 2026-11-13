@@ -18,7 +18,6 @@ import math
 import time
 import logging
 from typing import Any
-from warnings import warn
 from itertools import product
 from functools import lru_cache, partial
 
@@ -36,6 +35,7 @@ from so3lr.model_registry import resolve_model
 from so3lr.pbc import lattice_rows, minimum_image_problem
 from so3lr.cli.so3lr_md import load_model, atoms_to_jnp, process_model, dispersion_ratios
 from .so3lr_md import run_dtypes, setup_logger, setup_run
+from .presentation import get_reporter
 
 # Setup logging
 logger = logging.getLogger("SO3LR")
@@ -192,14 +192,22 @@ def grid_search(candidates, error_fn, time_fn, accuracy):
         raise ValueError(f"'{accuracy}' is not a float.")
     logger.info(f"Testing {len(candidates)} parameter combinations.")
     logger.info("Force-error estimates:")
+    reporter = get_reporter()
+    reporter.phase('Estimating', 'Force-error estimate of each candidate')
     errors = []
     for candidate in candidates:
         logger.info(f"  {_describe(candidate)}")
         errors.append(float(error_fn(**candidate)))
+        reporter.task_progress(len(errors), len(candidates), 'candidates')
     logger.info("Timings of the candidates within the accuracy:")
-    timings = []
+    reporter.phase('Timing', f'Force calls of the candidates within {accuracy:g} eV/Å')
+    within = sum(error <= accuracy for error in errors)
+    timings, timed = [], 0
     for candidate, error in zip(candidates, errors):
         timings.append(time_fn(**candidate) if error <= accuracy else float("inf"))
+        if error <= accuracy:
+            timed += 1
+            reporter.task_progress(timed, within, 'candidates timed')
         logger.info(f"  {_describe(candidate)}: {timings[-1]} s per force call, "
                     f"estimated error {error}")
     return candidates, errors, timings
@@ -531,6 +539,30 @@ def cell_is_present(cell) -> bool:
     return cell is not None and not np.all(np.asarray(cell) == 0.0)
 
 
+def _report_recommendation(rec, error, timing, accuracy, *, met, kspace, command):
+    """The chosen parameters as the live display's result table (settings-file names)."""
+    names = (('cutoff', 'lr_cutoff', ' Å'), ('smearing', 'kspace_smearing', ' Å'),
+             ('spacing', 'kspace_spacing', ' Å'), ('interpolation_nodes', 'kspace_interp_nodes', ''),
+             ('cutoff_lr_damping', 'dispersion_damping', ' Å'))
+    rows = [(name, f'{rec[key]:g}{unit}') for key, name, unit in names if rec.get(key) is not None]
+    if kspace in ('ewald', 'pme', 'p3m'):
+        rows.insert(1, ('kspace_electrostatics', kspace))
+    rows.append(('Force error', f'{error:.3g} eV/Å estimated · target ≤ {accuracy:g}'))
+    if timing != float('inf'):
+        rows.append(('Force call', f'{timing * 1e3:.3g} ms'))
+    if command:
+        rows.append(('Run MD', command))
+    title = ('Fastest settings within the target' if met
+             else 'No candidate meets the target: smallest error')
+    reporter = get_reporter()
+    reporter.results(title, rows)
+    if met:
+        reporter.outcome(f'force error {error:.2g} ≤ {accuracy:g} eV/Å')
+    else:
+        reporter.outcome(f'smallest force error {error:.2g} eV/Å',
+                         warning=f'no candidate meets the {accuracy:g} eV/Å target')
+
+
 def tune(
     settings: dict
 ) -> None:
@@ -590,6 +622,8 @@ def tune(
     # Tuning parameters
     # Note that all the tuning parameters are loaded further below
 
+    reporter = get_reporter()
+    reporter.phase('Loading', 'Reading the structure')
     input_file_path = settings.get('input_file')
     if input_file_path is None:
         raise ValueError(
@@ -626,6 +660,7 @@ def tune(
     )
     position = initial_geometry_dict['positions']
 
+    reporter.phase('Loading', 'Loading the force field')
     # A bundled name, a path, or None for the default model; load_model builds
     # the solver for the method being timed.
     potential = load_model(
@@ -767,7 +802,7 @@ def tune(
         logger.info(f"  force error estimate [eV/A]: {error}")
 
     else:
-        warn("No parameter meets the accuracy requirement.\n", stacklevel=1)
+        logger.warning(f"No parameter meets the accuracy requirement ({accuracy:g} eV/Å).")
     param, timing, error = params[errs.index(
         min(errs))], timings[errs.index(min(errs))], min(errs)
     logger.info("The parameters with the smallest error estimate are:")
@@ -791,18 +826,20 @@ def tune(
     # Print a ready-to-run MD command using the tuned parameters so users know
     # exactly how to launch a simulation next. Prefer the fastest param that met
     # the accuracy target; otherwise fall back to the smallest-error param.
-    rec = recommended_param if recommended_param is not None else param
+    met = recommended_param is not None
+    rec_index = timings.index(min(timings)) if met else errs.index(min(errs))
+    rec = params[rec_index]
+    command = None
     if kspace_electrostatics in ('ewald', 'pme', 'p3m'):
         _interp = rec.get('interpolation_nodes')
         _interp_flag = f" --kspace-interp-nodes {int(_interp)}" if _interp is not None else ""
         logger.info("=" * 60)
         logger.info("To run MD with these k-space parameters, e.g. NPT (CLI):")
-        logger.info(
-            f"  so3lr npt --input {input_file_path} --lr-cutoff {rec['cutoff']} "
-            f"--kspace-electrostatics {kspace_electrostatics} "
-            f"--kspace-smearing {rec['smearing']} --kspace-spacing {rec['spacing']}{_interp_flag} "
-            f"--temperature 300 --pressure 1.0"
-        )
+        command = (f"so3lr npt --input {input_file_path} --lr-cutoff {rec['cutoff']:g} "
+                   f"--kspace-electrostatics {kspace_electrostatics} "
+                   f"--kspace-smearing {rec['smearing']:g} --kspace-spacing {rec['spacing']:g}{_interp_flag} "
+                   f"--temperature 300 --pressure 1.0")
+        logger.info(f"  {command}")
         logger.info("Or add the following to your settings.yaml:")
         logger.info(f"  lr_cutoff: {rec['cutoff']}")
         logger.info(f"  kspace_electrostatics: {kspace_electrostatics}")
@@ -814,9 +851,10 @@ def tune(
     elif kspace_electrostatics == 'cutoff' or kspace_dispersion == 'cutoff':
         logger.info("=" * 60)
         logger.info("To run MD with this cutoff, e.g. NVT (CLI):")
-        logger.info(
-            f"  so3lr nvt --input {input_file_path} --lr-cutoff {rec['cutoff']} --temperature 300"
-        )
+        command = f"so3lr nvt --input {input_file_path} --lr-cutoff {rec['cutoff']:g} --temperature 300"
+        logger.info(f"  {command}")
         logger.info("Or add the following to your settings.yaml:")
         logger.info(f"  lr_cutoff: {rec['cutoff']}")
         logger.info("=" * 60)
+    _report_recommendation(rec, errs[rec_index], timings[rec_index], accuracy, met=met, command=command,
+                           kspace=kspace_electrostatics if kspace_dispersion != 'cutoff' else None)

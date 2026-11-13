@@ -23,6 +23,7 @@ import jax.numpy as jnp
 from flax import traverse_util
 from flax.core.frozen_dict import unfreeze
 
+from ..utils.console import say
 from ..utils import checkpoint_utils
 from ..utils.param_utils import (
     count_params,
@@ -996,9 +997,9 @@ def run_fine_tuning(
             # alpha/scale, leaving 'adaptive' robust loss fixed at its init.
             trainable_subset_keys = list(trainable_subset_keys) + ['adaptive_robust_loss']
 
-    print("=" * 50)
-    print_param_shapes(params)
-    print("=" * 50)
+    say("=" * 50)
+    print_param_shapes(params, emit=say)
+    say("=" * 50)
 
     total_params = count_params(params)
     trainable_params = count_trainable_params(
@@ -1007,16 +1008,16 @@ def run_fine_tuning(
         frozen_keys=frozen_subset_keys
     )
 
-    print(f"\nTotal number of parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
+    say(f"Total number of parameters: {total_params:,}")
+    say(f"Trainable parameters: {trainable_params:,}")
     if trainable_params != total_params:
-        print(f"Frozen parameters: {total_params - trainable_params:,}")
-        print(f"Fine-tuning strategy: {strategy}")
+        say(f"Frozen parameters: {total_params - trainable_params:,}")
+        say(f"Fine-tuning strategy: {strategy}")
         if trainable_subset_keys:
-            print(f"Trainable modules: {trainable_subset_keys}")
+            say(f"Trainable modules: {trainable_subset_keys}")
     if frozen_subset_keys:
-        print(f"Fine-tuning strategy: {strategy}")
-        print(f"Frozen modules: {frozen_subset_keys}")
+        say(f"Fine-tuning strategy: {strategy}")
+        say(f"Frozen modules: {frozen_subset_keys}")
 
     # Get data filepath.
     data_filepath = data_path_from_config(config=config)
@@ -1374,11 +1375,14 @@ def prepare_training_and_validation_data(config, loader, tf_record_present,
         test_indices = np.sort(all_indices[(num_train + num_valid):])
 
         # Cutoff is in Angstrom, so we have to divide the cutoff by the length unit.
+        from so3lr.cli.presentation import get_reporter, reading_progress
+        get_reporter().phase('Loading', 'Reading the dataset and building neighbour lists')
         training_and_validation_data, data_stats = loader.load(
             cutoff=model_config.cutoff / length_unit,
             cutoff_lr=config.data.neighbors_lr_cutoff / length_unit if config.data.neighbors_lr_bool is True else None,
             calculate_neighbors_lr=config.data.neighbors_lr_bool,
-            pick_idx=training_and_validation_indices
+            pick_idx=training_and_validation_indices,
+            progress=reading_progress(num_data),
         )
         # Since the training and validation indices are sorted, the index i at the n-th entry in
         # training_and_validation_indices corresponds to the n-th entry in training_and_validation_data which is

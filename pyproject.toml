@@ -52,6 +52,7 @@ dependencies = [
     "optax<0.3",
     "orbax-checkpoint<0.13",
     "pyyaml>=6,<7",
+    "rich>=14,<16",
     "tqdm>=4.67,<5",
 ]
 
@@ -115,6 +116,8 @@ include = [
     # Keep non-Python runtime inputs explicit even though Poetry currently
     # discovers files located inside the package automatically.
     { path = "so3lr/cli/*.yaml", format = ["sdist", "wheel"] },
+    # small example structures offered by `so3lr start`
+    { path = "so3lr/cli/examples/*.xyz", format = ["sdist", "wheel"] },
     { path = "so3lr/config/*.yaml", format = ["sdist", "wheel"] },
     { path = "so3lr/models/**/*", format = ["sdist", "wheel"] },
     { path = "so3lr/mlff/nn/observable/*.npz", format = ["sdist", "wheel"] },

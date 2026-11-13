@@ -63,6 +63,7 @@ from ..md_observables import is_per_atom_observable
 from ..md_settings_validation import (
     DEFAULT_PRECISION, model_precision, normalize_npt_coupling, resolve_ensemble, resolve_precision,
     state_precision, validate_md_counts)
+from .presentation import get_reporter, make_console_handler
 
 
 def _model_num_features(model_path) -> Optional[int]:
@@ -281,13 +282,9 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
     file_formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-    # Create formatter for console output - just the message, no prefix
-    console_formatter = logging.Formatter('%(message)s')
-
-    # Add the console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(console_level)
-    console_handler.setFormatter(console_formatter)
+    # The terminal renderer is independent of the durable file format below.
+    # Outside an active CLI display this remains a plain stderr handler.
+    console_handler = make_console_handler(console_level)
     logger.addHandler(console_handler)
 
     # Add the file handler if a log file is specified
@@ -310,6 +307,12 @@ def setup_logger(log_file=None, log_level=logging.INFO, console_level=logging.IN
 
     # Prevent propagation to the root logger to avoid duplicate messages
     logger.propagate = False
+
+    # The active invocation can write its durable identity only after its own
+    # file handler is installed (a previous CLI invocation may have left one).
+    ready = getattr(get_reporter(), 'logger_ready', None)
+    if ready is not None:
+        ready(log_file)
 
     return logger
 
@@ -930,8 +933,9 @@ def check_cell(
     # Sanity check the long-range cutoff up front, before the all-zero cell
     # early return. Otherwise non-periodic systems would silently accept a
     # too-small lr_cutoff because this check used to live below the return.
-    if lr_cutoff < 10 and (kspace_electrostatics == None or kspace_smearing == None):
-        raise ValueError(f'Long-range cutoff below 10 Å is not supported yet. Provided cutoff: {lr_cutoff} Å.')
+    if lr_cutoff < KS.MIN_DIRECT_LR_CUTOFF and (kspace_electrostatics == None or kspace_smearing == None):
+        raise ValueError(f'Long-range cutoff below {KS.MIN_DIRECT_LR_CUTOFF:g} Å is not supported yet. '
+                         f'Provided cutoff: {lr_cutoff} Å.')
 
     if np.all(cell == 0):
         return None
@@ -1279,19 +1283,74 @@ def validate_npt_restart_coupling(state, box, npt_coupling: str) -> None:
             )
 
 
-def format_md_row(step, KE, PE, H, T, time_per_step, npt_state=None, box=None):
+def format_md_row(step, KE, PE, H, T, time_per_step, npt_state=None, box=None, *, metrics=None):
     """One MD log row, tab-separated like the header in perform_md. For NPT pass
     the state and box: a flexible-cell (semi-isotropic) state adds its
-    pressure-tensor diagonal, then the box lengths follow."""
-    cols = [f'{step}', f'{KE + PE:.3f}', f'{KE:.3f}', f'{PE:.3f}', f'{(H or 0.0):.3f}', f'{T:.1f}']
+    pressure-tensor diagonal, then the box lengths follow. An optional metrics
+    dict receives the total energy, host-side cell data and pressure already
+    evaluated for this row, so the monitor needs no extra model evaluations."""
+    energy = KE + PE
+    cols = [f'{step}', f'{energy:.3f}', f'{KE:.3f}', f'{PE:.3f}', f'{(H or 0.0):.3f}', f'{T:.1f}']
+    if metrics is not None:
+        # Preserve the row's dtype-rounded sum. Adding converted host floats
+        # instead would silently change float32 total energies in the journal.
+        metrics['energy'] = float(energy)
     if npt_state is not None:
         if isinstance(npt_state, jax_md.simulate.NPTNoseHooverFlexState):
-            P = jax_md.simulate.pressure_tensor_flex(npt_state) / units.metal_unit_system()['pressure']
-            cols.append('({:.1f},{:.1f},{:.1f})'.format(*(float(P[i, i]) for i in range(3))))
-        L = box_to_diag(box)
+            pressure_diagonal = np.diag(np.asarray(jax_md.simulate.pressure_tensor_flex(npt_state)))
+            P = pressure_diagonal / np.asarray(units.metal_unit_system()['pressure'])
+            cols.append('({:.1f},{:.1f},{:.1f})'.format(*P))
+            if metrics is not None:
+                metrics['pressure_diagonal'] = pressure_diagonal.tolist()
+        L = np.atleast_1d(np.asarray(box_to_diag(box)))
         cols.append(f'{L[0]:.3f}' if len(L) == 1 else f'({L[0]:.3f},{L[1]:.3f},{L[2]:.3f})')
     cols.append(f'{time_per_step:.2e}')
+    if metrics is not None and box is not None:
+        cell = np.asarray(box)
+        if cell.ndim == 0 or cell.size == 1:
+            cell = np.eye(3) * float(cell.reshape(-1)[0])
+        elif cell.ndim == 1:
+            cell = np.diag(cell)
+        else:
+            cell = cell.T  # JAX-MD columns -> ASE lattice rows.
+        if cell.shape == (3, 3) and np.all(np.isfinite(cell)):
+            volume = abs(float(np.linalg.det(cell)))
+            if volume > 0:
+                metrics.update(box=cell.tolist(), volume=volume)
     return '\t'.join(cols)
+
+
+def report_md_row(reporter, step, KE, PE, H, T, time_per_step, *, ensemble,
+                  npt_state=None, box=None, timing_valid=True):
+    """Log one accepted state and share its exact values with an active observer.
+
+    Plain CLI runs still record telemetry. Direct library calls without an
+    observer avoid cell conversion/volume work used only by the display.
+    The first cycle's timing includes compilation and is excluded from ETA.
+    """
+    metrics = {} if reporter.observing else None
+    logger.info(format_md_row(step, KE, PE, H, T, time_per_step,
+                              npt_state, box, metrics=metrics))
+    if metrics is not None:
+        reporter.progress(step, temperature=T, potential_energy=PE,
+                          time_per_step=time_per_step if timing_valid else None,
+                          kinetic_energy=float(KE),
+                          conserved_energy=None if ensemble == 'nvt-langevin' or H is None else float(H),
+                          **metrics)
+
+
+def report_opt_step(reporter, step, energy, force_max, *, total_steps=None, force_target=None):
+    """Share the optimizer's existing energy and force evaluations with observers."""
+    energy, force_max = float(energy), float(force_max)
+    logger.info(f'{step}\t {energy:.3f}\t {force_max:.3f}')
+    if not reporter.observing:
+        return
+    values = dict(opt_step=step, opt_energy_eV=energy, opt_force_max_eVA=force_max)
+    if total_steps is not None:
+        values.update(operation='optimization', opt_total_steps=total_steps)
+        if force_target is not None:
+            values['opt_force_target_eVA'] = float(force_target)
+    reporter.update_info(**values)
 
 
 def log_nbrs_info(nbrs, label: str = 'SR', box=None):
@@ -1559,6 +1618,29 @@ def setup_kspace_grid(
         k_grid=k_grid,
     )
 
+def _warn_about_charge_and_spin(atoms, total_charge, num_unpaired_electrons):
+    """Warn when the run's charge/spin contradict the file or cannot exist.
+
+    The settings stay authoritative: a file value never replaces them here.
+    """
+    from so3lr.structure_info import electron_count_problem, recorded_charge_and_unpaired
+    file_charge, file_unpaired = recorded_charge_and_unpaired(atoms)
+    charge = None if total_charge is None else int(total_charge)
+    unpaired = 0 if num_unpaired_electrons is None else int(num_unpaired_electrons)
+    if file_charge is not None and charge is not None and file_charge != charge:
+        logger.warning(f"The structure file records charge={file_charge}, but this run uses total "
+                       f"charge {charge}. Pass --total-charge {file_charge} (YAML: total_charge) "
+                       f"if the file is right.")
+    if file_unpaired is not None and file_unpaired != unpaired:
+        logger.warning(f"The structure file records multiplicity {file_unpaired + 1}, but this run uses "
+                       f"{unpaired} unpaired electrons. Pass --spin {file_unpaired} "
+                       f"(YAML: num_unpaired_electrons) if the file is right.")
+    if charge is not None:
+        problem = electron_count_problem(int(atoms.get_atomic_numbers().sum()), charge, unpaired)
+        if problem:
+            logger.warning(problem)
+
+
 def validate_and_log_input(initial_geometry, input_file_path,
                            total_charge=None, num_unpaired_electrons=None,
                            verbose=True):
@@ -1582,6 +1664,7 @@ def validate_and_log_input(initial_geometry, input_file_path,
     if positions is None or len(positions) == 0:
         raise ValueError(f"Input geometry file {input_file_path} has no atomic positions.")
 
+    get_reporter().update_info(atoms=n_atoms)
     if not verbose:
         return
 
@@ -1604,6 +1687,8 @@ def validate_and_log_input(initial_geometry, input_file_path,
     for i in range(min(3, n_atoms)):
         x, y, z = positions[i]
         logger.info(f"    {symbols[i]:>2}  {x:11.5f} {y:11.5f} {z:11.5f}")
+
+    _warn_about_charge_and_spin(initial_geometry, total_charge, num_unpaired_electrons)
 
     # Warn about poorly-behaved electrostatics/spin in periodic cells.
     if is_periodic and total_charge is not None and abs(total_charge) > 2:
@@ -1807,10 +1892,11 @@ def save_restart_checkpoints(
     restart_save_path: Optional[str] = None,
     pysages_result=None,
     restart_pysages_save_path: Optional[str] = None,
-) -> None:
-    """Persist SO3LR and optional PySAGES state for one accepted cycle."""
+) -> Optional[str]:
+    """Persist one accepted cycle and return the primary checkpoint actually written."""
+    path = None
     if restart_save_path is not None:
-        save_state(
+        path = save_state(
             state,
             box,
             current_cycle,
@@ -1819,7 +1905,10 @@ def save_restart_checkpoints(
             fractional_coordinates=fractional_coordinates,
         )
     if restart_pysages_save_path is not None:
-        save_pysages_state(pysages_result, restart_pysages_save_path)
+        pysages_path = save_pysages_state(pysages_result, restart_pysages_save_path)
+        if path is None:
+            path = pysages_path
+    return path
 
 
 def _validate_md_output_write_policy(
@@ -1882,6 +1971,9 @@ def perform_md(
     log_file = all_settings.get('log_file')
     setup_logger(log_file)
     setup_run(all_settings)  # before any array: direct Python callers may bypass run()
+    reporter = get_reporter()
+    reporter.phase('Loading', 'Preparing the MD state')
+    reporter.update_info(engine='standard', device_count=1, kernels='JAX', precision=all_settings['precision'])
 
     # Extract settings with defaults
     input_file = all_settings.get('input_file')
@@ -2129,6 +2221,7 @@ def perform_md(
         all_settings, restart_pysages, mobile_mask is not None and bool(jnp.any(mobile_mask == 0)))
     # Loading restart
     if restart:
+        reporter.phase('Loading', 'Restoring the checkpoint')
         logger.info(f'Loading state from {restart_load_path}.')
         try:
             state, box, current_cycle = load_state(
@@ -2183,8 +2276,10 @@ def perform_md(
 
     # Loading the model. A bundled name (so3lr-tauri-s/m/l/so3lr) or a custom path; None
     # falls back to the default model. load_model resolves names and paths alike.
-    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    from so3lr.model_registry import DEFAULT_MODEL, available_models, model_aliases
     selected_model = model_path if model_path is not None else DEFAULT_MODEL
+    reporter.update_info(model=model_aliases().get(str(selected_model), str(selected_model)))
+    reporter.phase('Loading', 'Loading the force field')
     if selected_model in available_models():
         logger.info(f"Using bundled SO3LR model: {selected_model}")
     else:
@@ -2204,6 +2299,7 @@ def perform_md(
     )
 
     # Setting up the model
+    reporter.phase('Compiling', 'Preparing the force field and initial MD state')
     neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = process_model(
         potential=potential,
         species=initial_geometry_dict['species'],
@@ -2447,6 +2543,8 @@ def perform_md(
 
     # Running the MD
     logger.info('Starting MD simulation...')
+    if ensemble == 'nvt-langevin':
+        logger.info('For NVT-Langevin, H is the total energy E, not a conserved quantity.')
     if ensemble == 'npt':
         # One \t per column, as in format_md_row.
         p_col = '\tP [bar] (xx,yy,zz)' if isinstance(state, jax_md.simulate.NPTNoseHooverFlexState) else ''
@@ -2468,8 +2566,10 @@ def perform_md(
         md_P,
         k_grid_disp=k_grid_disp
     )
-    logger.info(format_md_row(current_cycle * md_steps, KE, PE, H, current_T, 0.0,
-                              state if ensemble == 'npt' else None, box))
+    reporter.start_md(current_cycle * md_steps, md_cycles * md_steps, md_dt_ps * 1000.0)
+    report_md_row(reporter, current_cycle * md_steps, KE, PE, H, current_T, 0.0,
+                  ensemble=ensemble, npt_state=state if ensemble == 'npt' else None,
+                  box=box, timing_valid=False)
 
     # --- Conserved-quantity drift watchdog --------------------------------
     # For NVE the conserved quantity is the total energy E = KE+PE; for the
@@ -2613,6 +2713,7 @@ def perform_md(
             reference_is_cartesian,
         )
 
+    reporter.phase('Compiling', 'Warming up the first MD cycle')
     while cycle_md < md_cycles:
         old_time = time.time()
         if do_enhanced_sampling:
@@ -2775,8 +2876,11 @@ def perform_md(
                                 f"to change the equilibration window; some drift early in the run is normal.)")
                             drift_warned = True
 
-            logger.info(format_md_row(current_cycle * md_steps, KE, PE, H, current_T, time_per_step,
-                                      state if ensemble == 'npt' else None, box))
+            reporter.phase('Running')
+            # Only accepted cycles advance the display.
+            report_md_row(reporter, current_cycle * md_steps, KE, PE, H, current_T, time_per_step,
+                          ensemble=ensemble, npt_state=state if ensemble == 'npt' else None,
+                          box=box, timing_valid=cycle_md > 1)
 
             out_pos = output_position_array(
                 state.position, box, fractional_coordinates, output_cartesian_positions
@@ -2793,6 +2897,7 @@ def perform_md(
                     obs_dict[key].append(obs_data[1][key])
 
             if len(positions) >= save_buffer:
+                reporter.phase('Saving', 'Writing output files')
                 # Write frames first, then checkpoint: a failed write must
                 # not leave the restart file ahead of the trajectory.
                 if output_format == 'hdf5':
@@ -2824,7 +2929,7 @@ def perform_md(
                 if create_restart or (
                     do_enhanced_sampling and restart_pysages_save_path is not None
                 ):
-                    save_restart_checkpoints(
+                    checkpoint_path = save_restart_checkpoints(
                         state,
                         box,
                         current_cycle,
@@ -2837,9 +2942,12 @@ def perform_md(
                         ),
                     )
                     last_checkpoint_cycle = current_cycle
+                    reporter.checkpoint(current_cycle * md_steps, checkpoint_path)
+                reporter.phase('Running')
 
     # A frame-major HDF5 layout and extxyz both support arbitrary batch sizes,
     # so flush the final short buffer instead of dropping or padding it.
+    reporter.phase('Saving', 'Finalizing output files')
     if positions:
         if output_format == 'hdf5':
             positions, momenta, boxes, obs_dict = write_to_hdf5(
@@ -2875,7 +2983,7 @@ def perform_md(
             or (do_enhanced_sampling and restart_pysages_save_path is not None)
         )
     ):
-        save_restart_checkpoints(
+        checkpoint_path = save_restart_checkpoints(
             state,
             box,
             current_cycle,
@@ -2887,6 +2995,7 @@ def perform_md(
                 restart_pysages_save_path if do_enhanced_sampling else None
             ),
         )
+        reporter.checkpoint(current_cycle * md_steps, checkpoint_path)
 
     logger.info('Results saved to: ' + output_file)
     # The first cycle is excluded from timing (it includes JIT compilation /
@@ -2939,6 +3048,7 @@ def run_on_flash(settings: Dict, atoms, task: str, start: Callable):
     validate_options(settings)
     engine = settings.get('engine') or 'auto'
     if engine == 'standard':
+        get_reporter().update_info(engine='standard', device_count=1, kernels='JAX')
         logger.info("Engine: neighbour-list potential (--engine standard)")
         return False, None
     problem = flash_problem(settings, atoms, task=task)
@@ -2949,6 +3059,7 @@ def run_on_flash(settings: Dict, atoms, task: str, start: Callable):
             problem = f"it does not import here ({type(exc).__name__}: {exc})"
     if problem is None:
         logger.info(f"Engine: flash ({'--engine flash' if engine == 'flash' else 'auto'})")
+        get_reporter().update_info(engine='flash')
         try:
             return True, start(flash_md)
         except flash_md.FlashUnavailable as exc:
@@ -2959,6 +3070,7 @@ def run_on_flash(settings: Dict, atoms, task: str, start: Callable):
     if engine == 'flash':
         raise ValueError(f"--engine flash: {problem}")
     logger.info(f"Engine: neighbour-list potential (flash cannot: {problem})")
+    get_reporter().update_info(engine='standard', device_count=1, kernels='JAX')
     return False, None
 
 
@@ -3034,6 +3146,8 @@ def perform_min(
     """
     setup_logger(all_settings.get('log_file'))  # first: setup_run may warn of a deprecated setting
     all_settings = setup_run(dict(all_settings))  # so3lr opt does not go through run()
+    reporter = get_reporter()
+    reporter.phase('Loading', 'Preparing geometry relaxation')
 
     # Extract settings with defaults
     output_file = all_settings.get('output_file')
@@ -3157,8 +3271,11 @@ def perform_min(
 
     # Loading the model. A bundled name (so3lr-tauri-s/m/l/so3lr) or a custom path; None
     # falls back to the default model. load_model resolves names and paths alike.
-    from so3lr.model_registry import DEFAULT_MODEL, available_models
+    from so3lr.model_registry import DEFAULT_MODEL, available_models, model_aliases
     selected_model = model_path if model_path is not None else DEFAULT_MODEL
+    reporter.update_info(model=model_aliases().get(str(selected_model), str(selected_model)),
+                         precision=all_settings['precision'], engine='standard', device_count=1, kernels='JAX')
+    reporter.phase('Loading', 'Loading the force field')
     if selected_model in available_models():
         logger.info(f"Using bundled SO3LR model: {selected_model}")
     else:
@@ -3177,6 +3294,7 @@ def perform_min(
     )
 
     # Setting up the model
+    reporter.phase('Compiling', 'Preparing geometry relaxation')
     neighbor_fn, neighbor_fn_lr, energy_or_obs_fn = process_model(
         potential=potential,
         species=initial_geometry_dict['species'],
@@ -3233,6 +3351,7 @@ def perform_min(
         neighbor_lr=nbrs_lr.idx
     )
 
+    reporter.phase('Relaxing', 'FIRE geometry optimization')
     logger.info('Starting minimization...')
     logger.info('Step\tE [eV]\tF_max [eV/Å]')
 
@@ -3250,7 +3369,8 @@ def perform_min(
         box=box
     )
     f_max = np.abs(F).max()
-    logger.info('{}\t {:.3f}\t {:.3f}'.format(0, E, f_max))
+    report_opt_step(reporter, 0, E, f_max, total_steps=min_cycles * min_steps,
+                    force_target=force_convergence)
 
     # If tracking trajectory, store all positions
     minimization_trajectory = []
@@ -3285,7 +3405,7 @@ def perform_min(
         )
 
         f_max = np.abs(F).max()
-        logger.info('{}\t {:.3f}\t {:.3f}'.format(i*min_steps, E, f_max))
+        report_opt_step(reporter, i * min_steps, E, f_max)
 
         # Save the current positions to the trajectory
         minimization_trajectory.append(np.array(min_state.position))
@@ -3306,7 +3426,7 @@ def perform_min(
                 f"FIRE minimization hit the min_cycles ceiling "
                 f"({min_cycles} cycles * {min_steps} steps = "
                 f"{min_cycles*min_steps} total steps) without reaching "
-                f"force_convergence={force_convergence:.3f} eV/Å "
+                f"force_convergence={force_convergence:.3g} eV/Å "
                 f"(last Fmax = {f_max:.3f} eV/Å). Saving best-so-far "
                 f"positions. Increase --min-cycles or relax --force-conv "
                 f"if tighter convergence is required.")
@@ -3314,11 +3434,13 @@ def perform_min(
     # Save optimization result and return optimized geometry
     positions = minimization_trajectory
     if output_format in ('extxyz', 'hdf5'):
+        reporter.phase('Saving', 'Writing the relaxed structure')
         write_to_extxyz(
             output_file, initial_geometry, boxes=box, momenta=None,
             positions=positions, fractional_coordinates=fractional_coordinates,
             append=False, overwrite=overwrite,
         )
+        reporter.update_info(optimization_output_file=str(output_file))
     
     logger.info(f"Optimization trajectory with {len(minimization_trajectory)} frames saved to {output_file}")
 
@@ -3335,9 +3457,9 @@ def save_state(
     path_to_save: str,
     ensemble: str = 'nvt',
     fractional_coordinates: bool = True
-) -> None:
+) -> str:
     """
-    Save the state of the simulation to a .npz file.
+    Save the state of the simulation and return the actual .npz filename.
 
     Args:
         state: Current state of the simulation.
@@ -3421,6 +3543,7 @@ def save_state(
         if output_mode is not None:
             temporary_path.chmod(output_mode)
         os.replace(temporary_path, destination)
+    return str(destination)
 
 
 def load_state(
@@ -3732,6 +3855,7 @@ def run(
 
     setup_logger(settings.get('log_file'))  # first: setup_run may warn of a deprecated setting
     setup_run(settings)
+    get_reporter().phase('Loading', 'Reading the input structure')
     input_file_path = settings.get('input_file')
     if input_file_path is not None:
         try:

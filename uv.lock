@@ -3004,6 +3004,7 @@ dependencies = [
     { name = "optax" },
     { name = "orbax-checkpoint" },
     { name = "pyyaml" },
+    { name = "rich" },
     { name = "tqdm" },
 ]
 
@@ -3063,6 +3064,7 @@ requires-dist = [
     { name = "orbax-checkpoint", specifier = "<0.13" },
     { name = "pysages", marker = "extra == 'pysages'", git = "https://github.com/em819/PySAGES.git?rev=c95297417953021c6a461507b36c47d4dea7660a" },
     { name = "pyyaml", specifier = ">=6,<7" },
+    { name = "rich", specifier = ">=14,<16" },
     { name = "setuptools", marker = "extra == 'tfds'", specifier = ">=84.1" },
     { name = "tensorboard", marker = "extra == 'tfds'", specifier = ">=2.21,<2.22" },
     { name = "tensorflow", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'tfds'", specifier = ">=2.21,<2.22" },
