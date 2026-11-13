@@ -1569,3 +1569,17 @@ def test_library_callers_get_a_reporter_that_ignores_task_events():
     assert not reporter.enabled
     reporter.task_progress(1, 2, 'structures')
     reporter.results('Timing', [('Evaluation', '1 s')])
+
+
+def test_live_optimization_draws_graphs_once_three_cycles_are_known(monkeypatch):
+    monkeypatch.setattr(sys, 'stderr', Terminal())
+    ui.configure(display='rich')
+    with ui.run_display({'input_file': 'water.xyz'}) as reporter:
+        reporter.update_info(operation='optimization', opt_step=0, opt_total_steps=30,
+                             opt_energy_eV=-10.0, opt_force_max_eVA=1.0, opt_force_target_eVA=0.05)
+        reporter.update_info(opt_step=10, opt_energy_eV=-10.5, opt_force_max_eVA=0.3)
+        assert 'Maximum force [' not in render(reporter, height=60)
+        reporter.update_info(opt_step=20, opt_energy_eV=-10.6, opt_force_max_eVA=0.08)
+        text = render(reporter, height=60)
+        assert 'Potential energy [eV]' in text and 'Target 0.05 eV/Å' in text
+        assert 'Maximum force [' not in render(reporter, height=20)  # no room: numbers only

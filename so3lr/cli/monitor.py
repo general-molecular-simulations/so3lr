@@ -27,6 +27,8 @@ ENERGIES = {
     'conserved_energy_eV': 'Conserved energy',
 }
 PLOT_FIELDS = ('temperature_K', *ENERGIES, 'volume_A3')
+OPT_FIELDS = ('opt_energy_eV', 'opt_force_max_eVA')
+OPT_MIN_POINTS = 3  # fewer cycles than this stay a text view
 MAX_HISTORY = 2048
 MAX_MEAN_BINS = 2048
 READ_BUDGET = 4 * 1024 * 1024
@@ -317,6 +319,22 @@ class RunState:
     property_means: dict = field(default_factory=lambda: {
         key: _LatterHalfMean() for key in PLOT_FIELDS if key != 'energy_eV'
     })
+    opt_samples: list = field(default_factory=list)  # optimization cycles: step, energy, max force
+
+    def record_optimization(self, info):
+        """Keep each reported optimization cycle for the graphs; step 0 starts a new optimization."""
+        step = _finite(info.get('opt_step'))
+        values = {key: _finite(info.get(key)) for key in OPT_FIELDS}
+        if step is None or all(value is None for value in values.values()):
+            return
+        if self.opt_samples and step <= self.opt_samples[-1]['step']:
+            if step != 0:
+                return
+            self.opt_samples = []
+        self.opt_samples.append({'step': step, **values})
+        if len(self.opt_samples) > MAX_HISTORY:
+            # every other cycle, always keeping the latest
+            self.opt_samples = self.opt_samples[:-1:2] + self.opt_samples[-1:]
 
     def reference(self, key):
         mean = self.energy_mean if key == 'energy_eV' else self.property_means.get(key)
@@ -349,6 +367,7 @@ class RunState:
             self.scheduler = data.get('scheduler') if isinstance(data.get('scheduler'), dict) else {}
         elif kind == 'info':
             self.info.update(data)
+            self.record_optimization(data)
         elif kind == 'phase':
             self.phase, self.detail = str(data.get('name', '')), str(data.get('detail', ''))
         elif kind == 'md_started':
@@ -496,20 +515,30 @@ def _time_ticks(left, right, columns):
     return [(0, f'{left:.4g}')]
 
 
-def _plot_scale(samples, key, target=None, reference=None, label_budget=24):
-    points = [(_finite(row.get('time_ps')), _finite(row.get(key))) for row in samples]
+def _axis_value(value, log):
+    """A value as placed on the axis: log10 on a log axis, where only positive values exist."""
+    value = _finite(value)
+    if value is None or not log:
+        return value
+    return math.log10(value) if value > 0 else None
+
+
+def _plot_scale(samples, key, target=None, reference=None, label_budget=24, x_key='time_ps', log=False):
+    points = [(_finite(row.get(x_key)), _axis_value(row.get(key), log)) for row in samples]
     points = [(x, y) for x, y in points if x is not None and y is not None]
     if not points:
         return None
     decimals = 1 if key == 'temperature_K' else 6 if key == 'conserved_energy_eV' else 3
     low, high = min(y for _, y in points), max(y for _, y in points)
-    target, reference = _finite(target), _finite(reference)
+    target, reference = _axis_value(target, log), _axis_value(reference, log)
     guide = target if target is not None else reference
     if guide is not None:
         low, high = min(low, guide), max(high, guide)
     padding = (high - low) * 0.07 if high > low else max(abs(low) * 0.001, 0.001)
     low, high = low - padding, high + padding
     ticks = (high, high / 2 + low / 2, low)
+    if log:  # decades read naturally as values, e.g. 0.05 rather than -1.30
+        return points, decimals, low, high, [f'{10 ** value:.3g}' for value in ticks]
     # Numeric readouts keep their usual precision, but an axis must reveal the
     # variation it magnifies. Increase tick precision before using scientific
     # notation when fixed decimals would make distinct ticks look identical.
@@ -529,7 +558,8 @@ def _plot_scale(samples, key, target=None, reference=None, label_budget=24):
 
 def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=7,
           reference=None, reference_approximate=False, label_width=None, time_bounds=None,
-          empty_message='No samples for this property yet.', scale=None):
+          empty_message='No samples for this property yet.', scale=None,
+          x_key='time_ps', x_unit='ps', log=False, target_label='Thermostat target'):
     from rich.console import Group
     from rich.text import Text
 
@@ -539,15 +569,20 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
     heading = Text()
     heading.append(f'{title} [{unit}]', style=theme.STRONG)
     if scale is None:
-        scale = _plot_scale(samples, key, target, reference, label_budget=max(8, width - 10))
+        scale = _plot_scale(samples, key, target, reference, label_budget=max(8, width - 10),
+                            x_key=x_key, log=log)
     if scale is None:
         return Group(heading, Text(empty_message, style=theme.MUTED))
     points, decimals, low, high, ylabels = scale
-    heading.append(f'  {points[-1][1]:.{decimals}f}', style=f'bold {trace}')
+    latest = next(value for value in (_finite(row.get(key)) for row in reversed(samples))
+                  if value is not None and (not log or value > 0))
+    heading.append(f'  {latest:.3g}' if log else f'  {latest:.{decimals}f}', style=f'bold {trace}')
+    if log:
+        heading.append('  log scale', style=theme.FAINT)
     target, reference = _finite(target), _finite(reference)
     caption = None
     if target is not None:
-        caption = f'Thermostat target {target:g} {unit}'
+        caption = f'{target_label} {target:g} {unit}'
     elif reference is not None:
         separator = ' | ' if ascii_only else ' · '
         approximate = ('~ ' if ascii_only else '≈ ') if reference_approximate else ''
@@ -562,7 +597,7 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
             heading.append(guide_mark, style=theme.FAINT)
             heading.append(caption, style=theme.MUTED)
             caption = None
-    guide = target if target is not None else reference
+    guide = _axis_value(target if target is not None else reference, log)
     left, right = time_bounds or (min(0, min(x for x, _ in points)), max(x for x, _ in points))
     span = right - left or 1.0
     label_width = max(label_width or 0, max(map(len, ylabels)))
@@ -571,7 +606,7 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
     bits = ((1, 8), (2, 16), (4, 32), (64, 128))
     previous = None
     for sample in samples:
-        x, y = _finite(sample.get('time_ps')), _finite(sample.get(key))
+        x, y = _finite(sample.get(x_key)), _axis_value(sample.get(key), log)
         if x is None or y is None:
             previous = None
             continue
@@ -629,12 +664,42 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
         labels[start:start + len(label)] = label
     result.append(Text(' ' * label_width + (' +' if ascii_only else ' └') + ''.join(axis), style=theme.FAINT))
     # The time unit sits in the label gutter, under the value axis.
-    tick_row = Text('ps'.rjust(label_width) + '  ', style=theme.FAINT)
+    tick_row = Text(x_unit.rjust(label_width) + '  ', style=theme.FAINT)
     tick_row.append(''.join(labels).rstrip(), style=theme.MUTED)
     result.append(tick_row)
     if caption is not None:
         result.append(Text(caption, style=theme.MUTED))
     return Group(*result)
+
+
+def optimization_plots(state, width, ascii_only=False, rows=7):
+    """Potential energy and maximum force per optimization cycle, or None for too few cycles.
+
+    The force axis is logarithmic, since it falls roughly exponentially, and carries
+    the convergence target as its guide line.
+    """
+    from rich.console import Group
+    from rich.text import Text
+    samples = state.opt_samples
+    if len(samples) < OPT_MIN_POINTS:
+        return None
+    target = _finite(state.info.get('opt_force_target_eVA'))
+    force_unit = 'eV/A' if ascii_only else 'eV/Å'
+    specs = (('opt_energy_eV', 'Potential energy', 'eV', None, False),
+             ('opt_force_max_eVA', 'Maximum force', force_unit, target, True))
+    budget = max(8, width - 10)
+    scales = [_plot_scale(samples, key, guide, None, budget, x_key='step', log=log)
+              for key, _, _, guide, log in specs]
+    label_width = max((max(map(len, scale[-1])) for scale in scales if scale is not None), default=0)
+    bounds = (0, max(row['step'] for row in samples) or 1)
+    plots = []
+    for (key, title, unit, guide, log), scale in zip(specs, scales):
+        if plots:
+            plots.append(Text(''))
+        plots.append(_plot(samples, key, title, unit, width, guide, ascii_only, rows,
+                           label_width=label_width, time_bounds=bounds, scale=scale,
+                           x_key='step', x_unit='step', log=log, target_label='Target'))
+    return Group(*plots)
 
 
 def _plot_specs(state, energy, ascii_only=False):
@@ -807,7 +872,7 @@ def _controls(state, attached=False, paged=False, multiple=False, keyboard=False
 
 
 def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=False, height=None,
-                         now=None, static=False):
+                         now=None, static=False, width=80):
     """Show recorded optimization measurements without inventing MD samples."""
     from rich.console import Group
     from rich.text import Text as RichText
@@ -826,7 +891,8 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
         priorities.append(priority)
 
     add(f'{theme.BRAND} SO3LR TAURI  optimization' + (' snapshot' if static else ''), theme.ACCENT_BOLD, 3)
-    add(f'Run {selected + 1}/{count} · {reader.path.parent.name}', priority=9)
+    run_name = reader.path.parent.name or reader.path.name.removesuffix('.events.jsonl')
+    add(f'Run {selected + 1}/{count} · {run_name}', priority=9)
     add(f'Last reported state: {state.status}', style, 4)
     add(_observation_line(reader, now), theme.WARNING if observation_status(reader, now) == 'Stale?' else theme.MUTED, 2)
     if origin := origin_label(state):
@@ -864,6 +930,10 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
     if reader.error:
         add('Read error: ' + reader.error, theme.WARNING, 2)
     if not compact:
+        plots = optimization_plots(state, max(24, width), ascii_only, rows=5)
+        if plots is not None:
+            rows.extend((Text(''), plots, Text('')))
+            priorities.extend((20, 20, 20))
         for key, label in (('output_file', 'Structure path'), ('log_file', 'Log path')):
             if state.settings.get(key):
                 add(f'{label}  {state.settings[key]}', theme.MUTED)
@@ -906,7 +976,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     reader = readers[selected % len(readers)]
     state = reader.state
     if state.info.get('operation') == 'optimization':
-        return _render_optimization(reader, selected, len(readers), ascii_only, now=now, static=static)
+        return _render_optimization(reader, selected, len(readers), ascii_only, now=now, static=static, width=width)
     run_name = reader.path.parent.name or reader.path.name.removesuffix('.events.jsonl')
     if state.run_id and run_name.endswith('.' + state.run_id):
         run_name = run_name[:-(len(state.run_id) + 1)]

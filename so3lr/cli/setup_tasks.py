@@ -293,8 +293,7 @@ def other_tasks(console):
     for command, purpose in (
             ('so3lr finetune --datafile data.extxyz --workdir finetune', 'Fine-tune a model on your data'),
             ('so3lr train --config config.yaml', 'Train a model from a configuration file'),
-            ('so3lr tune-ewald --input box.xyz --kspace-electrostatics pme', 'Tune k-space (Ewald/PME/P3M) parameters'),
-            ('so3lr eval --datafile data.extxyz', 'Evaluate without the guided setup')):
+            ('so3lr tune-ewald --input box.xyz --kspace-electrostatics pme', 'Tune k-space (Ewald/PME/P3M) parameters')):
         table.add_row(Text(command), Text(purpose))
     from rich.rule import Rule
     console.print(Text(''))

@@ -1408,3 +1408,46 @@ def test_render_cache_follows_new_samples(tmp_path):
                                temperature_K=999.0, energy_eV=-1.0))
     updated = render(reader, height=24)
     assert '999.0' in updated and updated != first
+
+
+def _optimization_journal(path, forces, target=0.05):
+    events = [event(0, 'run_started', settings={'model': 'so3lr-tauri-m-2606', 'precision': 'mixed'})]
+    for index, force in enumerate(forces):
+        values = dict(opt_step=index * 10, opt_energy_eV=-39.0 - 0.1 * index, opt_force_max_eVA=force)
+        if index == 0:
+            values.update(operation='optimization', opt_total_steps=10 * len(forces),
+                          opt_force_target_eVA=target)
+        events.append(event(index + 1, 'info', **values))
+    write(path, events)
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    return reader
+
+
+def test_optimization_history_restarts_at_step_zero_and_ignores_repeats():
+    state = monitor.RunState(Path('opt.events.jsonl'))
+    for step in (0, 10, 10, 5, 20):
+        state.record_optimization({'opt_step': step, 'opt_energy_eV': -1.0, 'opt_force_max_eVA': 0.1})
+    assert [row['step'] for row in state.opt_samples] == [0, 10, 20]
+    state.record_optimization({'opt_step': 0, 'opt_force_max_eVA': 0.2})  # a new optimization
+    assert [row['step'] for row in state.opt_samples] == [0]
+    state.record_optimization({'opt_step': 30})  # no measurement: nothing to plot
+    assert len(state.opt_samples) == 1
+
+
+def test_optimization_view_plots_energy_and_log_force_with_the_target(tmp_path):
+    reader = _optimization_journal(tmp_path / 'opt.events.jsonl', [2.0, 0.5, 0.1, 0.02])
+    text = render(reader)
+    assert 'Potential energy [eV]' in text and 'Maximum force [eV/Å]' in text
+    assert 'log scale' in text and 'Target 0.05 eV/Å' in text
+    assert 'step  0' in text
+    # the log axis labels decades as values, not exponents
+    assert '2' in text and '-0.' not in text.split('Maximum force')[1].split('step')[0]
+    few = _optimization_journal(tmp_path / 'few.events.jsonl', [2.0, 0.5])
+    assert 'Maximum force [' not in render(few)  # too few cycles: text view only
+
+
+def test_log_axis_skips_values_it_cannot_place():
+    rows = [{'step': 0, 'f': 1.0}, {'step': 1, 'f': 0.0}, {'step': 2, 'f': 0.01}]
+    points, *_ = monitor._plot_scale(rows, 'f', x_key='step', log=True)
+    assert [x for x, _ in points] == [0, 2]

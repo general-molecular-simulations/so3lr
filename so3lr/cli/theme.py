@@ -23,6 +23,7 @@ SERIES = {
     'conserved_energy_eV': '#22c3e6',
     'kinetic_energy_eV': '#22c3e6',
     'volume_A3': '#9b7bff',
+    'opt_energy_eV': '#22c3e6',
 }
 
 BRAND = '◆'

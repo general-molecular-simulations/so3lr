@@ -419,6 +419,7 @@ class _Reporter:
                 outcome = optimization_status(self.info, self.status)
                 if outcome != 'Relaxing geometry':  # the phase row already says so
                     rows.append(self._text(outcome, theme.SUCCESS if outcome == 'Force criterion met' else theme.MUTED))
+            plots_at = len(rows)
         if self._task is not None:
             done, total, unit = self._task
             ratio = done / total if total else 0.0
@@ -485,7 +486,25 @@ class _Reporter:
             hint = _controls(self._state, attached=True)
         if hint:
             rows.append(theme.controls(hint, self._ascii_only))
+        if self.info.get('operation') == 'optimization':
+            self._insert_optimization_plots(rows, plots_at)
         return Group(*rows)
+
+    def _insert_optimization_plots(self, rows, index):
+        """Energy and force graphs in the space the terminal has left, if at least 3 rows each."""
+        from rich.console import Group
+        from .monitor import OPT_MIN_POINTS, optimization_plots
+        if len(self._state.opt_samples) < OPT_MIN_POINTS:
+            return
+        width = self.console.width
+        used = len(self.console.render_lines(Group(*rows), self.console.options.update_width(width), pad=False))
+        free = self.console.height - int(self._heartbeat) - used
+        # each graph: heading, axis and tick rows; blank rows before, between and after
+        plot_rows = min(7, (free - 3) // 2 - 3)
+        if plot_rows < 3:
+            return
+        plots = optimization_plots(self._state, width, self._ascii_only, rows=plot_rows)
+        rows[index:index] = [self._text(''), plots, self._text('')]
 
     def print_hint(self, line):
         self.console.print(self._text(line, theme.MUTED))
@@ -614,6 +633,7 @@ class _Reporter:
         self.info.update({key: value for key, value in kwargs.items() if value is not None})
         self.requested.difference_update(kwargs)
         self._state.info.update({key: value for key, value in kwargs.items() if value is not None})
+        self._state.record_optimization(kwargs)
         self._refresh()
 
     def start_md(self, start_step, total_steps, dt_fs):
