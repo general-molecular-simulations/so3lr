@@ -24,6 +24,13 @@ _CSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 ESCAPE_TIMEOUT = 0.12
 
 
+class Back(click.Abort):
+    """Esc or Backspace in a menu: return to the previous step.
+
+    A subclass of Abort, so callers that do not handle it still cancel safely.
+    """
+
+
 def decode_key(buffer, *, final=False, literal=False):
     """Consume one key, retaining incomplete escape sequences for the next read.
 
@@ -55,7 +62,9 @@ def decode_key(buffer, *, final=False, literal=False):
         # O is a viewer shortcut and must not leak out of an incomplete arrow.
         return ('ignore', '') if final else (None, buffer)
     char, rest = buffer[0], buffer[1:]
-    if char in ('\x03', '\x04', '\x1a', '\x1b'):
+    if char in ('\x1b', '\x7f', '\x08'):  # Escape, Backspace (DEL or ^H)
+        return (char if literal else 'back'), rest
+    if char in ('\x03', '\x04', '\x1a'):
         return (char if literal else 'cancel'), rest
     if char in ('\r', '\n'):
         return (char if literal else 'enter'), rest if literal else rest.lstrip('\r\n')
@@ -86,6 +95,8 @@ class _Keys:
             self.buffer = remainder
             if event == 'cancel':
                 raise click.Abort()
+            if event == 'back':
+                raise Back()
             if event != 'ignore':
                 return event
 
@@ -145,7 +156,7 @@ def selection_view(title, choices, selected=0, height=24):
     start = max(0, min(selected - visible // 2, len(choices) - visible))
     end = min(len(choices), start + visible)
     from . import theme
-    hint = theme.controls('↑/↓: move · Enter: choose · Esc: cancel', single_line=True)
+    hint = theme.controls('↑/↓: move · Enter: choose · Esc: back', single_line=True)
     lines = [Text(terminal_text(title), style=theme.STRONG, no_wrap=True, overflow='ellipsis'), hint]
     if start:
         lines.append(Text(f'  ↑ {start} more', style=theme.MUTED))
@@ -163,7 +174,7 @@ def selection_view(title, choices, selected=0, height=24):
 
 
 def choose(console, title, choices, default=0):
-    """Return the chosen index. Escape/Ctrl+C cancels the enclosing wizard."""
+    """Return the chosen index. Esc/Backspace raise Back; Ctrl+C cancels."""
     from rich.live import Live
     from rich.text import Text
 

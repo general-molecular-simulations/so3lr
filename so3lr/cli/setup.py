@@ -17,6 +17,8 @@ from so3lr.md_settings_validation import DEFAULT_PRECISION, DEFAULT_PRESSURE, va
 from so3lr.model_registry import DEFAULT_MODEL, canonical_models, model_aliases
 from so3lr.structure_info import electron_count_problem, recorded_charge_and_unpaired
 
+from .prompts import Back
+
 
 _SCHEDULER_VARIABLES = ('SLURM_JOB_ID', 'SLURM_JOBID', 'PBS_JOBID', 'LSB_JOBID',
                         'JOB_ID', 'COBALT_JOBID')
@@ -263,7 +265,10 @@ def _select_model(console, previous=DEFAULT_MODEL):
         if selected < len(current):
             return current[selected][0]
         legacy_default = legacy.index(previous) + 1 if previous in legacy else 1
-        selected = _choose(console, 'Legacy models', legacy + ['← Back to current models'], legacy_default)
+        try:
+            selected = _choose(console, 'Legacy models', legacy + ['← Back to current models'], legacy_default)
+        except Back:
+            selected = len(legacy)
         if selected < len(legacy):
             return legacy[selected]
         default = len(choices)
@@ -317,7 +322,10 @@ def browse_structure(console, start=None):
             folders, files = [], []
         choices = ['↑ Up one directory', '← Back to structure sources', 'Enter or paste a path']
         choices += [f'{path.name}/' for path in folders] + [path.name for path in files]
-        selected = _choose(console, f'Browse · {directory}', choices)
+        try:
+            selected = _choose(console, f'Browse · {directory}', choices)
+        except Back:
+            return None
         if selected == 0:
             directory = directory.parent
         elif selected == 1:
@@ -385,8 +393,11 @@ def _select_structure(console, old):
         try:
             # A bundled example is a demo input: copy its first frame without a frame menu.
             preset = any(source == path for _, path in presets)
-            structure = (inspect_structure(source, frame_index=0) if preset
-                         else _pick_frame(console, source, old))
+            try:
+                structure = (inspect_structure(source, frame_index=0) if preset
+                             else _pick_frame(console, source, old))
+            except Back:
+                continue
         except (ValueError, OSError, IndexError, AssertionError) as exc:
             _say(console, exc, theme.DANGER)
             continue
@@ -459,6 +470,22 @@ _EDITS = (('Structure, dynamics and model (start over)', 'start_over'),
 EDIT_CHOICES = tuple(label for label, _ in _EDITS)
 
 
+def run_steps(*steps):
+    """Run setup steps in order; a Back from step k re-asks step k-1.
+
+    Back from the first step propagates to the caller (the previous menu).
+    """
+    index = 0
+    while index < len(steps):
+        try:
+            steps[index]()
+            index += 1
+        except Back:
+            if index == 0:
+                raise
+            index -= 1
+
+
 class _Draft:
     """Answers of one guided setup; each group can be asked again from the review."""
 
@@ -472,28 +499,41 @@ class _Draft:
         self.default_duration = self.default_frame * DEFAULT_MD_CYCLES
 
     # -- groups ---------------------------------------------------------
-    def ask_system(self):
-        from .setup_physics import long_range_settings
-        console, old = self.console, self.old
+    def ask_structure(self):
+        _stage(self.console, 1, 'Structure')
+        self.structure = _select_structure(self.console, self.old)
+
+    def ask_ensemble(self):
+        _stage(self.console, 2, 'Dynamics')
+        default = getattr(self, 'ensemble', self.old.get('ensemble', 'nvt'))
         while True:
-            _stage(console, 1, 'Structure')
-            self.structure = _select_structure(console, old)
-            _stage(console, 2, 'Dynamics')
-            while True:
-                self.ensemble = _ENSEMBLES[_choose(console, 'Dynamics',
-                    ('NVT · Nosé–Hoover', 'NVT · Langevin', 'NVE', 'NPT'),
-                    _ENSEMBLES.index(old.get('ensemble', 'nvt')) + 1)]
-                if self.ensemble != 'npt' or self.structure.periodic:
-                    break
-                _say(console, 'NPT requires a fully periodic, positive, axis-aligned orthorhombic cell.', theme.DANGER)
-            self.model = _select_model(console, old.get('model', DEFAULT_MODEL))
-            try:
-                self.proposal = long_range_settings(self.structure.periodic, self.structure.minimum_cell_height,
-                                                    self.model, ensemble=self.ensemble)
+            self.ensemble = _ENSEMBLES[_choose(self.console, 'Dynamics',
+                ('NVT · Nosé–Hoover', 'NVT · Langevin', 'NVE', 'NPT'), _ENSEMBLES.index(default) + 1)]
+            if self.ensemble != 'npt' or self.structure.periodic:
                 return
-            except ValueError as exc:
-                _say(console, exc, theme.DANGER)
-                _say(console, 'Choose another structure or model to continue.')
+            _say(self.console, 'NPT requires a fully periodic, positive, axis-aligned orthorhombic cell.', theme.DANGER)
+
+    def ask_model(self):
+        from .setup_physics import long_range_settings
+        self.model = _select_model(self.console, getattr(self, 'model', self.old.get('model', DEFAULT_MODEL)))
+        try:
+            self.proposal = long_range_settings(self.structure.periodic, self.structure.minimum_cell_height,
+                                                self.model, ensemble=self.ensemble)
+        except ValueError as exc:
+            _say(self.console, exc, theme.DANGER)
+            _say(self.console, 'Choose another structure or model to continue.')
+            raise Back() from None
+
+    def ask_details(self):
+        self.use_advanced_defaults()
+        self.ask_conditions()
+        self.ask_length()
+        self.ask_chemistry()
+        self._announce_pme()
+        _say(self.console, f'Defaults: {float(self.dt):g} fs timestep · seed {self.seed} · relaxation '
+             f'{"on" if self.relax else "off"} · {float(self.cutoff):g} Å cutoff. '
+             'Change them with Edit settings in the review.', theme.MUTED)
+        self.ask_directory()
 
     def ask_conditions(self):
         console, old = self.console, self.old
@@ -618,16 +658,8 @@ class _Draft:
 
     # -- the full first pass ------------------------------------------------
     def collect(self):
-        self.ask_system()
-        self.use_advanced_defaults()
-        self.ask_conditions()
-        self.ask_length()
-        self.ask_chemistry()
-        self._announce_pme()
-        _say(self.console, f'Defaults: {float(self.dt):g} fs timestep · seed {self.seed} · relaxation '
-             f'{"on" if self.relax else "off"} · {float(self.cutoff):g} Å cutoff. '
-             'Change them with Edit settings in the review.', theme.MUTED)
-        self.ask_directory()
+        """Ask each step in turn; Esc/Backspace in a step's menu returns to the step before."""
+        run_steps(self.ask_structure, self.ask_ensemble, self.ask_model, self.ask_details)
         return self
 
     def edit(self, choice):
@@ -762,38 +794,55 @@ def launch_setup():
     title.append(terminal_text(' · New run', ascii_only), style=theme.STRONG)
     console.print(title)
     _say(console, 'Choose a task, set it up, then review and start or save.', theme.MUTED)
-    console.print(theme.controls('↑/↓: move · Enter: select · Esc: cancel setup · Ctrl+C: cancel anywhere',
+    console.print(theme.controls('↑/↓: move · Enter: select · Esc/Backspace: back · Ctrl+C: cancel',
                                  ascii_only))
     try:
         from . import setup_tasks
-        task = setup_tasks.TASKS[_choose(console, 'What would you like to do?', setup_tasks.TASK_CHOICES)][1]
-        if task != 'md':
-            return {'opt': setup_tasks.optimization_setup, 'eval': setup_tasks.eval_setup,
-                    'show': setup_tasks.show_setup, 'other': setup_tasks.other_tasks}[task](console)
-        draft = _collect(console, None)
+        flows = {'md': _md_setup, 'opt': setup_tasks.optimization_setup, 'eval': setup_tasks.eval_setup,
+                 'show': setup_tasks.show_setup, 'other': setup_tasks.other_tasks}
         while True:
-            structure, destination, settings = draft.result()
-            _review(console, structure, destination, settings)
-            action = _choose(console, 'Next action · Enter starts MD now', REVIEW_ACTIONS)
-            if action == 2:
-                if not draft.edit(_choose(console, 'Edit settings', EDIT_CHOICES)):
-                    draft = _collect(console, draft.memory())
-                continue
-            if action == 3:
-                _say(console, 'Setup cancelled. No files written.')
-                return None
             try:
-                settings_path = export_run(destination, structure, settings)
-            except (OSError, ValueError) as exc:
-                _say(console, f'Could not save the run: {exc}', theme.DANGER)
-                continue
-            from .formatting import home_path
-            _say(console, f'{theme.status_glyph("completed")} Saved run: {home_path(destination)}', theme.SUCCESS)
-            if action == 0:
-                _say(console, 'Starting MD now in this terminal.')
-                return settings_path
-            _say(console, 'Start later with sh run.sh from that directory, in an environment with SO3LR installed.')
-            return None
+                task = setup_tasks.TASKS[_choose(console, 'What would you like to do?', setup_tasks.TASK_CHOICES)][1]
+            except Back:
+                raise click.Abort() from None  # Esc at the first menu closes setup
+            try:
+                return flows[task](console)
+            except Back:
+                continue  # back to the task menu
     except (click.Abort, KeyboardInterrupt, EOFError):
         _say(console, 'Setup cancelled. No files written.')
+        return None
+
+
+def _md_setup(console):
+    """MD: draft, review, export. Back from the first step returns to the task menu."""
+    draft = _collect(console, None)
+    while True:
+        structure, destination, settings = draft.result()
+        _review(console, structure, destination, settings)
+        try:
+            action = _choose(console, 'Next action · Enter starts MD now', REVIEW_ACTIONS)
+        except Back:
+            action = 2  # going back from the review means changing something
+        if action == 2:
+            try:
+                if not draft.edit(_choose(console, 'Edit settings', EDIT_CHOICES)):
+                    draft = _collect(console, draft.memory())
+            except Back:
+                pass  # back to the review
+            continue
+        if action == 3:
+            _say(console, 'Setup cancelled. No files written.')
+            return None
+        try:
+            settings_path = export_run(destination, structure, settings)
+        except (OSError, ValueError) as exc:
+            _say(console, f'Could not save the run: {exc}', theme.DANGER)
+            continue
+        from .formatting import home_path
+        _say(console, f'{theme.status_glyph("completed")} Saved run: {home_path(destination)}', theme.SUCCESS)
+        if action == 0:
+            _say(console, 'Starting MD now in this terminal.')
+            return settings_path
+        _say(console, 'Start later with sh run.sh from that directory, in an environment with SO3LR installed.')
         return None

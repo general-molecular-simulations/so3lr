@@ -353,7 +353,7 @@ def test_local_run_uses_bundle_directory_and_restores_cwd(tmp_path, monkeypatch,
     ('\x1b[A', 'up'), ('\x1b[B', 'down'), ('\x1bOA', 'up'),
     ('\xe0P', 'down'), ('\r', 'enter'), ('\n', 'enter'),
     ('\x1b[5~', 'page_up'), ('\x1b[6~', 'page_down'),
-    ('\x1b', 'cancel'), ('\x03', 'cancel'),
+    ('\x1b', 'back'), ('\x7f', 'back'), ('\x08', 'back'), ('\x03', 'cancel'),
 ])
 def test_native_key_decoder(sequence, expected):
     from so3lr.cli.prompts import decode_key

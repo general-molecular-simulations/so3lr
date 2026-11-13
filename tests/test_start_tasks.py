@@ -153,3 +153,73 @@ def test_refresh_is_daily_cached_and_never_raises(tmp_path):
 
 def test_cache_respects_xdg_cache_home(tmp_path):
     assert updates.cache_path({'XDG_CACHE_HOME': str(tmp_path)}) == tmp_path / 'so3lr' / 'latest-release.json'
+
+
+# -- going back ---------------------------------------------------------------------
+
+def scripted(monkeypatch, answers):
+    """Replace menu choices with a script: an index, or 'back' for Esc/Backspace."""
+    from so3lr.cli.prompts import Back
+    seen = []
+
+    def choose(console, title, choices, default=1):
+        seen.append(title)
+        answer = answers.pop(0)
+        if answer == 'back':
+            raise Back()
+        return answer
+    monkeypatch.setattr(setup, '_choose', choose)
+    monkeypatch.setattr(setup_tasks, '_choose', choose)
+    return seen
+
+
+def test_esc_steps_back_through_the_md_wizard_and_review(tmp_path, structure_file, monkeypatch):
+    path_choice = len(setup.available_presets()) + 1
+    seen = scripted(monkeypatch, [
+        0, 'back',                      # MD, then back from the structure menu to the task menu
+        0, path_choice, 'back',         # MD again; path; back from Dynamics to the structure menu
+        path_choice, 0, 'back',         # path again; NVT; back from the model to Dynamics
+        0, 0,                           # NVT, model M
+        'back', 'back',                 # back from the review opens Edit settings; back again returns
+        1,                              # Save for later
+    ])
+    destination = tmp_path / 'md'
+    text = '\n'.join([str(structure_file), str(structure_file), '300', '5', '0.05', '0', '0',
+                      str(destination)]) + '\n'
+    result = CliRunner().invoke(wizard, input=text)
+    assert result.exit_code == 0, result.output
+    assert seen == ['What would you like to do?', 'Choose a structure', 'What would you like to do?',
+                    'Choose a structure', 'Dynamics', 'Choose a structure', 'Dynamics',
+                    'Model (canonical release)', 'Dynamics', 'Model (canonical release)',
+                    'Next action · Enter starts MD now', 'Edit settings', 'Next action · Enter starts MD now']
+    assert (destination / 'settings.yaml').is_file()
+
+
+def test_esc_at_the_task_menu_closes_setup(monkeypatch):
+    scripted(monkeypatch, ['back'])
+    result = CliRunner().invoke(wizard)
+    assert result.exit_code == 0 and 'Setup cancelled. No files written.' in result.output
+
+
+def test_esc_steps_back_in_optimization_and_evaluation(tmp_path, structure_file, monkeypatch):
+    path_choice = len(setup.available_presets()) + 1
+    seen = scripted(monkeypatch, [1, path_choice, 'back', path_choice, 0, 'back', 1])
+    destination = tmp_path / 'opt'
+    text = '\n'.join([str(structure_file), str(structure_file), '', '', '0', '0', str(destination),
+                      '', '', '0', '0', str(tmp_path / 'opt2')]) + '\n'
+    result = CliRunner().invoke(wizard, input=text)
+    assert result.exit_code == 0, result.output
+    # Back from the model returns to the structure; back from the review re-asks the details.
+    assert seen == ['What would you like to do?', 'Choose a structure', 'Model (canonical release)',
+                    'Choose a structure', 'Model (canonical release)', 'Next action · Enter starts now',
+                    'Next action · Enter starts now']
+    assert (tmp_path / 'opt2' / 'settings.yaml').is_file() and not destination.exists()
+
+    seen = scripted(monkeypatch, [2, 'back', 0, 1])
+    text = '\n'.join([str(structure_file), '', '', str(tmp_path / 'ev')]) + '\n'
+    result = CliRunner().invoke(wizard, input=text)
+    assert result.exit_code == 0, result.output
+    # Back from the model re-asks the dataset, with the previous answer as default.
+    assert seen == ['What would you like to do?', 'Model (canonical release)', 'Model (canonical release)',
+                    'Next action · Enter starts now']
+    assert (tmp_path / 'ev' / 'run.sh').is_file()
