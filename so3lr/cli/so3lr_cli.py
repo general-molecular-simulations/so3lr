@@ -84,6 +84,14 @@ SO3LR_ASCII = """
   ╚══════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
 """
 
+
+
+def log_banner():
+    """The log file's header: the block logo, then which version wrote the log and when."""
+    from datetime import datetime
+    return f"{SO3LR_ASCII}  ◆ SO3LR TAURI · v{__version__} · {datetime.now():%Y-%m-%d %H:%M}\n"
+
+
 # Ignore FutureWarnings or warnings that do not affect the model's performance
 warnings.filterwarnings("ignore", message="scatter inputs have incompatible types")
 warnings.filterwarnings("ignore", message="Explicitly requested dtype.*truncated")
@@ -932,7 +940,7 @@ def _execute_md(settings: Dict[str, Any], settings_source=None) -> None:
             # The display starts before the lazy MD import initializes JAX.
             setup_logger(settings.get('log_file'))
             logger_ready = True
-            logger.info(SO3LR_ASCII)
+            logger.info(log_banner())
             if reporter.journal.active:
                 logger.info(f'Run journal: {reporter.journal.path}')
                 logger.info(f'Watch live: so3lr show {show_argument(reporter.journal.path)}')
@@ -1341,7 +1349,7 @@ def fire_optimization(
             logger_ready = True
 
             # Log the ASCII art
-            logger.info(SO3LR_ASCII)
+            logger.info(log_banner())
 
             logger.info("=" * 60)
             logger.info(f"SO3LR Geometry Optimization (v{__version__})")
@@ -1642,7 +1650,7 @@ def _evaluate(settings, *, model, kind, output_file):
     total_charge, num_unpaired_electrons = settings['total_charge'], settings['num_unpaired_electrons']
     jit_compile, overwrite = settings['jit_compile'], settings['overwrite']
     # Log ASCII art
-    logger.info(SO3LR_ASCII)
+    logger.info(log_banner())
 
     # Log all settings
     logger.info("=" * 60)
@@ -1753,7 +1761,7 @@ def finetune_model(
         setup_logger(log_file)
         try:
             # Log ASCII art
-            logger.info(SO3LR_ASCII)
+            logger.info(log_banner())
 
             # Log all settings
             logger.info("=" * 60)
@@ -1827,7 +1835,7 @@ def train_model(
         setup_logger(log_file)
         try:
             # Log ASCII art
-            logger.info(SO3LR_ASCII)
+            logger.info(log_banner())
 
             # Log all settings
             logger.info("=" * 60)
@@ -1974,7 +1982,7 @@ def tune_ewald(
         setup_logger(settings_dict.get('log_file'))
         try:
             # Log the ASCII art
-            logger.info(SO3LR_ASCII)
+            logger.info(log_banner())
             model_path = settings_dict.get('model_path')
             logger.info("=" * 60)
             logger.info(f"Tuner for k-space electrostatics for SO3LR (v{__version__})")

@@ -584,10 +584,9 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
     if target is not None:
         caption = f'{target_label} {target:g} {unit}'
     elif reference is not None:
-        separator = ' | ' if ascii_only else ' · '
         approximate = ('~ ' if ascii_only else '≈ ') if reference_approximate else ''
         suffix = ' (binned)' if reference_approximate else ''
-        caption = f'Reference{separator}latter half: {approximate}{reference:.{decimals}f} {unit}{suffix}'
+        caption = f'Second-half mean {approximate}{reference:.{decimals}f} {unit}{suffix}'
     if caption is not None:
         # The guide's exact value sits on the heading row when it fits.
         guide_mark = '- ' if ascii_only else '─ '

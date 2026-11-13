@@ -243,6 +243,7 @@ class _Activity:
     started: float
     reported: float
     unicode: bool = True
+    eta: tuple | None = None  # (monotonic deadline, whether it is only an upper bound)
 
     def __rich_console__(self, console, options):
         from rich.text import Text
@@ -255,6 +256,9 @@ class _Activity:
                     overflow='ellipsis' if self.unicode else 'crop')
         text.append(terminal_text(f' {self.phase}', not self.unicode), style='default')
         timing = f' · {duration_label(now - self.started)} since launch'
+        if self.eta is not None:
+            deadline, bound = self.eta
+            timing += f" · ETA {'≤ ' if bound else ''}{duration_label(max(0.0, deadline - now))}"
         if now - self.reported >= 2:
             timing += f' · last update {duration_label(now - self.reported)} ago'
         text.append(terminal_text(timing, not self.unicode), style=theme.MUTED)
@@ -290,6 +294,7 @@ class _Reporter:
         self._task = None
         self._task_origin = None
         self._results = []
+        self._opt_origin = None  # (wall clock, step) of the first optimization report
         self.requested = set()
         for key in ('model', 'precision', 'engine'):
             if settings.get(key) is not None:
@@ -376,8 +381,33 @@ class _Reporter:
             rows.append(row)
         activity = None
         if self.status == 'running':
-            activity = _Activity(self.phase_name, self._opened_at, self._reported_at, not self._ascii_only)
+            eta = self._eta()
+            activity = _Activity(self.phase_name, self._opened_at, self._reported_at, not self._ascii_only,
+                                 None if eta is None else (time.monotonic() + eta[0], eta[1]))
         return Group(*rows), activity
+
+    def _eta(self):
+        """(seconds left, whether only an upper bound) for the work in progress, or None.
+
+        From the measured rate only: none while loading or compiling. With a force
+        target, an optimization's step budget is a ceiling, so its ETA is a bound."""
+        now = time.monotonic()
+        if self.started_at is not None:
+            eta = self._live_progress().eta
+            return None if eta is None else (eta, False)
+        if self.info.get('operation') == 'optimization' and self._opt_origin is not None:
+            step, total = (_finite(self.info.get(key)) for key in ('opt_step', 'opt_total_steps'))
+            started, first = self._opt_origin
+            if step is not None and total is not None and first < step < total and now > started:
+                bound = _finite(self.info.get('opt_force_target_eVA')) is not None
+                return (total - step) * (now - started) / (step - first), bound
+            return None
+        if self._task is not None:
+            done, total, _ = self._task
+            started, first, _ = self._task_origin
+            if first < done < total and now > started:
+                return (total - done) * (now - started) / (done - first), False
+        return None
 
     def _live_view(self):
         from rich.console import Group
@@ -671,6 +701,9 @@ class _Reporter:
         self.requested.difference_update(kwargs)
         self._state.info.update({key: value for key, value in kwargs.items() if value is not None})
         self._state.record_optimization(kwargs)
+        step = _finite(kwargs.get('opt_step'))
+        if step is not None and (self._opt_origin is None or step < self._opt_origin[1]):
+            self._opt_origin = (self._reported_at, step)
         self._refresh()
 
     def start_md(self, start_step, total_steps, dt_fs):

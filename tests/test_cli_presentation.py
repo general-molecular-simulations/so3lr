@@ -353,7 +353,7 @@ def test_preamble_failure_retains_traceback_or_proves_it_was_saved(failure_cli, 
     elif stage == 'banner':
         original = app.logger.info
         def fail_banner(message, *args, **kwargs):
-            if message == app.SO3LR_ASCII:
+            if str(message).startswith(app.SO3LR_ASCII):
                 raise failure
             return original(message, *args, **kwargs)
         monkeypatch.setattr(app.logger, 'info', fail_banner)

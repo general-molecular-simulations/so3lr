@@ -1676,3 +1676,50 @@ def test_plain_closing_line_falls_back_to_ascii_for_ascii_logs(monkeypatch):
         pass
     stream.flush()
     assert raw.getvalue().decode('ascii').strip() == '+ Run finished in 00:00'
+
+
+def _activity_text(activity):
+    from rich.console import Console
+    output = io.StringIO()
+    Console(file=output, width=120, color_system=None).print(activity)
+    return output.getvalue()
+
+
+def test_activity_line_counts_down_an_eta_from_the_measured_rate(monkeypatch):
+    monkeypatch.setattr(sys, 'stderr', Terminal())
+    ui.configure(display='rich')
+    with ui.run_display({}, record=False) as reporter:
+        reporter.phase('Evaluating')
+        clock = [100.0]
+        monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
+        reporter.task_progress(0, 100, 'structures')
+        clock[0] = 110.0
+        reporter.task_progress(10, 100, 'structures')  # 1 structure/s
+        assert reporter._eta() == (90.0, False)
+        activity = ui._Activity('Evaluating', 100.0, 110.0, eta=(clock[0] + 90.0, False))
+        assert 'ETA 01:30' in _activity_text(activity)
+        reporter.task_progress(100, 100, 'structures')
+        assert reporter._eta() is None  # nothing left to estimate
+
+
+def test_optimization_eta_is_a_bound_when_a_force_target_can_stop_it_early(monkeypatch):
+    monkeypatch.setattr(sys, 'stderr', Terminal())
+    ui.configure(display='rich')
+    with ui.run_display({}, record=False) as reporter:
+        clock = [50.0]
+        monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
+        reporter.update_info(operation='optimization', opt_step=0, opt_total_steps=400,
+                             opt_energy_eV=-1.0, opt_force_max_eVA=1.0, opt_force_target_eVA=0.05)
+        clock[0] = 60.0
+        reporter.update_info(opt_step=100, opt_energy_eV=-1.1, opt_force_max_eVA=0.5)
+        assert reporter._eta() == (30.0, True)
+        activity = ui._Activity('Relaxing', 50.0, 60.0, eta=(60.0 + 30.0, True))
+        assert 'ETA ≤ 00:30' in _activity_text(activity)
+
+
+def test_log_banner_records_version_and_time():
+    from so3lr import __version__
+    from so3lr.cli import so3lr_cli
+    banner = so3lr_cli.log_banner()
+    assert banner.startswith(so3lr_cli.SO3LR_ASCII)
+    assert re.search(rf'◆ SO3LR TAURI · v{re.escape(__version__)} · \d{{4}}-\d\d-\d\d \d\d:\d\d', banner)

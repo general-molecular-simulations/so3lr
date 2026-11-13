@@ -665,11 +665,11 @@ def test_total_energy_reference_uses_elapsed_time_not_half_the_sample_count(tmp_
     reader.snapshot()
     assert reader.state.energy_mean.reference() == (-15, False)
     text = render(reader, energy='energy_eV')
-    assert 'Reference · latter half: -15.000 eV' in text
+    assert 'Second-half mean -15.000 eV' in text
     assert 'Target ' not in text
-    assert 'Reference · latter half: -15.000 eV' in render(reader, energy='potential_energy_eV')
-    assert 'Reference · latter half: -15.000000 eV' in render(reader, energy='conserved_energy_eV')
-    assert 'Reference | latter half: -15.000 eV' in render(reader, energy='energy_eV', ascii_only=True)
+    assert 'Second-half mean -15.000 eV' in render(reader, energy='potential_energy_eV')
+    assert 'Second-half mean -15.000000 eV' in render(reader, energy='conserved_energy_eV')
+    assert 'Second-half mean -15.000 eV' in render(reader, energy='energy_eV', ascii_only=True)
 
 
 def test_energy_mean_survives_plot_decimation_without_extrema_bias(tmp_path):
@@ -733,7 +733,7 @@ def test_attached_total_energy_reference_and_checkpoint_fit_short_terminal(tmp_p
     reader.state.consume(event(200, 'checkpoint', step=3000, path='restart.npz'))
     text = render(reader, energy='energy_eV', height=24, attached=True, live=live)
     assert 'Temperature [K]' in text and 'Total energy [eV]' in text
-    assert 'Reference · latter half' in text
+    assert 'Second-half mean' in text
     assert 'Checkpoint' in text and 'q: hide plots' in text
     assert 's/atom/step' in text and 'MD elapsed' in text
     assert len(text.splitlines()) <= 24
@@ -1182,8 +1182,8 @@ def test_nve_temperature_reference_is_observed_not_a_thermostat_target(tmp_path)
     text = render(reader)
     assert 'Total energy [eV]' in text
     assert 'Thermostat target' not in text
-    assert 'Reference · latter half: 295.0 K' in text
-    assert 'Reference · latter half: -38.785 eV' in text
+    assert 'Second-half mean 295.0 K' in text
+    assert 'Second-half mean -38.785 eV' in text
 
 
 def test_langevin_target_and_unavailable_conserved_energy_are_explicit(tmp_path):
@@ -1200,7 +1200,7 @@ def test_langevin_target_and_unavailable_conserved_energy_are_explicit(tmp_path)
     assert 'Thermostat target 300 K' in text
     assert 'Not defined for Langevin dynamics (stochastic thermostat).' in text
     assert 'Conserved energy [eV]  0' not in text
-    assert 'Reference · latter half:' not in text
+    assert 'Second-half mean' not in text
 
 
 def test_loading_and_failed_short_view_show_recorded_details_without_fake_samples(tmp_path):
@@ -1212,7 +1212,7 @@ def test_loading_and_failed_short_view_show_recorded_details_without_fake_sample
     text = render(reader, height=20)
     assert 'Compiling' in text
     assert 'Warming up the first MD cycle' in text
-    assert '│' not in text and 'Reference' not in text
+    assert '│' not in text and 'Second-half mean' not in text
     reader.state.consume(event(2, 'run_failed', message='Structure has no atoms'))
     failed = render(reader, height=20)
     assert 'Structure has no atoms' in failed
