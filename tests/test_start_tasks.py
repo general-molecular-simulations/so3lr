@@ -274,12 +274,11 @@ def test_eval_reports_binding_energies_for_dimer_files(tmp_path, caplog):
                                info={'structure_type': kind, 'benchmark_Eint': reference}))
     data = tmp_path / 'pairs.xyz'
     write(data, pairs, format='extxyz')
-    predicted = []
-    for index, binding in enumerate((-2.5, -6.0)):
-        bound = Atoms('He2', info={'energy_so3lr': -1.0 + binding / KCAL_PER_EV})
-        predicted += [bound, Atoms('He2', info={'energy_so3lr': -1.0})]
+    energies = []
+    for binding in (-2.5, -6.0):
+        energies += [-1.0 + binding / KCAL_PER_EV, -1.0]
     with caplog.at_level(logging.INFO, logger='SO3LR'):
-        summary = _report_binding_energies(_dimer_pairs(data), predicted)
+        summary = _report_binding_energies(_dimer_pairs(data), energies)
     assert summary['mae'] == pytest.approx(0.25)
     assert 'Binding energies (dimer - separated) for 2 dimers' in caplog.text
-    assert _report_binding_energies(_dimer_pairs(data), predicted[:2]) is None
+    assert _report_binding_energies(_dimer_pairs(data), energies[:2]) is None

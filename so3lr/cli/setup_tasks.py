@@ -12,7 +12,7 @@ import click
 
 from . import theme
 from .prompts import Back
-from .setup import (_choose, _confirm, _entered_path, _positive, _prompt, _review_actions_for, _say,
+from .setup import (_choose, _confirm, _entered_path, _positive, _prompt, TASK_REVIEW_ACTIONS, ask_new_directory, _say,
                     _select_model, _select_structure, _stage, _stage_rule, _unused_directory,
                     electron_count_problem, export_run, run_steps)
 from so3lr.md_settings_validation import DEFAULT_PRECISION
@@ -52,20 +52,6 @@ def _charge_and_spin(console, structure):
         if not _confirm('Keep these values anyway?', default=False):
             return _charge_and_spin(console, structure)
     return charge, spin
-
-
-def _new_directory(console, default):
-    while True:
-        answer = _prompt('New output directory', default=_unused_directory(default), type=str)
-        try:
-            destination = _entered_path(answer).absolute()
-            if destination.exists() or destination.is_symlink():
-                raise ValueError('That path already exists. Choose a new output directory.')
-            if not destination.parent.is_dir():
-                raise ValueError('The parent directory must already exist.')
-            return destination.resolve()
-        except (OSError, ValueError, RuntimeError) as exc:
-            _say(console, exc, theme.DANGER)
 
 
 def _rows_view(number, title, rows, notes):
@@ -113,7 +99,7 @@ def optimization_setup(console):
         state['force'] = _positive(console, 'Stop when the largest force is below (eV/Å)', state['force'])
         state['budget'] = _prompt('Maximum optimization steps', default=state['budget'], type=click.IntRange(min=10))
         state['charge'], state['spin'] = _charge_and_spin(console, state['structure'])
-        state['destination'] = _new_directory(console, 'so3lr-opt')
+        state['destination'] = ask_new_directory(console, _unused_directory('so3lr-opt'))
 
     def review():
         structure, force, budget = state['structure'], state['force'], state['budget']
@@ -137,7 +123,7 @@ def optimization_setup(console):
         console.print(_rows_view(3, 'Review and start', rows, (
             'Start now saves the files, then optimizes in this terminal.',
             'Save for later writes those files only. Start later with sh run.sh from the output directory.')))
-        action = _choose(console, 'Next action · Enter starts now', _review_actions_for('optimization'))
+        action = _choose(console, 'Next action · Enter starts now', TASK_REVIEW_ACTIONS)
         if action == 2:
             _say(console, 'Setup cancelled. No files written.')
             state['result'] = None
@@ -177,7 +163,7 @@ EVAL_EXAMPLES = (('Example · SAPT10k binding energies · 20 dimers', 'sapt10k_2
 
 
 def _dataset_kind(path):
-    """('dimers' | 'molecules' | 'periodic', frame count) from a quick look at the dataset."""
+    """'dimers', 'molecules' or 'periodic', from the dataset's first structure."""
     from ase.io import read
     from so3lr.binding_energies import BOUND
     first = read(str(path), index=0)
@@ -236,7 +222,7 @@ def eval_setup(console):
         _say(console, 'Use 12 Å for periodic data; gas-phase molecules need a long cutoff such as 100 Å.',
              theme.MUTED)
         state['cutoff'] = _positive(console, 'Long-range cutoff (Å)', default)
-        state['destination'] = _new_directory(console, 'so3lr-eval')
+        state['destination'] = ask_new_directory(console, _unused_directory('so3lr-eval'))
 
     def review():
         destination = state['destination']
@@ -250,7 +236,7 @@ def eval_setup(console):
         console.print(_rows_view(3, 'Review and start', rows, (
             'Start now saves run.sh, then evaluates in this terminal.',
             'Save for later writes run.sh only. Start later with sh run.sh from the output directory.')))
-        action = _choose(console, 'Next action · Enter starts now', _review_actions_for('evaluation'))
+        action = _choose(console, 'Next action · Enter starts now', TASK_REVIEW_ACTIONS)
         if action == 2:
             _say(console, 'Setup cancelled. No files written.')
             state['result'] = None

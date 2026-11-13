@@ -139,8 +139,8 @@ def _run_eval(so3lr_fn, items, budget):
     # The tolerances assume float64 all the way through.
     assert inputs['positions'].dtype == np.float64
     assert output['energy'].dtype == np.float64
-    # process_predictions writes nothing; save_to is unused.
-    predicted = process_predictions('unused.extxyz', graph_batch, inputs, output)
+    # process_predictions writes nothing; it only unbatches.
+    predicted = process_predictions(graph_batch, inputs, output)
     return inputs, predicted
 
 

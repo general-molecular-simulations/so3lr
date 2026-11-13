@@ -20,8 +20,7 @@ from so3lr.structure_info import electron_count_problem, recorded_charge_and_unp
 from .prompts import Back
 
 
-_SCHEDULER_VARIABLES = ('SLURM_JOB_ID', 'SLURM_JOBID', 'PBS_JOBID', 'LSB_JOBID',
-                        'JOB_ID', 'COBALT_JOBID')
+from .terminal import SCHEDULER_VARIABLES as _SCHEDULER_VARIABLES
 _ENSEMBLES = ('nvt', 'nvt-langevin', 'nve', 'npt')
 _PRESETS = (('Example · Ala4 peptide · 42 atoms · gas phase', 'ala4.xyz'),
             ('Example · DHA · 56 atoms', 'dha.xyz'),
@@ -148,8 +147,22 @@ def _decimal(value, label):
     return number
 
 
-def _review_actions_for(task):
-    return ('Save setup and start now', 'Save setup for later', 'Cancel')
+TASK_REVIEW_ACTIONS = ('Save setup and start now', 'Save setup for later', 'Cancel')
+
+
+def ask_new_directory(console, default):
+    """A path that does not exist yet, in an existing parent directory."""
+    while True:
+        answer = _prompt('New output directory', default=default, type=str)
+        try:
+            destination = _entered_path(answer).absolute()
+            if destination.exists() or destination.is_symlink():
+                raise ValueError('That path already exists. Choose a new output directory.')
+            if not destination.parent.is_dir():
+                raise ValueError('The parent directory must already exist.')
+            return destination.resolve()
+        except (OSError, ValueError, RuntimeError) as exc:
+            _say(console, exc, theme.DANGER)
 
 
 def export_run(directory, structure, settings, header=None):
@@ -616,18 +629,7 @@ class _Draft:
     def ask_directory(self):
         default = getattr(self, 'directory', None)
         default = str(default) if default is not None else _unused_directory(self.old.get('directory', 'so3lr-run'))
-        while True:
-            answer = _prompt('New output directory', default=default, type=str)
-            try:
-                destination = _entered_path(answer).absolute()
-                if destination.exists() or destination.is_symlink():
-                    raise ValueError('That path already exists. Choose a new output directory.')
-                if not destination.parent.is_dir():
-                    raise ValueError('The parent directory must already exist.')
-                self.directory = destination.resolve()
-                return
-            except (OSError, ValueError, RuntimeError) as exc:
-                _say(self.console, exc, theme.DANGER)
+        self.directory = ask_new_directory(self.console, default)
 
     def use_advanced_defaults(self):
         old, structure = self.old, self.structure

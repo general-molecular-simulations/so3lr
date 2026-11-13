@@ -202,11 +202,12 @@ def grid_search(candidates, error_fn, time_fn, accuracy):
     logger.info("Timings of the candidates within the accuracy:")
     reporter.phase('Timing', f'Force calls of the candidates within {accuracy:g} eV/Å')
     within = sum(error <= accuracy for error in errors)
-    timings = []
+    timings, timed = [], 0
     for candidate, error in zip(candidates, errors):
         timings.append(time_fn(**candidate) if error <= accuracy else float("inf"))
         if error <= accuracy:
-            reporter.task_progress(sum(t != float("inf") for t in timings), within, 'candidates timed')
+            timed += 1
+            reporter.task_progress(timed, within, 'candidates timed')
         logger.info(f"  {_describe(candidate)}: {timings[-1]} s per force call, "
                     f"estimated error {error}")
     return candidates, errors, timings
@@ -538,14 +539,14 @@ def cell_is_present(cell) -> bool:
     return cell is not None and not np.all(np.asarray(cell) == 0.0)
 
 
-def _report_recommendation(rec, error, timing, accuracy, *, met, method, command):
+def _report_recommendation(rec, error, timing, accuracy, *, met, kspace, command):
     """The chosen parameters as the live display's result table (settings-file names)."""
     names = (('cutoff', 'lr_cutoff', ' Å'), ('smearing', 'kspace_smearing', ' Å'),
              ('spacing', 'kspace_spacing', ' Å'), ('interpolation_nodes', 'kspace_interp_nodes', ''),
              ('cutoff_lr_damping', 'dispersion_damping', ' Å'))
     rows = [(name, f'{rec[key]:g}{unit}') for key, name, unit in names if rec.get(key) is not None]
-    if method in ('ewald', 'pme', 'p3m'):
-        rows.insert(1, ('kspace_electrostatics', method))
+    if kspace in ('ewald', 'pme', 'p3m'):
+        rows.insert(1, ('kspace_electrostatics', kspace))
     rows.append(('Force error', f'{error:.3g} eV/Å estimated · target ≤ {accuracy:g}'))
     if timing != float('inf'):
         rows.append(('Force call', f'{timing * 1e3:.3g} ms'))
@@ -825,7 +826,9 @@ def tune(
     # Print a ready-to-run MD command using the tuned parameters so users know
     # exactly how to launch a simulation next. Prefer the fastest param that met
     # the accuracy target; otherwise fall back to the smallest-error param.
-    rec = recommended_param if recommended_param is not None else param
+    met = recommended_param is not None
+    rec_index = timings.index(min(timings)) if met else errs.index(min(errs))
+    rec = params[rec_index]
     command = None
     if kspace_electrostatics in ('ewald', 'pme', 'p3m'):
         _interp = rec.get('interpolation_nodes')
@@ -853,6 +856,5 @@ def tune(
         logger.info("Or add the following to your settings.yaml:")
         logger.info(f"  lr_cutoff: {rec['cutoff']}")
         logger.info("=" * 60)
-    _report_recommendation(rec, errs[params.index(rec)], timings[params.index(rec)], accuracy,
-                           met=recommended_param is not None, command=command,
-                           method=kspace_electrostatics if kspace_dispersion != 'cutoff' else 'dispersion')
+    _report_recommendation(rec, errs[rec_index], timings[rec_index], accuracy, met=met, command=command,
+                           kspace=kspace_electrostatics if kspace_dispersion != 'cutoff' else None)

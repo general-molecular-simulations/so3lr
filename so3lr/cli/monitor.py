@@ -574,8 +574,7 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
     if scale is None:
         return Group(heading, Text(empty_message, style=theme.MUTED))
     points, decimals, low, high, ylabels = scale
-    latest = next(value for value in (_finite(row.get(key)) for row in reversed(samples))
-                  if value is not None and (not log or value > 0))
+    latest = 10 ** points[-1][1] if log else points[-1][1]
     heading.append(f'  {latest:.3g}' if log else f'  {latest:.{decimals}f}', style=f'bold {trace}')
     if log:
         heading.append('  log scale', style=theme.FAINT)
@@ -671,7 +670,26 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
     return Group(*result)
 
 
+def _run_name(reader):
+    """The run's folder, or for a journal in the current directory its file name without the run id."""
+    name = reader.path.parent.name or reader.path.name.removesuffix('.events.jsonl')
+    run_id = reader.state.run_id
+    return name[:-(len(run_id) + 1)] if run_id and name.endswith('.' + run_id) else name
+
+
 def optimization_plots(state, width, ascii_only=False, rows=7):
+    """The optimization graphs, rebuilt only when a cycle arrives or the size changes."""
+    samples = state.opt_samples
+    key = (len(samples), samples[-1]['step'] if samples else None,
+           state.info.get('opt_force_target_eVA'), width, ascii_only, rows)
+    cached = getattr(state, '_opt_plots', None)
+    if cached is None or cached[0] != key:
+        cached = (key, _optimization_plots(state, width, ascii_only, rows))
+        state._opt_plots = cached
+    return cached[1]
+
+
+def _optimization_plots(state, width, ascii_only, rows):
     """Potential energy and maximum force per optimization cycle, or None for too few cycles.
 
     The force axis is logarithmic, since it falls roughly exponentially, and carries
@@ -890,8 +908,7 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
         priorities.append(priority)
 
     add(f'{theme.BRAND} SO3LR TAURI  optimization' + (' snapshot' if static else ''), theme.ACCENT_BOLD, 3)
-    run_name = reader.path.parent.name or reader.path.name.removesuffix('.events.jsonl')
-    add(f'Run {selected + 1}/{count} · {run_name}', priority=9)
+    add(f'Run {selected + 1}/{count} · {_run_name(reader)}', priority=9)
     add(f'Last reported state: {state.status}', style, 4)
     add(_observation_line(reader, now), theme.WARNING if observation_status(reader, now) == 'Stale?' else theme.MUTED, 2)
     if origin := origin_label(state):
@@ -976,9 +993,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     state = reader.state
     if state.info.get('operation') == 'optimization':
         return _render_optimization(reader, selected, len(readers), ascii_only, now=now, static=static, width=width)
-    run_name = reader.path.parent.name or reader.path.name.removesuffix('.events.jsonl')
-    if state.run_id and run_name.endswith('.' + state.run_id):
-        run_name = run_name[:-(len(state.run_id) + 1)]
+    run_name = _run_name(reader)
     short_id = f' · {state.run_id[:8]}' if state.run_id else ''
     rows.append(Text(('Run · ' if attached else f'Run {selected + 1}/{len(readers)} · ') + run_name + short_id))
     status_style = theme.status_style(state.status)
@@ -1082,9 +1097,7 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
     reader = readers[selected % len(readers)]
     state = reader.state
     now = now or datetime.now(timezone.utc)
-    name = reader.path.parent.name or reader.path.name.removesuffix('.events.jsonl')
-    if state.run_id and name.endswith('.' + state.run_id):
-        name = name[:-(len(state.run_id) + 1)]
+    name = _run_name(reader)
     if attached:
         header = _attached_header(state, width, ascii_only, live)
     else:

@@ -8,9 +8,8 @@ from pathlib import Path
 
 from ..utils.param_utils import MAX_NUM_THEORY_LEVELS
 from ..utils.jraph_utils import with_uniform_periodic_fields
-from .dataloader_sparse_ase import _display_active
 from tqdm import tqdm
-from typing import Optional
+from typing import Callable, Optional
 
 import logging
 
@@ -63,8 +62,10 @@ class NpzDataLoaderSparse:
             cutoff: float,
             calculate_neighbors_lr: bool = False,
             cutoff_lr: Optional[float] = None,
-            pick_idx: np.ndarray = None
+            pick_idx: np.ndarray = None,
+            progress: Optional[Callable[[int], None]] = None,
     ):
+        """progress, if given, is called with the number of structures read and replaces tqdm."""
         if pick_idx is None:
             def keep(idx: int):
                 return True
@@ -104,7 +105,7 @@ class NpzDataLoaderSparse:
             np_data = np.load(file_path)
             keys = list(np_data.keys())
             data_iterator = zip(*(np_data[k] for k in keys))
-            for tup in tqdm(data_iterator, disable=_display_active()):
+            for tup in (data_iterator if progress else tqdm(data_iterator)):
                 if keep(i):
                     entry = {k: v for (k, v) in zip(keys, tup)}
                     result = entry_to_jraph(
@@ -122,6 +123,8 @@ class NpzDataLoaderSparse:
                     max_num_of_pairs = max_num_of_pairs if num_pairs <= max_num_of_pairs else num_pairs
                     loaded_data.append(result)
                 i += 1
+                if progress:
+                    progress(i)
 
         if pick_idx is not None:
             if max(pick_idx) >= i:

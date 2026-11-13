@@ -123,8 +123,7 @@ class AseDataLoaderSparse:
                     f"Calculate long-range neighbors within cutoff_lr={cutoff_lr} Ang."
                 )
             structures = iread(file_path)
-            for a in (structures if progress else tqdm(structures, mininterval=60, maxinterval=600,
-                                                       disable=_display_active())):
+            for a in (structures if progress else tqdm(structures, mininterval=60, maxinterval=600)):
                 if keep(i):
                     result = ASE_to_jraph(
                         a,
@@ -164,12 +163,6 @@ class AseDataLoaderSparse:
         # Molecules and crystals in one data set must be able to share a batch.
         loaded_data = with_uniform_periodic_fields(loaded_data)
         return loaded_data, {'max_num_of_nodes': max_num_of_nodes, 'max_num_of_edges': max_num_of_edges, 'max_num_of_pairs': max_num_of_pairs}
-
-
-def _display_active():
-    """True while the CLI's live display owns the terminal (tqdm would draw over it)."""
-    from so3lr.cli.presentation import get_reporter
-    return get_reporter().enabled
 
 
 def ASE_to_jraph(

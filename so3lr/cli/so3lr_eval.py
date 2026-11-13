@@ -10,7 +10,6 @@ import jax.numpy as jnp
 import time
 import logging
 from typing import Dict, List, Tuple, Optional, Any
-from tqdm import tqdm
 
 from ase import Atoms
 from ase.io import write
@@ -25,7 +24,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from ..jraph_utils import jraph_to_ase_atoms
-from .presentation import get_reporter
+from .presentation import get_reporter, progress_counter, reading_progress
 from ..base_calculator import make_so3lr
 from ..mlff.calculators.potential import cast_float_params
 from ..mlff.nn.observable.dispersion_ref_data import (
@@ -66,7 +65,6 @@ NORMALIZE_TARGET = {
 
 
 def process_predictions(
-    save_to: Optional[str],
     graph_batch: Tuple[jraph.GraphsTuple, jraph.GraphsTuple],
     inputs: Dict[str, Any],
     output_prediction: Dict[str, Any]
@@ -76,9 +74,6 @@ def process_predictions(
 
     Parameters:
     -----------
-    save_to : str or None
-        Unused; kept for callers. The caller decides whether predictions are kept
-        (binding energies need them unsaved too).
     graph_batch : tuple of jraph.GraphsTuple
         Tuple of (main_graph, long_range_graph) batches
     inputs : dict
@@ -226,13 +221,12 @@ def save_to_file(
         Total number of data points for progress reporting
     """
     logger.info(f'Saving predictions to {str(save_to)}')
-    reporter = get_reporter()
-    reporter.phase('Saving', 'Writing predictions')
+    get_reporter().phase('Saving', 'Writing predictions')
     
-    # Convert the length to Python int to avoid JAX array issues with tqdm
     total = len(predicted_graphs)
     if total == 0:
         raise ValueError("Cannot save an empty prediction collection.")
+    progress = progress_counter(total, 'structures written', 'Saving predictions')
 
     # Label keys that the dataloader fills with NaN when the source extxyz
     # info{} did not actually carry that ground-truth value. The real model
@@ -250,15 +244,15 @@ def save_to_file(
             return False
 
     with _staged_output(Path(save_to), overwrite=overwrite) as temporary:
-        # The live display already shows the phase; tqdm is for plain output.
-        for index, predicted_graph in enumerate(tqdm(predicted_graphs, desc="Saving predictions",
-                                                     disable=reporter.enabled)):
+        for index, predicted_graph in enumerate(predicted_graphs):
+            progress.update()
             # graphs from the neighbour-list model, Atoms from the flash engine
             atoms = predicted_graph if isinstance(predicted_graph, Atoms) else jraph_to_ase_atoms(predicted_graph)
             for _k in _label_keys_to_check:
                 if _k in atoms.info and _is_all_nan(atoms.info[_k]):
                     del atoms.info[_k]
             write(temporary, images=atoms, format='extxyz', append=index > 0)
+    progress.close()
 
     logger.info(f'Successfully saved predictions for {total} structures')
 
@@ -451,9 +445,8 @@ def evaluate_so3lr_on(
     else:
         logger.info(f"Using custom MLFF potential from: {model_path}")
 
-    # Dimer files report binding energies, which need the predictions even when unsaved.
+    # Dimer files report binding energies: one predicted energy per structure is kept for them.
     references = _dimer_pairs(datafile)
-    keep_predictions_bool = save_predictions_bool or references is not None
 
     kspace_enabled = (kspace_electrostatics is not None
                       or kspace_dispersion is not None)
@@ -484,7 +477,9 @@ def evaluate_so3lr_on(
         from ..flash.evaluate import evaluate_flash
         reporter.update_info(plan=f'{len(frames):,} structures')
         reporter.phase('Evaluating', 'SO3LR-Flash')
-        return evaluate_flash(frames, flash_settings, target_list, keep_predictions=keep_predictions_bool)
+        # the frames are in memory already; their predictions carry the binding energies
+        return evaluate_flash(frames, flash_settings, target_list,
+                              keep_predictions=save_predictions_bool or references is not None)
     ran, result = run_on_flash(flash_settings, frames, 'eval', eval_on_flash)
     if ran:
         (tot_abs, tot_sq, tot_n), (t_first, t_rest, n_rest) = result
@@ -497,7 +492,8 @@ def evaluate_so3lr_on(
             target_list=target_list, tot_abs=tot_abs, tot_sq=tot_sq, tot_n=tot_n, total_time=t_rest,
             compile_time=t_first, n_batches=n_rest, n_structures=n_rest, datafile=datafile, save_to=save_to,
             predicted=frames, overwrite=overwrite, total_time_start=total_time_start,
-            references=references)
+            references=references,
+            energies=[float(atoms.info['energy_so3lr']) for atoms in frames] if references else None)
     del frames
 
     reporter.phase('Loading', 'Loading the force field')
@@ -558,8 +554,7 @@ def evaluate_so3lr_on(
             cutoff_lr=lr_cutoff,
             calculate_neighbors_lr=True if lr_cutoff is not None else False,
             pick_idx=np.arange(num_data),
-            progress=(lambda read: reporter.task_progress(read, num_data, 'structures read'))
-            if reporter.enabled else None,
+            progress=reading_progress(num_data),
         )
     except Exception as e:
         raise RuntimeError(f"Error loading data: {str(e)}")
@@ -707,6 +702,7 @@ def evaluate_so3lr_on(
     total_time = 0.0
     total_num_structures = 0
     predicted = []
+    energies = []  # per structure, for a dimer file's binding energies
 
     logger.info(f'Starting evaluation on {num_data} structures')
     logger.info('-' * 50)
@@ -714,8 +710,7 @@ def evaluate_so3lr_on(
     try:
         # Create a progress bar that shows structures processed instead of batches
         reporter.phase('Evaluating')
-        progress_bar = tqdm(total=num_data, desc="Processing structures", unit="structure",
-                            smoothing=0.1, mininterval=0.5, disable=reporter.enabled)
+        progress_bar = progress_counter(num_data, 'structures', 'Processing structures')
 
         for graph_batch, kspace_constants in batched_graphs:
             # Transform the batched graph to inputs dict
@@ -736,7 +731,6 @@ def evaluate_so3lr_on(
             batch_size = int(inputs['num_of_non_padded_graphs'])
             total_num_structures += batch_size
             progress_bar.update(batch_size)
-            reporter.task_progress(total_num_structures, num_data, 'structures')
 
             # Accumulate atom embeddings per structure into all_x
             if save_x_bool and 'x' in output_prediction:
@@ -758,10 +752,11 @@ def evaluate_so3lr_on(
                 tot_n[t]   += batch_metrics[f"{t}_count"]
 
             # Process predictions if saving is enabled
-            if keep_predictions_bool:
-                predicted.extend(process_predictions(
-                    save_to, graph_batch, inputs, output_prediction
-                ))
+            if save_predictions_bool:
+                predicted.extend(process_predictions(graph_batch, inputs, output_prediction))
+            if references is not None:
+                real = np.asarray(inputs['graph_mask'], dtype=bool)
+                energies.extend(np.asarray(output_prediction['energy']).reshape(-1)[real].tolist())
 
             i += 1
         
@@ -772,8 +767,10 @@ def evaluate_so3lr_on(
         # per-structure outputs (metrics are order-independent sums).
         if order is not None:
             inverse = np.argsort(order)
-            if keep_predictions_bool:
+            if save_predictions_bool:
                 predicted = [predicted[i] for i in inverse]
+            if references is not None:
+                energies = [energies[i] for i in inverse]
             if save_x_bool:
                 all_x = [all_x[i] for i in inverse]
         
@@ -795,7 +792,7 @@ def evaluate_so3lr_on(
             target_list=target_list, tot_abs=tot_abs, tot_sq=tot_sq, tot_n=tot_n, total_time=total_time,
             compile_time=compile_time, n_batches=i, n_structures=total_num_structures, datafile=datafile,
             save_to=save_to, predicted=predicted, overwrite=overwrite, total_time_start=total_time_start,
-            references=references)
+            references=references, energies=energies)
 
     except Exception as e:
         logger.error(f"Error during evaluation: {str(e)}")
@@ -804,7 +801,7 @@ def evaluate_so3lr_on(
 
 def _finish_evaluation(*, target_list, tot_abs, tot_sq, tot_n, total_time, compile_time, n_batches,
                        n_structures, datafile, save_to, predicted, overwrite, total_time_start,
-                       references=None):
+                       references=None, energies=None):
     """The metrics from the per-target sums, the report, and the predictions saved (if
     save_to): the end of ``evaluate_so3lr_on`` for either engine. total_time: seconds of
     the n_batches timed calls, over n_structures structures."""
@@ -891,7 +888,7 @@ def _finish_evaluation(*, target_list, tot_abs, tot_sq, tot_n, total_time, compi
     )
     logger.info('-' * 50)
 
-    _report_binding_energies(references, predicted, energy_scored='energy' in _scored_targets)
+    _report_binding_energies(references, energies, energy_scored='energy' in _scored_targets)
     reporter.results('Timing', [
         ('Evaluation', f"{metrics['time_evaluation']:.3f} s · {metrics['time_per_structure'] * 1e3:.3g} ms per structure"),
         ('Compilation', f"{metrics['time_compile']:.3f} s")])
@@ -919,20 +916,17 @@ def _dimer_pairs(datafile):
         return None
 
 
-def _report_binding_energies(references, predicted, energy_scored=False):
+def _report_binding_energies(references, energies, energy_scored=False):
     """For prepare_dimer_xyz files, report binding energies against benchmark_Eint.
 
-    Uses the full-precision predicted energies (the saved file rounds them).
+    energies: the predicted energy (eV) of each structure in dataset order, at full
+    precision (the saved file rounds them).
     The per-frame 'energy' row above compares against interaction-energy labels
     in such files, so it is not a binding-energy error.
     """
     from so3lr.binding_energies import binding_energy_summary
-    if references is None or len(predicted) != 2 * len(references):
+    if references is None or energies is None or len(energies) != 2 * len(references):
         return None
-    energies = []
-    for graph in predicted:
-        atoms = graph if isinstance(graph, Atoms) else jraph_to_ase_atoms(graph)
-        energies.append(float(np.asarray(atoms.info['energy_so3lr']).reshape(-1)[0]))
     summary = binding_energy_summary(energies, references)
     logger.info(f"Binding energies (dimer - separated) for {summary['n']} dimers, "
                 "against benchmark_Eint in kcal/mol:")
@@ -948,8 +942,9 @@ def _report_binding_energies(references, predicted, energy_scored=False):
     if energy_scored:
         rows.append(('Note', "the energy row compares against interaction-energy labels; "
                              "use these binding energies"))
-    get_reporter().results('Binding energies (dimer − separated)', rows)
-    get_reporter().outcome(f"binding-energy MAE {summary['mae']:.2f} kcal/mol")
+    reporter = get_reporter()
+    reporter.results('Binding energies (dimer − separated)', rows)
+    reporter.outcome(f"binding-energy MAE {summary['mae']:.2f} kcal/mol")
     logger.info('-' * 50)
     return summary
 

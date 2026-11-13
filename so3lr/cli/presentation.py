@@ -77,7 +77,7 @@ class _NullReporter:
     def checkpoint(self, step, path):
         pass
 
-    def finish(self, level='success'):
+    def finish(self, level='complete', reason=''):
         pass
 
     def fail(self, message, reason='error'):
@@ -105,24 +105,6 @@ class _NullReporter:
 _null = _NullReporter()
 
 
-class _NoJournal:
-    """Stands in for EventJournal when a command keeps no run journal (eval, tuning, training)."""
-    enabled = active = False
-    path = run_id = None
-
-    def emit(self, *args, **kwargs):
-        return None
-
-    def flush_initial_warning(self):
-        pass
-
-    def _warn(self, *args, **kwargs):
-        pass
-
-    def close(self):
-        pass
-
-
 class _NoRunLog:
     """Stands in for RunLog: those commands keep their own text logs."""
 
@@ -131,11 +113,21 @@ class _NoRunLog:
 
 
 # What a completed command's main output file is called on screen.
-# The closing line's glyph and color by outcome; green only for a run that met its goal.
-VERDICTS = {'success': ('✓', theme.SUCCESS), 'warning': ('!', theme.WARNING),
-            'interrupted': ('■', theme.WARNING), 'failed': ('✕', theme.DANGER)}
 OPERATION_NAMES = {'md': 'MD', 'optimization': 'Optimization', 'evaluation': 'Evaluation',
                    'tuning': 'Tuning', 'training': 'Training'}
+def _existing(path):
+    """str(path) when it exists (a file, or a training run's model directory), else None."""
+    try:
+        return str(path) if path and os.path.exists(path) else None
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _output_artifact(settings, operation):
+    """(label, path) of the run's output, path None until it exists."""
+    return OUTPUT_LABELS.get(operation, 'Trajectory'), _existing(settings.get('output_file'))
+
+
 OUTPUT_LABELS = {'optimization': 'Optimization trajectory', 'evaluation': 'Predictions',
                  'training': 'Model directory'}
 
@@ -192,7 +184,7 @@ class _PlainReporter(_NullReporter):
         print(terminal_text(line, _ascii_stream(sys.stderr)), file=sys.stderr)
 
     def print_verdict(self, level, head, details):
-        line = ' · '.join([f'{VERDICTS[level][0]} {head}', *details])
+        line = ' · '.join([f'{theme.status_glyph(level)} {head}', *details])
         print(terminal_text(line, _ascii_stream(sys.stderr)), file=sys.stderr)
 
 
@@ -211,6 +203,37 @@ def _ascii_stream(stream):
 def get_reporter():
     """Return the current display, or a harmless reporter for library callers."""
     return _active.get() or _null
+
+
+def reading_progress(total):
+    """A data loader's progress callback for the live display, or None (it then uses tqdm)."""
+    reporter = get_reporter()
+    if not reporter.enabled:
+        return None
+    return lambda read: reporter.task_progress(read, total, 'structures read')
+
+
+class _TaskCounter:
+    """tqdm's update/close for work counted on the live display's progress bar."""
+
+    def __init__(self, reporter, total, unit):
+        self.reporter, self.total, self.unit, self.n = reporter, total, unit, 0
+
+    def update(self, count=1):
+        self.n += count
+        self.reporter.task_progress(self.n, self.total, self.unit)
+
+    def close(self):
+        pass
+
+
+def progress_counter(total, unit, description):
+    """Count finished work: on the live display's bar when one is open, else with tqdm."""
+    reporter = get_reporter()
+    if reporter.enabled:
+        return _TaskCounter(reporter, total, unit)
+    from tqdm import tqdm
+    return tqdm(total=total, desc=description, unit=unit.removesuffix('s'), smoothing=0.1, mininterval=0.5)
 
 
 def exception_message(exc):
@@ -294,7 +317,7 @@ class _Reporter:
         self._task = None
         self._task_origin = None
         self._results = []
-        self._opt_origin = None  # (wall clock, step) of the first optimization report
+        self._finish_level = 'complete'
         self.requested = set()
         for key in ('model', 'precision', 'engine'):
             if settings.get(key) is not None:
@@ -386,6 +409,10 @@ class _Reporter:
                                  None if eta is None else (time.monotonic() + eta[0], eta[1]))
         return Group(*rows), activity
 
+    @property
+    def _bar_width(self):
+        return min(40, max(8, self.console.width - 40))
+
     def _eta(self):
         """(seconds left, whether only an upper bound) for the work in progress, or None.
 
@@ -395,18 +422,14 @@ class _Reporter:
         if self.started_at is not None:
             eta = self._live_progress().eta
             return None if eta is None else (eta, False)
-        if self.info.get('operation') == 'optimization' and self._opt_origin is not None:
-            step, total = (_finite(self.info.get(key)) for key in ('opt_step', 'opt_total_steps'))
-            started, first = self._opt_origin
-            if step is not None and total is not None and first < step < total and now > started:
-                bound = _finite(self.info.get('opt_force_target_eVA')) is not None
-                return (total - step) * (now - started) / (step - first), bound
-            return None
-        if self._task is not None:
+        if self._task is not None and self.status == 'running':
             done, total, _ = self._task
             started, first, _ = self._task_origin
             if first < done < total and now > started:
-                return (total - done) * (now - started) / (done - first), False
+                # an optimization with a force target may stop before its step budget
+                bound = (self.info.get('operation') == 'optimization'
+                         and _finite(self.info.get('opt_force_target_eVA')) is not None)
+                return (total - done) * (now - started) / (done - first), bound
         return None
 
     def _live_view(self):
@@ -452,20 +475,28 @@ class _Reporter:
         rows.extend((metadata, self._text('')))
         style = theme.status_style(self.status)
         glyph = theme.status_glyph(self.status) or theme.status_glyph('running')
-        if self.status == 'complete' and getattr(self, '_finish_level', 'success') != 'success':
-            glyph, style = VERDICTS[self._finish_level]
+        if self.status == 'complete' and self._finish_level != 'complete':
+            glyph, style = theme.status_glyph(self._finish_level), theme.status_style(self._finish_level)
         phase = self._text(f'{glyph} {self.phase_name}', f'bold {style}')
         if self.detail:
             phase.append(self._label(f'  {self.detail}'), style=theme.MUTED)
         rows.append(phase)
+        if self._task is not None:
+            done, total, unit = self._task
+            ratio = done / total if total else 0.0
+            bar = theme.bar(ratio, self._bar_width, self._ascii_only)
+            bar.append(f'  {ratio:.0%}', style=theme.STRONG)
+            bar.append(self._label(f'  {done:,}/{total:,} {unit}'), style=theme.MUTED)
+            rows.append(bar)
+            started, first, _ = self._task_origin
+            elapsed = time.monotonic() - started
+            timing = f'Elapsed {duration_label(elapsed)}'
+            eta = self._eta()
+            if eta is not None:  # the rate is measured, so elapsed > 0 here
+                seconds, bound = eta
+                timing += f" · ETA {'≤ ' if bound else ''}{duration_label(seconds)} · {(done - first) / elapsed:.3g} {unit}/s"
+            rows.append(self._text(timing, theme.MUTED))
         if self.info.get('operation') == 'optimization':
-            step, total = (_finite(self.info.get(key)) for key in ('opt_step', 'opt_total_steps'))
-            if step is not None and total is not None and total > 0:
-                ratio = max(0.0, min(1.0, step / total))
-                width = min(40, max(8, self.console.width - 40))
-                bar = theme.bar(ratio, width, self._ascii_only)
-                bar.append(f'  {int(step):,}/{int(total):,} optimization steps', style=theme.MUTED)
-                rows.append(bar)
             energy, force, target = (_finite(self.info.get(key)) for key in
                                     ('opt_energy_eV', 'opt_force_max_eVA', 'opt_force_target_eVA'))
             if energy is not None:
@@ -479,21 +510,6 @@ class _Reporter:
                 if outcome != 'Relaxing geometry':  # the phase row already says so
                     rows.append(self._text(outcome, theme.SUCCESS if outcome == 'Force criterion met' else theme.MUTED))
             plots_at = len(rows)
-        if self._task is not None:
-            done, total, unit = self._task
-            ratio = done / total if total else 0.0
-            width = min(40, max(8, self.console.width - 40))
-            bar = theme.bar(ratio, width, self._ascii_only)
-            bar.append(f'  {ratio:.0%}', style=theme.STRONG)
-            bar.append(self._label(f'  {done:,}/{total:,} {unit}'), style=theme.MUTED)
-            rows.append(bar)
-            started, first, _ = self._task_origin
-            elapsed = time.monotonic() - started
-            timing = f'Elapsed {duration_label(elapsed)}'
-            if self.status == 'running' and done > first and elapsed > 0:
-                rate = (done - first) / elapsed
-                timing += f' · ETA {duration_label((total - done) / rate)} · {rate:.3g} {unit}/s'
-            rows.append(self._text(timing, theme.MUTED))
         for title, items in self._results:
             rows.append(self._text(''))
             rows.append(self._text(title, theme.STRONG))
@@ -505,8 +521,7 @@ class _Reporter:
             rows.append(table)
         if self.started_at is not None:
             live = self._live_progress()
-            width = min(40, max(8, self.console.width - 40))
-            bar = theme.bar(live.ratio, width, self._ascii_only)
+            bar = theme.bar(live.ratio, self._bar_width, self._ascii_only)
             bar.append(f'  {live.ratio:.0%}', style=theme.STRONG)
             bar.append(f'  {live.completed:,}/{live.total:,} steps', style=theme.MUTED)
             rows.append(bar)
@@ -569,7 +584,7 @@ class _Reporter:
         self.console.print(self._text(line, theme.MUTED))
 
     def print_verdict(self, level, head, details):
-        glyph, color = VERDICTS[level]
+        glyph, color = theme.status_glyph(level), theme.status_style(level)
         line = self._text('')
         line.append(self._label(f'{glyph} {head}'), style=f'bold {color}')
         for detail in details:
@@ -667,21 +682,21 @@ class _Reporter:
         phase = (str(name), str(detail))
         if phase == (self.phase_name, self.detail):
             return
-        if name != self.phase_name:
-            self._task = None  # a progress bar belongs to the phase that reported it
+        if name != self.phase_name and self._task is not None and self._task[0] >= self._task[1]:
+            self._task = None  # a finished bar leaves with its phase; one in progress stays
         self.phase_name, self.detail = phase
         self._reported_at = time.monotonic()
         self._state.phase, self._state.detail = phase
         # Show the first potentially blocking preparation stage immediately;
         # repeated Running/Saving transitions share the normal refresh budget.
-        first_preparation = phase not in self._seen_phases and name in ('Loading', 'Compiling', 'Relaxing')
-        self._seen_phases.add(phase)
+        first_preparation = name in ('Loading', 'Compiling', 'Relaxing') and phase not in self._seen_phases
+        if first_preparation:
+            self._seen_phases.add(phase)
         self._refresh(force=first_preparation)
 
     def task_progress(self, done, total, unit):
         """Generic progress for non-MD work: structures evaluated, training steps, candidates."""
         now = time.monotonic()
-        # The clock and rate survive a phase that hides the bar (training's validations).
         origin = self._task_origin
         if origin is None or str(unit) != origin[2] or done < origin[1]:
             self._task_origin = (now, int(done), str(unit))
@@ -701,9 +716,6 @@ class _Reporter:
         self.requested.difference_update(kwargs)
         self._state.info.update({key: value for key, value in kwargs.items() if value is not None})
         self._state.record_optimization(kwargs)
-        step = _finite(kwargs.get('opt_step'))
-        if step is not None and (self._opt_origin is None or step < self._opt_origin[1]):
-            self._opt_origin = (self._reported_at, step)
         self._refresh()
 
     def start_md(self, start_step, total_steps, dt_fs):
@@ -713,6 +725,7 @@ class _Reporter:
         self.dt_fs = _finite(dt_fs)
         self.started_at = time.monotonic()
         self.time_per_step = self.temperature = self.potential_energy = None
+        self._task = None  # a relaxation's step bar
         self._observe('md_started', {'start_step': self.start_step, 'total_steps': self.total_steps, 'dt_fs': self.dt_fs})
         self._start_keyboard()
         self.phase('Simulating')
@@ -742,23 +755,18 @@ class _Reporter:
         self._observe('checkpoint', {'step': int(step), 'path': str(path)})
         self._refresh()
 
-    def finish(self, level='success'):
+    def finish(self, level='complete', reason=''):
         if self.status != 'running':
             return
         self.status = 'complete'
         # A run that finished without reaching its goal says so in amber, as its closing line does.
-        self.phase_name, self.detail = ('Complete', '') if level == 'success' else ('Finished', 'target not met')
+        self.phase_name, self.detail = ('Complete', '') if level == 'complete' else ('Finished', reason)
         self._finish_level = level
         self._observe('run_completed', {'message': 'Run completed successfully.'})
-        output_label = OUTPUT_LABELS.get(self.info.get('operation'), 'Trajectory')
-        for key, label in (('output_file', output_label), ('log_file', 'Log')):
-            path = self.settings.get(key)
+        for label, path in (_output_artifact(self.settings, self.info.get('operation')),
+                            ('Log', _existing(self.settings.get('log_file')))):
             if path:
-                try:
-                    if os.path.exists(path):  # a training run's output is its model directory
-                        self.artifacts.append((label, str(path)))
-                except (OSError, TypeError, ValueError):
-                    pass
+                self.artifacts.append((label, path))
         self._refresh(force=True)
 
     def fail(self, message, reason='error'):
@@ -810,7 +818,7 @@ class _RunReporter:
         # enabled continues to mean terminal rendering, not journal availability.
         self.enabled = renderer.enabled
         # Only MD and optimization keep a run journal and run-log blocks for so3lr show.
-        self.journal = EventJournal(settings) if record else _NoJournal()
+        self.journal = EventJournal(settings, enabled=record)
         try:
             self.run_log = RunLog(settings, self.journal) if record else _NoRunLog()
             if self.enabled:
@@ -837,6 +845,7 @@ class _RunReporter:
         self._task = None
         self._failure = None
         self._details, self._warning = {}, None
+        self.final = None  # (level, head, details) once finished or failed
 
     def __getattr__(self, name):
         # Keep the renderer's inspection surface (live/render/artifacts) usable.
@@ -856,6 +865,12 @@ class _RunReporter:
         self._drain_logs()
         self._task = (int(done), int(total), str(unit))
         self.renderer.task_progress(done, total, unit)
+
+    def _optimization_progress(self, info):
+        """An optimization's steps feed the shared progress bar, once its budget is known."""
+        step, total = _finite(info.get('opt_step')), _finite(self._info.get('opt_total_steps'))
+        if step is not None and total:
+            self.task_progress(step, total, 'optimization steps')
 
     def outcome(self, detail=None, *, key=None, warning=None):
         """Add to the closing line: a detail (replaced when its key comes again), or why the
@@ -883,33 +898,26 @@ class _RunReporter:
             if level == 'failed' and self.enabled and message:
                 details.append(str(message).splitlines()[0])
             return level, head, details
-        level, head = 'success', f'{name} finished in {elapsed}'
+        warning = self._warning
         if info.get('operation') == 'optimization':
             force, target = (_finite(info.get(key)) for key in ('opt_force_max_eVA', 'opt_force_target_eVA'))
-            if force is not None and target is not None and force > target:
-                level = 'warning'
-                head = f'{name} finished without meeting the force target in {elapsed}'
-                details.append(f'max force {force:.3g} > {target:g} eV/Å')
-            elif force is not None:
-                details.append(f'max force {force:.3g}' + (f' ≤ {target:g}' if target is not None else '') + ' eV/Å')
-            step = _finite(info.get('opt_step'))
-            if step is not None:
-                details.append(f'{int(step):,} steps')
-        if self._warning:
-            level, head = 'warning', f'{name} finished in {elapsed}: {self._warning}'
+            met = optimization_status(info, 'complete') == 'Force criterion met'
+            if target is not None and not met:
+                warning = warning or 'force target not met'
+            if force is not None:
+                relation = '' if target is None else f" {'≤' if met else '>'} {target:g}"
+                details.append(f'max force {force:.3g}{relation} eV/Å')
+        level = 'warning' if warning else 'complete'
+        head = f'{name} finished in {elapsed}' + (f': {warning}' if warning else '')
         if md:
             details.append(f'{self._last_step - (self._start_step or 0):,} steps')
         if self._task is not None:
             done, total, unit = self._task
             details.append(f'{done:,} {unit}' if done >= total else f'{done:,}/{total:,} {unit}')
         details.extend(self._details.values())
-        output = self._settings.get('output_file')
-        try:
-            if output and os.path.exists(output):
-                label = OUTPUT_LABELS.get(info.get('operation'), 'Trajectory').lower()
-                details.append(f'{label} {_display_path(output)}')
-        except (OSError, TypeError, ValueError):
-            pass
+        label, output = _output_artifact(self._settings, info.get('operation'))
+        if output:
+            details.append(f'{label.lower()} {_display_path(output)}')
         return level, head, details
 
     def results(self, title, rows):
@@ -922,6 +930,7 @@ class _RunReporter:
         self.journal.emit('info', kwargs)
         self.run_log.update_info(kwargs)
         self.renderer.update_info(**kwargs)
+        self._optimization_progress(kwargs)
 
     def logger_ready(self, log_file):
         self._drain_logs()
@@ -932,6 +941,7 @@ class _RunReporter:
         # Relaxation can share this reporter; MD must replace its operation
         # marker in both the journal and attached display before new samples.
         self.update_info(operation='md')
+        self._task = None
         self._start_step, self._dt_fs = int(start_step), _finite(dt_fs)
         self._total_steps = int(total_steps)
         self.journal.emit('md_started', {'start_step': self._start_step,
@@ -1060,7 +1070,9 @@ class _RunReporter:
         self.journal.emit('run_completed', {'message': 'Run completed successfully.'})
         if self.enabled and self.journal.active:
             self.renderer.artifacts.append(('Metrics', str(self.journal.path)))
-        self.renderer.finish(self.verdict()[0])
+        self.final = self.verdict()
+        level, head = self.final[:2]
+        self.renderer.finish(level, head.partition(': ')[2])
 
     def fail(self, message, *, display_message=None, reason='error'):
         """Record a failure; ``reason`` is 'interrupt' (Ctrl+C), 'signal' or 'error'."""
@@ -1069,6 +1081,7 @@ class _RunReporter:
                 return
             self.status = 'failed'
         self._failure = (message if display_message is None else display_message, reason)
+        self.final = self.verdict()
         self._drain_logs()
         self.run_log.finish('failed', str(message))
         self.journal.emit('run_failed', {'message': str(message), 'reason': reason})
@@ -1140,8 +1153,8 @@ def run_display(settings, *, record=True):
         finally:
             try:
                 reporter.close()
-                if reporter.status != 'running':
-                    renderer.print_verdict(*reporter.verdict())
+                if reporter.final is not None:
+                    renderer.print_verdict(*reporter.final)
                 # One place prints the hints, whichever way the error is reported later;
                 # plain runs get the traceback pointer from the CLI's error line instead.
                 for line in ([failure_detail] if failure_detail and reporter.enabled else []) + resume:

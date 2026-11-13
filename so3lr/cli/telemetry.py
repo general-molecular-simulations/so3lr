@@ -52,11 +52,12 @@ def json_value(value):
 class EventJournal:
     """A best-effort journal flushed at each host-side reporting boundary."""
 
-    def __init__(self, settings):
+    def __init__(self, settings, enabled=True):
         self.run_id = uuid.uuid4().hex
         # Requested policy is distinct from active IO: a failed journal should
         # not suppress a replay snapshot that can still be written separately.
-        self.enabled = os.environ.get('SO3LR_JOURNAL') != '0'
+        # Commands that so3lr show does not follow (eval, training) pass enabled=False.
+        self.enabled = enabled and os.environ.get('SO3LR_JOURNAL') != '0'
         self.path = None
         self.seq = 0
         self._stream = None

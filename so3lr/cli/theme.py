@@ -34,6 +34,7 @@ STATUS = {
     'completed': ('✓', SUCCESS),
     'failed': ('✕', DANGER),
     'interrupted': ('■', WARNING),
+    'warning': ('!', WARNING),       # finished without reaching its goal
     'stale?': ('◌', WARNING),
     'read error': ('✕', DANGER),
 }

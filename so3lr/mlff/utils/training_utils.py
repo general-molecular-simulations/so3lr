@@ -274,12 +274,12 @@ def _reporter():
 
 
 def _report_step(reporter, step, start_step, epoch, num_epochs):
-    """Phase and epoch bar on the live display; the first step compiles."""
+    """The phase on the live display: the first step compiles. A repeated phase costs nothing;
+    the epoch bar moves at epoch ends."""
     if step == start_step:
         reporter.phase('Compiling', 'The first training step')
-        return
-    reporter.phase('Training', f'Epoch {epoch + 1:,} of {num_epochs:,} · step {step:,}')
-    reporter.task_progress(epoch, num_epochs, 'epochs')
+    else:
+        reporter.phase('Training', f'Epoch {epoch + 1:,} of {num_epochs:,}')
 
 
 def _report_validation(step, epoch, eval_metrics):
@@ -1371,6 +1371,7 @@ def fit(
 
     start_step = step
     reporter = _reporter()
+    reporter.task_progress(0, num_epochs, 'epochs')
     for epoch in range(num_epochs):
         # Switch to the stage-two loss at the configured epoch boundary.
         if (stage_two_start_epoch is not None and stage_two_loss_fn is not None
@@ -1471,7 +1472,7 @@ def fit(
             if step % eval_every_num_steps == 0:
                 # Validate the deployed weights (the EMA copy when EMA is on).
                 eval_params = ema_params if use_ema else params
-                reporter.phase('Training', f'Validating at step {step:,}')  # keeps the epoch bar
+                reporter.phase('Validating', f'Step {step:,}')
                 eval_metrics = _validation_metrics(
                     validation_step_fn, eval_params, validation_batches(), graph_to_batch_fn)
                 _log_and_checkpoint(ckpt_mngr, step, epoch, eval_params, eval_metrics,
@@ -1769,6 +1770,7 @@ def fit_from_iterator(
 
     reporter = _reporter()
     start_step = step
+    reporter.task_progress(start_epoch, num_epochs, 'epochs')
     for epoch in range(start_epoch, num_epochs):
         if stop_training:
             logger.info(
@@ -1879,7 +1881,7 @@ def fit_from_iterator(
             if step % eval_every_num_steps == 0:
                 # Use the EMA (deployed) weights for validation when enabled.
                 eval_params = ema_params if use_ema else params
-                reporter.phase('Training', f'Validating at step {step:,}')  # keeps the epoch bar
+                reporter.phase('Validating', f'Step {step:,}')
                 # Start iteration over validation batches.
                 eval_totals = {}
                 eval_counts = {}

@@ -13,11 +13,13 @@ import sys
 import threading
 import time
 
+from .terminal import SCHEDULER_VARIABLES
+
 RELEASES_URL = 'https://api.github.com/repos/general-molecular-simulations/so3lr/releases/latest'
 UPGRADE_HINT = 'pip install -U git+https://github.com/general-molecular-simulations/so3lr.git'
 CHECK_EVERY = 24 * 3600     # seconds between network checks
 TIMEOUT = 2.0               # seconds for one request
-_BATCH_VARIABLES = ('SLURM_JOB_ID', 'SLURM_JOBID', 'PBS_JOBID', 'LSB_JOBID', 'JOB_ID', 'COBALT_JOBID', 'CI')
+_BATCH_VARIABLES = (*SCHEDULER_VARIABLES, 'CI')
 
 
 def cache_path(environ=None):
@@ -72,15 +74,25 @@ def refresh(path=None, now=None, fetch=_fetch):
     checked = cached.get('checked_at')
     if isinstance(checked, (int, float)) and now - checked < CHECK_EVERY:
         return
+    tag = cached.get('latest', '')
+    # Claim the day before the request: a short command can exit while it is in
+    # flight (the thread is a daemon), and must not make every next command ask again.
+    if not _write(path, now, tag):
+        return
     try:
         tag = fetch()
     except Exception:
-        tag = cached.get('latest', '')  # offline or rate-limited: try again tomorrow
+        return  # offline or rate-limited: try again tomorrow
+    _write(path, now, tag)
+
+
+def _write(path, now, tag):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({'checked_at': now, 'latest': tag}))
+        return True
     except OSError:
-        pass
+        return False
 
 
 def start_refresh(path=None):

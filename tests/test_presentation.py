@@ -1303,7 +1303,7 @@ def test_initialization_failure_restores_started_terminal(monkeypatch, error):
         created.append(item)
         return item
 
-    def fail(settings):
+    def fail(settings, **_):
         raise error
 
     monkeypatch.setattr(ui, '_Reporter', renderer)
@@ -1323,7 +1323,7 @@ def test_interrupted_run_log_initialization_closes_its_journal(monkeypatch):
     ui.configure(display='rich')
     original, journals = ui.EventJournal, []
 
-    def journal(settings):
+    def journal(settings, **_):
         item = original(settings)
         journals.append(item)
         return item
@@ -1547,7 +1547,10 @@ def test_task_progress_and_results_render_without_a_run_journal(monkeypatch, tmp
         text = render(reporter)
         assert text.count('Timing') == 1 and 'Evaluation  2.000 s' in text
         reporter.phase('Saving', 'Writing predictions')
-        assert 'structures' not in render(reporter)  # a bar belongs to the phase that reported it
+        assert '5/20 structures' in render(reporter)  # unfinished work keeps its bar
+        reporter.task_progress(20, 20, 'structures')
+        reporter.phase('Done')
+        assert 'structures' not in render(reporter)  # a finished bar leaves with its phase
     assert reporter.journal.path is None
     assert reporter.artifacts == [('Log', str(log))]
     assert sorted(path.name for path in tmp_path.iterdir()) == ['eval.log']
@@ -1603,12 +1606,12 @@ def test_closing_line_summarizes_md_and_names_the_output(monkeypatch, tmp_path):
         reporter.start_md(1000, 200, 0.5)
         reporter.progress(1200, temperature=300.0, potential_energy=-1.0)
     level, head, details = reporter.verdict()
-    assert (level, head) == ('success', 'MD finished in 00:00')
+    assert (level, head) == ('complete', 'MD finished in 00:00')
     assert details == ['200 steps', 'trajectory water.xyz']  # relative to the working directory
     assert _plain_lines(output)[-1] == '✓ MD finished in 00:00 · 200 steps · trajectory water.xyz'
 
 
-@pytest.mark.parametrize('force,level', [(0.004, 'success'), (0.02, 'warning')])
+@pytest.mark.parametrize('force,level', [(0.004, 'complete'), (0.02, 'warning')])
 def test_optimization_is_green_only_when_the_force_target_is_met(monkeypatch, force, level):
     monkeypatch.setattr(sys, 'stderr', io.StringIO())
     ui.configure(display='plain')
@@ -1617,8 +1620,8 @@ def test_optimization_is_green_only_when_the_force_target_is_met(monkeypatch, fo
                              opt_energy_eV=-1.0, opt_force_max_eVA=force, opt_force_target_eVA=0.005)
     verdict = reporter.verdict()
     assert verdict[0] == level
-    assert ('without meeting the force target' in verdict[1]) is (level == 'warning')
-    assert '400 steps' in verdict[2]
+    assert verdict[1].endswith('force target not met') is (level == 'warning')
+    assert '400 optimization steps' in verdict[2]
 
 
 def test_commands_add_details_and_warnings_to_the_closing_line(monkeypatch):
@@ -1629,7 +1632,7 @@ def test_commands_add_details_and_warnings_to_the_closing_line(monkeypatch):
         reporter.task_progress(6, 6, 'epochs')
         reporter.outcome('validation loss 0.1', key='validation')
         reporter.outcome('validation loss 0.01', key='validation')  # replaced, not repeated
-    assert reporter.verdict() == ('success', 'Training finished in 00:00', ['6 epochs', 'validation loss 0.01'])
+    assert reporter.verdict() == ('complete', 'Training finished in 00:00', ['6 epochs', 'validation loss 0.01'])
     with ui.run_display({}, record=False) as reporter:
         reporter.update_info(operation='tuning')
         reporter.outcome('smallest force error 0.02 eV/Å', warning='no candidate meets the 0.001 eV/Å target')

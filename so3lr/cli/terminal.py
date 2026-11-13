@@ -3,6 +3,10 @@ from contextlib import contextmanager
 import signal
 import threading
 
+# Set inside batch-scheduler jobs: no prompts, no network checks there.
+SCHEDULER_VARIABLES = ('SLURM_JOB_ID', 'SLURM_JOBID', 'PBS_JOBID', 'LSB_JOBID',
+                       'JOB_ID', 'COBALT_JOBID')
+
 
 class TerminationSignal(BaseException):
     def __init__(self, number):

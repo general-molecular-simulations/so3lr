@@ -1361,11 +1361,14 @@ def prepare_training_and_validation_data(config, loader, tf_record_present,
         test_indices = np.sort(all_indices[(num_train + num_valid):])
 
         # Cutoff is in Angstrom, so we have to divide the cutoff by the length unit.
+        from so3lr.cli.presentation import get_reporter, reading_progress
+        get_reporter().phase('Loading', 'Reading the dataset and building neighbour lists')
         training_and_validation_data, data_stats = loader.load(
             cutoff=model_config.cutoff / length_unit,
             cutoff_lr=config.data.neighbors_lr_cutoff / length_unit if config.data.neighbors_lr_bool is True else None,
             calculate_neighbors_lr=config.data.neighbors_lr_bool,
-            pick_idx=training_and_validation_indices
+            pick_idx=training_and_validation_indices,
+            progress=reading_progress(num_data),
         )
         # Since the training and validation indices are sorted, the index i at the n-th entry in
         # training_and_validation_indices corresponds to the n-th entry in training_and_validation_data which is
