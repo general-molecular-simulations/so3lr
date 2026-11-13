@@ -408,7 +408,7 @@ class _Reporter:
             step, path = self.saved
             rows.append(self._text(f'Checkpoint step {step:,} · {_display_path(path)}', theme.MUTED))
         for label, path in self.artifacts:
-            rows.append(self._text(f'{label} · {path}', theme.MUTED))
+            rows.append(self._text(f'{label} · {_display_path(path)}', theme.MUTED))
         hint = None
         if self.info.get('operation') == 'optimization' and self.status != 'running':
             from .monitor import _controls

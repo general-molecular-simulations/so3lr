@@ -24,11 +24,14 @@ def structure_file(tmp_path):
     return path
 
 
-def answers(source, output, action='2', *, ensemble='1', duration='5', frame='0.05'):
-    # Path source, path, dynamics, model, temperature, duration, frame interval,
-    # charge, unpaired electrons, output directory, review action.
-    return '\n'.join([str(len(setup.available_presets()) + 2), str(source), ensemble, '1', '300', duration, frame,
-                      '0', '0', str(output), action]) + '\n'
+MD = '1'  # first menu: Run molecular dynamics
+
+
+def answers(source, output, action='2', *, ensemble='1', duration='5', frame='0.05', task=True):
+    # Task, path source, path, dynamics, model, temperature, duration, frame
+    # interval, charge, unpaired electrons, output directory, review action.
+    return '\n'.join([*([MD] if task else []), str(len(setup.available_presets()) + 2), str(source), ensemble,
+                      '1', '300', duration, frame, '0', '0', str(output), action]) + '\n'
 
 
 def edit(group, *values):
@@ -112,7 +115,7 @@ def test_npt_setup_proposes_margin_and_retries_an_unsafe_custom_cutoff(tmp_path,
     source.write_text('2\nLattice="24 0 0 0 24 0 0 0 24" pbc="T T T"\nH 0 0 0\nH 0 0 .74\n')
     destination = tmp_path / 'npt-margin'
     # NPT with defaults, then edit the cutoff: 12 Å is unsafe, Enter accepts the proposal.
-    text = '\n'.join([str(len(setup.available_presets()) + 2), str(source),
+    text = '\n'.join([MD, str(len(setup.available_presets()) + 2), str(source),
                       '4', '1', '300', '1', '0.01', '0.005', '0', '0', str(destination),
                       *edit('Long-range cutoff', '12', ''), '2']) + '\n'
     result = CliRunner().invoke(wizard, input=text)
@@ -194,7 +197,7 @@ def test_invalid_structure_retries_before_dynamics(tmp_path, structure_file, mon
         setup.inspect_structure(invalid)
     path_choice = str(len(setup.available_presets()) + 2)
     destination = tmp_path / 'valid-run'
-    text = '\n'.join([path_choice, str(invalid)]) + '\n' + answers(structure_file, destination)
+    text = '\n'.join([MD, path_choice, str(invalid)]) + '\n' + answers(structure_file, destination, task=False)
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
     assert message in result.output
@@ -593,7 +596,7 @@ def test_manual_water_input_reviews_pme_and_explicit_velocity_choice(tmp_path, m
     destination = tmp_path / 'water'
     # Manual path, NPT, default model, target T, velocity decision, pressure,
     # duration, frame interval, charge, spin, directory; then edit the cutoff and start.
-    text = '\n'.join([str(len(setup.available_presets()) + 2), str(source),
+    text = '\n'.join([MD, str(len(setup.available_presets()) + 2), str(source),
                       '4', '1', '300', '2' if retain else '1', '1',
                       '0.01', '0.005', '0', '0', str(destination),
                       *edit('Long-range cutoff', '5.5'), '1']) + '\n'
@@ -619,7 +622,7 @@ def test_dha_example_is_a_gas_phase_molecule_copied_unchanged(tmp_path, monkeypa
     monkeypatch.setattr(setup, '_interactive', lambda: True)
     source = dict((path.name, path) for _, path in setup.available_presets())['dha.xyz']
     destination = tmp_path / 'dha'
-    text = '\n'.join(['2', '1', '1', '300', '0.01', '0.005', '0', '0', str(destination), '1']) + '\n'
+    text = '\n'.join([MD, '2', '1', '1', '300', '0.01', '0.005', '0', '0', str(destination), '1']) + '\n'
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
     assert 'boundary' not in result.output.lower().split('review and start')[0]
@@ -722,7 +725,7 @@ def test_wizard_defaults_to_recorded_charge_and_rejects_impossible_parity(tmp_pa
     # Path, NVT, model, T, dt, duration, cadence; accept recorded charge -1 and
     # multiplicity 1; then try charge 0 with no unpaired electron, refuse to
     # keep it, and fall back to the recorded values.
-    text = '\n'.join([str(len(setup.available_presets()) + 2), str(source), '1', '1', '300', '5', '0.05',
+    text = '\n'.join([MD, str(len(setup.available_presets()) + 2), str(source), '1', '1', '300', '5', '0.05',
                       '0', '', 'n', '-1', '0', str(destination), '2']) + '\n'
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
@@ -747,7 +750,7 @@ def test_example_preset_exports_a_single_frame_without_a_frame_menu(tmp_path, mo
     monkeypatch.setattr(setup, '_interactive', lambda: True)
     preset = str(1 + [path.name for _, path in presets].index('ala4.xyz'))
     destination = tmp_path / 'ala4'
-    text = '\n'.join([preset, '1', '1', '300', '5', '0.05', '0', '0', str(destination), '2']) + '\n'
+    text = '\n'.join([MD, preset, '1', '1', '300', '5', '0.05', '0', '0', str(destination), '2']) + '\n'
     result = CliRunner().invoke(wizard, input=text)
     assert result.exit_code == 0, result.output
     assert 'choose the frame to copy' not in result.output
@@ -794,7 +797,7 @@ def test_first_pass_uses_advanced_defaults_and_review_edits_one_group(tmp_path, 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(setup, '_interactive', lambda: True)
     destination = tmp_path / 'edited'
-    text = '\n'.join([str(len(setup.available_presets()) + 2), str(structure_file), '1', '1', '300', '5', '0.05',
+    text = '\n'.join([MD, str(len(setup.available_presets()) + 2), str(structure_file), '1', '1', '300', '5', '0.05',
                       '0', '0', str(destination),
                       *edit('Seed and initial relaxation', '7', 'n'),
                       *edit('Timestep', '0.25'),
@@ -840,7 +843,7 @@ def test_editing_temperature_keeps_this_drafts_pressure_and_velocity_choice(tmp_
     destination = tmp_path / 'water'
     # NPT, retain velocities, 500 bar; then edit only the temperature, pressing
     # Enter for the velocity choice and the pressure.
-    text = '\n'.join([str(len(setup.available_presets()) + 2), str(source),
+    text = '\n'.join([MD, str(len(setup.available_presets()) + 2), str(source),
                       '4', '1', '300', '2', '500', '0.01', '0.005', '0', '0', str(destination),
                       *edit('Temperature and pressure', '310', '', ''), '2']) + '\n'
     result = CliRunner().invoke(wizard, input=text)

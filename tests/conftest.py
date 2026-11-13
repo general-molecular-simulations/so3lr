@@ -168,6 +168,12 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
+def _no_update_check_by_default(monkeypatch):
+    # Tests never contact GitHub.
+    monkeypatch.setenv('SO3LR_NO_UPDATE_CHECK', '1')
+
+
+@pytest.fixture(autouse=True)
 def _restore_so3lr_logger():
     """Give every test the "SO3LR" logger it found.
 

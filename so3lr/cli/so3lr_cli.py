@@ -820,7 +820,24 @@ def load_md_settings(settings, *, loaded_settings=None):
 
 def _interactive_setup():
     from .setup import launch_setup
+    from .setup_tasks import Action
     settings_path = launch_setup()
+    if isinstance(settings_path, Action):
+        if settings_path.kind == 'show':
+            from .monitor import show
+            show(Path(settings_path.argv[0]))
+            return
+        # A saved evaluation: run the same command its run.sh holds, from its folder.
+        previous = Path.cwd()
+        try:
+            os.chdir(settings_path.directory)
+            command = cli.commands[settings_path.argv[0]]
+            with command.make_context(settings_path.argv[0], list(settings_path.argv[1:]),
+                                      parent=click.get_current_context(silent=True)) as context:
+                command.invoke(context)
+        finally:
+            os.chdir(previous)
+        return
     if settings_path is not None:
         # A generated bundle uses relative paths, just like its run.sh. Restore
         # the caller's cwd even when initialization or the simulation fails.
@@ -832,7 +849,7 @@ def _interactive_setup():
             os.chdir(previous)
 
 
-@cli.command(name='start', help='Prepare an MD run interactively and save settings.yaml plus run.sh.',
+@cli.command(name='start', help='Set up MD, optimization or evaluation interactively; saves settings.yaml or run.sh in a new run folder.',
              context_settings={'help_option_names': ['--help', '-h']})
 def start_command():
     _interactive_setup()
@@ -1962,6 +1979,23 @@ def main() -> None:
     """Entry point for the command line interface."""
     os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2') # Suppress TF logging
 
+    from . import updates
+    # The update check never delays a command: a background thread refreshes a
+    # daily cache, and a newer release is announced when a command succeeds.
+    check_updates = updates.allowed(quiet=bool({'-q', '--quiet'} & set(sys.argv[1:])))
+    if check_updates:
+        updates.start_refresh()
+    try:
+        _run_cli()
+    except SystemExit as exit_:
+        if check_updates and exit_.code in (None, 0):
+            message = updates.notice(__version__)
+            if message:
+                click.secho(message, err=True, dim=True)
+        raise
+
+
+def _run_cli() -> None:
     # Standalone mode: click prints a usage error (missing file, bad choice,
     # unknown flag) as one line and exits 2, instead of raising a traceback.
     try:
