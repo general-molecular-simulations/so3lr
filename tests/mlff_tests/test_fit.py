@@ -10,6 +10,7 @@ from ase import units
 
 from so3lr.mlff import jraph_utils, training_utils
 from so3lr.mlff.data import NpzDataLoaderSparse, transformations
+from so3lr.mlff.utils import checkpoint_utils
 from so3lr.mlff.nn import SO3kratesSparse
 from so3lr.mlff.nn.stacknet.observable_function_sparse import get_energy_and_force_fn_sparse
 
@@ -67,17 +68,19 @@ def _loss(model, energy=0.001, forces=0.999):
         get_energy_and_force_fn_sparse(model), weights={'energy': energy, 'forces': forces})
 
 
+# Two ethanol frames per batch.
+_BATCH_LIMITS = dict(batch_max_num_nodes=9 + 9 + 1, batch_max_num_edges=72 + 72 + 1,
+                     batch_max_num_graphs=3, batch_max_num_pairs=100)
+
+
 def _fit(ckpt_dir, model, loss_fn, data, **kwargs):
-    """fit() on (training, validation) with the batch limits these tests share
-    (two ethanol frames per batch)."""
+    """fit() on (training, validation) with the shared _BATCH_LIMITS."""
     training_data, validation_data = data
     kwargs = {'optimizer': optax.adam(learning_rate=1e-3), 'num_epochs': 2,
               'eval_every_num_steps': 10, **kwargs}
     training_utils.fit(
         model=model, loss_fn=loss_fn, graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
-        batch_max_num_edges=72 + 72 + 1, batch_max_num_nodes=9 + 9 + 1,
-        batch_max_num_graphs=3, batch_max_num_pairs=100,
-        training_data=training_data, validation_data=validation_data,
+        **_BATCH_LIMITS, training_data=training_data, validation_data=validation_data,
         ckpt_dir=ckpt_dir, allow_restart=False, use_wandb=False, **kwargs)
 
 
@@ -98,6 +101,47 @@ def test_fit_saves_the_final_weights(tmp_path, ethanol_frames):
     _fit(tmp_path / 'checkpoints', model, _loss(model), _ethanol(ethanol_frames, 15, 5),
          num_epochs=1, eval_every_num_steps=10_000)
     assert any((tmp_path / 'checkpoints').iterdir())
+
+
+class _Epochs:
+    """The next_epoch() interface fit_from_iterator reads, batching in-memory
+    frames with _BATCH_LIMITS."""
+
+    def __init__(self, frames):
+        self.frames = frames
+
+    def next_epoch(self, split, mode, epoch_index=None):
+        return jraph_utils.dynamically_batch_with_lr(
+            iter(self.frames), n_node=_BATCH_LIMITS['batch_max_num_nodes'],
+            n_edge=_BATCH_LIMITS['batch_max_num_edges'],
+            n_graph=_BATCH_LIMITS['batch_max_num_graphs'],
+            n_pairs=_BATCH_LIMITS['batch_max_num_pairs'])
+
+
+def test_fit_from_iterator_saves_the_final_weights(tmp_path, ethanol_frames):
+    """fit_from_iterator() (the TFDS path) also validates and saves the last
+    step, with the training state a resume needs. 15 frames make 8 steps per
+    epoch, so evaluating every 5 steps used to leave the last checkpoint at
+    step 5. The resume from that final save is checked against uninterrupted
+    training in test_tfds_pipeline_logic.py."""
+    model = _so3krates()
+    loss_fn = _loss(model)
+    training, validation = _ethanol(ethanol_frames, 15, 5)
+    ckpt_dir = tmp_path / 'checkpoints'
+    training_utils.fit_from_iterator(
+        model=model, optimizer=optax.adam(learning_rate=1e-3), loss_fn=loss_fn,
+        val_fn=loss_fn, graph_to_batch_fn=jraph_utils.graph_to_batch_fn,
+        training_iterator=_Epochs(training), validation_iterator=_Epochs(validation),
+        **_BATCH_LIMITS, num_epochs=1, ckpt_dir=ckpt_dir,
+        ckpt_manager_options={'max_to_keep': 10}, eval_every_num_steps=5, use_wandb=False)
+
+    manager = checkpoint_utils.make_training_checkpoint_manager(ckpt_dir)
+    assert list(manager.all_steps()) == [5, 8]
+    state = training_utils._restore_tfds_training_state(
+        manager, step=8, optimizer=optax.adam(learning_rate=1e-3))
+    manager.close()
+    assert (state['checkpoint_step'], state['epoch'], state['batches_consumed'],
+            state['processed_graphs']) == (8, 0, 8, 15)
 
 
 def test_fit_early_stopping(tmp_path, caplog, ethanol_frames):

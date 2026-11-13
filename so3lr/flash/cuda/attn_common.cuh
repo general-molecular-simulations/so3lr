@@ -151,6 +151,31 @@ __device__ __forceinline__ void dylm(int m, float x, float y, float z, float& gx
   }
 }
 
+// a neighbour-row entry (engine._edge): the partner, and with KS > 0 (the short range over
+// the periodic images) its image's shift in boxes per axis, packed as b (2 KS + 1)^3 + code
+__device__ __forceinline__ int edge_atom(int v, int KS) {
+  const int W = 2 * KS + 1;
+  return KS ? v / (W * W * W) : v;
+}
+// v's displacement from atom a: the minimum image, or (KS) the shifted image of positions
+// wrapped into the box (engine._pos3)
+__device__ __forceinline__ void edge_disp(const double* px, const double* py, const double* pz, int a, int v,
+                                          int KS, double Lx, double Ly, double Lz, double& dx, double& dy,
+                                          double& dz) {
+  const int b = edge_atom(v, KS);
+  dx = px[b] - px[a]; dy = py[b] - py[a]; dz = pz[b] - pz[a];
+  if (KS) {
+    const int W = 2 * KS + 1, code = v - b * W * W * W;
+    dx += (code % W - KS) * Lx;
+    dy += ((code / W) % W - KS) * Ly;
+    dz += (code / (W * W) - KS) * Lz;
+  } else {
+    dx -= Lx * floor(dx * (1.0 / Lx) + 0.5);
+    dy -= Ly * floor(dy * (1.0 / Ly) + 0.5);
+    dz -= Lz * floor(dz * (1.0 / Lz) + 0.5);
+  }
+}
+
 // the pipelines' named barriers (producer / consumer warps) and the persistent tile loop
 __device__ __forceinline__ void bar_sync(int id, int n) { asm volatile("bar.sync %0, %1;" ::"r"(id), "r"(n) : "memory"); }
 __device__ __forceinline__ void bar_arrive(int id, int n) { asm volatile("bar.arrive %0, %1;" ::"r"(id), "r"(n) : "memory"); }

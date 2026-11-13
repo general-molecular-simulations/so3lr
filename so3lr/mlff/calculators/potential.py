@@ -11,13 +11,12 @@ from typing import Any, Callable, Type, Dict, Sequence, Optional
 from glp.graph import Graph
 
 from ...pbc import lattice_rows
-from ..utils.checkpoint_utils import load_params_pkl
+from ..utils.checkpoint_utils import load_params_from_checkpoint, load_params_pkl
 from ..utils.training_utils import expand_observables_to_theory_levels
 from ..nn.stacknet.observable_function_sparse import get_observable_fn_sparse
 from ..nn.observable.dispersion_ref_data import supported_atomic_numbers_for_config
 from ml_collections import config_dict
 from ..config import from_config
-from orbax import checkpoint
 
 
 def cast_float_params(params, dtype):
@@ -140,22 +139,7 @@ def load_model_from_workdir(
     if from_file is True:
         params = load_params_pkl(pathlib.Path(workdir) / 'params.pkl')
     else:
-        loaded_mngr = checkpoint.CheckpointManager(
-            pathlib.Path(workdir) / "checkpoints",
-            item_names=('params',),
-            item_handlers={'params': checkpoint.StandardCheckpointHandler()},
-            options=checkpoint.CheckpointManagerOptions(step_prefix="ckpt"),
-        )
-
-        mngr_state = loaded_mngr.restore(
-            loaded_mngr.latest_step(),
-            args=checkpoint.args.Composite(
-                params=checkpoint.args.StandardRestore()
-            ),
-        )
-
-        params = mngr_state.get('params')
-        loaded_mngr.close()
+        params = load_params_from_checkpoint(pathlib.Path(workdir) / 'checkpoints')
 
     if model == 'so3krates':
         net = from_config.make_so3krates_sparse_from_config(

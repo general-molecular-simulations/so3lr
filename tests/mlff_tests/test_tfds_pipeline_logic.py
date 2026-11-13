@@ -141,10 +141,13 @@ def test_atomic_training_state_round_trip(tmp_path, masked_sgd, legacy_fingerpri
         stage_two_active=True,
         header_printed=True,
         use_ema=True,
+        num_devices=4,
     )
     if legacy_fingerprint:
-        # Checkpoints written by earlier versions carry a 32-byte digest leaf.
+        # Checkpoints written by earlier versions carry a 32-byte digest leaf
+        # and no device count.
         state['restart_fingerprint'] = np.arange(32, dtype=np.uint8)
+        del state['num_devices']
     manager = checkpoint_utils.make_training_checkpoint_manager(tmp_path)
     assert manager.save(
         120,
@@ -175,6 +178,7 @@ def test_atomic_training_state_round_trip(tmp_path, masked_sgd, legacy_fingerpri
     assert restored['plateau_active']
     assert restored['stage_two_active']
     assert restored['header_printed']
+    assert restored.get('num_devices') == (None if legacy_fingerprint else 4)
     npt.assert_array_equal(restored['jax_rng'], jax.random.PRNGKey(7))
     manager.close()
 
@@ -197,6 +201,13 @@ def test_params_only_checkpoint_has_no_training_state(tmp_path):
 
     loaded = checkpoint_utils.load_params_from_checkpoint(tmp_path)
     assert float(loaded['w']) == pytest.approx(1.0)
+
+    # With no saved loss to rank by, inference loads the latest checkpoint.
+    manager = checkpoint_utils.make_checkpoint_manager(tmp_path)
+    manager.save(5, args=ocp.args.Composite(params=ocp.args.StandardSave({'w': jnp.array(2.0)})))
+    manager.wait_until_finished()
+    manager.close()
+    assert float(checkpoint_utils.load_params_from_checkpoint(tmp_path)['w']) == pytest.approx(2.0)
 
     training_manager = checkpoint_utils.make_training_checkpoint_manager(tmp_path)
     assert _restore_tfds_training_state(
@@ -226,9 +237,13 @@ def test_composite_checkpoint_prunes_params_and_training_state_together(tmp_path
     assert (tmp_path / 'ckpt_2' / 'training_state').is_dir()
 
 
+@pytest.mark.parametrize('eval_every', [1, 3])
 def test_fit_from_iterator_restart_matches_uninterrupted_updates(
-        tmp_path, monkeypatch):
-    """A stop at an epoch checkpoint must not alter the next optimizer step."""
+        tmp_path, monkeypatch, eval_every):
+    """A stop at an epoch checkpoint must not alter the next optimizer step.
+
+    With eval_every=3 the first epoch's two steps reach no multiple, so the
+    checkpoint the restart resumes from is the final save after the loop."""
 
     class FiniteIterator:
         def __init__(self, values):
@@ -293,8 +308,10 @@ def test_fit_from_iterator_restart_matches_uninterrupted_updates(
             batch_max_num_pairs=0,
             num_epochs=epochs,
             ckpt_dir=checkpoint_dir,
-            ckpt_manager_options={'max_to_keep': 10},
-            eval_every_num_steps=1,
+            # The validation loss rises every step, so the newest checkpoint is
+            # never the best one: the restart must still resume from it.
+            ckpt_manager_options={'max_to_keep': 1},
+            eval_every_num_steps=eval_every,
             allow_restart=allow_restart,
             use_wandb=False,
             use_ema=True,

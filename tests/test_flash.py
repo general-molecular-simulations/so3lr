@@ -2,7 +2,7 @@
 (NVIDIA, AMD Instinct) the engine against the neighbour-list potential.
 
 Without a GPU: PME's mesh part and its strain derivative against jaxpme, the real-space
-tables against so3lr_dev's pair functions, the reasons the engine choice gives (every
+tables against so3lr's pair functions, the reasons the engine choice gives (every
 settings key and model hyperparameter classified), the box free space runs in,
 ``so3lr nvt`` logging the engine it picked and, falling back to the neighbour-list
 potential, why, and the MD driver around a stand-in for the engine (PySAGES runs as
@@ -118,7 +118,7 @@ def test_pme_dispersion_matches_jaxpme():
 
 @pytest.mark.parametrize("smearing", [None, 2.0])
 def test_electrostatic_table(smearing):
-    """The tabulated pair function against so3lr_dev's, with and without PME."""
+    """The tabulated pair function against so3lr's, with and without PME."""
     from so3lr.mlff.nn.observable import observable_sparse as O
     rc, sigma = 10.0, 4.0
     phi, dphi, _ = E._phi_table(rc, sigma, 16384, smearing=smearing)
@@ -136,7 +136,7 @@ def test_electrostatic_table(smearing):
 
 def test_electrostatic_far_field():
     """A 1000 A cutoff (the gas phase's): the table out to 8 sigma, and past it the closed
-    form the long-range kernel takes (_far_field), give so3lr_dev's pair function and its
+    form the long-range kernel takes (_far_field), give so3lr's pair function and its
     derivative, and meet at the table's end; below 0.45 rc the closed form without its
     switching function is the same."""
     from so3lr.mlff.nn.observable import observable_sparse as O
@@ -175,7 +175,7 @@ def test_c6_mesh_table():
 
 
 def test_legacy_pieces_match_so3lr():
-    """The legacy so3lr's own pieces against so3lr_dev's modules (float64): LayerNorm, the
+    """The legacy so3lr's own pieces against the current so3lr modules (float64): LayerNorm, the
     Hirshfeld-ratio head, and the learnable ZBL repulsion from the repulsion kernel's tables."""
     import flax.linen as nn
     from so3lr.flash import blocks
@@ -271,8 +271,13 @@ def test_fixed_atoms_after_a_restart():
 
 
 def test_engine_choice_small_box(monkeypatch):
+    """A box under 2 x the cutoffs runs on flash (over the periodic images); one a
+    long-range cutoff far beyond it would make the images' walk too long for does not."""
     monkeypatch.setattr(check, "device_problem", lambda: None)
-    assert "narrower than twice the cutoff" in check.flash_problem(SETTINGS, _water((1, 1, 1)))
+    tiny = _water((1, 1, 1))[:3]
+    tiny.set_cell(np.eye(3) * 4.0)
+    assert check.flash_problem(SETTINGS, tiny) is None
+    assert "too small for its cutoffs" in check.flash_problem(dict(SETTINGS, lr_cutoff=1000.0), _water((1, 1, 1)))
 
 
 @pytest.mark.parametrize("task,change,reason", [
@@ -376,23 +381,40 @@ def test_model_architecture_check(tmp_path, model, edit, reason):
 
 
 def test_cell_grid_takes_every_box_from_the_smallest():
-    """Every cubic box from the smallest the grid takes on is accepted (cells rc wide where
-    they leave enough per side, wider ones where not); a large box keeps rc-wide cells."""
+    """Every cubic box from the smallest the minimum image's grid takes on is accepted
+    there (cells rc wide where they leave enough per side, wider ones where not); a large
+    box keeps rc-wide cells. Below it the periodic images' grid takes every box, the short
+    range over the images too under 2 rc, and only where the minimum image's has none."""
     for rc, lr, smallest in [(4.5, 10.0, 25.0), (4.5, 12.0, 30.0), (5.0, 12.0, 30.0)]:
-        assert check.box_problem([smallest - 0.1] * 3, rc, lr) is not None
+        assert check.box_problem([smallest - 0.1] * 3, rc, lr, images=False) is not None
         for L in np.arange(smallest, 60.0, 0.1):
+            assert check.box_problem([L] * 3, rc, lr, images=False) is None, (rc, lr, L)
+            assert check.layout([L] * 3, rc, lr)[2:] == (False, 0)
+        for L in np.arange(1.0, smallest, 0.1):
             assert check.box_problem([L] * 3, rc, lr) is None, (rc, lr, L)
+            nc, kc, images, ks = check.layout([L] * 3, rc, lr)
+            w = L / nc[0]
+            assert images and kc * w >= lr and (ks * w >= rc if ks else min(nc) >= 2), (rc, lr, L, nc, kc, ks)
+            assert (ks > 0) == (L < 2 * rc), (rc, lr, L, ks)
     assert check.cell_grid([49.6] * 3, 4.5, 12.0) == ([11, 11, 11], 3)
+    assert check.layout([12.4] * 3, 4.5, 12.0) == ([2, 2, 2], 2, True, 0)
+    # a slab: the thin side alone takes the images
+    assert check.layout([49.6, 49.6, 12.4], 4.5, 12.0) == ([11, 11, 2], 3, True, 0)
+    assert check.layout([3.567, 3.567, 7.134], 4.5, 12.0) == ([1, 1, 1], 4, True, 2)
+    # ks 2: each atom has 125 packed entries, which must fit an int32
+    assert "int32" in check.grid_problem([3.567, 3.567, 7.134], 4.5, 12.0, n=2 ** 31 // 125 + 1)
+    # the images' walk is bounded: a 1000 A cutoff needs a box of the minimum image
+    assert check.box_problem([12.4] * 3, 4.5, 1000.0) is not None
 
 
 def test_restart_box_is_checked(tmp_path, monkeypatch):
     """A restart starts in its checkpoint's box, so that is the box auto checks."""
     monkeypatch.setattr(check, "device_problem", lambda: None)
     atoms = _water((3, 3, 3))
-    np.savez(tmp_path / "small.npz", box=np.array([26.0, 26.0, 26.0]))
+    np.savez(tmp_path / "small.npz", box=np.array([0.5, 0.5, 0.5]))
     np.savez(tmp_path / "same.npz", box=np.diag(atoms.cell[:]).copy())
     problem = check.flash_problem(dict(SETTINGS, restart_load_path=str(tmp_path / "small.npz")), atoms)
-    assert "too small for the cell grid" in problem, problem
+    assert "too small for its cutoffs" in problem, problem
     assert check.flash_problem(dict(SETTINGS, restart_load_path=str(tmp_path / "same.npz")), atoms) is None
 
 
@@ -507,7 +529,7 @@ def test_free_space_box_has_no_images_within_reach(rc_lr):
         R = rng.normal(size=(n, 3)) * spread
         size = check.vacuum_size(R)
         L, reach = check.vacuum_box(size, rc, rc_lr)
-        assert check.box_problem([L] * 3, rc, reach) is None
+        assert check.box_problem([L] * 3, rc, reach, images=False) is None
         assert reach <= rc_lr
         c = R.mean(0)
         room = min(L - max(rc, reach), reach if reach < rc_lr else np.inf)      # the size vacuum_fits takes
@@ -578,8 +600,8 @@ def test_flash_modes_match_the_engine():
 
 @pytest.mark.parametrize("engine,line", [
     ("standard", "Engine: neighbour-list potential (--engine standard)"),
-    # 64 waters' 12.4 A box is narrower than twice the cutoff, so auto runs the
-    # neighbour-list potential on any machine
+    # a 1000 A long-range cutoff makes 64 waters' 12.4 A box's walk over the periodic
+    # images too long for flash, so auto runs the neighbour-list potential on any machine
     ("auto", "Engine: neighbour-list potential (flash cannot:"),
 ])
 def test_md_logs_its_engine(tmp_path, monkeypatch, engine, line):
@@ -595,7 +617,7 @@ def test_md_logs_its_engine(tmp_path, monkeypatch, engine, line):
     log = tmp_path / "out.log"
     result = CliRunner().invoke(so3lr_cli.cli, ["nvt", "--input", str(DATA / "water_64.xyz"), "--no-relax",
                                                 "--output", str(tmp_path / "out.hdf5"), "--log-file", str(log),
-                                                "--engine", engine])
+                                                "--lr-cutoff", "1000", "--engine", engine])
     assert result.exit_code == 0, result.output
     assert line in log.read_text(), log.read_text()[-2000:]
 
@@ -1923,3 +1945,72 @@ def test_cuda_kernels_asked_for_say_why_they_do_not_fit(monkeypatch):
     with pytest.raises(RuntimeError, match="flash_kernels cuda.*GiB of the 0 free.*minimal"):
         flash_md.build_engine(_water((3, 3, 3)), dict(model_path="so3lr-tauri-m-2606", flash_kernels="cuda"),
                               jnp.float32)
+
+
+# ---- boxes under 2 x a cutoff: that range over the periodic images ----
+SMALL_PME = dict(pme_electrostatics=(2.0, 1.55), pme_dispersion=(2.0, 1.55))
+
+
+def _diamond():
+    """Rattled diamond in a 3.57 x 3.57 x 7.13 A box: every side under the short-range cutoff."""
+    from ase.build import bulk
+    atoms = bulk("C", "diamond", a=3.567, cubic=True).repeat((1, 1, 2))
+    atoms.rattle(0.05, seed=0)
+    return atoms
+
+
+# 64 waters' 12.4 A box (two cells a side; PME meshes that scale with the box) and diamond
+SMALL_BOXES = pytest.mark.parametrize("make,reps,kw", [(lambda: _water((1, 1, 1)), (4, 4, 4), SMALL_PME),
+                                                       (_diamond, (9, 9, 5), {})],
+                                      ids=["water-12A-pme", "diamond-3.6A"])
+
+
+@GPU
+@SMALL_BOXES
+def test_small_box_follows_its_supercell(make, reps, kw):
+    """A box under 2 x the cutoffs gives per copy what its supercell, wide enough for the
+    minimum image, gives: the energy per atom, each atom's force and dE/d(strain) per axis
+    (float64)."""
+    atoms = make()
+    big = atoms.repeat(reps)
+    n = int(np.prod(reps))
+    eng = _engine("so3lr-tauri-m-2606", atoms, "float64", **kw)
+    ref = _engine("so3lr-tauri-m-2606", big, "float64", **kw)
+    assert eng.images and not ref.images
+    if kw:
+        for m, m_ref in ((eng.mesh_el, ref.mesh_el), (eng.mesh_disp, ref.mesh_disp)):
+            assert [a * r for a, r in zip(m, reps)] == list(m_ref), (m, m_ref)
+    e, f, w = eng.energy_forces_strain(jnp.asarray(atoms.get_positions(), jnp.float64), diag=True)
+    e_ref, f_ref, w_ref = ref.energy_forces_strain(jnp.asarray(big.get_positions(), jnp.float64), diag=True)
+    _check("energy", float(e) * n, e_ref, 1e-10)
+    _check("forces", f, np.asarray(f_ref)[:len(atoms)], 1e-9)       # ase's repeat: the unit cell first
+    _check("dE/d(strain) per axis", np.asarray(w) * n, w_ref, 1e-9)
+
+
+@CUDA
+@SMALL_BOXES
+def test_cuda_small_box(make, reps, kw):
+    """The CUDA kernels in a box under 2 x the cutoffs give the float64 engine's energy,
+    forces and dE/d(strain) per axis to float32 accuracy."""
+    atoms = make()
+    R = atoms.get_positions()
+    e_ref, f_ref, w_ref = _engine("so3lr-tauri-m-2606", atoms, "float64", **kw).energy_forces_strain(
+        jnp.asarray(R, jnp.float64), diag=True)
+    eng = _engine("so3lr-tauri-m-2606", atoms, "float32", keep_attention=True, kernels="cuda", **kw)
+    assert eng.cuda_kernels is not None and eng.images
+    e, f, w = eng.energy_forces_strain(jnp.asarray(R, jnp.float32), diag=True)
+    _check("energy", e, e_ref, 1e-6)
+    _check("forces", f, f_ref, 1e-4)
+    _check("dE/d(strain) per axis", w, w_ref, 1e-4)
+
+
+@GPU
+def test_md_in_a_small_box_on_flash(tmp_path):
+    """`so3lr npt` on 64 waters (12.4 A, under 2 x the 12 A cutoff: the neighbour-list
+    engine refuses the box) runs on flash."""
+    from ase.io import write
+    write(tmp_path / "w.xyz", _water((1, 1, 1)))
+    _so3lr(["npt", "--input", "w.xyz", "--no-relax", "--md-cycles", "2", "--md-steps", "5", "--pressure", "1",
+            "--output", "a.hdf5"], tmp_path)
+    log = (tmp_path / "a.log").read_text()
+    assert "Engine: flash" in log, log[-2000:]

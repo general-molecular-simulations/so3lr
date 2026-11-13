@@ -28,6 +28,10 @@ VACUUM_PAD = 10.0
 # 645 rc wide (2900 A at 4.5 A), the box free space lays out around atoms that span about
 # 1500 A (1000 A long range) to 2300 A (12 A)
 MAX_CELLS = 1 << 28
+# a periodic box narrower than twice a cutoff: that range sums over the periodic images it
+# reaches (``image_grid``), walking at most this many cells each way (a long-range cutoff far
+# beyond the box, such as 1000 A, is left to the neighbour-list engine)
+MAX_IMAGE_CELLS = 16
 ENGINES = ("auto", "flash", "standard")
 # the AMD GPUs (gfx targets) flash is tested on: the MI355X
 ROCM_TARGETS = ("gfx950",)
@@ -53,7 +57,7 @@ HANDLED = {
     "min_start_dt", "min_max_dt", "min_n_min", "force_convergence", "force_conv", "kspace_electrostatics",
     "kspace_smearing", "kspace_spacing", "kspace_interp_nodes", "kspace_dispersion",
     "kspace_dispersion_smearing", "kspace_dispersion_spacing", "kspace_dispersion_interp_nodes",
-    "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
+    "kspace_remove_net_force", "restart_load_path", "restart_save_path", "restart_reset", "energy_drift_threshold", "drift_warmup_ps",
     "engine", "flash_mode", "flash_mixed", "flash_devices", "flash_kernels", "md_precision",
     "do_enhanced_sampling", "pysages_input", "restart_pysages_load_path", "restart_pysages_save_path",
     "buffer_size_multiplier_sr", "buffer_sr",       # the coordinationnumber CV's neighbour list
@@ -277,27 +281,62 @@ def cell_grid(L, rc, rc_lr):
     return None
 
 
-def grid_problem(L, rc, rc_lr):
-    """Why the engine cannot lay out an orthorhombic box of sides L (None if it can):
-    ``box_problem``, then its cell grid (``cell_grid``) must have fewer than MAX_CELLS cells.
-    The engine raises it when it lays out a box (``_layout``)."""
-    problem = box_problem(L, rc, rc_lr)
+def image_grid(L, rc, rc_lr):
+    """The cell grid of a box the minimum image cannot take (where ``cell_grid`` has
+    none), as (cells per side, kc, ks), or None: cells at least rc wide (one where the side
+    is narrower), the long range walking kc cells each way through every periodic image it
+    reaches, and the short range ks (0 where every side is at least 2 rc: the minimum
+    image with two cells a side); None where kc or ks would be more than MAX_IMAGE_CELLS."""
+    nc = [max(int(math.floor(v / rc)), 1) for v in L]
+    kc = max(int(math.ceil(rc_lr / (v / n))) for v, n in zip(L, nc))
+    ks = 0 if min(L) >= 2.0 * rc else max(int(math.ceil(rc / (v / n))) for v, n in zip(L, nc))
+    return (nc, kc, ks) if max(kc, ks) <= MAX_IMAGE_CELLS else None
+
+
+def layout(L, rc, rc_lr, images=True):
+    """(cells per side, kc, images, ks) for an orthorhombic box of sides L, or None: the
+    minimum image's grid (``cell_grid``, images False, ks 0) where it exists, else (images
+    allowed) the periodic images' (``image_grid``, images True)."""
+    grid = cell_grid(L, rc, rc_lr)
+    if grid is not None:
+        return (*grid, False, 0)
+    grid = image_grid(L, rc, rc_lr) if images else None
+    return None if grid is None else (*grid[:2], True, grid[2])
+
+
+def grid_problem(L, rc, rc_lr, images=True, n=0):
+    """Why the engine cannot lay out an orthorhombic box of sides L for n atoms (None if it
+    can): ``box_problem``, then its cell grid (``layout``) must have fewer than MAX_CELLS
+    cells, and with the short range over the periodic images each neighbour entry (an atom
+    and its image, n (2 ks + 1)^3 of them) must fit an int32. The engine raises it when it
+    lays out a box (``_layout``)."""
+    problem = box_problem(L, rc, rc_lr, images)
     if problem:
         return problem
-    grid = cell_grid(L, rc, rc_lr)
+    grid = layout(L, rc, rc_lr, images)
     if grid is not None and math.prod(grid[0]) >= MAX_CELLS:
         return (f"box {[round(v) for v in L]} A too large for the cell grid "
                 f"({' x '.join(map(str, grid[0]))} cells, 2^{MAX_CELLS.bit_length() - 1} or more)")
+    if grid is not None and n * (2 * grid[3] + 1) ** 3 >= 2 ** 31:
+        return (f"box {[round(v, 2) for v in L]} A: {n} atoms and their periodic images overflow the "
+                f"neighbour rows' int32 entries (a larger box)")
     return None
 
 
-def box_problem(L, rc, rc_lr):
-    """Why the engine cannot take an orthorhombic box of sides L (None if it can): the
-    minimum image needs 2 x the cutoffs, and the cell grid (``cell_grid``) must exist."""
-    if min(L) < 2.0 * max(rc, rc_lr):
-        return f"box {[round(v, 2) for v in L]} A narrower than twice the cutoff {max(rc, rc_lr)} A"
-    if cell_grid(L, rc, rc_lr) is None:
-        return f"box {[round(v, 2) for v in L]} A too small for the cell grid"
+def box_problem(L, rc, rc_lr, images=True):
+    """Why the engine cannot take an orthorhombic box of sides L (None if it can). Where
+    every side is at least 2 rc_lr and the cell grid (``cell_grid``) exists, both ranges
+    take the minimum image; otherwise (images) they sum over the periodic images
+    (``image_grid``). Free space's box (images False) is always the minimum image's."""
+    if not images:
+        if min(L) < 2.0 * max(rc, rc_lr):
+            return f"box {[round(v, 2) for v in L]} A narrower than twice the cutoff {max(rc, rc_lr)} A"
+        if cell_grid(L, rc, rc_lr) is None:
+            return f"box {[round(v, 2) for v in L]} A too small for the cell grid"
+        return None
+    if layout(L, rc, rc_lr) is None:
+        return (f"box {[round(v, 2) for v in L]} A too small for its cutoffs {rc}, {rc_lr} A (the "
+                f"periodic images' walk takes at most {MAX_IMAGE_CELLS} cells each way)")
     return None
 
 
@@ -323,7 +362,7 @@ def vacuum_box(size, rc, rc_lr):
     pad = max(VACUUM_PAD, 0.25 * size)
     reach = min(rc_lr, size + pad)
     L = size + pad + max(rc, reach)
-    while box_problem([L] * 3, rc, reach):
+    while box_problem([L] * 3, rc, reach, images=False):
         L += 0.25 * rc
     return L, reach
 
@@ -385,7 +424,7 @@ def structure_problem(settings, atoms, rc):
         if not math.isfinite(size):
             return "its positions are not all finite"
         L, reach = vacuum_box(size, rc, rc_lr)
-        problem = grid_problem([L] * 3, rc, reach)
+        problem = grid_problem([L] * 3, rc, reach, images=False)
         if problem:
             return f"its atoms span {size:.0f} A (one far from the rest?), a free-space {problem}"
         return None
@@ -400,7 +439,7 @@ def structure_problem(settings, atoms, rc):
         sides = np.diag(box) if box.ndim == 2 else np.broadcast_to(box.reshape(-1), (3,))
     shrink = 1.0 - (NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0)
     L = [float(v) * shrink for v in sides]
-    return grid_problem(L, rc, rc_lr)
+    return grid_problem(L, rc, rc_lr, n=len(atoms))
 
 
 @functools.cache

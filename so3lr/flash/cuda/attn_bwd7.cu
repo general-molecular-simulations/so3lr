@@ -566,6 +566,7 @@ struct GatherParams {
       *__restrict__ gev_out, *__restrict__ f_out;   // f: [6][n] (fx, fy, fz, wx, wy, wz)
   int n, K, nl;
   int local;                     // the projections' gradients for the range's rows only ([nl, F], from row0)
+  int KS;                        // the rows' periodic images (edge_atom), 0: the minimum image
 };
 
 constexpr int GW_ = 8;
@@ -608,7 +609,7 @@ __global__ void __launch_bounds__(GW_ * 32) bwd_gather(GatherParams p) {
 #pragma unroll 1
   for (int c = part; c < n_a; c += GSPLIT) {
     const size_t slot = srow + c;
-    const int b = p.nbr[nrow + c], pq = p.PIDX[slot];
+    const int b = edge_atom(p.nbr[nrow + c], p.KS), pq = p.PIDX[slot];
     const float* sc = p.SC + slot * NSC;
     const float* w1 = p.Wst + (size_t)pq * 2 * F;
     const float* w2 = w1 + F;
@@ -701,7 +702,8 @@ static ffi::Error B7Impl(cudaStream_t stream, F32 q1, F32 k1, F32 v1, F32 q2, F3
 // local: the projections' gradients are the range's rows only ([nl, F] outputs, row r0 first)
 static ffi::Error GatherImpl(cudaStream_t stream, F32 q1, F32 k1, F32 q2, F32 k2, F32 gdx, F32 Wst, F32 SC, F32 FV,
                              F32 GEV, F32 gev_in, F32 f_in, S32 nbr, S32 cnt, S32 PIDX, S32 row0, RF32 gq1, RF32 gk1,
-                             RF32 gv1, RF32 gq2, RF32 gk2, RF32 gev_out, RF32 f_out, int64_t NL, int64_t local) {
+                             RF32 gv1, RF32 gq2, RF32 gk2, RF32 gev_out, RF32 f_out, int64_t NL, int64_t local,
+                             int64_t KS) {
   GatherParams p;
   p.q1 = q1.typed_data(); p.k1 = k1.typed_data(); p.q2 = q2.typed_data(); p.k2 = k2.typed_data();
   p.gdx = gdx.typed_data(); p.Wst = Wst.typed_data(); p.SC = SC.typed_data(); p.FV = FV.typed_data();
@@ -711,6 +713,7 @@ static ffi::Error GatherImpl(cudaStream_t stream, F32 q1, F32 k1, F32 q2, F32 k2
   p.gk2 = gk2->typed_data(); p.gev_out = gev_out->typed_data(); p.f_out = f_out->typed_data();
   auto d = nbr.dimensions();
   p.n = (int)d[0]; p.K = (int)d[1]; p.nl = (int)NL; p.row0 = row0.typed_data(); p.local = (int)local;
+  p.KS = (int)KS;
   bwd_gather<<<(p.nl * WPA + GW_ - 1) / GW_, GW_ * 32, 0, stream>>>(p);
   return launch_status();
 }
@@ -732,4 +735,4 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(BwdGather, GatherImpl,
         .Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>().Arg<F32>()  // Wst SC FV GEV gev_in f_in
         .Arg<S32>().Arg<S32>().Arg<S32>().Arg<S32>()                         // nbr cnt PIDX row0
         .Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Ret<F32>().Attr<int64_t>("NL")
-        .Attr<int64_t>("local"));
+        .Attr<int64_t>("local").Attr<int64_t>("KS"));

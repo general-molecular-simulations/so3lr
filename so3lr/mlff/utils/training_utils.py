@@ -37,7 +37,8 @@ ROBUST_LOSS_DIST = robust_loss_dist.Distribution()
 _TFDS_TRAINING_STATE_VERSION = 1
 # Checkpoints written before the fingerprint was dropped also carry a
 # ``restart_fingerprint`` leaf; the restore target is built from the saved
-# tree, so that extra leaf is restored and ignored.
+# tree, so that extra leaf is restored and ignored.  ``num_devices`` is
+# optional for the same reason: checkpoints written before it was saved lack it.
 _TFDS_TRAINING_STATE_KEYS = frozenset({
     'version', 'checkpoint_step',
     'raw_params', 'optimizer_state', 'ema_params', 'jax_rng',
@@ -55,7 +56,7 @@ def _make_tfds_training_state(
         best_eval_loss, evals_without_improvement, stop_training,
         plateau_best_loss, plateau_wait, plateau_cooldown_counter,
         plateau_scale, plateau_active, reduce_lr_enabled, stage_two_active,
-        header_printed, use_ema):
+        header_printed, use_ema, num_devices=1):
     """Build the versioned, Orbax-compatible restart PyTree."""
     return {
         'version': _TFDS_TRAINING_STATE_VERSION,
@@ -80,6 +81,7 @@ def _make_tfds_training_state(
         'stage_two_active': bool(stage_two_active),
         'header_printed': bool(header_printed),
         'use_ema': bool(use_ema),
+        'num_devices': int(num_devices),
     }
 
 
@@ -968,40 +970,104 @@ def make_training_step_fn(
             Updated state and metrics.
 
         """
-        (loss, metrics), grads = jax.value_and_grad(
-            loss_fn,
-            has_aux=True
-        )(
-            params,
-            batch
-        )
-
-        # Per-leaf gradient norms go under their own key: writing them to
-        # 'grad_norm' meant the unconditional global-norm assignment below
-        # overwrote them every step, making log_gradient_values a no-op.
-        if log_gradient_values:
-            metrics['grad_norm_per_leaf'] = unfreeze(
-                jax.tree_util.tree_map(
-                    lambda x: jnp.linalg.norm(x.reshape(-1), axis=0), grads
-                )
-            )
-
-        updates, opt_state = optimizer.update(
-            grads,
-            opt_state,
-            params
-        )
-
-        params = optax.apply_updates(
-            params=params,
-            updates=updates
-        )
-
-        metrics['grad_norm'] = optax.global_norm(grads)
-
-        return params, opt_state, metrics
+        return _training_step(optimizer, loss_fn, log_gradient_values, params, opt_state, batch)
 
     return training_step_fn
+
+
+def _training_step(optimizer, loss_fn, log_gradient_values, params, opt_state, batch, reduce=None):
+    """Loss, gradient and optimizer update shared by the single-device and the
+    data-parallel training steps; `reduce` (e.g. a pmean over devices) is applied
+    to the gradients and metrics before the update."""
+    (loss, metrics), grads = jax.value_and_grad(
+        loss_fn,
+        has_aux=True
+    )(
+        params,
+        batch
+    )
+    if reduce is not None:
+        grads, metrics = reduce(grads), reduce(metrics)
+
+    # Per-leaf gradient norms go under their own key: writing them to
+    # 'grad_norm' meant the unconditional global-norm assignment below
+    # overwrote them every step, making log_gradient_values a no-op.
+    if log_gradient_values:
+        metrics['grad_norm_per_leaf'] = unfreeze(
+            jax.tree_util.tree_map(
+                lambda x: jnp.linalg.norm(x.reshape(-1), axis=0), grads
+            )
+        )
+
+    updates, opt_state = optimizer.update(
+        grads,
+        opt_state,
+        params
+    )
+
+    params = optax.apply_updates(
+        params=params,
+        updates=updates
+    )
+
+    metrics['grad_norm'] = optax.global_norm(grads)
+
+    return params, opt_state, metrics
+
+
+def make_data_parallel_training_step_fn(
+        optimizer: optax.GradientTransformation,
+        loss_fn: Callable,
+        mesh,
+        log_gradient_values: bool = False,
+):
+    """
+    Make a data-parallel training step over the devices of `mesh` (one mesh axis, 'devices').
+
+    params and opt_state are replicated on every device; the batch pytree carries a leading
+    device axis that is sharded over the mesh, i.e. one padded batch per device. Each device
+    computes the gradient of `loss_fn` on its own batch, gradients and metrics are averaged
+    across devices (pmean), and every device applies the same optimizer update, so the
+    replicas stay identical. With one batch per device this equals a single-device step on
+    the averaged gradient.
+
+    Args:
+        optimizer (optax.GradientTransformation): Optax optimizer.
+        loss_fn (Callable): Loss function, as for make_training_step_fn.
+        mesh (jax.sharding.Mesh): One-dimensional mesh with axis name 'devices'.
+        log_gradient_values (bool): Log gradient norms for each leaf in the params pytree.
+
+    Returns:
+        Training step fn with the same signature and outputs as make_training_step_fn.
+    """
+    from jax.sharding import PartitionSpec
+
+    def local_step(params, opt_state, batch):
+        batch = jax.tree_util.tree_map(lambda x: x[0], batch)  # this device's batch
+        return _training_step(optimizer, loss_fn, log_gradient_values, params, opt_state, batch,
+                              reduce=lambda tree: jax.lax.pmean(tree, 'devices'))
+
+    # check_vma=False keeps each device's gradient local, so the explicit pmean is the
+    # only cross-device reduction (with the check on, differentiating with respect to
+    # the replicated params already sums the gradients over devices).
+    return jax.jit(jax.shard_map(
+        local_step,
+        mesh=mesh,
+        in_specs=(PartitionSpec(), PartitionSpec(), PartitionSpec('devices')),
+        out_specs=(PartitionSpec(), PartitionSpec(), PartitionSpec()),
+        check_vma=False,
+    ))
+
+
+def _batch_groups(iterator, n):
+    """Yield (index of the last batch, list of n consecutive batches) from `iterator`;
+    a partial group left at the end is dropped. n=1 gives one batch per group."""
+    group = []
+    for index, item in enumerate(iterator):
+        group.append(item)
+        if len(group) == n:
+            yield index, group
+            group = []
 
 
 def make_validation_step_fn(
@@ -1137,26 +1203,35 @@ def _validation_metrics(validation_step_fn, params, batches, graph_to_batch_fn):
     return {f'eval_{k}': float(v / n) for k, v in totals.items()}
 
 
-def _log_and_checkpoint(ckpt_mngr, step, epoch, eval_params, eval_metrics, print_header, use_wandb):
-    """Log the eval metrics (the table header first if asked) and save eval_params
-    when the loss is finite: orbax ranks checkpoints with best_fn/best_mode='min',
-    and a NaN comparison can leave a diverged step in the max_to_keep window as
-    'best', evicting the genuinely best weights."""
+def _log_eval_metrics(step, epoch, eval_metrics, print_header, use_wandb):
+    """Log the eval metrics (the table header first if asked), also to wandb."""
     if print_header:
         logger.info(print_metrics_header(eval_metrics))
     logger.info(print_metrics_row(epoch, step, eval_metrics))
     _report_validation(step, epoch, eval_metrics)
-    eval_loss = eval_metrics['eval_loss']
-    if jnp.isfinite(eval_loss):
-        ckpt_mngr.save(
-            step,
-            args=ocp.args.Composite(params=ocp.args.StandardSave(eval_params)),
-            metrics={'loss': eval_loss}
-        )
-    else:
-        logger.warning(f"Skipping checkpoint at step {step} because eval_loss={eval_loss}")
     if use_wandb:
         _wandb_log(eval_metrics, step=step)
+
+
+def _save_if_finite(ckpt_mngr, step, eval_loss, **items):
+    """Save the items as one checkpoint when the loss is finite: orbax ranks
+    checkpoints with best_fn/best_mode='min', and a NaN comparison can leave a
+    diverged step in the max_to_keep window as 'best', evicting the genuinely best
+    weights.  Returns whether a save started."""
+    if not jnp.isfinite(eval_loss):
+        logger.warning(f"Skipping checkpoint at step {step} because eval_loss={eval_loss}")
+        return False
+    return ckpt_mngr.save(
+        step,
+        args=ocp.args.Composite(**{k: ocp.args.StandardSave(v) for k, v in items.items()}),
+        metrics={'loss': eval_loss}
+    )
+
+
+def _log_and_checkpoint(ckpt_mngr, step, epoch, eval_params, eval_metrics, print_header, use_wandb):
+    """fit()'s evaluation output: log the metrics, then save the params alone."""
+    _log_eval_metrics(step, epoch, eval_metrics, print_header, use_wandb)
+    _save_if_finite(ckpt_mngr, step, eval_metrics['eval_loss'], params=eval_params)
 
 
 def fit(
@@ -1240,7 +1315,8 @@ def fit(
             If None, loss_fn will be used. Defaults to None.
         num_epochs (int): Number of training epochs.
         ckpt_dir (str): Checkpoint path.
-        ckpt_manager_options (dict): Checkpoint manager options.
+        ckpt_manager_options (dict): Checkpoint manager options. Training keeps the
+            ``max_to_keep`` (default 3) lowest-loss checkpoints and always the newest one.
         eval_every_num_steps (int): Evaluate the metrics every num-th step
         allow_restart: Restarts from existing checkpoints are allowed.
         training_seed (int): Random seed for shuffling of training data.
@@ -1266,19 +1342,9 @@ def fit(
     ckpt_dir.mkdir(exist_ok=True)
 
     # Create orbax CheckpointManager.
-    if ckpt_manager_options is None:
-        ckpt_manager_options = {'max_to_keep': 3}
-
-    options = ocp.CheckpointManagerOptions(
-        best_fn=lambda u: u['loss'],
-        best_mode='min',
-        step_prefix='ckpt',
-        **ckpt_manager_options
-    )
-
     ckpt_mngr = checkpoint_utils.make_checkpoint_manager(
         ckpt_dir=ckpt_dir,
-        ckpt_mngr_options=options
+        ckpt_mngr_options=checkpoint_utils.make_training_checkpoint_options(ckpt_manager_options)
     )
 
     training_step_fn = make_training_step_fn(
@@ -1313,7 +1379,7 @@ def fit(
                 f'{ckpt_dir} already exists at step {latest_step}. If you want '
                 'to re-start training, set `allow_restart=True`.'
             )
-        params = checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir)
+        params = checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir, step=latest_step)
         params = expand_observables_to_theory_levels(params)
         step = latest_step
         logger.info('Loaded parameters from %s at step %s.', ckpt_dir, latest_step)
@@ -1575,6 +1641,7 @@ def fit_from_iterator(
         stage_two_loss_fn=None,
         stage_two_val_fn=None,
         on_training_ready=None,
+        data_parallel: bool = False,
 ):
     """
     Fit model.
@@ -1596,7 +1663,7 @@ def fit_from_iterator(
         val_fn (Callable, optional): Validation function to use for metrics during validation.
             If None, loss_fn will be used. Defaults to None.
         ckpt_dir (str): Checkpoint path.
-        ckpt_manager_options (dict): Checkpoint manager options.
+        ckpt_manager_options (dict): Checkpoint manager options; see fit().
         eval_every_num_steps (int): Evaluate the metrics every num-th step
         allow_restart: Restarts from existing checkpoints are allowed.
         training_seed (int): Random seed for shuffling of training data.
@@ -1613,36 +1680,53 @@ def fit_from_iterator(
             'names', 'sizes', 'weights'. Used to log effective epochs per dataset.
         on_training_ready (Callable, optional): Called after checkpoint validation
             and restoration, before optimizer updates, to publish run metadata.
+        data_parallel (bool): Train data-parallel on all local devices. Every optimizer step
+            then consumes one padded batch per device and averages the gradients, so the
+            effective batch -- and the number of batches per step -- grows with the device
+            count (eval_every_num_steps still counts optimizer steps). Parameters, optimizer
+            state and EMA are replicated on every device; validation and checkpoints use
+            single-device copies, so checkpoints are identical in format to single-device
+            ones. A restart must use the same device count, and every epoch needs at least
+            one batch per device. Defaults to False.
     Returns:
 
     """
     jax_rng = jax.random.PRNGKey(seed=model_seed)
+
+    num_devices = jax.local_device_count() if data_parallel else 1
+    if data_parallel and num_devices == 1:
+        logger.warning('data_parallel=True but only one local device is visible; '
+                       'training on a single device.')
+    if num_devices > 1:
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec
+        mesh = Mesh(np.array(jax.local_devices()), ('devices',))
+        replicated = NamedSharding(mesh, PartitionSpec())
+        device_sharded = NamedSharding(mesh, PartitionSpec('devices'))
+        logger.info(f'Data-parallel training on {num_devices} devices: {num_devices} batches '
+                    f'per optimizer step, gradients averaged across devices.')
+
+    def _make_training_step(selected_loss_fn):
+        if num_devices > 1:
+            return make_data_parallel_training_step_fn(
+                optimizer, selected_loss_fn, mesh, log_gradient_values
+            )
+        return make_training_step_fn(optimizer, selected_loss_fn, log_gradient_values)
+
+    def _single_device(tree):
+        # Validation and checkpoints use one device's copy of the replicated state.
+        return jax.device_put(tree, jax.local_devices()[0]) if num_devices > 1 else tree
 
     # Create checkpoint directory.
     ckpt_dir = Path(ckpt_dir).expanduser().resolve()
     ckpt_dir.mkdir(exist_ok=True)
 
     # Create orbax CheckpointManager.
-    if ckpt_manager_options is None:
-        ckpt_manager_options = {'max_to_keep': 3}
-
-    options = ocp.CheckpointManagerOptions(
-        best_fn=lambda u: u['loss'],
-        best_mode='min',
-        step_prefix='ckpt',
-        **ckpt_manager_options
-    )
-
     ckpt_mngr = checkpoint_utils.make_training_checkpoint_manager(
         ckpt_dir=ckpt_dir,
-        ckpt_mngr_options=options
+        ckpt_mngr_options=checkpoint_utils.make_training_checkpoint_options(ckpt_manager_options)
     )
 
-    training_step_fn = make_training_step_fn(
-        optimizer,
-        loss_fn,
-        log_gradient_values
-    )
+    training_step_fn = _make_training_step(loss_fn)
 
     validation_step_fn = make_validation_step_fn(
         val_fn
@@ -1712,7 +1796,7 @@ def fit_from_iterator(
                 'and epoch counter.', latest_step,
             )
             params = expand_observables_to_theory_levels(
-                checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir)
+                checkpoint_utils.load_params_from_checkpoint(ckpt_dir=ckpt_dir, step=latest_step)
             )
             step = int(latest_step)
     if training_state is not None:
@@ -1721,6 +1805,15 @@ def fit_from_iterator(
         ema_params = training_state['ema_params']
         jax_rng = training_state['jax_rng']
         step = int(training_state['checkpoint_step'])
+        # The device count sets the effective batch, so a different count would
+        # silently change the optimisation the learning-rate schedule was set for.
+        saved_devices = training_state.get('num_devices')
+        if saved_devices is not None and int(saved_devices) != num_devices:
+            raise RuntimeError(
+                f'Checkpoint step {latest_step} was written by a run on {int(saved_devices)} '
+                f'device(s), but this run trains on {num_devices}; the effective batch would '
+                'change. Resume on the same number of devices.'
+            )
         # Continue with the next epoch rather than replaying the batches this
         # one already consumed: the replay runs the full input pipeline and
         # costs about as long as training on them did (hours to days).
@@ -1750,9 +1843,7 @@ def fit_from_iterator(
                 raise RuntimeError(
                     'Checkpoint is in stage two but no stage_two_loss_fn was provided.'
                 )
-            training_step_fn = make_training_step_fn(
-                optimizer, stage_two_loss_fn, log_gradient_values
-            )
+            training_step_fn = _make_training_step(stage_two_loss_fn)
             validation_step_fn = make_validation_step_fn(
                 stage_two_val_fn
                 if stage_two_val_fn is not None else stage_two_loss_fn
@@ -1769,8 +1860,55 @@ def fit_from_iterator(
     if on_training_ready is not None:
         on_training_ready()
 
-    reporter = _reporter()
+    # Shared by the periodic and the final evaluation; both read the current loop state.
+    def _evaluate():
+        """Validate and log the deployed weights (the EMA copy when EMA is on);
+        returns the eval loss."""
+        nonlocal header_printed
+        eval_metrics = _validation_metrics(
+            validation_step_fn, _single_device(ema_params if use_ema else params),
+            validation_iterator.next_epoch(split='train', mode='validation'),
+            graph_to_batch_fn)
+        _log_eval_metrics(step, epoch, eval_metrics, not header_printed, use_wandb)
+        header_printed = True
+        return eval_metrics['eval_loss']
+
+    def _save_checkpoint(eval_loss):
+        """Save the deployed weights with the full training state at this step."""
+        raw_params, optimizer_state, saved_ema_params = _single_device(
+            (params, opt_state, ema_params)
+        )
+        training_state = _make_tfds_training_state(
+            step=step,
+            raw_params=raw_params,
+            optimizer_state=optimizer_state,
+            ema_params=saved_ema_params,
+            jax_rng=jax_rng,
+            epoch=epoch,
+            batches_consumed=batches_consumed,
+            processed_graphs=processed_graphs,
+            processed_nodes=processed_nodes,
+            best_eval_loss=best_eval_loss,
+            evals_without_improvement=evals_without_improvement,
+            stop_training=stop_training,
+            plateau_best_loss=plateau_best_loss,
+            plateau_wait=plateau_wait,
+            plateau_cooldown_counter=plateau_cooldown_counter,
+            plateau_scale=plateau_scale,
+            plateau_active=_plateau_active,
+            reduce_lr_enabled=reduce_lr_on_plateau,
+            stage_two_active=_stage_two_active,
+            header_printed=header_printed,
+            use_ema=use_ema,
+            num_devices=num_devices,
+        )
+        if _save_if_finite(ckpt_mngr, step, eval_loss,
+                           params=saved_ema_params if use_ema else raw_params,
+                           training_state=training_state):
+            ckpt_mngr.wait_until_finished()
+
     start_step = step
+    reporter = _reporter()
     reporter.task_progress(start_epoch, num_epochs, 'epochs')
     for epoch in range(start_epoch, num_epochs):
         if stop_training:
@@ -1785,8 +1923,7 @@ def fit_from_iterator(
             logger.info(f"Two-stage loss reweighting: switching to the stage-two "
                         f"loss at epoch {epoch} (step {step}); resetting best-loss, "
                         f"early-stopping and plateau trackers.")
-            training_step_fn = make_training_step_fn(
-                optimizer, stage_two_loss_fn, log_gradient_values)
+            training_step_fn = _make_training_step(stage_two_loss_fn)
             validation_step_fn = make_validation_step_fn(
                 stage_two_val_fn if stage_two_val_fn is not None else stage_two_loss_fn)
             best_eval_loss = float('inf')
@@ -1805,19 +1942,31 @@ def fit_from_iterator(
             mode='train',
             epoch_index=epoch,
         )
-        for batch_index, (graph_batch_training, lr_batch_training) in enumerate(
-                training_iterator_loop):
+        # One optimizer step per group of num_devices batches (one per device); with data
+        # parallelism a partial group at the end of an epoch is dropped.
+        epoch_start_step = step
+        for batch_index, group in _batch_groups(training_iterator_loop, num_devices):
             batches_consumed = batch_index + 1
-            batch_training = graph_to_batch_fn(graph_batch_training, lr_batch_training)
-            processed_graphs += batch_training['num_of_non_padded_graphs']
-            processed_nodes += int(batch_max_num_nodes - jraph.get_number_of_padding_with_graphs_nodes(graph_batch_training))
-            # Training data is numpy arrays so we now transform them to jax.numpy arrays.
-            batch_training = jax.tree_util.tree_map(jnp.array, batch_training)
+            batches = []
+            for graph_batch_training, lr_batch_training in group:
+                batch_training = graph_to_batch_fn(graph_batch_training, lr_batch_training)
+                processed_graphs += batch_training['num_of_non_padded_graphs']
+                processed_nodes += int(batch_max_num_nodes - jraph.get_number_of_padding_with_graphs_nodes(graph_batch_training))
+                batches.append(batch_training)
+            if num_devices > 1:
+                # Stack along a leading device axis (on device: graph_to_batch_fn is jitted,
+                # so no host round trip) and give each device its own batch.
+                batch_training = jax.device_put(
+                    jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *batches), device_sharded
+                )
+            else:
+                # Training data is numpy arrays so we now transform them to jax.numpy arrays.
+                batch_training = jax.tree_util.tree_map(jnp.array, batches[0])
 
             # If params are None (in the first step), initialize the parameters or load from existing checkpoint.
             if params is None:
                 say('Initialize new parameters.')
-                params = model.init(jax_rng, batch_training)
+                params = model.init(jax_rng, jax.tree_util.tree_map(jnp.array, batches[0]))
 
                 # Initialize adaptive robust loss parameters if enabled
                 if use_adaptive_robust_loss and adaptive_robust_loss_targets is not None:
@@ -1857,6 +2006,12 @@ def fit_from_iterator(
                     reduce_lr_on_plateau = False
 
             _report_step(reporter, step, start_step, epoch, num_epochs)
+            if num_devices > 1:
+                # Replicate the state; a no-op once it is placed, so initialisation, a restart
+                # and host-side optimizer-state changes (reduce-LR) need no bookkeeping.
+                params, opt_state, ema_params = jax.device_put(
+                    (params, opt_state, ema_params), replicated
+                )
             params, opt_state, train_metrics = training_step_fn(params, opt_state, batch_training)
             step += 1
             if use_ema:
@@ -1880,46 +2035,8 @@ def fit_from_iterator(
 
             # Start validation process.
             if step % eval_every_num_steps == 0:
-                # Use the EMA (deployed) weights for validation when enabled.
-                eval_params = ema_params if use_ema else params
                 reporter.phase('Validating', f'Step {step:,}')
-                # Start iteration over validation batches.
-                eval_totals = {}
-                eval_counts = {}
-                validation_iterator_loop = validation_iterator.next_epoch(split='train', mode='validation')
-                for graph_batch_validation, lr_batch_validation in validation_iterator_loop:
-                    batch_validation = graph_to_batch_fn(graph_batch_validation, lr_batch_validation)
-                    batch_validation = jax.tree_util.tree_map(jnp.array, batch_validation)
-
-                    eval_out = validation_step_fn(
-                        eval_params,
-                        batch_validation
-                    )
-
-                    for k, v in eval_out.items():
-                        eval_totals[k] = eval_totals.get(k, 0.0) + np.asarray(v).item()
-                        eval_counts[k] = eval_counts.get(k, 0) + 1
-
-                eval_metrics = {k: eval_totals[k] / eval_counts[k] for k in eval_totals}
-
-                # Convert to dict to log with weights and bias.
-                eval_metrics = {
-                    f'eval_{k}': float(v) for k, v in eval_metrics.items()
-                }
-
-                if not header_printed:
-                    logger.info(print_metrics_header(eval_metrics))
-                    header_printed = True
-                logger.info(print_metrics_row(epoch, step, eval_metrics))
-                _report_validation(step, epoch, eval_metrics)
-                eval_loss = eval_metrics['eval_loss']
-
-                # Log to weights and bias.
-                if use_wandb:
-                    _wandb_log(
-                        eval_metrics,
-                        step=step
-                    )
+                eval_loss = _evaluate()
 
                 # Early stopping on the validation loss.
                 if early_stopping_patience is not None:
@@ -1940,7 +2057,7 @@ def fit_from_iterator(
                 if _plateau_active:
                     (opt_state, plateau_best_loss, plateau_wait,
                      plateau_cooldown_counter, plateau_scale) = _reduce_lr_on_plateau_step(
-                        opt_state, eval_metrics['eval_loss'],
+                        opt_state, eval_loss,
                         best_loss=plateau_best_loss, wait=plateau_wait,
                         cooldown_counter=plateau_cooldown_counter, scale=plateau_scale,
                         factor=reduce_lr_factor, patience=reduce_lr_patience,
@@ -1950,45 +2067,7 @@ def fit_from_iterator(
                 # Validation can update early-stop and plateau/optimizer state.
                 # Save only after those transitions so the restored next update
                 # sees exactly the same control state as uninterrupted training.
-                if jnp.isfinite(eval_loss):
-                    training_state = _make_tfds_training_state(
-                        step=step,
-                        raw_params=params,
-                        optimizer_state=opt_state,
-                        ema_params=ema_params,
-                        jax_rng=jax_rng,
-                        epoch=epoch,
-                        batches_consumed=batches_consumed,
-                        processed_graphs=processed_graphs,
-                        processed_nodes=processed_nodes,
-                        best_eval_loss=best_eval_loss,
-                        evals_without_improvement=evals_without_improvement,
-                        stop_training=stop_training,
-                        plateau_best_loss=plateau_best_loss,
-                        plateau_wait=plateau_wait,
-                        plateau_cooldown_counter=plateau_cooldown_counter,
-                        plateau_scale=plateau_scale,
-                        plateau_active=_plateau_active,
-                        reduce_lr_enabled=reduce_lr_on_plateau,
-                        stage_two_active=_stage_two_active,
-                        header_printed=header_printed,
-                        use_ema=use_ema,
-                    )
-                    checkpoint_started = ckpt_mngr.save(
-                        step,
-                        args=ocp.args.Composite(
-                            params=ocp.args.StandardSave(eval_params),
-                            training_state=ocp.args.StandardSave(training_state),
-                        ),
-                        metrics={'loss': eval_loss}
-                    )
-                    if checkpoint_started:
-                        ckpt_mngr.wait_until_finished()
-                else:
-                    logger.warning(
-                        f"Skipping checkpoint at step {step} because "
-                        f"eval_loss={eval_loss}"
-                    )
+                _save_checkpoint(eval_loss)
             # Finished validation process.
 
             if stop_training:
@@ -1999,12 +2078,26 @@ def fit_from_iterator(
                     close_training_iterator()
                 break  # exit the batch loop
 
+        if step == epoch_start_step and num_devices > 1:
+            raise RuntimeError(
+                f'Epoch {epoch} has fewer than {num_devices} training batches, so data-parallel '
+                f'training on {num_devices} devices takes no optimizer step. Use fewer devices, '
+                'a smaller batch or data_parallel: false.'
+            )
         reporter.task_progress(epoch + 1, num_epochs, 'epochs')
         if stop_training:
             break  # exit the epoch loop
 
+    # Validate and save the final weights too when this call trained past the
+    # last multiple of eval_every_num_steps, as fit() does.  This evaluation does
+    # not feed early stopping or reduce-LR, so a resume matches an uninterrupted run.
+    if step > start_step and step % eval_every_num_steps != 0:
+        _save_checkpoint(_evaluate())
+
     # Wait until checkpoint manager completes all save operations.
     ckpt_mngr.wait_until_finished()
+
+
 def make_optimizer(
         name: str = 'adam',
         optimizer_args: Dict = dict(),

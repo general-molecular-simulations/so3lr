@@ -4,7 +4,8 @@
     atoms.calc = FlashCalculator(model="so3lr-tauri-m", kspace_electrostatics="pme")
     atoms.get_potential_energy(), atoms.get_forces()
 
-For periodic orthorhombic cells at least twice the long-range cutoff across, or no cell
+For periodic orthorhombic cells (under twice a cutoff across, that range sums over the
+periodic images), or no cell
 (``pbc=False``: free space, any long-range cutoff), on an NVIDIA GPU (``check.flash_problem``
 with task "ase"); anything else raises, naming the reason (``so3lr.So3lrCalculator``, the
 neighbour-list model, takes any structure). The engine is built at the first call and

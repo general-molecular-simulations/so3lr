@@ -12,3 +12,5 @@ KSPACE_INTERP_NODES = {"pme": (4,), "p3m": (1, 2, 3, 4, 5)}
 DEFAULT_KSPACE_DISPERSION_SMEARING = 2.0  # A
 DEFAULT_KSPACE_DISPERSION_SPACING = 3.0   # A
 DEFAULT_KSPACE_DISPERSION_INTERP_NODES = 4
+# MD and opt take the k-space forces minus their mean (PME's mesh leaves a net force)
+DEFAULT_KSPACE_REMOVE_NET_FORCE = True
