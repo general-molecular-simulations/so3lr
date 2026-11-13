@@ -540,7 +540,8 @@ class _Reporter:
 
     def print_verdict(self, level, head, details):
         glyph, color = VERDICTS[level]
-        line = self._text(f'{glyph} {head}', f'bold {color}')
+        line = self._text('')
+        line.append(self._label(f'{glyph} {head}'), style=f'bold {color}')
         for detail in details:
             line.append(self._label(f' · {detail}'), style=theme.MUTED)
         self.console.print(line)
