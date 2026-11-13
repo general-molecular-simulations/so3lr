@@ -114,7 +114,8 @@ def test_batch_and_quiet_runs_write_complete_live_journal(tmp_path, monkeypatch,
                       'conserved_energy_eV': -10.5, 'seconds_per_step': 0.02, 'volume_A3': 1000.,
                       'box_A': [10., 10., 10.], 'pressure_diagonal_eVA3': [0.1, 0.2, 0.3]}
     assert not reporter.journal.active
-    assert capsys.readouterr().err == ''
+    # batch output is the closing line only; --quiet prints nothing
+    assert capsys.readouterr().err == ('' if quiet else '✓ MD finished in 00:00 · 2,000 steps\n')
 
 
 def test_nonfinite_values_are_null_and_device_objects_are_not_inspected(tmp_path):
@@ -375,7 +376,7 @@ def test_warnings_errors_are_recorded_in_plain_mode_and_not_duplicated(tmp_path,
                                              'levelname': 'WARNING', 'telemetry_internal': True}))
     records = events(reporter.journal.path)
     assert [record['type'] for record in records] == ['run_started', 'warning', 'error', 'run_completed']
-    assert capsys.readouterr().err == 'warning\nerror\ninternal\n'
+    assert capsys.readouterr().err == 'warning\nerror\ninternal\n✓ Run finished in 00:00\n'
 
 
 def test_library_reporter_does_not_create_files(tmp_path):
