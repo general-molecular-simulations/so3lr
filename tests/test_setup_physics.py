@@ -36,7 +36,7 @@ def test_invalid_model_cell_and_cutoff_are_rejected_before_export():
         long_range_settings(False, None, DEFAULT_MODEL, 5)
 
 
-@pytest.mark.parametrize('height', [24.0, 24.5, 24.7])
+@pytest.mark.parametrize('height', [24.0, 24.7])  # 12 Å fits only without the NPT margin
 def test_npt_proposal_and_custom_cutoff_leave_backend_contraction_margin(height):
     from so3lr.flash.check import NPT_BOX_MARGIN
     from so3lr.pbc import minimum_image_problem

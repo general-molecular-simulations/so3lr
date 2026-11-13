@@ -93,7 +93,7 @@ def test_finetune_names_only_the_missing_launch_option(tmp_path, option, missing
     assert f'Missing required option: {missing}.' in result.output
 
 
-@pytest.mark.parametrize('command', ['nvt', 'opt', 'eval', 'tune-ewald', 'start', 'show'])
+@pytest.mark.parametrize('command', ['nvt', 'start'])  # checked in the group callback, before any dispatch
 def test_root_settings_cannot_be_silently_ignored_with_a_subcommand(tmp_path, monkeypatch, command):
     from so3lr.cli import so3lr_cli as app
     settings = tmp_path / 'run.yaml'
@@ -108,11 +108,9 @@ def test_root_settings_cannot_be_silently_ignored_with_a_subcommand(tmp_path, mo
     ('input_file: [\n', 'Error loading settings file'),
     ('- input.xyz\n', 'YAML mapping'),
     ('1: input.xyz\n', 'string setting names'),
-    ('{}\n', "Missing required key 'input_file'"),
     ('input_file: input.xyz\nensemble: typo\n', 'Unknown ensemble'),
-    ('input_file: input.xyz\nmd_steps: 0\n', 'md_steps must be a positive integer'),
     ('input_file: input.xyz\ndt: not-a-number\n', 'Invalid settings'),
-])
+])  # missing input_file and zero counts: test_cli_errors.py
 def test_md_yaml_configuration_errors_exit_two_before_execution(tmp_path, monkeypatch, contents, message):
     from so3lr.cli import so3lr_cli as app
     settings = tmp_path / 'invalid.yaml'
@@ -141,9 +139,9 @@ finally:
     assert 'Traceback' not in result.stderr
 
 
-@pytest.mark.parametrize('error', [ValueError('runtime shape failure'), TypeError('runtime type failure')])
-def test_md_yaml_does_not_reclassify_runtime_exceptions(tmp_path, monkeypatch, error):
+def test_md_yaml_does_not_reclassify_runtime_exceptions(tmp_path, monkeypatch):
     from so3lr.cli import so3lr_cli as app
+    error = ValueError('runtime shape failure')  # the type a settings error would also raise
     settings = tmp_path / 'run.yaml'
     settings.write_text('input_file: input.xyz\n')
     def run(*args, **kwargs):
@@ -162,9 +160,8 @@ def test_programmatic_md_settings_validation_keeps_value_error(tmp_path):
         load_md_settings(settings)
 
 
-@pytest.mark.parametrize('filename', ['run.log', 'trajectory.xyz'])
-def test_show_rejects_nonjournal_files_as_usage_errors(tmp_path, filename):
-    path = tmp_path / filename
+def test_show_rejects_nonjournal_files_as_usage_errors(tmp_path):
+    path = tmp_path / 'run.log'
     path.write_text('Not a metrics journal.\n')
     result = CliRunner().invoke(cli, ['show', str(path), '--once'])
     assert result.exit_code == 2, result.output

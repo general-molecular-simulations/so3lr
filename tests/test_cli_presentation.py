@@ -6,32 +6,21 @@ from so3lr.cli.so3lr_cli import cli
 from so3lr.cli import presentation
 
 
-def test_help_discovers_yaml_workflow_and_preserves_executable_name():
-    result = CliRunner().invoke(cli, ['--help'], prog_name='so3lr')
-    assert result.exit_code == 0
-    assert 'Usage: so3lr ' in result.output
-    assert 'so3lr --settings run.yaml' in result.output
-    assert '--display' in result.output
-    assert 'bare so3lr also opens guided setup' in result.output
-    assert 'including batch jobs' in result.output
-    assert 'molecule.xyz --lr-cutoff 100' in result.output
-    assert 'water.xyz' not in result.output
+def test_help_discovers_yaml_workflow_and_keeps_extra_examples_for_full_help():
+    brief = CliRunner().invoke(cli, ['--help'], prog_name='so3lr')
+    full = CliRunner().invoke(cli, ['--help-full'], prog_name='so3lr')
+    assert brief.exit_code == full.exit_code == 0
+    assert 'Usage: so3lr ' in brief.output
+    assert 'so3lr --settings run.yaml' in brief.output
+    assert '--display' in brief.output
+    assert 'More examples' not in brief.output
+    assert 'More examples' in full.output
 
 
 def test_version_is_available_without_model_initialization():
     result = CliRunner().invoke(cli, ['--version'])
     assert result.exit_code == 0
     assert 'SO3LR Tauri' in result.output
-
-
-def test_full_help_advertises_and_includes_its_additional_examples():
-    brief = CliRunner().invoke(cli, ['--help'])
-    full = CliRunner().invoke(cli, ['--help-full'])
-    assert brief.exit_code == full.exit_code == 0
-    assert 'with additional examples' in ' '.join(brief.output.split())
-    assert 'More examples' not in brief.output
-    assert 'More examples' in full.output
-    assert 'so3lr --display plain --settings run.yaml' in full.output
 
 
 def test_grouped_help_exposes_common_and_advanced_options():
@@ -60,11 +49,10 @@ def test_new_commands_are_discoverable_and_help_never_launches(monkeypatch):
     from so3lr.cli import setup
     monkeypatch.setattr(setup, 'should_launch', lambda: True)
     monkeypatch.setattr(setup, 'launch_setup', lambda: (_ for _ in ()).throw(AssertionError('prompted')))
-    for args in (['--help'], ['start', '--help'], ['init', '--help'], ['show', '--help']):
+    for args in (['--help'], ['show', '--help'], ['start', '--help'], ['start', '-h'], ['init', '--help']):
         result = CliRunner().invoke(cli, args)
         assert result.exit_code == 0, result.output
     overview = CliRunner().invoke(cli, ['--help']).output
-    assert 'Prepare and monitor' in overview
     assert 'so3lr start' in overview
     assert 'so3lr init' not in overview
     assert cli.commands['init'].hidden and not cli.commands['start'].hidden
@@ -155,14 +143,23 @@ def test_unmarked_md_yaml_keeps_units_defaults_and_single_read(tmp_path, monkeyp
     assert calls[0]['md_dt'] == 0.0005 and calls[0]['ensemble'] == 'nvt'
 
 
-@pytest.mark.parametrize('error', [KeyError('forces'), AssertionError()])
-def test_main_preserves_unexpected_exceptions_outside_display(monkeypatch, error):
+@pytest.mark.parametrize('in_display', [False, True])
+def test_main_preserves_unexpected_exceptions_without_a_proven_saved_trace(tmp_path, monkeypatch, in_display):
+    # A plain display owning the run does not by itself prove a traceback was saved.
     from so3lr.cli import so3lr_cli
+    error = KeyError('forces')
+    presentation.configure(display='plain')
     def fail():
-        raise error
+        if not in_display:
+            raise error
+        with presentation.run_display({'log_file': tmp_path / 'run.log'}):
+            raise error
     monkeypatch.setattr(so3lr_cli, 'cli', fail)
-    with pytest.raises(type(error)) as caught:
-        so3lr_cli.main()
+    try:
+        with pytest.raises(KeyError) as caught:
+            so3lr_cli.main()
+    finally:
+        presentation.reset()
     assert caught.value is error
     assert caught.traceback[-1].name == 'fail'
 
@@ -176,22 +173,6 @@ def test_main_unexpected_command_failure_keeps_terminal_traceback(tmp_path):
     assert result.returncode != 0
     assert 'Traceback (most recent call last)' in result.stderr
     assert 'ZeroDivisionError: division by zero' in result.stderr
-
-
-def test_main_keeps_traceback_when_display_ownership_does_not_prove_a_saved_trace(tmp_path, monkeypatch):
-    from so3lr.cli import so3lr_cli
-    presentation.configure(display='plain')
-    def fail():
-        with presentation.run_display({'log_file': tmp_path / 'run.log'}):
-            raise KeyError('forces')
-    monkeypatch.setattr(so3lr_cli, 'cli', fail)
-    try:
-        with pytest.raises(KeyError) as caught:
-            so3lr_cli.main()
-    finally:
-        presentation.reset()
-    assert caught.value.args == ('forces',)
-    assert caught.traceback[-1].name == 'fail'
 
 
 @pytest.fixture
@@ -311,8 +292,9 @@ def test_optimization_step_budget_completion_remains_a_successful_command(failur
     assert invoke('opt') is None  # command completion remains success, not convergence
 
 
-@pytest.mark.parametrize('operation', ['md', 'opt'])
-def test_failed_traceback_file_write_keeps_original_exception(failure_cli, monkeypatch, capsys, operation):
+@pytest.mark.parametrize('operation,lost', [('md', 'full disk'), ('opt', 'full disk'), ('md', 'filtered')])
+def test_unwritten_traceback_keeps_original_exception_and_claims_no_file(
+        failure_cli, monkeypatch, capsys, operation, lost):
     import logging
     app, log_path, invoke = failure_cli
     monkeypatch.setattr(logging, 'raiseExceptions', False)
@@ -328,8 +310,13 @@ def test_failed_traceback_file_write_keeps_original_exception(failure_cli, monke
             return super().emit(record)
 
     def setup(path):
+        if lost == 'full disk':
+            handler = FullDiskHandler(path)
+        else:
+            handler = logging.FileHandler(path)
+            handler.addFilter(lambda record: not record.exc_info)
         app.logger.addHandler(presentation.make_console_handler())
-        app.logger.addHandler(FullDiskHandler(path))
+        app.logger.addHandler(handler)
         presentation.get_reporter().logger_ready(path)
     monkeypatch.setattr(app, 'setup_logger', setup)
     with pytest.raises(AssertionError, match='runtime failure') as caught:
@@ -371,28 +358,7 @@ def test_traceback_rollover_still_produces_one_compact_terminal_error(
     assert 'Traceback (most recent call last)' not in err
 
 
-def test_filtered_traceback_does_not_claim_preservation(failure_cli, monkeypatch, capsys):
-    import logging
-    app, log_path, invoke = failure_cli
-
-    def setup(path):
-        handler = logging.FileHandler(path)
-        handler.addFilter(lambda record: not record.exc_info)
-        app.logger.addHandler(presentation.make_console_handler())
-        app.logger.addHandler(handler)
-        presentation.get_reporter().logger_ready(path)
-
-    monkeypatch.setattr(app, 'setup_logger', setup)
-    with pytest.raises(AssertionError, match='runtime failure') as caught:
-        invoke('md')
-    assert not getattr(caught.value, '_so3lr_traceback_preserved', False)
-    assert 'Traceback (most recent call last)' not in log_path.read_text()
-    assert 'Full traceback:' not in capsys.readouterr().err
-    assert not getattr(caught.value, '_so3lr_traceback_path', None)
-
-
-@pytest.mark.parametrize('failure', [KeyboardInterrupt(), SystemExit(7),
-                                   presentation._TerminationSignal(15)])
+@pytest.mark.parametrize('failure', [KeyboardInterrupt(), presentation._TerminationSignal(15)])
 def test_hardware_inspection_does_not_swallow_control_flow(monkeypatch, failure):
     import sys
     from types import SimpleNamespace

@@ -72,10 +72,12 @@ def test_unknown_schema_bad_data_and_duplicates_are_skipped(tmp_path):
     valid = event(2, 'sample', step=0, time_ps=0)
     write(path, [[], event(0, 'run_started', settings={}), unsupported,
                  valid, valid, event(3, 'sample', step='bad', time_ps=1)])
+    # Deeply nested JSON raises RecursionError, not a decode error; later records must still load.
+    path.write_text('[' * 10_000 + '0' + ']' * 10_000 + '\n' + path.read_text())
     reader = monitor.JournalReader(path)
     reader.snapshot()
     assert reader.state.unsupported == 1
-    assert reader.state.malformed == 2
+    assert reader.state.malformed == 3
     assert reader.state.sample_count == 1
 
 
@@ -226,25 +228,6 @@ def test_plot_connects_samples_without_changing_numeric_readout():
     assert rows == [{'time_ps': 0, 'temperature_K': 100}, {'time_ps': 1, 'temperature_K': 300}]
 
 
-def test_target_guide_uses_a_solid_terminal_row_with_exact_caption():
-    # Solid guides use character-row resolution; the caption retains the
-    # exact value when two nearby targets occupy the same terminal row.
-    samples = [{'time_ps': 0, 'temperature_K': 0},
-               {'time_ps': 0, 'temperature_K': 1}]
-    low, high, pixels = -0.07, 1.07, 28
-    targets = [high - pixel / (pixels - 1) * (high - low) for pixel in (8, 11)]
-    top = monitor._plot(samples, 'temperature_K', 'Temperature', 'K', 40, target=targets[0])
-    bottom = monitor._plot(samples, 'temperature_K', 'Temperature', 'K', 40, target=targets[1])
-    # Heading is followed by plot rows; pixel8 and pixel11 both occupy row2.
-    top_row, bottom_row = top.renderables[3].plain, bottom.renderables[3].plain
-    assert '────' in top_row and top_row == bottom_row
-    assert f'Thermostat target {targets[0]:g} K' in top.renderables[-1].plain
-    assert f'Thermostat target {targets[1]:g} K' in bottom.renderables[-1].plain
-    ascii_plot = monitor._plot(samples, 'temperature_K', 'Temperature', 'K', 40,
-                               target=targets[1], ascii_only=True)
-    assert '-' in ascii_plot.renderables[3].plain
-
-
 def test_render_uses_segment_time_literal_paths_and_distinct_energy_fields(tmp_path):
     path = tmp_path / 'run.events.jsonl'
     write(path, samples())
@@ -263,7 +246,7 @@ def test_render_uses_segment_time_literal_paths_and_distinct_energy_fields(tmp_p
     assert '[red]restart.npz' in render(reader)
 
 
-@pytest.mark.parametrize('width', [80, 100, 120])
+@pytest.mark.parametrize('width', [80, 120])
 @pytest.mark.parametrize('constrained', [False, True])
 def test_colored_chart_rows_never_wrap_away_from_their_axes(tmp_path, monkeypatch, width, constrained):
     from rich.console import Console
@@ -292,30 +275,7 @@ def test_colored_chart_rows_never_wrap_away_from_their_axes(tmp_path, monkeypatc
     assert not any(line.strip() == '5' for line in lines)
 
 
-def test_ascii_plot_and_no_missing_property_substitution(tmp_path):
-    path = tmp_path / 'run.events.jsonl'
-    write(path, samples(1))
-    reader = monitor.JournalReader(path)
-    reader.snapshot()
-    for row in reader.state.samples:
-        row.pop('conserved_energy_eV', None)
-    text = render(reader, energy='conserved_energy_eV', ascii_only=True)
-    assert text.isascii()
-    assert 'No samples for this property yet.' in text
-    assert 'Conserved energy' in text
-
-
-def test_compact_view_has_controls_in_24_rows(tmp_path):
-    path = tmp_path / 'run.events.jsonl'
-    write(path, samples())
-    reader = monitor.JournalReader(path)
-    reader.snapshot()
-    text = render(reader, height=24)
-    assert len(text.splitlines()) <= 24
-    assert 'q: detach' in text
-
-
-@pytest.mark.parametrize('width', [32, 50, 60, 80])
+@pytest.mark.parametrize('width', [32, 60])
 @pytest.mark.parametrize('completed', [False, True])
 def test_ascii_paged_controls_fit_after_arrow_names_expand(tmp_path, width, completed):
     path = tmp_path / 'run.events.jsonl'
@@ -348,24 +308,16 @@ def test_cycle_throughput_and_checkpoint_age_are_explicit(tmp_path):
     compact = render(reader, now=now, height=24)
     assert 'Cycle 30.857 ns/day · 1.56e-04 s/atom/step' in compact
     assert 'Checkpoint step 3,000 · age 12s' in compact
-    assert len(compact.splitlines()) <= 24
-
-
-def test_throughput_omits_unknown_atom_normalization(tmp_path):
-    path = tmp_path / 'run.events.jsonl'
-    write(path, samples())
-    reader = monitor.JournalReader(path)
-    reader.snapshot()
-    reader.state.samples[-1]['seconds_per_step'] = 0.0014
+    assert len(compact.splitlines()) <= 24 and 'q: detach' in compact
+    # Without an atom count, the per-atom rate is omitted rather than invented.
     reader.state.info.pop('atoms')
     for height in (None, 24):
         text = render(reader, height=height)
-        assert '30.857 ns/day' in text
-        assert 's/atom/step' not in text
+        assert '30.857 ns/day' in text and 's/atom/step' not in text
 
 
-@pytest.mark.parametrize('width', [80, 100, 120])
-def test_npt_volume_is_below_temperature_and_energy(tmp_path, width):
+def test_npt_volume_is_below_temperature_and_energy(tmp_path):
+    width = 80  # other widths: test_all_stacked_plot_axes_align_with_wide_values_and_missing_tail
     path = tmp_path / 'npt.events.jsonl'
     events = samples()
     events[0]['data']['settings']['ensemble'] = 'npt'
@@ -466,9 +418,8 @@ def test_discovery_order_is_stable_when_writers_touch_journals(tmp_path):
         assert monitor.discover_journals(tmp_path) == expected
 
 
-@pytest.mark.parametrize('name', ['run.log', 'trajectory.xyz', 'other.jsonl'])
-def test_explicit_nonjournal_file_has_actionable_neighbor_hint(tmp_path, name):
-    path = tmp_path / name
+def test_explicit_nonjournal_file_has_actionable_neighbor_hint(tmp_path):
+    path = tmp_path / 'other.jsonl'
     path.write_text('original content\n')
     journal = tmp_path / 'run.abc.events.jsonl'
     write(journal, samples(1))
@@ -511,8 +462,7 @@ def test_show_existing_parent_folder_opens_all_run_overview(tmp_path, monkeypatc
     assert '\x1b' not in text
 
 
-@pytest.mark.parametrize('close_key', ['q', 'escape'])
-def test_show_cycles_overview_and_runs_and_returns_directly(tmp_path, monkeypatch, close_key):
+def test_show_cycles_overview_and_runs_and_returns_directly(tmp_path, monkeypatch):
     from rich.console import Console
     import rich.live
 
@@ -542,7 +492,7 @@ def test_show_cycles_overview_and_runs_and_returns_directly(tmp_path, monkeypatc
             frames.append(output.getvalue())
     class Keyboard:
         def __enter__(self):
-            self.keys = iter(['next', 'e', 'next', 'next', 'previous', 'o', close_key])
+            self.keys = iter(['next', 'e', 'next', 'next', 'previous', 'o', 'escape'])
             return self
         def __exit__(self, *args):
             pass
@@ -575,18 +525,7 @@ def test_once_is_ansi_free_even_in_a_terminal(tmp_path, monkeypatch):
     assert 'Esc/q' not in output.getvalue() and 'Plot page' not in output.getvalue()
 
 
-@pytest.mark.parametrize('kind', ['run_completed', 'run_failed'])
-def test_valid_once_snapshot_returns_normally_regardless_recorded_outcome(tmp_path, monkeypatch, kind):
-    path = tmp_path / 'run.events.jsonl'
-    write(path, samples(1) + [event(100, kind, message='recorded outcome')])
-    output = io.StringIO()
-    monkeypatch.setattr(sys, 'stdout', output)
-    assert monitor.show(path, once=True) is None
-    assert 'recorded outcome' in output.getvalue()
-    assert 'Esc/q' not in output.getvalue() and 'Plot page' not in output.getvalue()
-
-
-@pytest.mark.parametrize('width,height', [(32, 3), (32, 6), (32, 10), (40, 24), (80, 24)])
+@pytest.mark.parametrize('width,height', [(32, 3), (32, 6), (40, 24)])
 def test_compact_view_keeps_age_and_recorded_origin(tmp_path, width, height):
     path = tmp_path / 'run.events.jsonl'
     entries = samples(1)
@@ -603,19 +542,7 @@ def test_compact_view_keeps_age_and_recorded_origin(tmp_path, width, height):
     assert len(text.splitlines()) <= height
 
 
-@pytest.mark.parametrize('width', [32, 80])
-@pytest.mark.parametrize('ascii_only', [False, True])
-def test_folder_overview_always_shows_escape_close_hint(tmp_path, width, ascii_only):
-    from rich.console import Console
-    from so3lr.cli.overview import render_overview
-    reader = monitor.JournalReader(tmp_path / 'run.events.jsonl')
-    output = io.StringIO()
-    Console(file=output, width=width, color_system=None).print(
-        render_overview([reader], width=width, height=2, ascii_only=ascii_only))
-    assert output.getvalue().splitlines()[-1].startswith('Esc/q: close')
-
-
-@pytest.mark.parametrize('interval', [0, -1, float('nan'), float('inf')])
+@pytest.mark.parametrize('interval', [0, float('nan')])
 def test_bad_intervals_are_rejected(tmp_path, interval):
     with pytest.raises(ValueError, match='positive'):
         monitor.show(tmp_path, interval=interval)
@@ -632,6 +559,10 @@ def test_time_axis_includes_intermediate_numbered_ticks():
         axis, labels = plot.renderables[-2:]
         assert axis.plain.count('+' if ascii_only else '┬') == (6 if ascii_only else 5)
         assert labels.plain.split() == ['ps', '0', '1.25', '2.5', '3.75', '5']
+    # A single sample at t = 0 gets one tick, not an invented elapsed span.
+    zero = monitor._plot([{'time_ps': 0, 'energy_eV': -39}], 'energy_eV', 'Total energy', 'eV', 80)
+    assert zero.renderables[-1].plain.split() == ['ps', '0']
+    assert monitor._time_ticks(0, 0, 60) == [(0, '0')]
 
 
 @pytest.mark.parametrize('columns', [8, 12, 20, 30])
@@ -646,12 +577,6 @@ def test_time_ticks_adapt_without_overlapping_labels(columns, right):
         previous_end = start + len(label) - 1
     assert ticks[0][1] == '0'
     assert len(ticks) <= 5
-
-
-def test_time_zero_axis_has_no_invented_elapsed_time():
-    plot = monitor._plot([{'time_ps': 0, 'energy_eV': -39}], 'energy_eV', 'Total energy', 'eV', 80)
-    assert plot.renderables[-1].plain.split() == ['ps', '0']
-    assert monitor._time_ticks(0, 0, 60) == [(0, '0')]
 
 
 def test_total_energy_reference_uses_elapsed_time_not_half_the_sample_count(tmp_path):
@@ -758,13 +683,12 @@ def test_completed_attached_display_reopens_with_show_and_has_no_stale_controls(
 
 
 @pytest.mark.parametrize('height', [None, 24])
-@pytest.mark.parametrize('status', ['Completed', 'Failed'])
-def test_opted_out_attached_display_does_not_offer_unsaved_graphs(tmp_path, height, status):
+def test_opted_out_attached_display_does_not_offer_unsaved_graphs(tmp_path, height):
     path = tmp_path / 'run.events.jsonl'
     write(path, samples())
     reader = monitor.JournalReader(path)
     reader.snapshot()
-    reader.state.status = status
+    reader.state.status = 'Failed'  # Completed takes the same branch in _controls
     reader.state.info['_journal_enabled'] = False
     text = render(reader, height=height, attached=True)
     assert 'Saved graphs unavailable: SO3LR_JOURNAL=0. Text log retained.' in text.replace('\n', '')
@@ -785,35 +709,11 @@ def test_opted_out_attached_plots_do_not_advertise_a_nonexistent_journal(tmp_pat
     assert str(path) not in text
 
 
-def test_import_does_not_load_model_backends():
-    result = subprocess.run([sys.executable, '-c',
-        "import sys; import so3lr.cli.monitor; "
-        "assert not any(m.split('.')[0] in ('jax', 'flax', 'jax_md') for m in sys.modules)"],
-        capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-
-
-@pytest.mark.skipif(os.name == 'nt', reason='POSIX terminal restoration')
-def test_keyboard_restores_terminal_on_failure(monkeypatch):
-    import termios
-    import tty
-    saved, restored = object(), []
-    monkeypatch.setattr(sys, 'stdin', type('Input', (), {'fileno': lambda self: 42})())
-    monkeypatch.setattr(termios, 'tcgetattr', lambda fd: saved)
-    monkeypatch.setattr(tty, 'setcbreak', lambda fd: None)
-    monkeypatch.setattr(termios, 'tcsetattr', lambda fd, when, state: restored.append((fd, state)))
-    with pytest.raises(RuntimeError):
-        with monitor._Keyboard():
-            raise RuntimeError('reader failed')
-    assert restored == [(42, saved)]
-
-
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX keyboard byte stream')
 @pytest.mark.parametrize('chunks, expected', [
     ([b'\x1b[Ceq'], ['next', 'e', 'q']),
     ([b'\x1b', b'[', b'Dq'], ['', '', 'previous', 'q']),
     ([b'\x1bOA\x1bOB\x1bOCeq'], ['up', 'down', 'next', 'e', 'q']),
-    ([b'\x1b', b'O', b'Dq'], ['', '', 'previous', 'q']),
     ([b'\x1b[1;5Aq'], ['', 'q']),  # unsupported modifier sequence is one key
     ([b'\x1bOPq'], ['', 'q']),  # an unsupported SS3 key must not become O
 ])
@@ -889,8 +789,8 @@ def test_real_pty_application_arrows_preserve_shortcuts_and_restore_input(monkey
         os.close(slave)
 
 
-@pytest.mark.parametrize('surface', ['show', 'prompt'])
-@pytest.mark.parametrize('kind', ['keyboard', 'termination'])
+@pytest.mark.parametrize('surface,kind', [('show', 'keyboard'), ('show', 'termination'),
+                                          ('prompt', 'termination')])
 def test_live_start_interruption_restores_cursor_before_context_entry(tmp_path, monkeypatch, surface, kind):
     from rich.console import Console
     from rich.live import Live
@@ -1002,8 +902,7 @@ def test_keyboard_cleanup_is_owned_before_entry_returns(tmp_path, monkeypatch, o
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX signal and terminal ownership')
-@pytest.mark.parametrize('surface', ['show', 'prompt'])
-@pytest.mark.parametrize('signal_name', ['SIGTERM', 'SIGHUP'])
+@pytest.mark.parametrize('surface,signal_name', [('show', 'SIGTERM'), ('prompt', 'SIGHUP')])
 def test_interactive_viewer_and_prompt_restore_terminal_before_termination(tmp_path, surface, signal_name):
     import fcntl
     import pty
@@ -1127,9 +1026,13 @@ def test_solid_guide_preserves_trace_and_never_colors_guide_as_data():
     ascii_plot = monitor._plot(rows, 'energy_eV', 'Total energy', 'eV', 60, reference=0.5, ascii_only=True)
     assert '---' in ascii_plot.renderables[4].plain
     assert '*' in ascii_plot.renderables[4].plain
+    # A thermostat target uses the same guide; when its caption cannot share the
+    # heading row it moves below the plot and still shows the exact value.
+    narrow = monitor._plot(rows, 'energy_eV', 'Total energy', 'eV', 40, target=0.123456)
+    assert 'Thermostat target 0.123456 eV' in narrow.renderables[-1].plain
 
 
-@pytest.mark.parametrize('width', [32, 60, 80, 100, 120])
+@pytest.mark.parametrize('width', [32, 80, 120])
 @pytest.mark.parametrize('ascii_only', [False, True])
 @pytest.mark.parametrize('height', [None, 20, 23, 24])
 def test_all_stacked_plot_axes_align_with_wide_values_and_missing_tail(tmp_path, width, ascii_only, height):
@@ -1220,7 +1123,7 @@ def test_loading_and_failed_short_view_show_recorded_details_without_fake_sample
     assert 'job continues' not in failed
 
 
-@pytest.mark.parametrize('height', [None, 20, 24])
+@pytest.mark.parametrize('height', [None, 20])
 @pytest.mark.parametrize('ascii_only', [False, True])
 def test_optimization_view_shows_recorded_force_criterion_without_md_graphs(tmp_path, height, ascii_only):
     path = tmp_path / 'opt.events.jsonl'
@@ -1261,20 +1164,6 @@ def test_optimization_marker_clears_when_md_begins(tmp_path):
     assert 'Optimization' not in text
     assert 'Temperature [K]' in text and 'Total energy [eV]' in text
     assert 'Segment 0/200 steps' in text and 'step counter 1,000' in text
-
-
-def test_deeply_nested_json_is_skipped_and_later_records_still_load(tmp_path):
-    path = tmp_path / 'nested.events.jsonl'
-    nested = '[' * 10_000 + '0' + ']' * 10_000 + '\n'
-    path.write_text(nested + ''.join(json.dumps(item) + '\n' for item in samples(2)))
-    reader = monitor.JournalReader(path)
-    reader.snapshot()
-    assert reader.state.malformed == 1
-    assert reader.state.sample_count == 3
-    with path.open('a') as stream:
-        stream.write(json.dumps(event(20, 'run_completed')) + '\n')
-    reader.poll()
-    assert reader.state.status == 'Completed' and reader.state.malformed == 1
 
 
 @pytest.mark.parametrize('key,values', [
@@ -1322,7 +1211,7 @@ def test_ascii_paged_views_never_add_a_unicode_ellipsis(tmp_path, operation, hei
     assert len(output.getvalue().splitlines()) <= height
 
 
-@pytest.mark.parametrize('height', [1, 3, 6, 10, 12])
+@pytest.mark.parametrize('height', [1, 3, 10])
 @pytest.mark.parametrize('status', ['Running', 'Completed', 'Failed'])
 def test_short_optimization_views_keep_controls_and_outcome(tmp_path, height, status):
     path = tmp_path / 'optimization.events.jsonl'

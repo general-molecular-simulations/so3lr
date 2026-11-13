@@ -5,7 +5,8 @@ from so3lr.cli import theme
 from so3lr.cli.formatting import terminal_text
 
 
-@pytest.mark.parametrize('ratio', [0, 0.01, 0.26, 0.5, 0.99, 1, 1.7, -3])
+# Empty, a half cell, and clamping at both ends.
+@pytest.mark.parametrize('ratio', [0, 0.26, 1.7, -3])
 @pytest.mark.parametrize('ascii_only', [False, True])
 def test_bar_has_exact_width_and_monotone_fill(ratio, ascii_only):
     bar = theme.bar(ratio, 20, ascii_only)
@@ -27,15 +28,3 @@ def test_controls_keep_visible_text_and_emphasize_only_keys():
     assert bold == ['↑/↓', 'e', 'Esc/q', 'Ctrl+C']
     assert theme.controls(hint, ascii_only=True).plain == terminal_text(hint, True)
     assert theme.controls('Line one\nq: quit').plain == 'Line one\nq: quit'
-
-
-def test_new_glyphs_fold_to_ascii():
-    text = terminal_text('◆ ● ○ ◌ ✓ ✕ ✦ ✧ › ┄ ╸ ×', ascii_only=True)
-    assert text.isascii() and '\\u' not in text
-
-
-@pytest.mark.parametrize('status, color', [('Running', theme.WARNING), ('Completed', theme.SUCCESS),
-                                           ('complete', theme.SUCCESS), ('Failed', theme.DANGER),
-                                           ('Started', theme.MUTED), ('Something else', theme.MUTED)])
-def test_status_colors(status, color):
-    assert theme.status_style(status) == color

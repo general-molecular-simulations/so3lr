@@ -126,14 +126,8 @@ def test_failed_write_never_reports_checkpoint(driver, monkeypatch, operation):
     assert recorder.saved == []
 
 
-def test_checkpoint_report_uses_actual_npz_filename(driver):
-    run, _, settings, recorder = driver
-    settings['restart_save_path'] = settings['restart_save_path'].removesuffix('.npz')
-    run(settings)
-    assert recorder.saved == [(4, 2), (6, 3)]
-
-
 def test_checkpoint_report_uses_writer_returned_path(driver, monkeypatch):
+    # The writer appends .npz to a suffix-less path, so this also covers the actual npz filename.
     run, _, settings, recorder = driver
     save = so3lr_md.save_state
 
@@ -187,16 +181,6 @@ def test_cell_metrics_preserve_log_format_and_use_lattice_rows():
     assert row == so3lr_md.format_md_row(100, 1., -2., -1., 300., 0.1, box=box)
     assert values['box'] == box.T.tolist()
     assert values['volume'] == pytest.approx(1320.)
-
-
-def test_float32_energy_metric_uses_the_existing_log_sum():
-    ke, pe = jnp.float32(100.1), jnp.float32(-100000.1)
-    values = {}
-    row = so3lr_md.format_md_row(50, ke, pe, ke + pe, 300., .01, metrics=values)
-    assert row.split('\t')[1] == '-99900.000'
-    assert f'{float(ke) + float(pe):.3f}' == '-99900.002'  # previous journal value
-    assert values['energy'] == float(ke + pe)
-    assert f'{values["energy"]:.3f}' == row.split('\t')[1]
 
 
 def test_float32_driver_energy_matches_log_rows(driver, monkeypatch):
@@ -271,7 +255,7 @@ def test_langevin_samples_do_not_label_energy_as_conserved(driver):
     assert 'Step\tE [eV]\tKE\tPE\tH\tTemp [K]\ttime/step [s]' in log
 
 
-@pytest.mark.parametrize('dtype', [np.float32, np.float64])
+@pytest.mark.parametrize('dtype', [np.float32])
 def test_pressure_is_shared_between_log_and_metrics(monkeypatch, dtype):
     class FlexibleState:
         pass

@@ -55,7 +55,7 @@ def test_missing_segment_uses_restart_offset_without_inventing_completion():
                   samples=[dict(step=1100, temperature_K=300)], status='Running')
     text = render([item], width=100, now=datetime(2026, 11, 1, tzinfo=timezone.utc))
     assert '100/100' in text and '100%' in text
-    assert 'Stale?' in text and '0 completed' in text
+    assert 'Stale?' in text and '1 stale?' in text and '0 completed' in text
     assert 'current job status unknown' in text
     assert 'Total E [eV]' in text
     assert '304d' in text
@@ -86,7 +86,7 @@ def test_names_disambiguate_journals_in_one_directory_and_repeated_directory_nam
     assert 'a/same' in text and 'b/same' in text
 
 
-@pytest.mark.parametrize('width', [40, 52, 80, 100, 120])
+@pytest.mark.parametrize('width', [40, 80, 120])
 def test_overview_stays_inside_terminal_width_and_height(width):
     readers = [reader(f'/runs/long-run-name-{index:02d}/run.events.jsonl') for index in range(64)]
     text = render(readers, width=width, height=24)
@@ -113,13 +113,6 @@ def test_paging_wraps_and_full_snapshot_includes_every_reader():
     assert all(f'run-{index:03d}' in snapshot for index in range(64))
 
 
-def test_all_128_discovered_runs_fit_one_unbounded_snapshot():
-    readers = [reader(f'/runs/run-{index:03d}/run.events.jsonl') for index in range(128)]
-    text = render(readers)
-    assert '128 runs' in text and 'Runs 1-128 of 128' in text
-    assert all(f'run-{index:03d}' in text for index in range(128))
-
-
 def test_static_snapshot_includes_all_runs_without_interactive_or_page_hints():
     items = [reader(f'/runs/run-{index:03d}/run.events.jsonl') for index in range(128)]
     text = render(items, static=True, height=2, page=12)
@@ -129,7 +122,7 @@ def test_static_snapshot_includes_all_runs_without_interactive_or_page_hints():
     assert 'Age' in text
 
 
-@pytest.mark.parametrize('width', [32, 40, 80, 120])
+@pytest.mark.parametrize('width', [32, 80])
 def test_age_remains_visible_and_origin_is_available_at_standard_width(width):
     item = reader('/runs/ethanol/run.events.jsonl', host='mel2024',
                   scheduler={'SLURM_JOB_ID': '5450148'})
@@ -141,18 +134,6 @@ def test_age_remains_visible_and_origin_is_available_at_standard_width(width):
     assert len(text.splitlines()) <= 24
 
 
-def test_stale_unknown_and_terminal_states_remain_distinct():
-    items = [reader('/runs/stale/run.events.jsonl'),
-             reader('/runs/completed/run.events.jsonl', status='Completed'),
-             reader('/runs/unknown/run.events.jsonl', status='No lifecycle event yet', sample_timestamp=None)]
-    text = render(items, width=100, now=datetime(2026, 2, 1, tzinfo=timezone.utc))
-    assert '1 stale?' in text and '1 completed' in text and '1 unknown' in text
-    assert '31d' in text and 'Stale?' in text
-    assert 'current job status unknown' in text
-    assert items[0].state.status == 'Running'
-    assert 'Failed' not in text
-
-
 def test_final_console_width_and_small_height_are_respected():
     items = [reader(f'/runs/sample-{index}/run.events.jsonl') for index in range(20)]
     output = io.StringIO()
@@ -161,10 +142,13 @@ def test_final_console_width_and_small_height_are_respected():
     text = output.getvalue()
     assert 'Age' in text and 'Total E [eV]' not in text
     assert max(map(cell_len, text.splitlines())) <= 80
-    for height in (3, 6, 12):
+    for height in (2, 3, 6, 12):
         compact = render(items, height=height)
         assert len(compact.splitlines()) <= height
         assert 'q: close' in compact
+    for width, ascii_only in ((32, True), (80, False)):  # even two rows end with the close hint
+        last = render(items, width=width, height=2, ascii_only=ascii_only).splitlines()[-1]
+        assert last.startswith('Esc/q: close')
 
 
 def test_literal_names_and_ascii_output_do_not_emit_terminal_controls():

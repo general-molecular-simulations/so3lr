@@ -42,5 +42,24 @@ def test_md_input_check_warns_without_changing_settings(caplog, settings, file_i
     assert len(caplog.records) == len(expected)
 
 
-def test_electron_count_problem_is_empty_for_valid_states():
-    assert electron_count_problem(10, 0, 0) == '' and electron_count_problem(10, 1, 1) == ''
+@pytest.mark.parametrize('info, expected', [
+    ({'multiplicity': 3}, (None, 2)),
+    ({'charge': 0.5}, (None, None)),
+    ({'charge': True, 'multiplicity': 0}, (None, None)),
+    ({'charge': 10 ** 400, 'multiplicity': '1e999'}, (None, None)),  # overflow and infinity
+])
+def test_recorded_values_must_be_whole_numbers(info, expected):
+    assert recorded_charge_and_unpaired(info) == expected
+
+
+@pytest.mark.parametrize('electrons, charge, unpaired, fragment', [
+    (10, 0, 0, ''),
+    (10, 1, 1, ''),
+    (10, 1, 0, '9 electrons (an odd number)'),
+    (10, 0, 1, '10 electrons (an even number)'),
+    (10, 11, 0, 'removes more than the 10 electrons'),
+    (10, 0, 12, 'exceed the 10 electrons'),
+])
+def test_electron_count_problem_explains_impossible_states(electrons, charge, unpaired, fragment):
+    problem = electron_count_problem(electrons, charge, unpaired)
+    assert (fragment in problem) if fragment else problem == ''

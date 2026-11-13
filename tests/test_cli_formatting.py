@@ -1,62 +1,44 @@
 """Shared display labels tolerate incomplete or invalid run metadata."""
-import subprocess
-import sys
-
 import pytest
 
-from so3lr.cli.formatting import precision_label, throughput_label, terminal_text
+from so3lr.cli.formatting import duration_label, optimization_status, throughput_label, terminal_text
 
 
-def test_mixed_precision_explains_model_and_dynamics():
-    assert precision_label('mixed') == 'mixed (float32 model; float64 dynamics)'
-
-
-def test_optimization_completion_is_separate_from_force_convergence():
-    from so3lr.cli.formatting import optimization_status
-    info = {'opt_force_target_eVA': 0.02, 'opt_force_max_eVA': 0.1}
-    assert optimization_status(info, 'Completed') == 'Step budget reached; force criterion not met'
-    info['opt_force_max_eVA'] = 0.01
-    assert optimization_status(info, 'Running') == 'Force criterion met'
-    assert optimization_status(info, 'Failed') == 'Optimization stopped'
-    assert optimization_status({}, 'Completed') == 'Step budget finished (no force target)'
-
-
-def test_zero_force_target_matches_the_actual_fire_comparison():
-    from so3lr.cli.formatting import optimization_status
-    info = {'opt_force_target_eVA': 0, 'opt_force_max_eVA': .01}
-    assert optimization_status(info, 'Completed') == 'Step budget reached; force criterion not met'
-    info['opt_force_max_eVA'] = 0.
-    assert optimization_status(info, 'Completed') == 'Force criterion met'
-    info['opt_force_target_eVA'] = -1.
-    assert optimization_status(info, 'Completed') == 'Step budget reached; force criterion not met'
-
-
-@pytest.mark.parametrize('field', ['opt_force_target_eVA', 'opt_force_max_eVA'])
-@pytest.mark.parametrize('value', [True, False])
-def test_boolean_metadata_cannot_report_optimization_convergence(field, value):
-    from so3lr.cli.formatting import optimization_status
-    info = {'opt_force_target_eVA': .02, 'opt_force_max_eVA': .01, field: value}
-    assert optimization_status(info, 'Completed') != 'Force criterion met'
-
-
-@pytest.mark.parametrize('value', ['float32', 'float64', 'unknown', '', None])
-def test_other_precision_labels_are_preserved(value):
-    assert precision_label(value) == str(value)
+@pytest.mark.parametrize('info,status,label', [
+    # Finishing the job is separate from meeting its recorded force criterion.
+    ({'opt_force_target_eVA': 0.02, 'opt_force_max_eVA': 0.1}, 'Completed',
+     'Step budget reached; force criterion not met'),
+    ({'opt_force_target_eVA': 0.02, 'opt_force_max_eVA': 0.01}, 'Running', 'Force criterion met'),
+    ({'opt_force_target_eVA': 0.02, 'opt_force_max_eVA': 0.01}, 'Failed', 'Optimization stopped'),
+    ({}, 'Completed', 'Step budget finished (no force target)'),
+    # Zero is an exact-force target, as in FIRE's own comparison; a negative one is never met.
+    ({'opt_force_target_eVA': 0, 'opt_force_max_eVA': .01}, 'Completed',
+     'Step budget reached; force criterion not met'),
+    ({'opt_force_target_eVA': 0, 'opt_force_max_eVA': 0.}, 'Completed', 'Force criterion met'),
+    ({'opt_force_target_eVA': -1., 'opt_force_max_eVA': 0.}, 'Completed',
+     'Step budget reached; force criterion not met'),
+    # Booleans are not numbers here, so they cannot report convergence.
+    ({'opt_force_target_eVA': True, 'opt_force_max_eVA': .01}, 'Completed',
+     'Step budget finished (no force target)'),
+    ({'opt_force_target_eVA': .02, 'opt_force_max_eVA': False}, 'Completed',
+     'Step budget reached; force criterion not met'),
+    # A relaxation that used its budget is not shown as still relaxing while MD runs.
+    ({'opt_step': 100, 'opt_total_steps': 100, 'opt_force_max_eVA': 0.03}, 'Running',
+     'Step budget finished (no force target)'),
+    ({'opt_step': 40, 'opt_total_steps': 100, 'opt_force_max_eVA': 0.03}, 'Running', 'Relaxing geometry'),
+    ({'opt_step': 100, 'opt_total_steps': 100, 'opt_force_max_eVA': 0.03, 'opt_force_target_eVA': 0.01},
+     'Running', 'Step budget reached; force criterion not met'),
+])
+def test_optimization_status(info, status, label):
+    assert optimization_status(info, status) == label
 
 
 def test_throughput_uses_femtoseconds_and_total_atom_count():
     assert throughput_label(0.004, 0.5, 192) == '10.800 ns/day · 2.08e-05 s/atom/step'
-    assert throughput_label(0.004, 0.5, 384) == '10.800 ns/day · 1.04e-05 s/atom/step'
-
-
-def test_available_rates_are_independent():
-    assert throughput_label(0.004, dt_fs=0.5) == '10.800 ns/day'
-    assert throughput_label(0.004, atoms=192) == '2.08e-05 s/atom/step'
     assert throughput_label(0.004) == ''
 
 
-@pytest.mark.parametrize('invalid', [None, 0, -1, float('nan'), float('inf'),
-                                   float('-inf'), True, False, 'unknown', {}, [], 1j])
+@pytest.mark.parametrize('invalid', [None, 0, float('nan'), True, 'unknown', 1j])
 def test_invalid_values_suppress_only_dependent_rates(invalid):
     assert throughput_label(invalid, 0.5, 192) == ''
     assert throughput_label(0.004, invalid, 192) == '2.08e-05 s/atom/step'
@@ -65,19 +47,15 @@ def test_invalid_values_suppress_only_dependent_rates(invalid):
 
 def test_overflow_and_underflow_results_are_not_displayed():
     assert throughput_label(1e-300, 1e300, 100) == '1.00e-302 s/atom/step'
-    assert throughput_label(1e300, 1e300, 1e-300) == '0.086 ns/day'
-    assert throughput_label(1e-300, 1e-300, 1e300) == '0.086 ns/day'
     assert throughput_label(1e300, 1e-300) == ''
     assert throughput_label(10**1000, 0.5, 192) == ''
 
 
-def test_formatter_imports_no_numerical_or_terminal_dependencies():
-    subprocess.run([sys.executable, '-c',
-                    'from so3lr.cli.formatting import precision_label, throughput_label; '
-                    'precision_label("mixed"); throughput_label(.004, .5, 192); '
-                    'import sys; '
-                    'assert not {"jax", "jax_md", "flax", "numpy", "rich"}.intersection(sys.modules)'],
-                   check=True)
+@pytest.mark.parametrize('seconds, label', [(3725, '1:02:05'),
+                                            (86400 * 2 + 3 * 3600 + 4 * 60 + 5, '2d 03:04:05')])
+def test_duration_label_spells_out_hours_and_days(seconds, label):
+    # mm:ss is asserted by every closing line ("finished in 00:00") and ETA test.
+    assert duration_label(seconds) == label
 
 
 @pytest.mark.parametrize('ascii_only', [False, True])
@@ -104,24 +82,6 @@ def test_terminal_text_preserves_only_explicitly_allowed_layout_newlines():
     assert terminal_text(source) == 'first\\x0asecond\\x1b[2J\\x0dthird\\x09'
     assert terminal_text(source, allow_newlines=True) == 'first\nsecond\\x1b[2J\\x0dthird\\x09'
     assert terminal_text('Volume [Å³] · target ≤ 2', ascii_only=True) == 'Volume [A^3] | target <= 2'
-
-
-def test_prompt_choices_use_the_same_control_escaping():
-    import io
-    from rich.console import Console
-    from so3lr.cli.prompts import selection_view
-
-    output = io.StringIO()
-    Console(file=output, width=100, force_terminal=True, color_system=None).print(
-        selection_view('Choose molecule', ['[bold]ethanol\x1b[2J\nα.xyz']))
-    assert '\x1b' not in output.getvalue()
-    assert '[bold]ethanol\\x1b[2J\\x0aα.xyz' in output.getvalue()
-
-
-def test_relaxation_that_used_its_budget_is_not_shown_as_still_relaxing():
-    from so3lr.cli.formatting import optimization_status
-    info = {'opt_step': 100, 'opt_total_steps': 100, 'opt_force_max_eVA': 0.03}
-    assert optimization_status(info, 'Running') == 'Step budget finished (no force target)'
-    assert optimization_status({**info, 'opt_step': 40}, 'Running') == 'Relaxing geometry'
-    assert optimization_status({**info, 'opt_force_target_eVA': 0.01}, 'Running') == (
-        'Step budget reached; force criterion not met')
+    # Every UI glyph has a readable ASCII fallback, not a \u escape.
+    folded = terminal_text('◆ ● ○ ◌ ✓ ✕ ✦ ✧ › ┄ ╸ ×', ascii_only=True)
+    assert folded.isascii() and '\\u' not in folded

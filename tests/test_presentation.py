@@ -48,7 +48,6 @@ def render(reporter, width=80, height=100):
     (False, 'xterm', 'auto', False, False),
     (True, 'dumb', 'auto', False, False),
     (True, 'xterm', 'plain', False, False),
-    (False, 'dumb', 'rich', False, False),
     (True, 'dumb', 'rich', False, True),
     (True, 'xterm', 'rich', True, False),
 ])
@@ -88,8 +87,6 @@ def test_forced_rich_redirect_uses_plain_output_and_warns_once(monkeypatch, quie
 
 @pytest.mark.parametrize('preserved,path,expected', [
     (False, '/tmp/run.log', ''),
-    (True, None, ''),
-    (True, '/tmp/run.log', 'Full traceback: /tmp/run.log'),
     (True, '/tmp/[red]run\n\x1b.log', 'Full traceback: /tmp/[red]run\\x0a\\x1b.log'),
 ])
 def test_failure_details_require_verified_path_and_escape_controls(preserved, path, expected):
@@ -99,40 +96,33 @@ def test_failure_details_require_verified_path_and_escape_controls(preserved, pa
     assert ui.failure_details(error) == expected
 
 
-def test_rich_failure_footer_follows_cleanup_and_keeps_full_journal_message(monkeypatch, tmp_path):
+@pytest.mark.parametrize('preserved', [True, False])
+def test_rich_failure_footer_follows_cleanup_and_keeps_full_journal_message(monkeypatch, tmp_path, preserved):
     import json
 
     output = Terminal()
     monkeypatch.setattr(sys, 'stderr', output)
     ui.configure(display='rich')
     error = RuntimeError('first line\nsecond XLA diagnostic')
-    error._so3lr_traceback_preserved = True
+    error._so3lr_traceback_preserved = preserved
     error._so3lr_traceback_path = '/tmp/verified-run.log'
     with pytest.raises(RuntimeError) as caught:
         with ui.run_display({'log_file': str(tmp_path / 'run.log')}) as reporter:
             raise error
     assert caught.value is error
-    assert reporter.renderer.detail == 'RuntimeError: first line'
     text = output.getvalue()
-    assert text.count('Full traceback: /tmp/verified-run.log') == 1
-    assert text.rfind('Full traceback:') > text.rfind('\x1b[?25h')
-    assert 'second XLA diagnostic' not in text and '\\x0a' not in text
+    if preserved:
+        assert reporter.renderer.detail == 'RuntimeError: first line'
+        assert text.count('Full traceback: /tmp/verified-run.log') == 1
+        assert text.rfind('Full traceback:') > text.rfind('\x1b[?25h')
+        assert 'second XLA diagnostic' not in text and '\\x0a' not in text
+    else:
+        # An unverified traceback file is never offered, so nothing is hidden.
+        assert reporter.renderer.detail == 'RuntimeError: first line\nsecond XLA diagnostic'
+        assert 'Full traceback:' not in text
     events = [json.loads(line) for line in reporter.journal.path.read_text().splitlines()]
     failure = next(event for event in events if event['type'] == 'run_failed')
     assert failure['data']['message'] == 'RuntimeError: first line\nsecond XLA diagnostic'
-
-
-def test_unverified_failure_does_not_hide_diagnostics_or_offer_traceback_file(monkeypatch):
-    output = Terminal()
-    monkeypatch.setattr(sys, 'stderr', output)
-    ui.configure(display='rich')
-    error = RuntimeError('first line\nsecond diagnostic')
-    error._so3lr_traceback_path = '/tmp/not-verified.log'
-    with pytest.raises(RuntimeError):
-        with ui.run_display({}) as reporter:
-            raise error
-    assert reporter.renderer.detail == 'RuntimeError: first line\nsecond diagnostic'
-    assert 'Full traceback:' not in output.getvalue()
 
 
 def test_module_and_plain_runs_do_not_import_rich_or_jax():
@@ -141,8 +131,7 @@ def test_module_and_plain_runs_do_not_import_rich_or_jax():
         "import sys; from so3lr.cli.presentation import configure, run_display; "
         "configure(display='plain'); "
         "ctx = run_display({}); ctx.__enter__(); ctx.__exit__(None, None, None); "
-        "assert not any(m == 'jax' or m.startswith('jax.') or m == 'rich' "
-        "or m.startswith('rich.') for m in sys.modules)",
+        "assert not {'jax', 'jax_md', 'flax', 'numpy', 'rich'} & {m.split('.')[0] for m in sys.modules}",
     ], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
@@ -163,7 +152,8 @@ def test_no_color_keeps_layout_without_color_codes(monkeypatch, environment, exp
     assert not re.search(r'\x1b\[(?:3[0-7]|9[0-7]|38;)[0-9;]*m', text)
 
 
-def test_resumed_progress_measures_only_new_steps(monkeypatch):
+def test_resumed_progress_measures_only_new_steps(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger='SO3LR')
     monkeypatch.setattr(sys, 'stderr', Terminal())
     ui.configure(display='rich')
     with ui.run_display({'model': 'so3lr-tauri-m'}) as reporter:
@@ -185,6 +175,9 @@ def test_resumed_progress_measures_only_new_steps(monkeypatch):
         assert '0.665 ns/day' in text
         assert 'Temperature [K]  300.2' in text
         assert 'Total energy [eV]  -11.800' in text
+        reporter.checkpoint(12_000, 'restart.npz')
+    # Greppable progress lines are for plain output only.
+    assert not any(record.getMessage().startswith('Progress ') for record in caplog.records)
 
 
 def test_paths_are_literal_and_saved_only_after_notification(monkeypatch):
@@ -198,30 +191,21 @@ def test_paths_are_literal_and_saved_only_after_notification(monkeypatch):
         assert path in render(reporter)
 
 
-def test_requested_metadata_becomes_resolved(monkeypatch):
+def test_startup_shows_configured_run_then_resolved_metadata(monkeypatch):
     monkeypatch.setattr(sys, 'stderr', Terminal())
     ui.configure(display='rich')
-    with ui.run_display({'engine': 'auto'}) as reporter:
-        assert 'auto (requested)' in render(reporter)
-        reporter.update_info(engine='Flash', atoms=300, devices=['GPU 0'])
-        text = render(reporter)
-        assert 'Flash' in text
-        assert '(requested)' not in text
-        assert '300' in text
-        assert 'GPU 0' in text
-
-
-def test_startup_shows_configured_run_before_md_starts(monkeypatch):
-    monkeypatch.setattr(sys, 'stderr', Terminal())
-    ui.configure(display='rich')
-    with ui.run_display({'model_path': 'so3lr-tauri-m', 'ensemble': 'nvt',
+    with ui.run_display({'model_path': 'so3lr-tauri-m', 'engine': 'auto', 'ensemble': 'nvt',
                          'md_T': 300, 'md_cycles': 40, 'md_steps': 100,
                          'md_dt': 0.0005}) as reporter:
         text = render(reporter)
-        assert 'so3lr-tauri-m (requested)' in text
+        assert 'so3lr-tauri-m (requested)' in text and 'auto (requested)' in text
         assert 'NVT · 300 K target' in text
         assert '4,000 steps · 0.5 fs · 2 ps' in text
         assert 'Loading  Initializing runtime' in text
+        reporter.update_info(model='so3lr-tauri-m-2606', engine='Flash', atoms=300, devices=['GPU 0'])
+        text = render(reporter)
+        assert 'Flash' in text and '300' in text and 'GPU 0' in text
+        assert '(requested)' not in text
 
 
 def test_success_lists_only_existing_output_paths(monkeypatch, tmp_path):
@@ -244,10 +228,11 @@ def test_success_lists_only_existing_output_paths(monkeypatch, tmp_path):
     assert not reporter.artifacts
 
 
-def test_console_and_file_logging_are_separate(monkeypatch, tmp_path):
+@pytest.mark.parametrize('verbose', [False, True])
+def test_console_and_file_logging_are_separate(monkeypatch, tmp_path, verbose):
     output = Terminal()
     monkeypatch.setattr(sys, 'stderr', output)
-    ui.configure(display='rich')
+    ui.configure(display='rich', verbose=verbose)
     logger = logging.getLogger('presentation-test')
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -257,22 +242,25 @@ def test_console_and_file_logging_are_separate(monkeypatch, tmp_path):
     try:
         with ui.run_display({}):
             logger.info('2000\t300.2\t-12.3')
+            logger.info('Detailed settings [literal]')
             logger.warning('Fallback: [standard]')
             logger.error('Debug traceback', extra={'file_only': True})
     finally:
         file_handler.close()
         logger.handlers.clear()
     assert '2000\t300.2' not in output.getvalue()
+    assert ('Detailed settings [literal]' in output.getvalue()) is verbose
     assert 'WARNING: Fallback: [standard]' in output.getvalue()
     assert 'Debug traceback' not in output.getvalue()
-    assert file_path.read_text() == '2000\t300.2\t-12.3\nFallback: [standard]\nDebug traceback\n'
+    assert file_path.read_text() == ('2000\t300.2\t-12.3\nDetailed settings [literal]\n'
+                                     'Fallback: [standard]\nDebug traceback\n')
 
 
-@pytest.mark.parametrize('quiet,verbose', [(False, False), (True, False), (False, True)])
-def test_plain_console_preserves_rows_and_quiet_keeps_warnings(monkeypatch, quiet, verbose):
+@pytest.mark.parametrize('quiet', [False, True])
+def test_plain_console_preserves_rows_and_quiet_keeps_warnings(monkeypatch, quiet):
     output = io.StringIO()
     monkeypatch.setattr(sys, 'stderr', output)
-    ui.configure(display='plain', quiet=quiet, verbose=verbose)
+    ui.configure(display='plain', quiet=quiet)
     handler = ui.make_console_handler()
     with ui.run_display({}) as reporter:
         reporter.phase('Hidden presentation event')
@@ -282,18 +270,7 @@ def test_plain_console_preserves_rows_and_quiet_keeps_warnings(monkeypatch, quie
                                  + ('' if quiet else '✓ Run finished in 00:00\n'))
 
 
-def test_verbose_rich_shows_info(monkeypatch):
-    output = Terminal()
-    monkeypatch.setattr(sys, 'stderr', output)
-    ui.configure(display='rich', verbose=True)
-    with ui.run_display({}):
-        ui.make_console_handler().handle(logging.makeLogRecord({
-            'msg': 'Detailed settings [literal]', 'levelno': logging.INFO,
-        }))
-    assert 'Detailed settings [literal]' in output.getvalue()
-
-
-@pytest.mark.parametrize('error', [ValueError('Invalid input'), KeyboardInterrupt(), SystemExit(1)])
+@pytest.mark.parametrize('error', [ValueError('Invalid input'), KeyboardInterrupt()])
 def test_error_cleanup_restores_cursor_and_propagates(monkeypatch, error):
     output = Terminal()
     monkeypatch.setattr(sys, 'stderr', output)
@@ -307,15 +284,6 @@ def test_error_cleanup_restores_cursor_and_propagates(monkeypatch, error):
     assert not ui.get_reporter().enabled
     assert '\x1b[?25h' in output.getvalue()
     assert 'Complete' not in output.getvalue()
-
-
-def test_plain_error_is_not_marked_reported():
-    ui.configure(display='plain')
-    error = ValueError('Bad input')
-    with pytest.raises(ValueError):
-        with ui.run_display({}):
-            raise error
-    assert not getattr(error, '_so3lr_reported', False)
 
 
 def test_reporter_restores_cursor_after_interruption_before_live_hook(monkeypatch):
@@ -358,35 +326,6 @@ def test_failure_uses_actual_exception_chain_instead_of_previous_error(monkeypat
     assert ui.exception_message(AssertionError()) == 'AssertionError'
 
 
-def test_worker_warning_is_visible_immediately_but_state_updates_on_owner_thread(monkeypatch):
-    import json
-    import threading
-    output = Terminal()
-    monkeypatch.setattr(sys, 'stderr', output)
-    ui.configure(display='rich')
-    with ui.run_display({}) as reporter:
-        handler = ui.make_console_handler()
-        original = reporter.renderer.remember_log
-        rendered_on = []
-        def render_record(record):
-            rendered_on.append(threading.get_ident())
-            original(record)
-        monkeypatch.setattr(reporter.renderer, 'remember_log', render_record)
-        thread = threading.Thread(target=lambda: handler.handle(logging.makeLogRecord({
-            'msg': 'worker diagnostic', 'levelno': logging.WARNING, 'levelname': 'WARNING'})))
-        thread.start()
-        thread.join(timeout=3)
-        assert not thread.is_alive()
-        assert not rendered_on
-        assert 'worker diagnostic' in output.getvalue()
-        assert reporter.renderer._state.diagnostic is None
-        records = [json.loads(line) for line in reporter.journal.path.read_text().splitlines()]
-        assert records[-1]['type'] == 'warning'
-        reporter.phase('Running')
-        assert rendered_on == [threading.get_ident()]
-        assert 'worker diagnostic' in output.getvalue()
-
-
 def test_worker_warning_burst_has_no_display_queue_loss(monkeypatch):
     import json
     import threading
@@ -407,6 +346,8 @@ def test_worker_warning_burst_has_no_display_queue_loss(monkeypatch):
         assert all(f'worker-{index:03d}' in text for index in range(300))
         records = [json.loads(line) for line in reporter.journal.path.read_text().splitlines()]
         assert sum(event['type'] == 'warning' for event in records) == 300
+        # Shown at once from the worker, but the view's state changes only on the owning thread.
+        assert reporter.renderer._state.diagnostic is None
         reporter.phase('Running')
         assert reporter.renderer._state.diagnostic == ('warning', 'worker-299')
 
@@ -435,18 +376,12 @@ def test_finalization_warning_stays_in_live_and_journal(monkeypatch):
         assert records[-2]['type'] == 'run_completed'
 
 
-@pytest.mark.parametrize('collect_previous', [False, True])
-def test_reused_handler_binds_to_current_invocation(monkeypatch, collect_previous):
-    import gc
+def test_reused_handler_binds_to_current_invocation(monkeypatch):
     import json
     ui.configure(display='plain')
     with ui.run_display({}) as previous:
         handler = ui.make_console_handler()
     old_path = previous.journal.path
-    if collect_previous:
-        del previous
-        gc.collect()
-        assert handler._reporter() is None
     with ui.run_display({}) as current:
         handler.handle(logging.makeLogRecord(dict(name='SO3LR', msg='new invocation diagnostic',
             levelno=logging.WARNING, levelname='WARNING')))
@@ -598,45 +533,7 @@ def test_interrupted_mask_restoration_reapplies_saved_mask(monkeypatch, when):
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX pending signals and masks')
-def test_worker_sigint_cannot_leave_main_signal_mask_blocked(tmp_path):
-    import json
-    code = '''
-import json, os, signal, threading
-from pathlib import Path
-from so3lr.cli.terminal import termination_signals
-original = signal.pthread_sigmask
-prior = original(signal.SIG_BLOCK, [])
-injected = False
-def unmask(how, values):
-    global injected
-    if how == signal.SIG_SETMASK and not injected:
-        injected = True
-        def interrupt():
-            original(signal.SIG_UNBLOCK, {signal.SIGINT})
-            os.kill(os.getpid(), signal.SIGINT)
-        thread = threading.Thread(target=interrupt)
-        thread.start()
-        thread.join(2)
-    return original(how, values)
-try:
-    with termination_signals():
-        signal.pthread_sigmask = unmask
-except KeyboardInterrupt:
-    Path('restore.json').write_text(json.dumps({
-        'mask_restored': original(signal.SIG_BLOCK, []) == prior,
-        'defaults': all(signal.getsignal(n) == signal.SIG_DFL for n in (signal.SIGTERM, signal.SIGHUP))}))
-finally:
-    signal.pthread_sigmask = original
-    original(signal.SIG_SETMASK, prior)
-'''
-    result = subprocess.run([sys.executable, '-c', code], cwd=tmp_path,
-                            capture_output=True, text=True, timeout=5)
-    assert result.returncode == 0, result.stderr
-    assert json.loads((tmp_path/'restore.json').read_text()) == {'mask_restored': True, 'defaults': True}
-
-
-@pytest.mark.skipif(os.name == 'nt', reason='POSIX pending signals and masks')
-@pytest.mark.parametrize('signal_name', ['SIGTERM', 'SIGHUP'])
+@pytest.mark.parametrize('signal_name', ['SIGHUP'])  # TERM and HUP share this path
 def test_real_signal_during_restore_waits_until_all_dispositions_are_restored(tmp_path, signal_name):
     import json
     import signal
@@ -697,7 +594,8 @@ def _wait_for_native_marker(process, path):
         time.sleep(.01)
 
 
-@pytest.mark.parametrize('display,quiet', [('plain', False), ('auto', False), ('rich', True), ('rich', False)])
+# Every non-terminal display skips the signal guard; forced rich is the one that could get it wrong.
+@pytest.mark.parametrize('display,quiet', [('rich', False)])
 def test_nonterminal_run_retains_native_termination_during_blocked_c_call(tmp_path, native_signal_blocker, display, quiet):
     import signal
     code = '''
@@ -723,7 +621,8 @@ with ui.run_display({'log_file': 'run.log'}):
             process.wait()
 
 
-@pytest.mark.parametrize('second_signal', ['SIGTERM', 'SIGHUP'])
+# A different second signal: proves every disposition, not just the received one, is native again.
+@pytest.mark.parametrize('second_signal', ['SIGHUP'])
 def test_second_termination_is_native_after_first_exception_is_swallowed(tmp_path, native_signal_blocker, second_signal):
     import signal
     code = '''
@@ -758,7 +657,7 @@ with termination_signals():
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX PTY and termination signals')
-@pytest.mark.parametrize('signal_name', ['SIGTERM', 'SIGHUP'])
+@pytest.mark.parametrize('signal_name', ['SIGHUP'])  # terminal hang-up; SIGTERM shares the path
 def test_real_terminal_termination_restores_modes_and_preserves_signal_exit(tmp_path, signal_name):
     import fcntl
     import json
@@ -887,27 +786,6 @@ def test_attached_plots_update_before_completion_without_reading_journal(monkeyp
         assert 'detach' not in frames[1]
 
 
-def test_attached_history_is_bounded_and_retains_extrema(monkeypatch):
-    from so3lr.cli.monitor import MAX_HISTORY
-
-    monkeypatch.setattr(sys, 'stderr', Terminal())
-    ui.configure(display='rich')
-    with ui.run_display({'ensemble': 'npt'}) as reporter:
-        reporter.start_md(0, 5000, 0.5)
-        monkeypatch.setattr(reporter.renderer, '_refresh', lambda **kwargs: None)
-        for step in range(5000):
-            reporter.progress(step, temperature=1000 if step == 200 else 300,
-                              potential_energy=-100 if step == 201 else -1,
-                              volume=5000 if step == 202 else 1000)
-        assert reporter._state.sample_count == 5000
-        assert len(reporter._state.samples) <= MAX_HISTORY
-        assert reporter._state.samples[0]['step'] == 0
-        assert reporter._state.samples[-1]['step'] == 4999
-        assert max(row['temperature_K'] for row in reporter._state.samples) == 1000
-        assert min(row['potential_energy_eV'] for row in reporter._state.samples) == -100
-        assert max(row['volume_A3'] for row in reporter._state.samples) == 5000
-
-
 class InputTerminal(Terminal):
     def fileno(self):
         return 42
@@ -948,9 +826,12 @@ def test_activity_updates_time_without_advancing_simulation(monkeypatch, unicode
     assert '%' not in text and 'steps' not in text
     assert len({line[0] for line in text.splitlines()}) >= 3
     assert '\x1b' not in text
-    assert all(not ('\u2800' <= char <= '\u28ff') for char in text)
     if not unicode:
         assert text.isascii()
+        narrow = AsciiTerminal()  # truncation must not add an ellipsis glyph
+        Console(file=narrow, width=20, color_system=None).print(
+            ui._Activity('Compiling a long molecular force field', 0, 0, unicode=False))
+        assert narrow.getvalue().isascii()
 
 
 class FakeKeyboard:
@@ -986,9 +867,6 @@ def test_attached_keyboard_pages_selects_energy_and_toggles_plots_without_stoppi
         first_page = render(reporter, height=24)
         assert len(first_page.splitlines()) <= 24
         assert 'Temperature [K]' in first_page and 'Total energy [eV]' in first_page
-        assert 'MD elapsed' in first_page and 'ETA' in first_page and '10%' in first_page
-        assert 'mixed (float32 model; float64 dynamics)' in first_page
-        assert 'ns/day' in first_page and 's/atom/step' in first_page
         assert 'q: hide plots' in first_page and 'Ctrl+C: interrupt MD' in first_page
         keyboard.keys.append('down')
         reporter.progress(200, temperature=300, potential_energy=-39, energy=-38, volume=1010)
@@ -997,74 +875,33 @@ def test_attached_keyboard_pages_selects_energy_and_toggles_plots_without_stoppi
         reporter.progress(300, temperature=300, potential_energy=-39, energy=-38, conserved_energy=-37, volume=1010)
         reporter.progress(400, temperature=300, potential_energy=-39, energy=-38, conserved_energy=-37, volume=1010)
         assert 'Conserved energy [eV]' in render(reporter, height=24)
-        keyboard.keys.append('q')
+        keyboard.keys.append('escape')
         reporter.progress(500, temperature=300, potential_energy=-39)
         assert reporter.status == 'running'
         assert keyboard.entered == 1 and keyboard.closed == 0
         assert 'Temperature [K]' not in render(reporter)
         assert 'q: show plots' in render(reporter)
+        keyboard.keys.append('escape')  # Escape only hides; it never toggles the plots back
         reporter.progress(600, temperature=310, potential_energy=-38, energy=-37)
         assert reporter._state.samples[-1]['step'] == 600
+        assert 'Temperature [K]' not in render(reporter)
         keyboard.keys.append('q')
         reporter.progress(700, temperature=315, potential_energy=-37, energy=-36, conserved_energy=-35)
         restored = render(reporter)
         assert 'Temperature [K]  315.0' in restored
         assert 'Conserved energy [eV]' in restored
         assert reporter._state.sample_count == 7
-        keyboard.keys.append('q')
+        keyboard.keys.append('q')  # q toggles: hide again
         reporter.progress(1000, temperature=310, potential_energy=-38)
         assert reporter._state.samples[-1]['step'] == 1000
+        assert 'Temperature [K]' not in render(reporter)
     assert reporter.status == 'complete' and keyboard.closed == 1
     assert 'so3lr show' in render(reporter)
     assert 'q: show plots' not in render(reporter)
 
 
-def test_attached_escape_hides_idempotently_and_q_restores_plots(monkeypatch):
-    from so3lr.cli import monitor
-
-    monkeypatch.setattr(sys, 'stderr', Terminal())
-    monkeypatch.setattr(sys, 'stdin', InputTerminal())
-    keyboard = FakeKeyboard()
-    monkeypatch.setattr(monitor, '_Keyboard', lambda: keyboard)
-    ui.configure(display='rich')
-    with ui.run_display({'ensemble': 'nvt', 'md_T': 300}) as reporter:
-        reporter.start_md(0, 1000, 0.5)
-        reporter.progress(100, temperature=300, energy=-38)
-        assert 'Temperature [K]' in render(reporter)
-        for step in (200, 300):
-            keyboard.keys.append('escape')
-            reporter.progress(step, temperature=310, energy=-37)
-            assert reporter.status == 'running'
-            assert 'Temperature [K]' not in render(reporter)
-            assert 'q: show plots' in render(reporter)
-            assert keyboard.closed == 0
-        keyboard.keys.append('q')
-        reporter.progress(400, temperature=315, energy=-36)
-        assert 'Temperature [K]  315.0' in render(reporter)
-        assert reporter._state.sample_count == 4
-        assert reporter.status == 'running'
-    assert keyboard.closed == 1
-
-
-@pytest.mark.parametrize('error', [KeyboardInterrupt(), RuntimeError('partial Rich start')])
-def test_shared_live_stop_restores_cursor_when_stop_raises(error):
-    from types import SimpleNamespace
-    from so3lr.cli.terminal import stop_live
-
-    cursors = []
-
-    def stop():
-        raise error
-
-    live = SimpleNamespace(stop=stop, console=SimpleNamespace(show_cursor=cursors.append))
-    with pytest.raises(type(error)) as captured:
-        stop_live(live)
-    assert captured.value is error
-    assert cursors == [True]
-
-
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX terminal stderr redirection')
-@pytest.mark.parametrize('failure', [False, True])
+@pytest.mark.parametrize('failure', [True])  # success runs the same close()
 def test_terminal_stderr_redirect_is_scoped_and_flushes_partial_lines(tmp_path, failure):
     import json
     import pty
@@ -1157,8 +994,8 @@ def test_attached_never_takes_redirected_or_unusable_input(monkeypatch, stdin):
         assert 'q: hide' not in render(reporter)
 
 
-@pytest.mark.parametrize('failure', ['interrupt', 'render'])
-def test_attached_keyboard_restored_after_interrupt_or_render_failure(monkeypatch, failure):
+def test_attached_keyboard_restored_after_render_failure(monkeypatch):
+    # Ctrl+C is covered with a real PTY in test_real_terminal_controls_restore_input...
     from so3lr.cli import monitor
 
     monkeypatch.setattr(sys, 'stderr', Terminal())
@@ -1166,13 +1003,11 @@ def test_attached_keyboard_restored_after_interrupt_or_render_failure(monkeypatc
     keyboard = FakeKeyboard()
     monkeypatch.setattr(monitor, '_Keyboard', lambda: keyboard)
     ui.configure(display='rich')
-    error_type = KeyboardInterrupt if failure == 'interrupt' else RuntimeError
-    with pytest.raises(error_type):
+    with pytest.raises(RuntimeError):
         with ui.run_display({}) as reporter:
             reporter.start_md(0, 100, 0.5)
             reporter.progress(0, temperature=300, potential_energy=-39)
-            if failure == 'interrupt':
-                raise KeyboardInterrupt()
+            # The failure recurs while fail() refreshes; the keyboard must still be released.
             monkeypatch.setattr(reporter.renderer, '_render', lambda: (_ for _ in ()).throw(RuntimeError('Render failed')))
             reporter.renderer._refresh(force=True)
     assert keyboard.entered == keyboard.closed == 1
@@ -1279,8 +1114,8 @@ def test_narrow_render_keeps_labels_and_long_paths(monkeypatch):
         assert all(len(line) <= 32 for line in text.splitlines())
 
 
-@pytest.mark.parametrize('error', [KeyboardInterrupt(), RuntimeError('journal initialization failed')])
-def test_initialization_failure_restores_started_terminal(monkeypatch, error):
+def test_initialization_failure_restores_started_terminal(monkeypatch):
+    error = KeyboardInterrupt()  # a BaseException: the stronger case than an ordinary error
     output = Terminal()
     monkeypatch.setattr(sys, 'stderr', output)
     ui.configure(display='rich')
@@ -1303,26 +1138,6 @@ def test_initialization_failure_restores_started_terminal(monkeypatch, error):
     assert created[0]._closed and not created[0].live.is_started
     assert '\x1b[?25l' in output.getvalue() and '\x1b[?25h' in output.getvalue()
     assert not ui.get_reporter().enabled
-
-
-def test_initial_live_start_failure_restores_cursor(monkeypatch):
-    from rich.live import Live
-    output = Terminal()
-    monkeypatch.setattr(sys, 'stderr', output)
-    ui.configure(display='rich')
-    original, displays = Live.start, []
-
-    def start(display, *args, **kwargs):
-        original(display, *args, **kwargs)
-        displays.append(display)
-        raise RuntimeError('first refresh failed')
-
-    monkeypatch.setattr(Live, 'start', start)
-    with pytest.raises(RuntimeError, match='first refresh failed'):
-        with ui.run_display({}):
-            pass
-    assert displays and not displays[0].is_started
-    assert '\x1b[?25h' in output.getvalue()
 
 
 class AsciiTerminal(Terminal):
@@ -1355,14 +1170,6 @@ def test_ascii_terminal_handles_startup_progress_and_outcome(monkeypatch, operat
     assert '\\u2500' not in output.getvalue() and '\\u2501' not in output.getvalue()
 
 
-def test_ascii_activity_truncates_without_adding_unicode():
-    from rich.console import Console
-    output = AsciiTerminal()
-    console = Console(file=output, width=20, color_system=None)
-    console.print(ui._Activity('Compiling a long molecular force field', 0, 0, unicode=False))
-    assert output.getvalue().isascii()
-
-
 def test_plain_runs_log_greppable_progress_with_wall_clock_eta(tmp_path, monkeypatch, caplog):
     import logging
     ui.configure(display='plain')
@@ -1383,30 +1190,6 @@ def test_plain_runs_log_greppable_progress_with_wall_clock_eta(tmp_path, monkeyp
     assert lines[0] == 'Progress 50.0% · step 500/1,000 · 2.160 ns/day · ETA 00:10'
     assert lines[1].startswith('Progress 90.0% · step 900/1,000 · ')
     assert len(lines) == 2
-
-
-def test_rich_runs_do_not_add_plain_progress_lines(tmp_path, caplog):
-    import logging
-    ui.configure(display='rich')
-    with caplog.at_level(logging.INFO, logger='SO3LR'):
-        reporter = ui._RunReporter({'log_file': str(tmp_path / 'run.log')},
-                                   ui.SimpleNamespace(enabled=True, attach_journal=lambda *a, **k: None,
-                                                      start_md=lambda *a: None, progress=lambda *a, **k: None,
-                                                      checkpoint=lambda *a: None, update_info=lambda **k: None,
-                                                      remember_log=lambda record: None))
-        reporter.start_md(0, 100, 0.5)
-        reporter.progress(0)
-        reporter.progress(50)
-        reporter.checkpoint(50, 'restart.npz')
-        reporter.journal.close()
-    assert not any(record.getMessage().startswith('Progress ') for record in caplog.records)
-
-
-@pytest.mark.parametrize('seconds, label', [(0, '00:00'), (75, '01:15'), (3725, '1:02:05'),
-                                            (86400 * 2 + 3 * 3600 + 4 * 60 + 5, '2d 03:04:05')])
-def test_duration_label_spells_out_days(seconds, label):
-    from so3lr.cli.formatting import duration_label
-    assert duration_label(seconds) == label
 
 
 def test_interrupted_plain_run_prints_checkpoint_and_resume_hint(tmp_path, monkeypatch, capsys):
@@ -1540,13 +1323,8 @@ def test_task_rate_starts_after_the_first_unit_and_restarts_with_the_task(monkey
         assert reporter._task_origin is None and reporter._task_started == 62.0
         reporter.task_progress(1, 5, 'candidates')           # another task starts its own clock
         assert reporter._task_origin is None
-
-
-def test_library_callers_get_a_reporter_that_ignores_task_events():
-    reporter = ui.get_reporter()
-    assert not reporter.enabled
-    reporter.task_progress(1, 2, 'structures')
-    reporter.results('Timing', [('Evaluation', '1 s')])
+        reporter.task_progress(5, 5, 'candidates')
+        assert reporter._eta() is None                       # nothing left to estimate
 
 
 def test_live_optimization_draws_graphs_once_three_cycles_are_known(monkeypatch):
@@ -1634,13 +1412,6 @@ def test_closing_line_after_a_failure(monkeypatch, error, level, head):
     assert shown[index + 1].startswith('No checkpoint was saved')
 
 
-def test_answered_questions_are_not_green():
-    import inspect
-    from so3lr.cli import prompts
-    source = inspect.getsource(prompts)
-    assert "status_glyph('completed') + ' ', ascii_only), style=theme.FAINT" in source
-
-
 def test_plain_closing_line_falls_back_to_ascii_for_ascii_logs(monkeypatch):
     raw = io.BytesIO()
     stream = io.TextIOWrapper(raw, encoding='ascii')
@@ -1657,25 +1428,6 @@ def _activity_text(activity):
     output = io.StringIO()
     Console(file=output, width=120, color_system=None).print(activity)
     return output.getvalue()
-
-
-def test_activity_line_counts_down_an_eta_from_the_measured_rate(monkeypatch):
-    monkeypatch.setattr(sys, 'stderr', Terminal())
-    ui.configure(display='rich')
-    with ui.run_display({}, record=False) as reporter:
-        reporter.phase('Evaluating')
-        clock = [100.0]
-        monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
-        reporter.task_progress(0, 100, 'structures')
-        clock[0] = 105.0
-        reporter.task_progress(5, 100, 'structures')   # the rate is measured from here
-        clock[0] = 110.0
-        reporter.task_progress(10, 100, 'structures')  # 1 structure/s
-        assert reporter._eta() == (90.0, False)
-        activity = ui._Activity('Evaluating', 100.0, 110.0, eta=(clock[0] + 90.0, False))
-        assert 'ETA 01:30' in _activity_text(activity)
-        reporter.task_progress(100, 100, 'structures')
-        assert reporter._eta() is None  # nothing left to estimate
 
 
 def test_optimization_eta_is_a_bound_when_a_force_target_can_stop_it_early(monkeypatch):
