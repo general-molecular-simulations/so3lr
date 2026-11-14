@@ -1984,7 +1984,7 @@ class FlashSO3LR:
         """Repulsion, heads, long range and the heads' backward: (energy, dE/dx, forces so
         far, most long-range partners of any atom)."""
         e_atom, raw_q, a0, c6, f3 = self._head_local(x, pos3, nb)
-        q = raw_q + (self.total_charge - raw_q.sum()) / self.n
+        q = self._equilibrated(raw_q)
         e_atom, gq, ga0, gc6, f3, most = self._long_range(pos3, nb[:3], q, a0, c6, e_atom, f3)
         if self.pme_el or self.pme_disp:
             e_atom, gq, gc6, f3 = self._pme_terms(pos3, q, c6, e_atom, gq, gc6, f3)
@@ -1995,6 +1995,10 @@ class FlashSO3LR:
         g_mean = self._sum(self._counted(self._mine(gq)).sum()) / self.n
         g_x = self._head_backward(x, gq - g_mean, ga0, gc6)
         return energy, g_x, f3, most
+
+    def _equilibrated(self, raw_q):
+        """The charges from the heads' raw ones: their sum moved to the total charge."""
+        return raw_q + (self.total_charge - raw_q.sum()) / self.n
 
     def _head_local(self, x, pos3, nb):
         """Repulsion and heads: per-atom energy without the long range, raw charge, a0 and
@@ -2257,6 +2261,7 @@ class FlashSO3LR:
                                                              gdx, gdev, carry)
                     c["att", li, pi] = jit(att, donate_argnums=(4,))
             c["head"] = jit(lambda x, R, nb: self._head(x, self._pos3(R), nb), donate_argnums=(0,))
+            c["heads"] = jit(lambda x: self._heads(x, self.z)[1:])      # observables: raw q, a0, c6
             self._stage_cache = c
         return self._stage_cache
 
@@ -2320,6 +2325,19 @@ class FlashSO3LR:
     def energy_forces_strain_staged(self, R, diag=False):
         """energy_forces_staged and dE/d(strain) (box and positions scaled together; diag:
         per axis, shape [3], whose sum that is)."""
+        def step(Rs):
+            st = self._forward_staged(Rs)
+            cnt = st["nb"][4]
+            energy, f3, most = self._backward_staged(Rs, st)
+            return (energy, f3, self._strain(f3[3:], Rs)), int(jnp.max(cnt)) > self.K or int(most) > self.maxh
+        (energy, f3, w3), perm = self._staged_rebuilding(R, step)
+        return energy, self._net_free(_unsorted(jnp.stack(f3[:3], -1), perm)), (w3 if diag else w3.sum())
+
+    def _staged_rebuilding(self, R, step):
+        """(step(Rs)'s result, perm): step -> (result, overflowed) run on the positions with the
+        atoms in a spatial order (sort_atoms; perm, None if not) and the engine's z and elem in
+        it, again after a rebuild while a row or scratch overflowed or the atoms outgrew free
+        space's box."""
         R = jnp.asarray(R)
         R = R if R.dtype == jnp.float64 else R.astype(self.dtype)
         # the atoms in a spatial order (sort_atoms) for the stages, as in the jitted call (any
@@ -2331,13 +2349,23 @@ class FlashSO3LR:
             for _ in range(MAX_REBUILDS + 1):
                 if bool(self._outgrown(R)) and self._recover(R, 2):     # before the work, which needs the box
                     continue
-                st = self._forward_staged(Rs)
-                cnt = st["nb"][4]
-                energy, f3, most = self._backward_staged(Rs, st)
-                if not self._recover(R, int(int(jnp.max(cnt)) > self.K or int(most) > self.maxh)):
-                    w3 = self._strain(f3[3:], Rs)
-                    return energy, self._net_free(_unsorted(jnp.stack(f3[:3], -1), perm)), (w3 if diag else w3.sum())
+                result, overflowed = step(Rs)
+                if not self._recover(R, int(overflowed)):
+                    return result, perm
         raise RuntimeError(f"Flash: overflowed again after {MAX_REBUILDS} rebuilds")
+
+    def observables(self, R):
+        """(charges, a0 ratios, c6 ratios) per atom, in R's order: the heads after the layers'
+        forward, with no long range and no backward (so3lr tune-ewald's charges). The charges
+        add up to the total charge, as the force call's do. One device (the staged forward)."""
+        def step(Rs):
+            st = self._forward_staged(Rs)
+            overflowed = int(jnp.max(st["nb"][4])) > self.K
+            x = st.pop("x")
+            del st                                   # the forward's saved inputs, before the heads
+            return self._stages()["heads"](x), overflowed
+        (raw_q, a0, c6), perm = self._staged_rebuilding(R, step)
+        return tuple(_unsorted(v, perm) for v in (self._equilibrated(raw_q), a0, c6))
 
     def widen(self):
         """Wider neighbour rows and long-range scratch after an overflow; recompiles."""
