@@ -56,7 +56,7 @@ class EventJournal:
         self.run_id = uuid.uuid4().hex
         # Requested policy is distinct from active IO: a failed journal should
         # not suppress a replay snapshot that can still be written separately.
-        # Commands that so3lr show does not follow (eval, training) pass enabled=False.
+        # Commands that so3lr show does not follow (eval, tune-ewald) pass enabled=False.
         self.enabled = enabled and os.environ.get('SO3LR_JOURNAL') != '0'
         self.path = None
         self.seq = 0

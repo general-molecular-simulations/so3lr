@@ -28,7 +28,11 @@ ENERGIES = {
 }
 PLOT_FIELDS = ('temperature_K', *ENERGIES, 'volume_A3')
 OPT_FIELDS = ('opt_energy_eV', 'opt_force_max_eVA')
-OPT_MIN_POINTS = 3  # fewer cycles than this stay a text view
+TRAIN_FIELDS = ('train_loss', 'train_forces_mae', 'train_energy_mae')
+# Runs measured per step rather than per MD sample: optimization cycles and validation points.
+STEP_SERIES = {'opt_step': OPT_FIELDS, 'train_step': TRAIN_FIELDS}
+STEPWISE = ('optimization', 'training')
+OPT_MIN_POINTS = 3  # fewer points than this stay a text view
 MAX_HISTORY = 2048
 MAX_MEAN_BINS = 2048
 READ_BUDGET = 4 * 1024 * 1024
@@ -319,22 +323,29 @@ class RunState:
     property_means: dict = field(default_factory=lambda: {
         key: _LatterHalfMean() for key in PLOT_FIELDS if key != 'energy_eV'
     })
-    opt_samples: list = field(default_factory=list)  # optimization cycles: step, energy, max force
+    # optimization cycles (step, energy, max force) or validation points (step, loss, errors)
+    step_samples: list = field(default_factory=list)
 
-    def record_optimization(self, info):
-        """Keep each reported optimization cycle for the graphs; step 0 starts a new optimization."""
-        step = _finite(info.get('opt_step'))
-        values = {key: _finite(info.get(key)) for key in OPT_FIELDS}
-        if step is None or all(value is None for value in values.values()):
+    def record_steps(self, info):
+        """Keep each reported optimization cycle or validation point for the graphs; step 0
+        starts a new optimization."""
+        for step_key, fields in STEP_SERIES.items():
+            step = _finite(info.get(step_key))
+            if step is not None:
+                break
+        else:
             return
-        if self.opt_samples and step <= self.opt_samples[-1]['step']:
+        values = {key: _finite(info.get(key)) for key in fields}
+        if all(value is None for value in values.values()):
+            return
+        if self.step_samples and step <= self.step_samples[-1]['step']:
             if step != 0:
                 return
-            self.opt_samples = []
-        self.opt_samples.append({'step': step, **values})
-        if len(self.opt_samples) > MAX_HISTORY:
-            # every other cycle, always keeping the latest
-            self.opt_samples = self.opt_samples[:-1:2] + self.opt_samples[-1:]
+            self.step_samples = []
+        self.step_samples.append({'step': step, **values})
+        if len(self.step_samples) > MAX_HISTORY:
+            # every other point, always keeping the latest
+            self.step_samples = self.step_samples[:-1:2] + self.step_samples[-1:]
 
     def reference(self, key):
         mean = self.energy_mean if key == 'energy_eV' else self.property_means.get(key)
@@ -367,7 +378,7 @@ class RunState:
             self.scheduler = data.get('scheduler') if isinstance(data.get('scheduler'), dict) else {}
         elif kind == 'info':
             self.info.update(data)
-            self.record_optimization(data)
+            self.record_steps(data)
         elif kind == 'phase':
             self.phase, self.detail = str(data.get('name', '')), str(data.get('detail', ''))
         elif kind == 'md_started':
@@ -567,7 +578,7 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
 
     trace = theme.series_style(key)
     heading = Text()
-    heading.append(f'{title} [{unit}]', style=theme.STRONG)
+    heading.append(f'{title} [{unit}]' if unit else title, style=theme.STRONG)
     if scale is None:
         scale = _plot_scale(samples, key, target, reference, label_budget=max(8, width - 10),
                             x_key=x_key, log=log)
@@ -575,7 +586,9 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
         return Group(heading, Text(empty_message, style=theme.MUTED))
     points, decimals, low, high, ylabels = scale
     latest = 10 ** points[-1][1] if log else points[-1][1]
-    heading.append(f'  {latest:.3g}' if log else f'  {latest:.{decimals}f}', style=f'bold {trace}')
+    # fixed decimals, except where they would hide a small value (a training loss of 0.0011)
+    small = log or 0 < abs(latest) < 0.1
+    heading.append(f'  {latest:.3g}' if small else f'  {latest:.{decimals}f}', style=f'bold {trace}')
     if log:
         heading.append('  log scale', style=theme.FAINT)
     target, reference = _finite(target), _finite(reference)
@@ -677,33 +690,52 @@ def _run_name(reader):
     return name[:-(len(run_id) + 1)] if run_id and name.endswith('.' + run_id) else name
 
 
-def optimization_plots(state, width, ascii_only=False, rows=7):
-    """The optimization graphs, rebuilt only when a cycle arrives or the size changes."""
-    samples = state.opt_samples
+def step_plots(state, width, ascii_only=False, rows=7):
+    """The optimization or training graphs, rebuilt only when a point arrives or the size changes."""
+    samples = state.step_samples
     key = (len(samples), samples[-1]['step'] if samples else None,
            state.info.get('opt_force_target_eVA'), width, ascii_only, rows)
-    cached = getattr(state, '_opt_plots', None)
+    cached = getattr(state, '_step_plots', None)
     if cached is None or cached[0] != key:
-        cached = (key, _optimization_plots(state, width, ascii_only, rows))
-        state._opt_plots = cached
+        cached = (key, _step_plots(state, width, ascii_only, rows))
+        state._step_plots = cached
     return cached[1]
 
 
-def _optimization_plots(state, width, ascii_only, rows):
-    """Potential energy and maximum force per optimization cycle, or None for too few cycles.
+def _step_plot_specs(state, ascii_only):
+    """(key, title, unit, guide, log axis) per graph.
 
-    The force axis is logarithmic, since it falls roughly exponentially, and carries
-    the convergence target as its guide line.
+    An optimization: potential energy, and maximum force on a log axis (it falls roughly
+    exponentially) with the convergence target as its guide line. Training: validation
+    loss and the force error (the energy error without forces), on log axes when they are
+    positive and fall at least fivefold (an adaptive robust loss can be negative).
     """
+    angstrom = 'A' if ascii_only else 'Å'
+    if state.info.get('operation') != 'training':
+        return (('opt_energy_eV', 'Potential energy', 'eV', None, False),
+                ('opt_force_max_eVA', 'Maximum force', f'eV/{angstrom}',
+                 _finite(state.info.get('opt_force_target_eVA')), True))
+    samples = state.step_samples
+
+    def logarithmic(key):
+        values = [value for row in samples if (value := _finite(row.get(key))) is not None]
+        return bool(values) and min(values) > 0 and max(values) >= 5 * min(values)
+
+    error = (('train_forces_mae', 'Force MAE', f'eV/{angstrom}')
+             if any(_finite(row.get('train_forces_mae')) is not None for row in samples)
+             else ('train_energy_mae', 'Energy MAE', 'eV'))
+    return (('train_loss', 'Validation loss', '', None, logarithmic('train_loss')),
+            (*error, None, logarithmic(error[0])))
+
+
+def _step_plots(state, width, ascii_only, rows):
+    """The two graphs of an optimization or a training run, or None for too few points."""
     from rich.console import Group
     from rich.text import Text
-    samples = state.opt_samples
+    samples = state.step_samples
     if len(samples) < OPT_MIN_POINTS:
         return None
-    target = _finite(state.info.get('opt_force_target_eVA'))
-    force_unit = 'eV/A' if ascii_only else 'eV/Å'
-    specs = (('opt_energy_eV', 'Potential energy', 'eV', None, False),
-             ('opt_force_max_eVA', 'Maximum force', force_unit, target, True))
+    specs = _step_plot_specs(state, ascii_only)
     budget = max(8, width - 10)
     scales = [_plot_scale(samples, key, guide, None, budget, x_key='step', log=log)
               for key, _, _, guide, log in specs]
@@ -879,7 +911,7 @@ def _controls(state, attached=False, paged=False, multiple=False, keyboard=False
             return 'Ctrl+C: interrupt MD · more plots: so3lr show <run-folder>'
         return ('↑/↓: plots · ' if paged else '') + 'e: energy · Esc/q: hide plots · Ctrl+C: interrupt MD'
     close = 'Esc/q: close viewer' if state.status in ('Completed', 'Failed') else 'Esc/q: detach'
-    if state.info.get('operation') == 'optimization':
+    if state.info.get('operation') in STEPWISE:
         return ('←/→: run · o: overview · ' if multiple else '') + close
     if multiple:
         return ('↑/↓: plots · ' if paged else '') + '←/→: run · o: overview · e: energy · ' + close
@@ -888,9 +920,25 @@ def _controls(state, attached=False, paged=False, multiple=False, keyboard=False
     return ('↑/↓: plot page · ' if paged else '') + 'j/k or ←/→: run · e: energy · ' + close
 
 
-def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=False, height=None,
-                         now=None, static=False, width=80, plot_rows=5):
-    """Show recorded optimization measurements without inventing MD samples."""
+def _training_rows(state, add):
+    """The latest validation of a training run: its epoch and errors."""
+    step, epoch, total = (_finite(state.info.get(key)) for key in ('train_step', 'train_epoch', 'train_total_epochs'))
+    if step is None:
+        add('Waiting for the first validation.', theme.MUTED, 2)
+        return
+    progress = f'step {int(step):,} · epoch {int(epoch or 0):,}' + (f' of {int(total):,}' if total else '')
+    add('Validated  ' + progress, priority=5)
+    for key, label, unit, priority in (('train_loss', 'Loss       ', '', 1),
+                                       ('train_forces_mae', 'Force MAE  ', ' eV/Å', 6),
+                                       ('train_energy_mae', 'Energy MAE ', ' eV', 7)):
+        value = _finite(state.info.get(key))
+        if value is not None:
+            add(f'{label}{value:.4g}{unit}', theme.WARNING, priority)
+
+
+def _render_steps(reader, selected=0, count=1, ascii_only=False, compact=False, height=None,
+                  now=None, static=False, width=80, plot_rows=5):
+    """Show a recorded optimization or training run without inventing MD samples."""
     from rich.console import Group
     from rich.text import Text as RichText
 
@@ -907,13 +955,15 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
         rows.append(Text(value, style))
         priorities.append(priority)
 
-    add(f'{theme.BRAND} SO3LR TAURI  optimization' + (' snapshot' if static else ''), theme.ACCENT_BOLD, 3)
+    training = state.info.get('operation') == 'training'
+    add(f"{theme.BRAND} SO3LR TAURI  {'training' if training else 'optimization'}" + (' snapshot' if static else ''),
+        theme.ACCENT_BOLD, 3)
     add(f'Run {selected + 1}/{count} · {_run_name(reader)}', priority=9)
     add(f'Last reported state: {state.status}', style, 4)
     add(_observation_line(reader, now), theme.WARNING if observation_status(reader, now) == 'Stale?' else theme.MUTED, 2)
     if origin := origin_label(state):
         add(origin, theme.MUTED, 9)
-    add('Optimization · latest recorded cycle', theme.MUTED, 13)
+    add('Training · latest validation' if training else 'Optimization · latest recorded cycle', theme.MUTED, 13)
     model = state.info.get('model', state.settings.get('model', state.settings.get('model_path')))
     precision = state.info.get('precision', state.settings.get('precision'))
     if model is not None:
@@ -922,22 +972,25 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
         add(f'Precision  {precision_label(precision)}', theme.MUTED, 12)
     if state.phase:
         add(f'Phase      {state.phase}' + (f' · {state.detail}' if state.detail else ''), theme.MUTED, 10)
-    step, total = (_finite(state.info.get(key)) for key in ('opt_step', 'opt_total_steps'))
-    if step is not None:
-        progress = f'{int(step):,}/{int(total):,} steps' if total is not None else f'{int(step):,} steps'
-        add('Progress   ' + progress, priority=5)
-    energy, force, target = (_finite(state.info.get(key))
-                             for key in ('opt_energy_eV', 'opt_force_max_eVA', 'opt_force_target_eVA'))
-    if energy is not None:
-        add(f'Potential energy  {energy:.6f} eV', theme.WARNING, 8)
-    if force is not None:
-        add(f'Maximum force     {force:.6g} eV/Å', theme.WARNING, 6)
-    if target is not None:
-        add(f'Force target      {target:.6g} eV/Å', theme.MUTED, 7)
-    criterion = optimization_status(state.info, state.status)
-    add(criterion, theme.SUCCESS if criterion == 'Force criterion met' else theme.MUTED, 1)
-    if step is None:
-        add('Waiting for the first recorded optimization cycle.', theme.MUTED, 2)
+    if training:
+        _training_rows(state, add)
+    else:
+        step, total = (_finite(state.info.get(key)) for key in ('opt_step', 'opt_total_steps'))
+        if step is not None:
+            progress = f'{int(step):,}/{int(total):,} steps' if total is not None else f'{int(step):,} steps'
+            add('Progress   ' + progress, priority=5)
+        energy, force, target = (_finite(state.info.get(key))
+                                 for key in ('opt_energy_eV', 'opt_force_max_eVA', 'opt_force_target_eVA'))
+        if energy is not None:
+            add(f'Potential energy  {energy:.6f} eV', theme.WARNING, 8)
+        if force is not None:
+            add(f'Maximum force     {force:.6g} eV/Å', theme.WARNING, 6)
+        if target is not None:
+            add(f'Force target      {target:.6g} eV/Å', theme.MUTED, 7)
+        criterion = optimization_status(state.info, state.status)
+        add(criterion, theme.SUCCESS if criterion == 'Force criterion met' else theme.MUTED, 1)
+        if step is None:
+            add('Waiting for the first recorded optimization cycle.', theme.MUTED, 2)
     if state.message:
         add(state.message, style, 2 if state.status == 'Failed' else 14)
     if state.diagnostic:
@@ -946,11 +999,12 @@ def _render_optimization(reader, selected=0, count=1, ascii_only=False, compact=
     if reader.error:
         add('Read error: ' + reader.error, theme.WARNING, 2)
     if not compact:
-        plots = optimization_plots(state, max(24, width), ascii_only, rows=plot_rows) if plot_rows else None
+        plots = step_plots(state, max(24, width), ascii_only, rows=plot_rows) if plot_rows else None
         if plots is not None:
             rows.extend((Text(''), plots, Text('')))
             priorities.extend((20, 20, 20))
-        for key, label in (('output_file', 'Structure path'), ('log_file', 'Log path')):
+        for key, label in (('output_file', 'Model directory' if training else 'Structure path'),
+                           ('log_file', 'Log path')):
             if state.settings.get(key):
                 add(f'{label}  {state.settings[key]}', theme.MUTED)
         add(f'Journal  {reader.path}', theme.MUTED)
@@ -991,8 +1045,8 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
         return Group(*rows)
     reader = readers[selected % len(readers)]
     state = reader.state
-    if state.info.get('operation') == 'optimization':
-        return _render_optimization(reader, selected, len(readers), ascii_only, now=now, static=static, width=width)
+    if state.info.get('operation') in STEPWISE:
+        return _render_steps(reader, selected, len(readers), ascii_only, now=now, static=static, width=width)
     run_name = _run_name(reader)
     short_id = f' · {state.run_id[:8]}' if state.run_id else ''
     rows.append(Text(('Run · ' if attached else f'Run {selected + 1}/{len(readers)} · ') + run_name + short_id))
@@ -1241,17 +1295,17 @@ class _MonitorView:
         if height is not None and self.readers and (
                 full is None or len(console.render_lines(full, options, pad=False)) > height):
             reader = self.readers[kwargs['selected'] % len(self.readers)]
-            if reader.state.info.get('operation') == 'optimization':
+            if reader.state.info.get('operation') in STEPWISE:
                 # smaller graphs, then the full view without them, before the compact view
                 for plot_rows in (3, 0):
-                    view = _render_optimization(reader, kwargs['selected'], len(self.readers), kwargs['ascii_only'],
-                                                now=kwargs['now'], static=kwargs['static'], width=kwargs['width'],
-                                                plot_rows=plot_rows)
+                    view = _render_steps(reader, kwargs['selected'], len(self.readers), kwargs['ascii_only'],
+                                         now=kwargs['now'], static=kwargs['static'], width=kwargs['width'],
+                                         plot_rows=plot_rows)
                     if len(console.render_lines(view, options, pad=False)) <= height:
                         yield view
                         return
-                yield _render_optimization(reader, kwargs['selected'], len(self.readers), kwargs['ascii_only'],
-                                           compact=True, height=height, now=kwargs['now'], static=kwargs['static'])
+                yield _render_steps(reader, kwargs['selected'], len(self.readers), kwargs['ascii_only'],
+                                    compact=True, height=height, now=kwargs['now'], static=kwargs['static'])
             else:
                 yield _paged_monitor(console, options, self.readers, page=page, **kwargs)
         else:

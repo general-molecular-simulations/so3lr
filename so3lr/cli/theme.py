@@ -24,6 +24,7 @@ SERIES = {
     'kinetic_energy_eV': '#22c3e6',
     'volume_A3': '#9b7bff',
     'opt_energy_eV': '#22c3e6',
+    'train_loss': '#9b7bff',
 }
 
 BRAND = '◆'

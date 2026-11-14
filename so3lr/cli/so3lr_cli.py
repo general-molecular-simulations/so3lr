@@ -88,10 +88,11 @@ SO3LR_ASCII = """
 
 
 @contextmanager
-def _command_display(settings, *, failure, log_file, **info):
-    """eval, finetune, train and tune-ewald: the live display without a run journal, the
-    log file with its banner, and the traceback kept in the log when the command fails."""
-    with presentation.run_display(settings, record=False) as reporter:
+def _command_display(settings, *, failure, log_file, record=False, **info):
+    """eval, finetune, train and tune-ewald: the live display, the log file with its banner,
+    and the traceback kept in the log when the command fails. Training records a run journal
+    for so3lr show (record=True); eval and tuning have no graphs to follow."""
+    with presentation.run_display(settings, record=record) as reporter:
         logger_ready = False
         try:
             reporter.update_info(**info)
@@ -1729,9 +1730,9 @@ def finetune_model(
         raise click.ClickException(f"Dataset file not found: {datafile}")
 
     from so3lr.model_registry import DEFAULT_MODEL
-    # Fine-tuning shows the live display like MD, without a run journal.
+    # Fine-tuning shows the live display like MD, with a run journal next to the log.
     display_settings = dict(input_file=datafile, output_file=workdir, log_file=str(log_file))
-    with _command_display(display_settings, failure='Fine-tuning failed', log_file=log_file,
+    with _command_display(display_settings, failure='Fine-tuning failed', log_file=log_file, record=True,
                           operation='training', model=model_path or DEFAULT_MODEL,
                           plan=f'fine-tune · {strategy} strategy'):
         # Log all settings
@@ -1743,10 +1744,10 @@ def finetune_model(
         logger.info(f"Finetuning strategy:       {strategy}")
         logger.info(f"Force field:               {'Custom MLFF' if model_path else 'SO3LR'}")
         if model_path is not None:
-            logger.info(f"Model path:            {model_path}")
+            logger.info(f"Model path:                {model_path}")
         logger.info(f"Config:                    {'Custom' if config_path else 'Default'}")
         if config_path is not None:
-            logger.info(f"Config path:           {config_path}")
+            logger.info(f"Config path:               {config_path}")
         logger.info(f"Number training points:    {num_train}")
         logger.info(f"Number validation points:  {num_valid}")
         logger.info("=" * 60)
@@ -1754,6 +1755,7 @@ def finetune_model(
         # Log hardware info
         get_hardware_info()
 
+        time_start = time.time()
         finetune_so3lr(
             datafile=datafile,
             workdir=workdir,
@@ -1765,7 +1767,18 @@ def finetune_model(
             log_file=log_file
         )
         logger.info("=" * 60)
-        logger.info("finetuning completed successfully!")
+        logger.info("Fine-tuning completed successfully!")
+        logger.info(f"Total runtime: {_format_runtime(time.time() - time_start)}")
+
+
+def _config_workdir(config_path):
+    """The model directory a training config names, for the display; None if unreadable."""
+    try:
+        with open(config_path) as stream:
+            workdir = (yaml.safe_load(stream) or {}).get('workdir')  # JSON is YAML too
+    except (OSError, yaml.YAMLError, AttributeError):
+        return None
+    return str(workdir) if workdir else None
 
 
 @cli.command(name='train', help="Train a SO3krates model from a config file with `so3lr train --config config.yaml`.")
@@ -1793,9 +1806,10 @@ def train_model(
     if log_file is None:
         log_file = str(Path(config_path).with_suffix('.log'))
 
-    # Training shows the live display like MD, without a run journal.
-    with _command_display(dict(input_file=config_path, log_file=log_file), failure='Training failed',
-                          log_file=log_file, operation='training', plan='train from the config file'):
+    # Training shows the live display like MD, with a run journal next to the log.
+    display_settings = dict(input_file=config_path, output_file=_config_workdir(config_path), log_file=log_file)
+    with _command_display(display_settings, failure='Training failed', log_file=log_file, record=True,
+                          operation='training', plan='train from the config file'):
         # Log all settings
         logger.info("=" * 60)
         logger.info(f"SO3LR Model Training (v{__version__})")

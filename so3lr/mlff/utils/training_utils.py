@@ -285,11 +285,27 @@ def _report_step(reporter, step, start_step, epoch, num_epochs):
         reporter.phase('Training', f'Epoch {epoch + 1:,} of {num_epochs:,}')
 
 
+# Validation errors shown on the live display (the log's table keeps every metric), with
+# their units: training works in eV and Angstrom.
+_SHOWN_ERRORS = (('energy_mae', 'Energy MAE', 'eV'), ('forces_mae', 'Force MAE', 'eV/Å'),
+                 ('stress_mae', 'Stress MAE', 'eV/Å³'), ('dipole_vec_mae', 'Dipole MAE', 'e·Å'),
+                 ('hirshfeld_ratios_mae', 'Hirshfeld ratio MAE', ''))
+
+
 def _report_validation(step, epoch, eval_metrics):
-    """The latest validation metrics as a table on the live display."""
+    """The latest validation errors as a table on the live display, and as a point of the
+    run journal's loss and error graphs."""
     rows = [('Step', f'{step:,} · epoch {epoch + 1:,}')]
-    rows += [(key.removeprefix('eval_'), f'{eval_metrics[key]:.4g}') for key in _display_metric_keys(eval_metrics)]
+    if 'eval_loss' in eval_metrics:
+        rows.append(('Loss', f"{eval_metrics['eval_loss']:.4g}"))
+    for key, label, unit in _SHOWN_ERRORS:
+        if f'eval_{key}' in eval_metrics:
+            rows.append((label, f"{eval_metrics[f'eval_{key}']:.4g} {unit}".rstrip()))
     reporter = _reporter()
+    # The graph point first: the table's redraw then shows both.
+    reporter.update_info(train_step=int(step), train_epoch=epoch + 1,
+                         **{f'train_{key}': eval_metrics.get(f'eval_{key}')
+                            for key in ('loss', 'energy_mae', 'forces_mae')})
     reporter.results('Latest validation', rows)
     if 'eval_loss' in eval_metrics:
         reporter.outcome(f"validation loss {eval_metrics['eval_loss']:.4g}", key='validation')
@@ -1439,6 +1455,7 @@ def fit(
     start_step = step
     reporter = _reporter()
     reporter.task_progress(0, num_epochs, 'epochs')
+    reporter.update_info(train_total_epochs=num_epochs)
     for epoch in range(num_epochs):
         # Switch to the stage-two loss at the configured epoch boundary.
         if (stage_two_start_epoch is not None and stage_two_loss_fn is not None
@@ -1910,6 +1927,7 @@ def fit_from_iterator(
     start_step = step
     reporter = _reporter()
     reporter.task_progress(start_epoch, num_epochs, 'epochs')
+    reporter.update_info(train_total_epochs=num_epochs)
     for epoch in range(start_epoch, num_epochs):
         if stop_training:
             logger.info(

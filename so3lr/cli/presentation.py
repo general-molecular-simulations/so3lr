@@ -443,6 +443,7 @@ class _Reporter:
         from rich.console import Group
         from rich.table import Table
         from .. import __version__
+        from .monitor import STEPWISE
 
         if self._state.samples and not self._graphs_hidden:
             from .monitor import ENERGIES, render_monitor
@@ -451,6 +452,7 @@ class _Reporter:
                                   ascii_only=self._ascii_only,
                                   page=self._plot_page, attached=True, live=self._live_progress())
 
+        stepwise = self.info.get('operation') in STEPWISE
         title = self._text('')
         title.append(self._label(f'{theme.BRAND} SO3LR TAURI'), style=theme.ACCENT_BOLD)
         title.append(f'  v{__version__}', style=theme.MUTED)
@@ -490,14 +492,15 @@ class _Reporter:
             bar.append(f'  {ratio:.0%}', style=theme.STRONG)
             bar.append(self._label(f'  {done:,}/{total:,} {unit}'), style=theme.MUTED)
             rows.append(bar)
-            now = time.monotonic()
-            timing = f'Elapsed {duration_label(now - self._task_started)}'
-            eta = self._eta()
-            if eta is not None:  # only once a rate is measured
-                seconds, bound = eta
-                started, first = self._task_origin
-                timing += f" · ETA {'≤ ' if bound else ''}{duration_label(seconds)} · {(done - first) / (now - started):.3g} {unit}/s"
-            rows.append(self._text(timing, theme.MUTED))
+            if self.status == 'running':  # once finished, the closing line gives the time taken
+                now = time.monotonic()
+                timing = f'Elapsed {duration_label(now - self._task_started)}'
+                eta = self._eta()
+                if eta is not None:  # only once a rate is measured
+                    seconds, bound = eta
+                    started, first = self._task_origin
+                    timing += f" · ETA {'≤ ' if bound else ''}{duration_label(seconds)} · {(done - first) / (now - started):.3g} {unit}/s"
+                rows.append(self._text(timing, theme.MUTED))
         if self.info.get('operation') == 'optimization':
             energy, force, target = (_finite(self.info.get(key)) for key in
                                     ('opt_energy_eV', 'opt_force_max_eVA', 'opt_force_target_eVA'))
@@ -511,7 +514,7 @@ class _Reporter:
                 outcome = optimization_status(self.info, self.status)
                 if outcome != 'Relaxing geometry':  # the phase row already says so
                     rows.append(self._text(outcome, theme.SUCCESS if outcome == 'Force criterion met' else theme.MUTED))
-            plots_at = len(rows)
+        plots_at = len(rows)
         for title, items in self._results:
             rows.append(self._text(''))
             rows.append(self._text(title, theme.STRONG))
@@ -552,7 +555,7 @@ class _Reporter:
         for label, path in self.artifacts:
             rows.append(self._text(f'{label} · {_display_path(path)}', theme.MUTED))
         hint = None
-        if self.info.get('operation') == 'optimization' and self.status != 'running':
+        if stepwise and self.status != 'running':
             from .monitor import _controls
             hint = _controls(self._state, attached=True)
         if self._graphs_hidden and self.status == 'running' and self._keyboard is not None:
@@ -562,15 +565,16 @@ class _Reporter:
             hint = _controls(self._state, attached=True)
         if hint:
             rows.append(theme.controls(hint, self._ascii_only))
-        if self.info.get('operation') == 'optimization':
-            self._insert_optimization_plots(rows, plots_at)
+        if stepwise:
+            self._insert_step_plots(rows, plots_at)
         return Group(*rows)
 
-    def _insert_optimization_plots(self, rows, index):
-        """Energy and force graphs in the space the terminal has left, if at least 3 rows each."""
+    def _insert_step_plots(self, rows, index):
+        """An optimization's energy and force graphs, or training's loss and error graphs, in
+        the space the terminal has left, if at least 3 rows each."""
         from rich.console import Group
-        from .monitor import OPT_MIN_POINTS, optimization_plots
-        if len(self._state.opt_samples) < OPT_MIN_POINTS:
+        from .monitor import OPT_MIN_POINTS, step_plots
+        if len(self._state.step_samples) < OPT_MIN_POINTS:
             return
         width = self.console.width
         used = len(self.console.render_lines(Group(*rows), self.console.options.update_width(width), pad=False))
@@ -579,8 +583,10 @@ class _Reporter:
         plot_rows = min(7, (free - 3) // 2 - 3)
         if plot_rows < 3:
             return
-        plots = optimization_plots(self._state, width, self._ascii_only, rows=plot_rows)
-        rows[index:index] = [self._text(''), plots, self._text('')]
+        plots = step_plots(self._state, width, self._ascii_only, rows=plot_rows)
+        # a results table that follows brings its own blank row
+        after = [] if index < len(rows) and getattr(rows[index], 'plain', None) == '' else [self._text('')]
+        rows[index:index] = [self._text(''), plots, *after]
 
     def print_hint(self, line):
         self.console.print(self._text(line, theme.MUTED))
@@ -722,7 +728,7 @@ class _Reporter:
         self.info.update({key: value for key, value in kwargs.items() if value is not None})
         self.requested.difference_update(kwargs)
         self._state.info.update({key: value for key, value in kwargs.items() if value is not None})
-        self._state.record_optimization(kwargs)
+        self._state.record_steps(kwargs)
         self._refresh()
 
     def start_md(self, start_step, total_steps, dt_fs):
@@ -824,7 +830,7 @@ class _RunReporter:
         self._last_checkpoint = None
         # enabled continues to mean terminal rendering, not journal availability.
         self.enabled = renderer.enabled
-        # Only MD and optimization keep a run journal for so3lr show.
+        # MD, optimization and training keep a run journal for so3lr show.
         self.journal = EventJournal(settings, enabled=record)
         try:
             if self.enabled:

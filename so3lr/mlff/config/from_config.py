@@ -997,9 +997,12 @@ def run_fine_tuning(
             # alpha/scale, leaving 'adaptive' robust loss fixed at its init.
             trainable_subset_keys = list(trainable_subset_keys) + ['adaptive_robust_loss']
 
-    say("=" * 50)
-    print_param_shapes(params, emit=say)
-    say("=" * 50)
+    def detail(line):
+        say(line, logging.DEBUG)
+
+    detail("=" * 50)
+    print_param_shapes(params, emit=detail)
+    detail("=" * 50)
 
     total_params = count_params(params)
     trainable_params = count_trainable_params(
@@ -1246,6 +1249,21 @@ def run_fine_tuning(
     logger.info('Training has finished!')
 
 
+
+@functools.cache
+def _shipped_filters():
+    """(min_distance, max_force) of the packaged train and finetune configs."""
+    folder = Path(__file__).resolve().parents[2] / 'config'
+    pairs = set()
+    for name in ('config.yaml', 'finetune.yaml'):
+        try:
+            data = yaml.safe_load((folder / name).read_text()) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        filt = (data.get('data') or {}).get('filter') or {}
+        pairs.add((filt.get('min_distance'), filt.get('max_force')))
+    return pairs
+
 def data_loader_from_config(config):
     """Create a data loader from config.
     
@@ -1296,13 +1314,15 @@ def data_loader_from_config(config):
     else:
         # config.data.filter.min_distance / max_force are honoured only by the TFDS loader.
         # If the user set them but we are about to instantiate an ASE/NPZ loader, warn loudly
-        # so the values are not silently ignored.
+        # so the values are not silently ignored. The shipped configs' own values only get a
+        # note in the log: every ASE/NPZ run with a default config would warn otherwise.
         if hasattr(config.data, 'filter'):
             _filt = config.data.filter
             _min_d = _filt.min_distance if hasattr(_filt, 'min_distance') else None
             _max_f = _filt.max_force if hasattr(_filt, 'max_force') else None
             if _min_d is not None or _max_f is not None:
-                logger.warning(
+                logger.log(
+                    logging.INFO if (_min_d, _max_f) in _shipped_filters() else logging.WARNING,
                     "config.data.filter.* is honoured only by the TFDS dataloader. "
                     f"You set min_distance={_min_d}, max_force={_max_f}, but the ASE/NPZ "
                     "loader will IGNORE these values -- no structures will be filtered out. "

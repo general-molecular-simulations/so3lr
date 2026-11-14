@@ -203,6 +203,13 @@ def test_mixed_optimization_overview_uses_its_own_iterations_and_explicit_mode()
     assert 'OPT:' in render([optimization, md], width=60)
 
 
+
+def test_training_runs_count_epochs_in_the_overview():
+    training = reader('/runs/finetune/run.events.jsonl', status='Completed',
+                      info=dict(operation='training', train_epoch=300, train_total_epochs=300))
+    text = render([training, reader('/runs/md/run.events.jsonl')], height=24)
+    assert 'TRN' in text and '300/300' in text and 'training epoch' in text
+
 def test_force_converged_optimization_does_not_invent_a_percentage():
     item = reader('/runs/relax/run.events.jsonl', status='Completed',
                   info=dict(operation='optimization', opt_step=24, opt_total_steps=None))

@@ -1316,12 +1316,12 @@ def _optimization_journal(path, forces, target=0.05):
 def test_optimization_history_restarts_at_step_zero_and_ignores_repeats():
     state = monitor.RunState(Path('opt.events.jsonl'))
     for step in (0, 10, 10, 5, 20):
-        state.record_optimization({'opt_step': step, 'opt_energy_eV': -1.0, 'opt_force_max_eVA': 0.1})
-    assert [row['step'] for row in state.opt_samples] == [0, 10, 20]
-    state.record_optimization({'opt_step': 0, 'opt_force_max_eVA': 0.2})  # a new optimization
-    assert [row['step'] for row in state.opt_samples] == [0]
-    state.record_optimization({'opt_step': 30})  # no measurement: nothing to plot
-    assert len(state.opt_samples) == 1
+        state.record_steps({'opt_step': step, 'opt_energy_eV': -1.0, 'opt_force_max_eVA': 0.1})
+    assert [row['step'] for row in state.step_samples] == [0, 10, 20]
+    state.record_steps({'opt_step': 0, 'opt_force_max_eVA': 0.2})  # a new optimization
+    assert [row['step'] for row in state.step_samples] == [0]
+    state.record_steps({'opt_step': 30})  # no measurement: nothing to plot
+    assert len(state.step_samples) == 1
 
 
 def test_optimization_view_plots_energy_and_log_force_with_the_target(tmp_path):
@@ -1335,6 +1335,30 @@ def test_optimization_view_plots_energy_and_log_force_with_the_target(tmp_path):
     few = _optimization_journal(tmp_path / 'few.events.jsonl', [2.0, 0.5])
     assert 'Maximum force [' not in render(few)  # too few cycles: text view only
 
+
+
+def _training_journal(path, losses, forces):
+    events = [event(0, 'run_started', settings={'log_file': 'finetune.log', 'output_file': 'finetune_run'}),
+              event(1, 'info', operation='training', model='so3lr-tauri-m-2606', train_total_epochs=30)]
+    for index, (loss, force) in enumerate(zip(losses, forces)):
+        events.append(event(index + 2, 'info', train_step=(index + 1) * 10, train_epoch=index + 1,
+                            train_loss=loss, train_forces_mae=force, train_energy_mae=0.5))
+    write(path, events)
+    reader = monitor.JournalReader(path)
+    reader.snapshot()
+    return reader
+
+
+def test_training_view_plots_validation_loss_and_force_error(tmp_path):
+    reader = _training_journal(tmp_path / 'ft.events.jsonl', [1.0, 0.3, 0.05, 0.01], [0.5, 0.2, 0.1, 0.05])
+    text = render(reader)
+    assert 'SO3LR TAURI  training' in text
+    assert 'Validated  step 40 · epoch 4 of 30' in text and 'Force MAE  0.05 eV/Å' in text
+    assert 'Validation loss' in text and 'Force MAE [eV/Å]' in text and 'log scale' in text
+    assert 'Model directory  finetune_run' in text
+    # an adaptive robust loss can be negative, and a nearly flat error gains nothing from a log axis
+    flat = _training_journal(tmp_path / 'flat.events.jsonl', [-0.1, -0.2, -0.3], [0.024, 0.023, 0.022])
+    assert 'Validation loss' in render(flat) and 'log scale' not in render(flat)
 
 def test_log_axis_skips_values_it_cannot_place():
     rows = [{'step': 0, 'f': 1.0}, {'step': 1, 'f': 0.0}, {'step': 2, 'f': 0.01}]

@@ -1341,6 +1341,24 @@ def test_live_optimization_draws_graphs_once_three_cycles_are_known(monkeypatch)
         assert 'Maximum force [' not in render(reporter, height=20)  # no room: numbers only
 
 
+
+def test_live_training_draws_loss_and_error_graphs_from_validation(monkeypatch):
+    from so3lr.mlff.utils.training_utils import _report_validation
+    monkeypatch.setattr(sys, 'stderr', Terminal())
+    ui.configure(display='rich')
+    with ui.run_display({'input_file': 'data.xyz'}) as reporter:
+        reporter.update_info(operation='training', train_total_epochs=30)
+        reporter.task_progress(3, 30, 'epochs')
+        for step, loss in ((10, 1.0), (20, 0.2), (30, 0.05)):
+            _report_validation(step, step // 10 - 1, {'eval_loss': loss, 'eval_forces_mae': loss / 2,
+                                                      'eval_forces_mse': loss, 'eval_loss_mae': loss})
+        text = render(reporter, height=60)
+        assert 'Validation loss' in text and 'Force MAE [eV/Å]' in text
+        assert 'Force MAE  0.025 eV/Å' in text and 'mse' not in text  # labelled errors, with units
+    assert [row['step'] for row in reporter._state.step_samples] == [10, 20, 30]
+    assert reporter.final[2][-1] == 'validation loss 0.05'
+    assert 'Elapsed' not in render(reporter, height=60)  # the closing line gives the time taken
+
 def _plain_lines(output):
     return [line for line in output.getvalue().splitlines() if line]
 

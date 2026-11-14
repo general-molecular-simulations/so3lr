@@ -61,15 +61,25 @@ def _sample(state):
     return {}
 
 
-def _optimization(state):
+_MODES = {'optimization': 'OPT', 'training': 'TRN'}
+# what a stepwise run counts as its progress: optimization iterations, training epochs
+_PROGRESS_KEYS = {'optimization': ('opt_step', 'opt_total_steps'),
+                  'training': ('train_epoch', 'train_total_epochs')}
+
+
+def _operation(state):
+    """'optimization' or 'training' for a run measured per step, else None (MD)."""
     info = getattr(state, 'info', {})
-    return isinstance(info, dict) and info.get('operation') == 'optimization'
+    operation = info.get('operation') if isinstance(info, dict) else None
+    return operation if operation in _MODES else None
 
 
 def _steps(state, sample):
-    if _optimization(state):
-        segment = _number(state.info.get('opt_step'))
-        total = _number(state.info.get('opt_total_steps'))
+    operation = _operation(state)
+    if operation is not None:
+        done_key, total_key = _PROGRESS_KEYS[operation]
+        segment = _number(state.info.get(done_key))
+        total = _number(state.info.get(total_key))
     else:
         segment = _number(sample.get('segment_step'))
         if segment is None:
@@ -127,7 +137,7 @@ def _render(readers, width, height, now, ascii_only, page, static):
     if static:
         height = None
     states = [reader.state for reader in readers]
-    has_optimization = any(_optimization(state) for state in states)
+    has_stepwise = any(_operation(state) for state in states)
     names, folder = _names(states)
     separator = ' | ' if ascii_only else ' · '
 
@@ -146,7 +156,7 @@ def _render(readers, width, height, now, ascii_only, page, static):
     waiting = counts['Started']
     classified = sum(counts[status] for status in ('Running', 'Completed', 'Failed')) + waiting
     summary = [f'{counts[status]} {status.lower()}' for status in ('Running', 'Completed', 'Failed')]
-    summary.append(f'{waiting} started/waiting' if has_optimization else f'{waiting} waiting for MD')
+    summary.append(f'{waiting} started/waiting' if has_stepwise else f'{waiting} waiting for MD')
     for status, label in (('Interrupted', 'interrupted'), ('Stale?', 'stale?'), ('Reading', 'reading history'),
                           ('Read error', 'read errors'), ('Unknown', 'unknown')):
         if counts[status]:
@@ -158,7 +168,8 @@ def _render(readers, width, height, now, ascii_only, page, static):
     if folder is not None:
         header.append(line('Folder: ' + home_path(folder), theme.MUTED))
 
-    progress_note = ('Steps: MD segment / optimization iteration; restart offsets excluded.' if has_optimization
+    progress_note = ('Steps: MD segment / optimization iteration / training epoch; restart offsets excluded.'
+                     if has_stepwise
                      else 'Steps/%: current segment; restart offsets excluded.')
     footer = [line(progress_note, theme.MUTED)]
     if counts['Stale?']:
@@ -191,9 +202,9 @@ def _render(readers, width, height, now, ascii_only, page, static):
     page_index = int(page) % pages
     first, last = page_index * capacity, min(len(states), (page_index + 1) * capacity)
 
-    progress_title = 'Steps' if has_optimization else 'Segment steps'
+    progress_title = 'Steps' if has_stepwise else 'Segment steps'
     columns = [('#', max(2, len(str(len(states)))), 'right'), ('Run', None, 'left')]
-    if has_optimization and width >= 76:
+    if has_stepwise and width >= 76:
         columns.append(('Mode', 4, 'left'))
     has_origin = any(origin_label(state) for state in states)
     columns.extend([('State', 11, 'left'), ('Age', 6, 'right')])
@@ -217,19 +228,19 @@ def _render(readers, width, height, now, ascii_only, page, static):
                          no_wrap=True, overflow='crop' if ascii_only else 'ellipsis', header_style='bold')
     for index in range(first, last):
         state = states[index]
-        optimization = _optimization(state)
-        sample = {} if optimization else _sample(state)
+        mode = _MODES.get(_operation(state), 'MD')
+        sample = {} if mode != 'MD' else _sample(state)
         steps, percent, ratio = _steps(state, sample)
         status = statuses[index]
         style = theme.status_style(status)
         name = _literal(names[index], ascii_only)
-        if has_optimization and width < 76:
-            prefix = 'OPT:' if optimization else 'MD:'
+        if has_stepwise and width < 76:
+            prefix = mode + ':'
             name = prefix + _shorten(name, max(1, name_width - len(prefix)), ascii_only)
         else:
             name = _shorten(name, name_width, ascii_only)
         values = {'#': str(index + 1), 'Run': name,
-                  'Mode': 'OPT' if optimization else 'MD',
+                  'Mode': mode,
                   'State': _literal(status, ascii_only), progress_title: steps, '%': percent,
                   'Progress': _progress_cell(percent, ratio, ascii_only),
                   'T [K]': _metric(sample.get('temperature_K'), 7, 1),
