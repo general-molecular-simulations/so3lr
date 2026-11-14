@@ -6,7 +6,8 @@ does not know makes it decline (with the reason), rather than run something it m
 not compute.
 
 The tasks (``TASKS``): ``md`` (``so3lr nve|nvt|nvt-langevin|npt``), ``opt`` (``so3lr opt``),
-``eval`` (``so3lr eval``: energies and forces only) and ``ase`` (``calculator.FlashCalculator``).
+``eval`` (``so3lr eval``: energies and forces only), ``ase`` (``calculator.FlashCalculator``) and
+``tune`` (``so3lr tune-ewald``: PME electrostatics only).
 """
 import dataclasses
 import functools
@@ -37,7 +38,7 @@ ENGINES = ("auto", "flash", "standard")
 ROCM_TARGETS = ("gfx950",)
 FLASH_MODES = ("auto", "fast", "default", "lean", "leanest", "minimal")     # engine.MODES and auto
 KERNELS = ("auto", "pallas", "cuda")      # flash_kernels: the CUDA kernels where they apply, Pallas, CUDA only
-TASKS = ("md", "opt", "eval", "ase")
+TASKS = ("md", "opt", "eval", "ase", "tune")
 # what so3lr eval can take from the engine
 EVAL_TARGETS = ("energy", "forces")
 # so3lr eval builds (and compiles) an engine per set of atoms: auto takes this many at most
@@ -165,6 +166,8 @@ def settings_problem(settings, task="md"):
     ens = s.get("ensemble")
     if task == "md" and ens not in ("nve", "nvt", "nvt-langevin", "npt"):
         return f"it runs nve, nvt, nvt-langevin and npt, not {ens}"
+    if task == "tune" and s.get("kspace_electrostatics") != "pme":
+        return f"it tunes PME, not {s.get('kspace_electrostatics') or 'cutoff dispersion'}"
     if task == "eval":
         other = [t for t in _targets(s.get("targets")) if t not in EVAL_TARGETS]
         if other:

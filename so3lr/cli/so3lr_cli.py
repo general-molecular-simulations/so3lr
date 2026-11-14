@@ -1782,6 +1782,12 @@ def train_model(
 @kspace_options
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
               help='Use JIT compilation for speed. [default: enabled]')
+@click.option('--engine', 'engine', default='auto', type=click.Choice(list(ENGINES)),
+              help='auto: tune PME on the flash engine (its charges, and timings of its force calls, '
+                   'with no per-edge arrays: tens of thousands of atoms fit a GPU) whenever flash takes the '
+                   'structure, else on the neighbour-list potential; the log says which and why. standard '
+                   'forces the neighbour lists, flash forces flash (an error where it cannot run, e.g. for '
+                   'Ewald, P3M or cutoff tuning, which auto runs on the neighbour lists). [default: auto]')
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 @click.pass_context
 def tune_ewald(
@@ -1802,6 +1808,7 @@ def tune_ewald(
     total_charge: int,
     num_unpaired_electrons: int,
     jit_compile: bool,
+    engine: str,
     kspace_electrostatics: str,
     kspace_smearing: float,
     kspace_spacing: float,
@@ -1863,7 +1870,9 @@ def tune_ewald(
         'buffer_size_multiplier_sr': buffer_sr,
         'buffer_size_multiplier_lr': buffer_lr,
         'total_charge':              total_charge,
+        'num_unpaired_electrons':    num_unpaired_electrons,
         'jit_compile':               jit_compile,
+        'engine':                    engine,
         'kspace_electrostatics':     kspace_electrostatics,
     }
     # CLI param names that differ from their internal key
@@ -1907,6 +1916,8 @@ def tune_ewald(
     logger.info(f"Spin (unpaired e-):        {settings_dict.get('num_unpaired_electrons')}")
     logger.info(f"JIT compilation:           {'Enabled' if settings_dict.get('jit_compile') else 'Disabled'}")
 
+
+    reserve_gpu(settings_dict, task='tune')   # before JAX starts
 
     # Log hardware info
     get_hardware_info()

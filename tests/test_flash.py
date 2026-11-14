@@ -270,6 +270,17 @@ def test_fixed_atoms_after_a_restart():
     assert check.settings_problem(dict(SETTINGS, fixed_atom_indices=[0, 1], restart_load_path="r.npz")) is None
 
 
+@pytest.mark.parametrize("kspace,reason", [("pme", None), ("ewald", "it tunes PME, not ewald"),
+                                           ("cutoff", "it tunes PME, not cutoff"),
+                                           (None, "it tunes PME, not cutoff dispersion")])
+def test_tune_task_takes_pme_only(kspace, reason):
+    """so3lr tune-ewald runs on flash for PME electrostatics; the tuning ranges are settings
+    flash ignores."""
+    s = dict(model_path=None, lr_cutoff=10.0, kspace_electrostatics=kspace, accuracy=1e-3, smear_lo=2.0,
+             mesh_hi=7, cutoff_lo=6.0, engine="auto", jit_compile=True)
+    assert check.settings_problem(s, task="tune") == reason
+
+
 def test_engine_choice_small_box(monkeypatch):
     """A box under 2 x the cutoffs runs on flash (over the periodic images); one a
     long-range cutoff far beyond it would make the images' walk too long for does not."""
@@ -2014,3 +2025,61 @@ def test_md_in_a_small_box_on_flash(tmp_path):
             "--output", "a.hdf5"], tmp_path)
     log = (tmp_path / "a.log").read_text()
     assert "Engine: flash" in log, log[-2000:]
+
+
+@GPU
+@pytest.mark.parametrize("model", ["so3lr-tauri-m-2606", "so3lr"])
+def test_observables_match_neighbour_lists(model):
+    """The charges flash's heads give (``FlashSO3LR.observables``: no long range, no
+    backward; what tune-ewald takes) are the neighbour-list model's (float64, 37 A of
+    water), and the force call after them on the same engine runs."""
+    from jax_md.space import periodic_general
+    from so3lr.cli import tune_ewald as T
+    from so3lr.cli.so3lr_md import atoms_to_jnp
+    from so3lr.flash.md import build_engine
+    atoms = _water((3, 3, 3))
+    settings = dict(model_path=model, lr_cutoff=12.0, dispersion_damping=2.0, precision="float64", total_charge=0)
+    box = jnp.asarray(np.diag(atoms.cell[:]), jnp.float64)
+    displacement, _ = periodic_general(box=box, fractional_coordinates=False)
+    q_ref = T._neighbour_list_setup(settings, atoms_to_jnp(atoms, precision=jnp.float64), box, jnp.diag(box),
+                                    displacement, jnp.float64, "pme", 4).charges
+    eng, _ = build_engine(atoms, dict(settings, kspace_electrostatics="pme", kspace_remove_net_force=False),
+                          jnp.float64, box_margin=0.0)
+    R = jnp.asarray(atoms.get_positions(), jnp.float64)
+    q, a0, c6 = (np.asarray(v) for v in eng.observables(R))
+    assert q.shape == a0.shape == c6.shape == (len(atoms),)
+    assert abs(q.sum()) < 1e-9
+    np.testing.assert_allclose(q, np.asarray(q_ref).reshape(-1), rtol=0, atol=1e-9)
+    e, f = eng.energy_forces(R)
+    assert np.isfinite(float(e)) and np.isfinite(np.asarray(f)).all()
+
+
+def _tune_log(tmp_path, name, engine):
+    import yaml
+    (tmp_path / f"{name}.yaml").write_text(yaml.safe_dump(dict(
+        precision="mixed", lr_cutoff=12.0, cutoff_lo=12.0, cutoff_hi=12.0, cutoff_it=2.0, smear_lo=2.0,
+        smear_hi=4.0, smear_it=1.0, mesh_lo=5, mesh_hi=6, accuracy=1e-3)))
+    _so3lr(["tune-ewald", "--input", "w.xyz", "--settings", f"{name}.yaml", "--kspace-electrostatics", "pme",
+            "--engine", engine], tmp_path)
+    return (tmp_path / f"{name}.log").read_text()
+
+
+@GPU
+def test_tune_ewald_on_flash(tmp_path):
+    """`so3lr tune-ewald --engine flash` (PME, 37 A of water) gives the neighbour-list run's
+    error estimates (the same charges), builds and times one engine per cutoff and mesh
+    shape (2 here, for 6 candidates), and recommends parameters."""
+    import re
+    from ase.io import write
+    write(tmp_path / "w.xyz", _water((3, 3, 3)))
+    flash, lists = _tune_log(tmp_path, "flash", "flash"), _tune_log(tmp_path, "lists", "standard")
+    assert "Engine: flash (--engine flash)" in flash, flash[-3000:]
+    assert "Engine: neighbour-list potential (--engine standard)" in lists, lists[-3000:]
+
+    def totals(log):
+        return [float(v) for v in re.findall(r"Error estimates: .*total=([0-9.eE+-]+)", log)]
+    assert len(totals(flash)) == 6
+    np.testing.assert_allclose(totals(flash), totals(lists), rtol=1e-3)
+    timed = re.findall(r"flash, lr_cutoff ([0-9.]+), PME mesh (\([0-9, ]+\))", flash)
+    assert len(timed) == len(set(timed)) <= 2, timed
+    assert "Optimally timed PME parameters" in flash, flash[-3000:]
