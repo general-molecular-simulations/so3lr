@@ -76,18 +76,94 @@ def _neutral_box():
 
 
 def test_estimates_keep_their_values():
-    """The Kolafa-Perram and Petersen estimates give what the earlier implementation gave
-    for the same structure and parameters."""
+    """The Kolafa-Perram and Petersen estimates keep their values for the same structure
+    and parameters. PME's take h from the mesh jax-pme builds (32 x 64 x 64 points here),
+    not from the spacing: the earlier h = L / (2 L / spacing + 1) gave 6.18e-5, 1.57e-5
+    and 5.31e-6, 3.7-8.9x higher."""
     from so3lr.cli.tune_ewald import EwaldErrorBounds, PMEErrorBounds
 
     ewald = EwaldErrorBounds(**_neutral_box())
     assert ewald.err_kspace(smearing=2.0, spacing=3.0) == pytest.approx(8.89619561939042e-06, rel=1e-6)
     assert ewald.err_rspace(smearing=2.0, cutoff=10.0) == pytest.approx(1.959476866247133e-07, rel=1e-6)
     pme = PMEErrorBounds(**_neutral_box())
-    for nodes, value in ((3, 6.177889820238487e-05), (4, 1.5689216429297842e-05),
-                         (5, 5.3114413847518695e-06)):
+    for nodes, value in ((3, 1.6686409324646276e-05), (4, 2.739249344040009e-06),
+                         (5, 5.994462993709993e-07)):
         assert pme.err_kspace(smearing=2.0, spacing=1.55, interpolation_nodes=nodes) == \
             pytest.approx(value, rel=1e-6)
+
+
+@pytest.mark.parametrize("side", [20.0, 31.7, 64.5, 68.03])
+def test_pme_candidate_spacings_give_their_mesh(side):
+    """A candidate of m gets 2**m mesh points along the shortest side from jax-pme, which
+    pads its mesh to a power of two (the earlier 2 L / (2**m - 1) gave 2**(m+1))."""
+    from so3lr.cli.tune_ewald import pme_mesh_spacing
+    from so3lr.mlff.utils.kspace_utils import kspace_grid_shape
+
+    for m in range(2, 9):
+        shape = kspace_grid_shape("pme", pme_mesh_spacing(side, m), np.diag([side, 1.5 * side, 2 * side]))
+        assert shape[0] == 2 ** m, (m, shape)
+
+
+@pytest.mark.parametrize("start,stop,step,expected", [
+    (12, 7, -2, [12, 10, 8]), (12, 8, -2, [12, 10, 8]), (2, 6, 2, [2, 4, 6]),
+    (2.0, 6.0, 1.5, [2.0, 3.5, 5.0]), (15, 15, -2, [15])])
+def test_candidate_ranges_stay_within_their_bounds(start, stop, step, expected):
+    """cutoff_lo 7 with cutoff_hi 12, step 2 tried 6 A as well (#42 item 4)."""
+    from so3lr.cli.tune_ewald import _inclusive
+    assert list(_inclusive(start, stop, step)) == pytest.approx(expected)
+
+
+def test_recommendation_breaks_timing_ties_by_error():
+    """Of the candidates within the accuracy and as fast as the fastest (a shared timing,
+    or within 3 %), the smallest error; none within the accuracy gives None."""
+    from so3lr.cli.tune_ewald import recommended_index
+    errors = [5e-4, 2e-4, 3e-3, 1e-4, 9.7e-4, 3.8e-4]
+    timings = [1.0, 1.0, float("inf"), 2.0, 0.99, 1.02]
+    assert recommended_index(errors, timings, 1e-3) == 1
+    assert recommended_index(errors, timings, 1e-3, tolerance=0.0) == 4
+    assert recommended_index(errors, timings, 1e-5) is None
+
+
+def _charged_box(n=60, box=14.0, seed=1):
+    rng = np.random.default_rng(seed)
+    positions = rng.uniform(0, box, (n, 3))
+    charges = rng.uniform(-0.6, 0.6, n)
+    return positions, charges - charges.mean(), box
+
+
+@pytest.mark.parametrize("kernel", ["erf", "pme"])
+def test_sampled_pair_forces_match_autograd(kernel, x64):
+    """SamplePairs' forces (F_i = -2 de/dr along r_i - r_j, the pairs of the sampled atoms
+    only) equal the gradient of the energy summed over every pair, on all atoms and on a
+    sample of them."""
+    from jax_md import space
+    from so3lr.cli.tune_ewald import COULOMB_CONSTANT, SamplePairs, get_forces_rs
+    from so3lr.mlff.nn.observable.observable_sparse import (coulomb_erf,
+                                                            coulomb_erf_shifted_force_smooth_pme)
+
+    positions, charges, box = _charged_box()
+    R, q = jnp.asarray(positions, jnp.float64), jnp.asarray(charges, jnp.float64)
+    displacement, _ = space.periodic(box)
+    cutoff = 6.5
+    # every ordered pair within the cutoff (minimum image), as so3lr's sparse lists hold them
+    d = positions[:, None] - positions[None]
+    r = np.linalg.norm(d - box * np.round(d / box), axis=-1)
+    idx = jnp.asarray(np.stack(np.nonzero((r < cutoff) & (r > 0))))
+    params = (dict(cutoff=2.0) if kernel == "erf"
+              else dict(cutoff=cutoff, cuton=4.5, smearing=2.0))
+    energy = coulomb_erf if kernel == "erf" else coulomb_erf_shifted_force_smooth_pme
+    reference = get_forces_rs(energy, R, q, displacement, idx_i=idx[0], idx_j=idx[1],
+                              ke=COULOMB_CONSTANT, sigma=4.0, **params)
+
+    every = SamplePairs(R, displacement, cutoff)
+    assert every.n == len(R)
+    forces = every.forces(energy, q, cutoff, ke=COULOMB_CONSTANT, sigma=4.0, **params)
+    np.testing.assert_allclose(forces, reference, rtol=1e-9, atol=1e-11)
+
+    some = SamplePairs(R, displacement, cutoff, n_sample=17, chunk=8)
+    assert some.n == 17
+    forces = some.forces(energy, q, cutoff, ke=COULOMB_CONSTANT, sigma=4.0, **params)
+    np.testing.assert_allclose(forces, np.asarray(reference)[some.sample], rtol=1e-9, atol=1e-11)
 
 
 @pytest.mark.parametrize("method,nodes", [("pme", (3, 3)), ("pme", (4, 5)), ("p3m", (2, 2)),
