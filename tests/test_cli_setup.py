@@ -240,7 +240,7 @@ def test_launcher_handles_spaces_and_shell_metacharacters(tmp_path, structure_fi
     result = subprocess.run(['sh', str(destination / 'run.sh')], cwd=tmp_path,
                             env={**os.environ, 'PATH': str(binary) + os.pathsep + os.environ['PATH']},
                             text=True, capture_output=True, check=True)
-    assert result.stdout.splitlines() == [str(destination), '--settings', 'settings.yaml']
+    assert result.stdout.splitlines() == [str(destination), 'resume', '--or-start', '.']
     assert not (tmp_path / 'injected').exists()
 
 
@@ -580,7 +580,7 @@ def test_example_preset_exports_a_single_frame_without_a_frame_menu(tmp_path, mo
     assert 'Example · Ala4 peptide' in result.output
     assert (destination / 'structure.extxyz').read_bytes() == presets[int(preset) - 1][1].read_bytes()
     settings = yaml.safe_load((destination / 'settings.yaml').read_text())
-    assert settings['lr_cutoff'] == 100 and 'kspace_electrostatics' not in settings  # gas phase
+    assert settings['lr_cutoff'] == 100 and settings['kspace_electrostatics'] == 'none'  # gas phase
     assert settings['md_cycles'] == 2 and settings['save_buffer'] == 2  # checkpoint cadence bounded by the run
 
 

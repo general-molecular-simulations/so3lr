@@ -14,8 +14,9 @@ import click
 from . import theme
 from .prompts import Back
 from .setup import (_choose, _confirm, _entered_path, _positive, _prompt, TASK_REVIEW_ACTIONS, ask_new_directory, _say,
-                    _select_model, _select_structure, _stage, _stage_rule, _unused_directory,
-                    electron_count_problem, export_run, launcher_script, run_steps)
+                    _select_model, _select_structure, _stage, _stage_rule, _unused_directory, SAVE_FOR_LATER,
+                    START_LATER, default_charge_and_spin, electron_count_problem, export_run, launcher_script,
+                    run_steps)
 from so3lr.md_settings_validation import DEFAULT_PRECISION
 from so3lr.model_registry import DEFAULT_MODEL
 
@@ -40,8 +41,9 @@ class Action:
 def _charge_and_spin(console, structure):
     if structure.spin_reading:
         _say(console, f'Default multiplicity from the file: {structure.spin_reading}.', theme.MUTED)
-    charge = _prompt('Total charge (e)', default=structure.input_charge or 0, type=int)
-    spin = _prompt('Unpaired electrons (multiplicity minus one)', default=structure.input_unpaired or 0,
+    charge_default, spin_default = default_charge_and_spin(structure)
+    charge = _prompt('Total charge (e)', default=charge_default, type=int)
+    spin = _prompt('Unpaired electrons (multiplicity minus one)', default=spin_default,
                    type=click.IntRange(min=0))
     problem = electron_count_problem(structure.electrons, charge, spin)
     if problem:
@@ -127,7 +129,7 @@ def optimization_setup(console):
                 ('Files', 'structure.extxyz, run.sh (the so3lr opt command); the run adds optimization.extxyz, run.log')]
         console.print(_rows_view(3, 'Review and start', rows, (
             'Start now saves the files, then optimizes in this terminal.',
-            'Save for later writes those files only. Start later with sh run.sh, or submit it with sbatch run.sh.')))
+            SAVE_FOR_LATER.format(files='those files'))))
         action = _choose(console, 'Next action · Enter starts now', TASK_REVIEW_ACTIONS)
         if action == 2:
             _say(console, 'Setup cancelled. No files written.')
@@ -143,7 +145,7 @@ def optimization_setup(console):
             _say(console, 'Starting the optimization now in this terminal.')
             state['result'] = Action('opt', tuple(argv), destination)
             return
-        _say(console, 'Start later with sh run.sh (or sbatch run.sh) in an environment with SO3LR installed.')
+        _say(console, START_LATER)
         state['result'] = None
 
     run_steps(structure, model, details, review)
@@ -244,7 +246,7 @@ def eval_setup(console):
                 ('Files', 'run.sh; the run adds predictions.extxyz and eval.log (the dataset is not copied)')]
         console.print(_rows_view(3, 'Review and start', rows, (
             'Start now saves run.sh, then evaluates in this terminal.',
-            'Save for later writes run.sh only. Start later with sh run.sh, or submit it with sbatch run.sh.')))
+            SAVE_FOR_LATER.format(files='run.sh'))))
         action = _choose(console, 'Next action · Enter starts now', TASK_REVIEW_ACTIONS)
         if action == 2:
             _say(console, 'Setup cancelled. No files written.')
@@ -268,7 +270,7 @@ def eval_setup(console):
             _say(console, 'Starting the evaluation now in this terminal.')
             state['result'] = Action('eval', argv, destination)
             return
-        _say(console, 'Start later with sh run.sh (or sbatch run.sh) in an environment with SO3LR installed.')
+        _say(console, START_LATER)
         state['result'] = None
 
     run_steps(dataset, model, details, review)

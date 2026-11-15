@@ -22,7 +22,8 @@ LARGE_CELL = {'lr_cutoff': 12.0, 'kspace_electrostatics': 'pme', 'kspace_smearin
 
 
 def test_periodic_cells_get_pme_and_isolated_structures_a_long_cutoff():
-    assert long_range_settings(False, None, DEFAULT_MODEL) == {'lr_cutoff': 100.0}
+    assert long_range_settings(False, None, DEFAULT_MODEL) == {
+        'lr_cutoff': 100.0, 'kspace_electrostatics': 'none', 'kspace_dispersion': 'none'}
     assert long_range_settings(True, 999.9, DEFAULT_MODEL) == LARGE_CELL
 
 
@@ -159,3 +160,14 @@ def test_evaluation_keeps_the_cutoff_and_unreadable_structures_turn_auto_off(tmp
     missing = {'lr_cutoff': 12.0}
     resolve_long_range(missing, set(), tmp_path / 'missing.xyz')
     assert missing['kspace_electrostatics'] is None
+
+
+def test_the_cell_comes_from_the_comment_line_of_the_frame_md_reads(tmp_path):
+    from so3lr.cli.setup_physics import structure_cell
+    path = tmp_path / 'traj.extxyz'
+    frame = '3\nLattice="{a} 0 0 0 {a} 0 0 0 {a}" Properties=species:S:1:pos:R:3 pbc="T T T"\n' + 'O 0 0 0\nH 1 0 0\nH 0 1 0\n'
+    path.write_text(frame.format(a=30.0) + frame.format(a=12.4))
+    assert structure_cell(path) == (True, 12.4)
+    assert structure_cell(path, index=0) == (True, 30.0)
+    (tmp_path / 'gas.xyz').write_text('3\nwater\nO 0 0 0\nH 1 0 0\nH 0 1 0\n')
+    assert structure_cell(tmp_path / 'gas.xyz') == (False, None)

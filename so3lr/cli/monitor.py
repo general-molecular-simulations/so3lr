@@ -130,11 +130,16 @@ def _observation_line(reader, now):
     return f'Age {age} · last journal event'
 
 
-def origin_label(state, compact=False):
-    host = getattr(state, 'host', '')
+def slurm_job(state):
+    """The Slurm job id the run recorded, or None."""
     scheduler = getattr(state, 'scheduler', {})
     scheduler = scheduler if isinstance(scheduler, dict) else {}
-    job = scheduler.get('SLURM_JOB_ID') or scheduler.get('SLURM_JOBID')
+    return scheduler.get('SLURM_JOB_ID') or scheduler.get('SLURM_JOBID')
+
+
+def origin_label(state, compact=False):
+    host = getattr(state, 'host', '')
+    job = slurm_job(state)
     if not host and not job:
         return ''
     if compact:
@@ -1398,12 +1403,11 @@ _SUMMARY_INFO = ('operation', 'model', 'engine', 'atoms', 'precision', 'device_c
 def run_summary(reader, now):
     """One run as plain data for so3lr show --json: its state, progress, last sample,
     checkpoint and failure, so scripts and agents need not parse the table."""
+    from .overview import progress
     state = reader.state
     last = state.samples[-1] if state.samples else {}
-    done = _finite(last.get('segment_step'))
-    total = state.total_steps or None
+    done, total, ratio = progress(state)
     checkpoint = state.checkpoint or {}
-    scheduler = state.scheduler if isinstance(state.scheduler, dict) else {}
     return {
         'journal': str(reader.path.resolve()),
         'run_id': state.run_id or None,
@@ -1414,10 +1418,11 @@ def run_summary(reader, now):
         'ensemble': state.settings.get('ensemble'),
         'output_file': state.settings.get('output_file'),
         'host': state.host or None,
-        'slurm_job': scheduler.get('SLURM_JOB_ID') or scheduler.get('SLURM_JOBID'),
-        'segment_steps': None if done is None else int(done),
-        'segment_total_steps': total,
-        'fraction_done': None if done is None or not total else min(1.0, done / total),
+        'slurm_job': slurm_job(state),
+        # MD steps of the current segment, optimization iterations or training epochs
+        'done': None if done is None else int(done),
+        'planned': None if total is None else int(total),
+        'fraction_done': ratio,
         'last_sample': {key: last.get(key) for key in ('step', 'time_ps', 'temperature_K',
                                                        'potential_energy_eV', 'energy_eV',
                                                        'volume_A3', 'seconds_per_step')} if last else None,

@@ -32,6 +32,12 @@ def cell_heights(cell) -> np.ndarray:
     return 1.0 / np.linalg.norm(np.linalg.pinv(np.asarray(cell, float)).T, axis=1)
 
 
+def minimum_cell_height(cell) -> float:
+    """The smallest cell height in A; 0.0 for a cell that spans less than three dimensions."""
+    cell = np.asarray(cell, float)
+    return float(np.min(cell_heights(cell))) if np.linalg.matrix_rank(cell) == 3 else 0.0
+
+
 def minimum_image_problem(cell, cutoff):
     """Why a periodic cell is too thin for minimum-image neighbour lists at this
     cutoff, or None. ``cell`` holds the lattice vectors as rows. Those lists keep

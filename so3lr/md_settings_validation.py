@@ -1,5 +1,6 @@
 """Import-light settings helpers shared by the CLI and ``so3lr_md``: loading a
-settings YAML, resolving the ensemble and the run's precision, checking the MD counts."""
+settings YAML, resolving the ensemble and the run's precision, checking the MD counts
+and which output files a run would refuse to replace."""
 
 import difflib
 import logging
@@ -255,27 +256,37 @@ def _validate_md_output_write_policy(
     )
 
 
-def output_refusal(settings, task='md'):
-    """Why a run would refuse to write its outputs (one exists, no overwrite), or ''.
+
+def relaxation_output(output_file) -> Path:
+    """The trajectory of the relaxation before MD: <output stem>_opt.xyz beside the output."""
+    path = Path(output_file)
+    return path.with_name(f'{path.stem}_opt.xyz')
+
+
+def checkpoint_file(path) -> Path:
+    """The file save_state writes for restart_save_path: NumPy's .npz suffix added when missing."""
+    return Path(path) if str(path).endswith('.npz') else Path(f'{path}.npz')
+
+
+def refuse_existing(path, overwrite: bool) -> None:
+    """Raise when path exists and overwrite is off (the writers and the CLI's preflight)."""
+    if path and not overwrite and _existing_regular_output_mode(Path(path)) is not None:
+        raise RuntimeError(f"Output file already exists: {path}. Refusing to overwrite. "
+                           f"Pass --overwrite to replace it, or choose a different --output.")
+
+
+def check_outputs(settings, task='md') -> None:
+    """Raise RuntimeError when a run would refuse to write its outputs (one exists, no overwrite).
 
     The CLI asks before it opens the run's journal, so a refused start leaves no
     record behind; the writers keep their own checks."""
     output_file = settings.get('output_file')
     overwrite = bool(settings.get('overwrite', False))
-    try:
-        if task == 'opt':
-            if output_file and _existing_regular_output_mode(Path(output_file)) is not None and not overwrite:
-                raise RuntimeError(f"Output file already exists: {output_file}. Refusing to overwrite. "
-                                   f"Pass --overwrite to overwrite, or choose a different --output.")
-            return ''
-        restart = settings.get('restart_load_path')
-        _validate_md_output_write_policy(output_file=output_file, output_format=settings.get('output_format'),
-                                         overwrite=overwrite, restart_load_path=restart)
-        if output_file and settings.get('relax_before_run', True) and restart is None:
-            relaxation = Path(output_file).with_name(f'{Path(output_file).stem}_opt.xyz')
-            if _existing_regular_output_mode(relaxation) is not None and not overwrite:
-                raise RuntimeError(f"Output file already exists: {relaxation}. Refusing to overwrite. "
-                                   f"Pass --overwrite to replace it, or choose a different --output.")
-    except RuntimeError as exc:
-        return str(exc)
-    return ''
+    if task == 'opt':
+        refuse_existing(output_file, overwrite)
+        return
+    restart = settings.get('restart_load_path')
+    _validate_md_output_write_policy(output_file=output_file, output_format=settings.get('output_format'),
+                                     overwrite=overwrite, restart_load_path=restart)
+    if output_file and settings.get('relax_before_run', True) and restart is None:
+        refuse_existing(relaxation_output(output_file), overwrite)

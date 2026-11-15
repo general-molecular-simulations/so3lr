@@ -42,11 +42,10 @@ import numpy as np
 from ase.io import read
 from jax_md import units
 
+from so3lr.md_settings_validation import _validate_md_output_write_policy, refuse_existing, relaxation_output
 from so3lr.cli.so3lr_md import (
     MAX_OVERFLOW_RETRIES,
     RestartInNewEnsembleError,
-    _existing_regular_output_mode,
-    _validate_md_output_write_policy,
     atoms_to_jnp,
     cell_from_atoms_boundary_conditions,
     report_md_row,
@@ -318,9 +317,7 @@ def relax_flash(eng, staged, position, shift, box, settings, atoms, start, opt_f
     reporter = get_reporter()
     reporter.phase('Relaxing', 'FIRE geometry optimization')
     overwrite = bool(s.get("overwrite", False))
-    if opt_file is not None and _existing_regular_output_mode(opt_file) is not None and not overwrite:
-        raise RuntimeError(f"Output file already exists: {opt_file}. Refusing to overwrite. "
-                           f"Pass --overwrite to overwrite, or choose a different --output.")
+    refuse_existing(opt_file, overwrite)
     def fire():
         """jax-md's FIRE on the engine as it is (made again after a rebuild: _run_jitted)."""
         return jax_md.minimize.fire_descent(
@@ -558,7 +555,7 @@ def perform_md_flash(all_settings, restart=False, atoms=None):
     if not restart and s.get("relax_before_run", True):
         out = Path(s["output_file"])
         position = relax_flash(eng, staged, position, shift, box, s, atoms, start=(e0, F0),
-                               opt_file=out.with_name(f"{out.stem}_opt.xyz"))
+                               opt_file=relaxation_output(out))
         e0, F0, W0 = strain(position)
         if pysages_set_dict is not None:
             # the CVs' reference structure (neutral H counts) is the relaxed one, as in

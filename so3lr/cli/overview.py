@@ -74,7 +74,10 @@ def _operation(state):
     return operation if operation in _MODES else None
 
 
-def _steps(state, sample):
+def progress(state, sample=None):
+    """(done, planned, ratio) of a run, each None when unknown: MD steps of the current
+    segment, optimization iterations or training epochs."""
+    sample = _sample(state) if sample is None else sample
     operation = _operation(state)
     if operation is not None:
         done_key, total_key = _PROGRESS_KEYS[operation]
@@ -90,10 +93,14 @@ def _steps(state, sample):
     if segment is not None and (segment < 0 or not math.isfinite(segment)):
         segment = None
     total = total if total is not None and total > 0 else None
+    ratio = segment / total if segment is not None and total is not None else None
+    return segment, total, ratio if ratio is not None and math.isfinite(ratio) else None
+
+
+def _steps(state, sample):
+    segment, total, ratio = progress(state, sample)
     done = f'{int(segment):,}' if segment is not None else '-'
     planned = f'{int(total):,}' if total is not None else '-'
-    ratio = segment / total if segment is not None and total is not None else None
-    ratio = ratio if ratio is not None and math.isfinite(ratio) else None
     percentage = f'{ratio * 100:.0f}%' if ratio is not None else '-'
     return f'{done}/{planned}' if total is not None else done, percentage, ratio
 

@@ -27,11 +27,11 @@ _PRESETS = (('Example · Ala4 peptide · 42 atoms · gas phase', 'ala4.xyz'),
             ('Example · DHA · 56 atoms', 'dha.xyz'),
             ('Example · water box · 192 atoms · periodic', 'water_64.xyz'))
 REVIEW_ACTIONS = ('Save setup and start MD now', 'Save setup for later', 'Edit settings…', 'Cancel')
-# A settings bundle continues from its checkpoint when one exists (so3lr resume).
-MD_COMMAND = '''if [ -e restart.npz ]; then
-    exec so3lr resume .
-fi
-exec so3lr --settings settings.yaml'''
+# A settings bundle starts, or continues from its checkpoint when it has one.
+MD_COMMAND = 'exec so3lr resume --or-start .'
+NPT_CELL = 'NPT requires a fully periodic, positive, axis-aligned orthorhombic cell.'
+START_LATER = 'Start later with sh run.sh (or sbatch run.sh) in an environment with SO3LR installed.'
+SAVE_FOR_LATER = 'Save for later writes {files} only. Start later with sh run.sh, or submit it with sbatch run.sh.'
 
 
 def launcher_script(directory, command):
@@ -111,7 +111,7 @@ def inspect_structure(path, frame_index=None):
     # wizard or displaying command help must not initialize a numerical model.
     import numpy as np
     from ase.io import iread
-    from so3lr.pbc import cell_heights, is_fully_periodic
+    from so3lr.pbc import is_fully_periodic, minimum_cell_height
 
     frames = iread(str(path), format='extxyz', index=':')
     first, count = None, 0
@@ -142,9 +142,7 @@ def inspect_structure(path, frame_index=None):
         # for every ensemble. Match check_cell's exact off-diagonal check;
         # accepting tiny tilts here would still fail after saving and launching.
         raise ValueError('Periodic MD requires a positive, axis-aligned orthorhombic cell.')
-    height = None
-    if periodic:
-        height = float(np.min(cell_heights(cell))) if np.linalg.matrix_rank(cell) == 3 else 0.0
+    height = minimum_cell_height(cell) if periodic else None
     has_momenta = first.has('momenta') and bool(np.any(first.get_momenta()))
     charge, unpaired = structure_charge_and_unpaired(first.info)
     return Structure(path, len(first), first.get_chemical_formula(),
@@ -237,7 +235,7 @@ def export_run(directory, structure, settings=None, header=None, command=None):
         launcher = directory / 'run.sh'
         with launcher.open('x') as handle:
             written.append(launcher)
-            handle.write(launcher_script(directory, MD_COMMAND if command is None else 'exec ' + command))
+            handle.write(launcher_script(directory, 'exec ' + command if command else MD_COMMAND))
         launcher.chmod(0o755)
     except BaseException:
         # Remove only files this export owns; never recursively remove content
@@ -530,13 +528,13 @@ class _Draft:
     """Answers of one guided setup; each group can be asked again from the review."""
 
     def __init__(self, console, old):
-        from .so3lr_cli import (DEFAULT_MD_CYCLES, DEFAULT_MD_STEPS_PER_CYCLE,
+        from .so3lr_cli import (DEFAULT_DURATION_PS, DEFAULT_FRAME_INTERVAL_PS,
                                 DEFAULT_SEED, DEFAULT_TEMPERATURE, DEFAULT_TIMESTEP)
         self.console, self.old = console, old
         self.default_seed, self.default_temperature = DEFAULT_SEED, DEFAULT_TEMPERATURE
         self.default_dt = Decimal(str(DEFAULT_TIMESTEP))
-        self.default_frame = self.default_dt * DEFAULT_MD_STEPS_PER_CYCLE / 1000
-        self.default_duration = self.default_frame * DEFAULT_MD_CYCLES
+        self.default_frame = Decimal(str(DEFAULT_FRAME_INTERVAL_PS))
+        self.default_duration = Decimal(str(DEFAULT_DURATION_PS))
 
     # -- groups ---------------------------------------------------------
     def ask_structure(self):
@@ -551,7 +549,7 @@ class _Draft:
                 ('NVT · Nosé–Hoover', 'NVT · Langevin', 'NVE', 'NPT'), _ENSEMBLES.index(default) + 1)]
             if self.ensemble != 'npt' or self.structure.periodic:
                 return
-            _say(self.console, 'NPT requires a fully periodic, positive, axis-aligned orthorhombic cell.', theme.DANGER)
+            _say(self.console, NPT_CELL, theme.DANGER)
 
     def ask_model(self):
         from .setup_physics import long_range_settings
@@ -616,10 +614,9 @@ class _Draft:
     def ask_chemistry(self):
         console, old, structure = self.console, self.old, self.structure
         same_source = old.get('source') == str(structure.path)
-        charge_default = getattr(self, 'charge', old['charge'] if same_source and 'charge' in old
-                                 else (structure.input_charge or 0))
-        spin_default = getattr(self, 'spin', old['spin'] if same_source and 'spin' in old
-                               else (structure.input_unpaired or 0))
+        file_charge, file_spin = default_charge_and_spin(structure)
+        charge_default = getattr(self, 'charge', old['charge'] if same_source and 'charge' in old else file_charge)
+        spin_default = getattr(self, 'spin', old['spin'] if same_source and 'spin' in old else file_spin)
         recorded = [label for value, label in ((structure.input_charge, 'total charge'),
                                                (structure.input_unpaired, 'multiplicity')) if value is not None]
         if recorded and not same_source and not hasattr(self, 'charge'):
@@ -670,7 +667,7 @@ class _Draft:
 
     def _announce_pme(self):
         proposal = self.proposal
-        if 'kspace_electrostatics' in proposal:
+        if proposal.get('kspace_electrostatics') == 'pme':
             _say(self.console, f'Proposed for this cell: {proposal["lr_cutoff"]:g} Å real-space cutoff, '
                  'PME electrostatics and PME dispersion. '
                  f'Electrostatics: {proposal["kspace_smearing"]:g} Å smearing, '
@@ -722,12 +719,23 @@ class _Draft:
                     cutoff=str(self.cutoff), directory=str(self.directory))
 
 
+def default_charge_and_spin(structure):
+    """Total charge and unpaired electrons recorded in the structure file, else 0."""
+    return structure.input_charge or 0, structure.input_unpaired or 0
+
+
 def md_settings(structure, *, model, ensemble, temperature, pressure, dt, frames, steps_per_frame,
-                charge, spin, seed, relax, cutoff=None):
+                charge=None, spin=None, seed, relax, cutoff=None):
     """The settings.yaml of an MD bundle, from the guided setup or `so3lr start --input`.
-    cutoff None takes the proposal for the structure (setup_physics.long_range_settings)."""
+    charge/spin None take the file's values; cutoff None takes the proposal for the
+    structure (setup_physics.long_range_settings)."""
     from .setup_physics import long_range_settings
     from .so3lr_cli import DEFAULT_SAVE_BUFFER
+    if ensemble == 'npt' and not structure.periodic:
+        raise ValueError(NPT_CELL)
+    file_charge, file_spin = default_charge_and_spin(structure)
+    charge = file_charge if charge is None else charge
+    spin = file_spin if spin is None else spin
     long_range = long_range_settings(structure.periodic, structure.minimum_cell_height, model,
                                      cutoff=None if cutoff is None else float(cutoff), ensemble=ensemble)
     settings = dict(input_file='structure.extxyz', output_file='trajectory.extxyz', log_file='run.log',
@@ -752,19 +760,15 @@ def noninteractive_md_setup(input_file, *, frame=None, ensemble, model, temperat
     """`so3lr start --input`: the guided MD setup's proposal without prompts, for scripts and
     agents. Writes the run folder (or prints its settings.yaml); returns the folder or None."""
     structure = inspect_structure(input_file, frame_index=None if frame is None else frame - 1)
-    if ensemble == 'npt' and not structure.periodic:
-        raise ValueError('NPT requires a fully periodic, positive, axis-aligned orthorhombic cell.')
     structure = replace(structure, keep_input_momenta=bool(keep_velocities and structure.has_momenta))
     frames, steps = frame_plan(duration, frame_interval, dt)
-    charge = (structure.input_charge or 0) if charge is None else charge
-    spin = (structure.input_unpaired or 0) if spin is None else spin
-    problem = electron_count_problem(structure.electrons, charge, spin)
-    if problem:
-        click.echo(f'Warning: {problem}', err=True)
     settings = md_settings(structure, model=model, ensemble=ensemble,
                            temperature=temperature, pressure=pressure if ensemble == 'npt' else None,
                            dt=dt, frames=frames, steps_per_frame=steps, charge=charge, spin=spin,
                            seed=seed, relax=relax, cutoff=cutoff)
+    problem = electron_count_problem(structure.electrons, settings['total_charge'], settings['num_unpaired_electrons'])
+    if problem:
+        click.echo(f'Warning: {problem}', err=True)
     if print_only:
         click.echo(_SETTINGS_HEADER + yaml.safe_dump(settings, sort_keys=False), nl=False)
         return None
@@ -832,7 +836,7 @@ def review_view(structure, destination, settings):
             table.add_row(Text(label), Text(terminal_text(value)))
     return Group(Text(''), _stage_rule(3, 'Review and start'), table,
                  Text('Start now saves structure.extxyz, settings.yaml and run.sh, then runs MD in this terminal.'),
-                 Text('Save for later writes those files only. Start later with sh run.sh, or submit it with sbatch run.sh.',
+                 Text(SAVE_FOR_LATER.format(files='those files'),
                       style=theme.MUTED))
 
 
@@ -914,5 +918,5 @@ def _md_setup(console):
         if action == 0:
             _say(console, 'Starting MD now in this terminal.')
             return settings_path
-        _say(console, 'Start later with sh run.sh (or sbatch run.sh) in an environment with SO3LR installed.')
+        _say(console, START_LATER)
         return None

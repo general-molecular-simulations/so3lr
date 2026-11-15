@@ -17,7 +17,6 @@ import sys
 import time
 import logging
 import pathlib
-import stat
 import tempfile
 from pathlib import Path
 from functools import partial
@@ -33,8 +32,9 @@ import jax_md
 from jax_md import units, partition
 from jax_md.space import DisplacementOrMetricFn, raw_transform
 from so3lr.mlff.calculators.potential import PotentialSparse
-from so3lr.md_settings_validation import (  # noqa: F401 (flash.md imports them from here)
-    _existing_regular_output_mode, _validate_md_output_write_policy)
+from so3lr.md_settings_validation import (
+    _existing_regular_output_mode, _validate_md_output_write_policy, checkpoint_file, refuse_existing,
+    relaxation_output)
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported,
 )
@@ -3110,18 +3110,13 @@ def perform_min(
         # Optimization currently writes EXTXYZ even when MD uses HDF5. Check
         # the actual destination, not just the requested HDF5 name.
         output_path = Path(output_file)
-        output_file = str(output_path.with_name(f'{output_path.stem}_opt.xyz'))
+        output_file = str(relaxation_output(output_path))
         logger.warning(
             f"Optimization trajectories use EXTXYZ; writing {output_file}."
         )
 
     # Refuse to clobber existing output unless --overwrite was passed.
-    if (output_file and _existing_regular_output_mode(Path(output_file)) is not None
-            and not overwrite):
-        raise RuntimeError(
-            f"Output file already exists: {output_file}. Refusing to overwrite. "
-            f"Pass --overwrite to overwrite, or choose a different --output."
-        )
+    refuse_existing(output_file, overwrite)
 
     # Model parameters
     model_path = all_settings.get('model_path')
@@ -3479,10 +3474,7 @@ def save_state(
     state_dict.update(ensemble=ensemble)
     # Preserve NumPy's historical suffix behavior while writing through a file
     # handle, so a serialization failure cannot truncate the last checkpoint.
-    destination = Path(path_to_save)
-    if not str(destination).endswith('.npz'):
-        destination = Path(str(destination) + '.npz')
-    destination = Path(os.path.realpath(destination))
+    destination = Path(os.path.realpath(checkpoint_file(path_to_save)))
     output_mode = _existing_regular_output_mode(destination)
     with tempfile.TemporaryDirectory(
         dir=destination.parent, prefix=f'.{destination.name}.',
@@ -3860,9 +3852,7 @@ def run(
             )
             output_path = Path(settings['output_file'])
             relaxation_settings = dict(settings)
-            relaxation_settings['output_file'] = str(
-                output_path.with_name(f'{output_path.stem}_opt.xyz')
-            )
+            relaxation_settings['output_file'] = str(relaxation_output(output_path))
             relaxation_settings['output_format'] = 'extxyz'
             # the engine is chosen above: this is the neighbour-list potential's relaxation
             opt_structure = perform_min(relaxation_settings, log_input=False, try_flash=False)

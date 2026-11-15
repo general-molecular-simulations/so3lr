@@ -24,11 +24,12 @@ def water(tmp_path, monkeypatch):
 
 
 def test_display_options_may_follow_the_subcommand(tmp_path):
-    commands = cli.commands
-    assert _hoist_display_options(commands, ['nvt', '--input', 'x.xyz', '-q']) == ['-q', 'nvt', '--input', 'x.xyz']
-    assert (_hoist_display_options(commands, ['--settings', 'show', 'nvt', '--display', 'plain', '--no-color'])
+    assert _hoist_display_options(cli, ['nvt', '--input', 'x.xyz', '-q']) == ['-q', 'nvt', '--input', 'x.xyz']
+    assert (_hoist_display_options(cli, ['--settings', 'show', 'nvt', '--display', 'plain', '--no-color'])
             == ['--settings', 'show', '--display', 'plain', '--no-color', 'nvt'])
-    assert _hoist_display_options(commands, ['nvt', '--', '-q']) == ['nvt', '--', '-q']
+    assert (_hoist_display_options(cli, ['nvt', '--display=rich', '--input', 'x.xyz'])
+            == ['--display=rich', 'nvt', '--input', 'x.xyz'])
+    assert _hoist_display_options(cli, ['nvt', '--', '-q']) == ['nvt', '--', '-q']
     result = CliRunner().invoke(cli, ['show', str(tmp_path), '--once', '-q'])
     assert result.exit_code == 0 and 'No such option' not in result.output
 
@@ -49,7 +50,7 @@ def test_start_with_input_writes_a_bundle_whose_run_script_works_under_sbatch(wa
     script = (bundle / 'run.sh').read_text()
     # sbatch runs a copy from its spool directory: the bundle's own path is written in
     assert f'run_dir={bundle.resolve()}' in script
-    assert 'so3lr resume .' in script and 'so3lr --settings settings.yaml' in script
+    assert 'exec so3lr resume --or-start .' in script
     assert yaml.safe_load((bundle / 'settings.yaml').read_text())['md_cycles'] == 20
 
 
@@ -96,12 +97,25 @@ def test_resume_runs_the_cycles_left_from_the_checkpoint(tmp_path, monkeypatch):
     from so3lr.cli import so3lr_cli
     seen = {}
     monkeypatch.setattr(so3lr_cli, '_execute_md', lambda settings, **kwargs: seen.update(settings))
-    monkeypatch.setattr(so3lr_cli, 'load_md_settings', lambda path, loaded_settings, notes: loaded_settings)
+    monkeypatch.setattr(so3lr_cli, '_load_md_settings', lambda path, loaded: (loaded, set(loaded)))
     bundle = _bundle(tmp_path)
     result = CliRunner().invoke(cli, ['resume', str(bundle)])
     assert result.exit_code == 0, result.output
     assert seen['restart_load_path'] == 'restart.npz' and seen['md_cycles'] == 60
     assert 'Resuming from cycle 40 of 100' in result.output
+
+
+def test_resume_or_start_runs_a_run_without_a_checkpoint_from_the_beginning(tmp_path, monkeypatch):
+    from so3lr.cli import so3lr_cli
+    seen = {}
+    monkeypatch.setattr(so3lr_cli, '_execute_md', lambda settings, **kwargs: seen.update(settings))
+    monkeypatch.setattr(so3lr_cli, '_load_md_settings', lambda path, loaded: (loaded, set(loaded)))
+    bundle = _bundle(tmp_path)
+    (bundle / 'restart.npz').unlink()
+    assert CliRunner().invoke(cli, ['resume', str(bundle)]).exit_code == 2  # no checkpoint yet
+    result = CliRunner().invoke(cli, ['resume', '--or-start', str(bundle)])
+    assert result.exit_code == 0, result.output
+    assert 'restart_load_path' not in seen and seen['md_cycles'] == 100
 
 
 def test_resume_of_a_finished_run_says_so(tmp_path):
@@ -128,7 +142,8 @@ def test_show_json_reports_state_progress_and_checkpoint(tmp_path):
     result = CliRunner().invoke(cli, ['show', str(tmp_path), '--json'])
     assert result.exit_code == 0, result.output
     run, = json.loads(result.output)['runs']
-    assert (run['state'], run['atoms'], run['fraction_done']) == ('Interrupted', 192, 0.4)
+    assert (run['state'], run['atoms'], run['done'], run['planned']) == ('Interrupted', 192, 400, 1000)
+    assert run['fraction_done'] == 0.4
     assert run['checkpoint'] == {'step': 400, 'path': 'restart.npz'}
     assert run['last_sample']['temperature_K'] == 301.0 and run['failure_reason'] == 'signal'
 

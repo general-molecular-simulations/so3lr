@@ -7,6 +7,7 @@ tuning procedure; the numerical backend's minimum-image bounds stay
 authoritative. Import-light: no JAX.
 """
 import math
+from pathlib import Path
 
 from so3lr.kspace_defaults import (
     DEFAULT_KSPACE_DISPERSION_SMEARING, DEFAULT_KSPACE_DISPERSION_SPACING,
@@ -15,6 +16,8 @@ from so3lr.kspace_defaults import (
 KSPACE_METHOD_KEYS = ('kspace_electrostatics', 'kspace_dispersion')
 # The cutoff and mesh a small-cell proposal may replace when the user left them unset.
 _CELL_FITTED_KEYS = ('lr_cutoff', 'kspace_smearing', 'kspace_spacing')
+# What resolve_long_range chooses unless the user set it.
+LONG_RANGE_KEYS = KSPACE_METHOD_KEYS + _CELL_FITTED_KEYS
 
 
 def long_range_settings(periodic, minimum_cell_height, model, cutoff=None, *, ensemble=None):
@@ -31,7 +34,7 @@ def long_range_settings(periodic, minimum_cell_height, model, cutoff=None, *, en
         if not math.isfinite(value) or value < MIN_DIRECT_LR_CUTOFF:
             raise ValueError('Gas-phase MD requires a finite long-range cutoff of at least '
                              f'{MIN_DIRECT_LR_CUTOFF:g} Å.')
-        return {'lr_cutoff': value}
+        return {'lr_cutoff': value, 'kspace_electrostatics': 'none', 'kspace_dispersion': 'none'}
 
     from so3lr.flash.check import NPT_BOX_MARGIN, model_cutoff
     from so3lr.pbc import minimum_image_problem
@@ -89,19 +92,63 @@ def kspace_method(value, explicit):
     return str(value).strip().lower()
 
 
+def _skip_lines(stream, count):
+    """Move a binary stream past count lines without parsing them."""
+    while count > 0:
+        start, chunk = stream.tell(), stream.read(1 << 20)
+        if not chunk:
+            return
+        found = chunk.count(b'\n')
+        if found < count:
+            count -= found
+            continue
+        end = -1
+        for _ in range(count):
+            end = chunk.index(b'\n', end + 1)
+        stream.seek(start + end + 1)
+        return
+
+
+def _xyz_header(path, index):
+    """Frame index's (0 or -1) comment line of an (ext)xyz file, read without parsing atoms."""
+    header = None
+    with open(path, 'rb') as stream:
+        while (count := stream.readline().strip()):
+            header = stream.readline().decode()
+            if index == 0:
+                break
+            _skip_lines(stream, int(count))
+    return header
+
+
+def _cell_and_pbc(path, index):
+    """The cell and pbc of frame index; for (ext)xyz from its comment line alone."""
+    import numpy as np
+    if Path(path).suffix.lower() in ('.xyz', '.extxyz') and index in (0, -1):
+        try:
+            from ase.io.extxyz import key_val_str_to_dict
+            info = key_val_str_to_dict(_xyz_header(path, index) or '')
+            if 'Lattice' not in info:
+                return np.zeros((3, 3)), np.zeros(3, bool)
+            return np.reshape(info['Lattice'], (3, 3)), np.broadcast_to(info.get('pbc', True), (3,))
+        except (OSError, ValueError, TypeError, KeyError):
+            pass  # an unusual header: ASE reads the frame below
+    from ase.io import read
+    atoms = read(str(path), index=index)
+    return np.asarray(atoms.cell), atoms.pbc
+
+
 def structure_cell(path, index=-1):
     """(periodic, minimum cell height) of frame ``index`` of a structure file (by
-    default the frame MD reads); None if unreadable."""
+    default the frame MD reads); None if unreadable. An (ext)xyz file is read only
+    up to its comment lines: a multi-million-atom input is not parsed twice."""
     try:
-        import numpy as np
-        from ase.io import read
-        from so3lr.pbc import cell_heights
-        atoms = read(str(path), index=index)
-        cell = np.asarray(atoms.cell)
-        periodic = bool(np.all(atoms.pbc)) and np.linalg.matrix_rank(cell) == 3
-        return periodic, float(np.min(cell_heights(cell))) if periodic else None
+        from so3lr.pbc import is_fully_periodic, minimum_cell_height
+        cell, pbc = _cell_and_pbc(path, index)
+        periodic = is_fully_periodic(pbc, context='Long-range defaults') and minimum_cell_height(cell) > 0
+        return periodic, minimum_cell_height(cell) if periodic else None
     except Exception:
-        return None
+        return None  # the run reports an unreadable or mixed-PBC structure itself
 
 
 def resolve_long_range(settings, explicit, structure_path, *, fit_cell=True, index=-1):
