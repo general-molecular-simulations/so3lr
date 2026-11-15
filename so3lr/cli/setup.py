@@ -37,14 +37,15 @@ SAVE_FOR_LATER = 'Save for later writes {files} only. Start later with sh run.sh
 def launcher_script(directory, command):
     """run.sh for a bundle: runs command from the bundle, with sh or sbatch.
 
-    sbatch runs a copy of the script from its spool directory, so the bundle's
-    absolute path is written in; a moved bundle falls back to the script's folder.
+    The script runs from its own folder, so a copied or moved bundle runs itself.
+    sbatch runs a copy from its spool directory (no run.sh there): then the
+    bundle's absolute path, written in, is used.
     """
     return f'''#!/bin/sh
 # Run with: sh run.sh, or submit with: sbatch run.sh (add #SBATCH lines here).
 set -eu
-run_dir={shlex.quote(str(directory))}
-[ -d "$run_dir" ] || run_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+run_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ -f "$run_dir/run.sh" ] || run_dir={shlex.quote(str(directory))}
 cd "$run_dir"
 {command}
 '''

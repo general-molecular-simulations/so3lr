@@ -29,6 +29,7 @@ def test_display_options_may_follow_the_subcommand(tmp_path):
             == ['--settings', 'show', '--display', 'plain', '--no-color', 'nvt'])
     assert (_hoist_display_options(cli, ['nvt', '--display=rich', '--input', 'x.xyz'])
             == ['--display=rich', 'nvt', '--input', 'x.xyz'])
+    assert _hoist_display_options(cli, ['nvt', '--input', 'x.xyz', '-qv']) == ['-qv', 'nvt', '--input', 'x.xyz']
     assert _hoist_display_options(cli, ['nvt', '--', '-q']) == ['nvt', '--', '-q']
     result = CliRunner().invoke(cli, ['show', str(tmp_path), '--once', '-q'])
     assert result.exit_code == 0 and 'No such option' not in result.output
@@ -51,6 +52,17 @@ def test_start_with_input_writes_a_bundle_whose_run_script_works_under_sbatch(wa
     # sbatch runs a copy from its spool directory: the bundle's own path is written in
     assert f'run_dir={bundle.resolve()}' in script
     assert 'exec so3lr resume --or-start .' in script
+    # a copy runs itself, not the folder it was copied from
+    import subprocess
+    copy = pathlib.Path(shutil.copytree(bundle, water.parent / 'copy'))
+    fake = water.parent / 'bin'
+    fake.mkdir()
+    (fake / 'so3lr').write_text('#!/bin/sh\npwd\n')
+    (fake / 'so3lr').chmod(0o755)
+    import os
+    ran = subprocess.run(['sh', str(copy / 'run.sh')], env={**os.environ, 'PATH': f'{fake}:{os.environ["PATH"]}'},
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert pathlib.Path(ran).resolve() == copy.resolve()
     assert yaml.safe_load((bundle / 'settings.yaml').read_text())['md_cycles'] == 20
 
 
@@ -87,7 +99,7 @@ def _bundle(tmp_path, md_cycles=100, cycle=40):
     bundle = tmp_path / 'run'
     bundle.mkdir()
     (bundle / 'settings.yaml').write_text(yaml.safe_dump({
-        'input_file': 'structure.extxyz', 'output_file': 'trajectory.extxyz',
+        'input_file': 'structure.extxyz', 'output_file': 'trajectory.extxyz', 'overwrite': True,
         'restart_save_path': 'restart.npz', 'md_cycles': md_cycles}))
     np.savez(bundle / 'restart.npz', step=cycle)
     return bundle
@@ -102,6 +114,7 @@ def test_resume_runs_the_cycles_left_from_the_checkpoint(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli, ['resume', str(bundle)])
     assert result.exit_code == 0, result.output
     assert seen['restart_load_path'] == 'restart.npz' and seen['md_cycles'] == 60
+    assert seen['overwrite'] is False  # appends; overwrite: true would truncate the trajectory so far
     assert 'Resuming from cycle 40 of 100' in result.output
 
 
@@ -151,3 +164,4 @@ def test_show_json_reports_state_progress_and_checkpoint(tmp_path):
 def test_spin_read_as_multiplicity_is_named():
     assert 'read as 2S+1' in spin_key_note({'spin': 1})
     assert spin_key_note({'spin': 1, 'multiplicity': 2}) == '' and spin_key_note({}) == ''
+    assert spin_key_note({'spin': 0}) == ''  # ignored by the readers: not presented as the multiplicity

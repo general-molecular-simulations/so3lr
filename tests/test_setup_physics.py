@@ -171,3 +171,17 @@ def test_the_cell_comes_from_the_comment_line_of_the_frame_md_reads(tmp_path):
     assert structure_cell(path, index=0) == (True, 30.0)
     (tmp_path / 'gas.xyz').write_text('3\nwater\nO 0 0 0\nH 1 0 0\nH 0 1 0\n')
     assert structure_cell(tmp_path / 'gas.xyz') == (False, None)
+
+
+def test_dispersion_off_keeps_the_cutoff_and_mixed_datasets_keep_real_space(tmp_path):
+    settings = {'lr_cutoff': 12.0, 'kspace_smearing': 4.0, 'kspace_spacing': 2.0, 'kspace_dispersion': 'none'}
+    resolve_long_range(settings, {'kspace_dispersion'}, _water(tmp_path))
+    assert (settings['kspace_electrostatics'], settings['kspace_dispersion'], settings['lr_cutoff']) == ('pme', None, 12.0)
+    mixed = tmp_path / 'mixed.extxyz'
+    box = '3\nLattice="30 0 0 0 30 0 0 0 30" Properties=species:S:1:pos:R:3 pbc="T T T"\nO 0 0 0\nH 1 0 0\nH 0 1 0\n'
+    mixed.write_text(box + '3\nProperties=species:S:1:pos:R:3\nO 0 0 0\nH 1 0 0\nH 0 1 0\n')
+    dataset = {'lr_cutoff': 12.0}
+    resolve_long_range(dataset, set(), mixed, fit_cell=False, index=None)
+    assert dataset['kspace_electrostatics'] is None and dataset['kspace_dispersion'] is None
+    unreadable = {'lr_cutoff': 12.0}
+    assert 'could not be read' in resolve_long_range(unreadable, set(), tmp_path / 'missing.xyz')

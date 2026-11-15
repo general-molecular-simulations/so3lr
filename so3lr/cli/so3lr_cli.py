@@ -523,7 +523,8 @@ def _hoist_display_options(group, args):
         name = arg.partition('=')[0]
         if arg == '--':
             rest += [arg, *tail]
-        elif name in hoisted:
+        elif name in hoisted or (arg[:1] == '-' and arg[1:2] != '-' and len(arg) > 2
+                                 and all(f'-{flag}' in hoisted for flag in arg[1:])):   # -qv
             moved += [arg, next(tail, '')] if arg in takes_value else [arg]
         else:
             rest.append(arg)
@@ -880,12 +881,16 @@ def _resume_settings(raw, settings_path, or_start=False):
     if cycle >= total:
         click.echo(f'Already complete: the checkpoint is at cycle {cycle:,} of {total:,}.')
         return None
-    # A restart runs md_cycles more cycles; EXTXYZ appends, HDF5 needs a new file.
-    resumed = dict(raw, restart_load_path=str(checkpoint), md_cycles=total - cycle)
+    # A restart runs md_cycles more cycles. EXTXYZ appends (overwrite would truncate the
+    # trajectory written so far); HDF5 needs a new file, a fresh name per attempt.
+    resumed = dict(raw, restart_load_path=str(checkpoint), md_cycles=total - cycle, overwrite=False)
     output = raw.get('output_file')
     if output and infer_output_format(output) == 'hdf5':
-        output = Path(output)
-        resumed['output_file'] = str(output.with_name(f'{output.stem}.from_cycle_{cycle}{output.suffix}'))
+        output, attempt = Path(output), 1
+        while (fresh := output.with_name(f'{output.stem}.from_cycle_{cycle}'
+                                         f'{f"-{attempt}" if attempt > 1 else ""}{output.suffix}')).exists():
+            attempt += 1
+        resumed['output_file'] = str(fresh)
     click.echo(f'Resuming from cycle {cycle:,} of {total:,} ({checkpoint}): {total - cycle:,} cycles to go.',
                err=True)
     return resumed
@@ -1845,8 +1850,8 @@ def eval_model(
         kspace_dispersion_spacing=kspace_dispersion_spacing,
         kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
         engine=engine, flash_mode=flash_mode, flash_mixed=flash_mixed, flash_devices=flash_devices, flash_kernels=flash_kernels)
-    # PME for a periodic dataset (its first structure decides) unless set otherwise
-    long_range_note = _resolve_long_range(settings, datafile, fit_cell=False, index=0)
+    # PME for a dataset of periodic structures only (a mixed one keeps real space) unless set otherwise
+    long_range_note = _resolve_long_range(settings, datafile, fit_cell=False, index=None)
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     _model = model_path or DEFAULT_MODEL
     _kind = 'bundled' if _model in available_models() else 'custom path'

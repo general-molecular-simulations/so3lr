@@ -24,9 +24,10 @@ def spin_key_note(mol):
     unpaired electrons; the note makes the reading visible ('' otherwise).
     """
     info = getattr(mol, 'info', mol)
-    if info.get('multiplicity') is not None or info.get('spin') is None:
-        return ''
-    return f"spin={info['spin']} in the file is read as 2S+1, the OMol25 convention"
+    spin = _integer(info.get('spin'))
+    if info.get('multiplicity') is not None or spin is None or spin < 1:
+        return ''   # no spin=, or one the readers ignore (not a multiplicity)
+    return f"spin={spin} in the file is read as 2S+1, the OMol25 convention"
 
 
 def _integer(value):

@@ -109,46 +109,53 @@ def _skip_lines(stream, count):
         return
 
 
-def _xyz_header(path, index):
-    """Frame index's (0 or -1) comment line of an (ext)xyz file, read without parsing atoms."""
-    header = None
+def _xyz_headers(path):
+    """Each frame's comment line of an (ext)xyz file, read without parsing atoms."""
     with open(path, 'rb') as stream:
         while (count := stream.readline().strip()):
-            header = stream.readline().decode()
-            if index == 0:
-                break
+            yield stream.readline().decode()
             _skip_lines(stream, int(count))
-    return header
 
 
-def _cell_and_pbc(path, index):
-    """The cell and pbc of frame index; for (ext)xyz from its comment line alone."""
+def _cells(path, index):
+    """[(cell, pbc)] of frame index (0 or -1), or of every frame (None); for (ext)xyz
+    from the comment lines alone."""
     import numpy as np
-    if Path(path).suffix.lower() in ('.xyz', '.extxyz') and index in (0, -1):
+    if Path(path).suffix.lower() in ('.xyz', '.extxyz') and index in (0, -1, None):
         try:
+            from collections import deque
+            from itertools import islice
             from ase.io.extxyz import key_val_str_to_dict
-            info = key_val_str_to_dict(_xyz_header(path, index) or '')
-            if 'Lattice' not in info:
-                return np.zeros((3, 3)), np.zeros(3, bool)
-            return np.reshape(info['Lattice'], (3, 3)), np.broadcast_to(info.get('pbc', True), (3,))
+            headers = _xyz_headers(path)
+            headers = (list(islice(headers, 1)) if index == 0 else list(deque(headers, maxlen=1)) if index == -1
+                       else list(headers))
+            cells = []
+            for header in headers:
+                info = key_val_str_to_dict(header)
+                cells.append((np.reshape(info['Lattice'], (3, 3)), np.broadcast_to(info.get('pbc', True), (3,)))
+                             if 'Lattice' in info else (np.zeros((3, 3)), np.zeros(3, bool)))
+            if cells:
+                return cells
         except (OSError, ValueError, TypeError, KeyError):
-            pass  # an unusual header: ASE reads the frame below
+            pass  # an unusual header: ASE reads the frames below
     from ase.io import read
-    atoms = read(str(path), index=index)
-    return np.asarray(atoms.cell), atoms.pbc
+    frames = read(str(path), index=':' if index is None else index)
+    return [(np.asarray(atoms.cell), atoms.pbc) for atoms in (frames if index is None else [frames])]
 
 
 def structure_cell(path, index=-1):
     """(periodic, minimum cell height) of frame ``index`` of a structure file (by
-    default the frame MD reads); None if unreadable. An (ext)xyz file is read only
-    up to its comment lines: a multi-million-atom input is not parsed twice."""
+    default the frame MD reads), or of every frame with index None (periodic only
+    if all are); None if unreadable. An (ext)xyz file is read only up to its
+    comment lines: a multi-million-atom input is not parsed twice."""
     try:
         from so3lr.pbc import is_fully_periodic, minimum_cell_height
-        cell, pbc = _cell_and_pbc(path, index)
-        periodic = is_fully_periodic(pbc, context='Long-range defaults') and minimum_cell_height(cell) > 0
-        return periodic, minimum_cell_height(cell) if periodic else None
+        heights = [minimum_cell_height(cell) if is_fully_periodic(pbc, context='Long-range defaults') else 0.0
+                   for cell, pbc in _cells(path, index)]
+        periodic = bool(heights) and min(heights) > 0
+        return periodic, min(heights) if periodic else None
     except Exception:
-        return None  # the run reports an unreadable or mixed-PBC structure itself
+        return None  # resolve_long_range says the cell could not be read; the run reports why
 
 
 def resolve_long_range(settings, explicit, structure_path, *, fit_cell=True, index=-1):
@@ -157,13 +164,15 @@ def resolve_long_range(settings, explicit, structure_path, *, fit_cell=True, ind
     ``explicit`` holds the setting names the user gave. 'auto' (or unset)
     k-space means PME for a periodic structure and off otherwise. With PME
     electrostatics and no explicit cutoff, a cell too small for the usual
-    cutoff gets the guided setup's cell-fitting cutoff and mesh (not with
-    fit_cell=False: evaluation lists every periodic image). Frame ``index`` of
-    the structure file is read only when one of these choices needs it.
+    cutoff gets the guided setup's cell-fitting cutoff and mesh, but only with
+    both terms in k-space (a shorter cutoff would truncate real-space dispersion)
+    and not with fit_cell=False (evaluation lists every periodic image). Frame
+    ``index`` of the structure file (None: every frame) is read only when one of
+    these choices needs it.
     Returns a short description of what was chosen, for the log ('' when nothing was).
     """
     methods = {key: kspace_method(settings.get(key), key in explicit) for key in KSPACE_METHOD_KEYS}
-    fit_cutoff = fit_cell and 'lr_cutoff' not in explicit and methods['kspace_electrostatics'] is not None
+    fit_cutoff = fit_cell and 'lr_cutoff' not in explicit and None not in methods.values()
     needs_cell = structure_path is not None and ('auto' in methods.values() or fit_cutoff)
     cell = structure_cell(structure_path, index) if needs_cell else None
     periodic = bool(cell and cell[0])
@@ -175,7 +184,9 @@ def resolve_long_range(settings, explicit, structure_path, *, fit_cell=True, ind
                 chosen.append(key.removeprefix('kspace_'))
         settings[key] = method
     notes = [f"PME {' and PME '.join(chosen)} (the default for periodic structures)"] if chosen else []
-    if periodic and settings['kspace_electrostatics'] and fit_cutoff:
+    if needs_cell and cell is None and 'auto' in methods.values():
+        notes.append(f'the cell of {structure_path} could not be read, so k-space stays off')
+    if periodic and all(settings[key] for key in KSPACE_METHOD_KEYS) and fit_cutoff:
         try:
             proposal = long_range_settings(True, cell[1], settings.get('model_path'),
                                            ensemble=settings.get('ensemble'))
