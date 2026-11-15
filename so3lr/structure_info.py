@@ -17,6 +17,18 @@ def charge_and_multiplicity(mol):
     return info.get('charge'), multiplicity
 
 
+def spin_key_note(mol):
+    """Say how a ``spin=`` value was read when the file has no ``multiplicity=``.
+
+    OMol25's ``spin`` is the multiplicity 2S+1, while SO3LR's own --spin counts
+    unpaired electrons; the note makes the reading visible ('' otherwise).
+    """
+    info = getattr(mol, 'info', mol)
+    if info.get('multiplicity') is not None or info.get('spin') is None:
+        return ''
+    return f"spin={info['spin']} in the file is read as 2S+1, the OMol25 convention"
+
+
 def _integer(value):
     if isinstance(value, bool) or value is None:
         return None

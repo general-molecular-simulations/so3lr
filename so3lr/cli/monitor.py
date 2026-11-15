@@ -948,7 +948,7 @@ def _render_steps(reader, selected=0, count=1, ascii_only=False, compact=False, 
 
     state = reader.state
     now = now or datetime.now(timezone.utc)
-    style = theme.status_style(state.status)
+    style = theme.status_style(lifecycle_label(state))
     rows, priorities = [], []
 
     def add(value, style='', priority=20):
@@ -959,7 +959,7 @@ def _render_steps(reader, selected=0, count=1, ascii_only=False, compact=False, 
     add(f"{theme.BRAND} SO3LR TAURI  {'training' if training else 'optimization'}" + (' snapshot' if static else ''),
         theme.ACCENT_BOLD, 3)
     add(f'Run {selected + 1}/{count} · {_run_name(reader)}', priority=9)
-    add(f'Last reported state: {state.status}', style, 4)
+    add(f'Last reported state: {lifecycle_label(state)}', style, 4)
     add(_observation_line(reader, now), theme.WARNING if observation_status(reader, now) == 'Stale?' else theme.MUTED, 2)
     if origin := origin_label(state):
         add(origin, theme.MUTED, 9)
@@ -1050,8 +1050,8 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     run_name = _run_name(reader)
     short_id = f' · {state.run_id[:8]}' if state.run_id else ''
     rows.append(Text(('Run · ' if attached else f'Run {selected + 1}/{len(readers)} · ') + run_name + short_id))
-    status_style = theme.status_style(state.status)
-    rows.append(Text(f'{"State" if attached else "Last reported state"}: {state.status}', style=status_style))
+    label = lifecycle_label(state)
+    rows.append(Text(f'{"State" if attached else "Last reported state"}: {label}', style=theme.status_style(label)))
     if not attached:
         rows.append(Text(_observation_line(reader, now), style=theme.MUTED))
         if origin := origin_label(state):
@@ -1155,11 +1155,12 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
     if attached:
         header = _attached_header(state, width, ascii_only, live)
     else:
-        qualifier = observation_status(reader, now)
-        observation = f' · {"Reading history" if qualifier == "Reading" else qualifier}' if qualifier != state.status else ''
+        qualifier, label = observation_status(reader, now), lifecycle_label(state)
+        observation = f' · {"Reading history" if qualifier == "Reading" else qualifier}' if qualifier != label else ''
+        # the phase only while the run is in progress (a finished run's phase repeats its state)
+        phase = f' · {state.phase}' if state.phase and state.status not in ('Completed', 'Failed') else ''
         header = [Text(f'{theme.BRAND} SO3LR TAURI · Run {selected + 1}/{len(readers)} · {name}', theme.ACCENT_BOLD),
-                  Text(f'Last reported state: {state.status}{observation} · {state.phase}',
-                       theme.status_style(state.status))]
+                  Text(f'Last reported state: {label}{observation}{phase}', theme.status_style(label))]
         if origin := origin_label(state):
             header.append(Text(origin, theme.MUTED))
     if state.samples and not attached:
@@ -1391,8 +1392,44 @@ class _Keyboard(AbstractContextManager):
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self.previous)
 
 
-def show(path, once=False, interval=1.0, no_color=False):
-    """Observe a journal/directory. Non-TTY output always produces one snapshot."""
+_SUMMARY_INFO = ('operation', 'model', 'engine', 'atoms', 'precision', 'device_count')
+
+
+def run_summary(reader, now):
+    """One run as plain data for so3lr show --json: its state, progress, last sample,
+    checkpoint and failure, so scripts and agents need not parse the table."""
+    state = reader.state
+    last = state.samples[-1] if state.samples else {}
+    done = _finite(last.get('segment_step'))
+    total = state.total_steps or None
+    checkpoint = state.checkpoint or {}
+    scheduler = state.scheduler if isinstance(state.scheduler, dict) else {}
+    return {
+        'journal': str(reader.path.resolve()),
+        'run_id': state.run_id or None,
+        'state': observation_status(reader, now),
+        'recorded_state': lifecycle_label(state),
+        'age_seconds': _age_seconds(observation_timestamp(state), now),
+        **{key: state.info.get(key) for key in _SUMMARY_INFO},
+        'ensemble': state.settings.get('ensemble'),
+        'output_file': state.settings.get('output_file'),
+        'host': state.host or None,
+        'slurm_job': scheduler.get('SLURM_JOB_ID') or scheduler.get('SLURM_JOBID'),
+        'segment_steps': None if done is None else int(done),
+        'segment_total_steps': total,
+        'fraction_done': None if done is None or not total else min(1.0, done / total),
+        'last_sample': {key: last.get(key) for key in ('step', 'time_ps', 'temperature_K',
+                                                       'potential_energy_eV', 'energy_eV',
+                                                       'volume_A3', 'seconds_per_step')} if last else None,
+        'checkpoint': {'step': checkpoint.get('step'), 'path': checkpoint.get('path')} if checkpoint else None,
+        'message': state.message or None,
+        'failure_reason': state.failure_reason or None,
+    }
+
+
+def show(path, once=False, interval=1.0, no_color=False, as_json=False):
+    """Observe a journal/directory. Non-TTY output always produces one snapshot; as_json
+    prints one machine-readable snapshot (run_summary per run)."""
     from rich.console import Console
     from rich.live import Live
     from .overview import render_overview
@@ -1405,6 +1442,12 @@ def show(path, once=False, interval=1.0, no_color=False):
                       markup=False, highlight=False)
     paths = discover_journals(path)
     readers = [JournalReader(item) for item in paths]
+    if as_json:
+        for reader in readers:
+            reader.snapshot()
+        now = datetime.now(timezone.utc)
+        print(json.dumps({'schema': 1, 'runs': [run_summary(reader, now) for reader in readers]}, indent=2))
+        return
     interactive = console.is_terminal and sys.stdin.isatty() and os.environ.get('TERM') != 'dumb'
     ascii_only = ascii_only_console(console)
     if once or not interactive:

@@ -320,11 +320,11 @@ def common_model_options(f: Callable) -> Callable:
                      callback=_validate_model_choice, help=MODEL_HELP)(f)
     f = click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(PRECISIONS), help=PRECISION_HELP)(f)
     f = click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
-                     help=f'Long-range cutoff distance in Å. The default ({DEFAULT_LR_CUTOFF}) '
-                          f'is intended for condensed-phase systems with periodic boundaries; '
-                          f'for gas-phase / non-periodic systems use --lr-cutoff 100 so the '
-                          f'long-range electrostatics and dispersion are not artificially truncated. '
-                          f'[default: {DEFAULT_LR_CUTOFF}]')(f)
+                     help=f'Long-range (real-space) cutoff distance in Å. With PME (the default for '
+                          f'periodic structures) a periodic cell too small for {DEFAULT_LR_CUTOFF:g} Å '
+                          f'gets a cutoff and mesh that fit it unless this is given; for gas-phase / '
+                          f'non-periodic systems use --lr-cutoff 100 so the long-range electrostatics '
+                          f'and dispersion are not artificially truncated. [default: {DEFAULT_LR_CUTOFF}]')(f)
     f = click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
                      help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}]')(f)
     f = click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
@@ -356,7 +356,7 @@ def common_md_options(f: Callable) -> Callable:
                      help=f'Number of frames to buffer before writing. [default: {DEFAULT_SAVE_BUFFER}]')(f)
     f = click.option('--temperature', default=DEFAULT_TEMPERATURE, type=float,
                      help=f'Simulation temperature in Kelvin. [default: {DEFAULT_TEMPERATURE}]')(f)
-    f = click.option('--dt', default=DEFAULT_TIMESTEP, type=float,
+    f = click.option('--dt', default=DEFAULT_TIMESTEP, type=click.FloatRange(min=0, min_open=True),
                      help=f'MD timestep in femtoseconds. [default: {DEFAULT_TIMESTEP}]')(f)
     f = click.option('--md-cycles', default=DEFAULT_MD_CYCLES, type=click.IntRange(min=1),
                      help=f'Number of MD cycles to run. [default: {DEFAULT_MD_CYCLES}]')(f)
@@ -445,11 +445,23 @@ def flash_options(f: Callable) -> Callable:
     return f
 
 
-def kspace_electrostatics_options(f: Callable) -> Callable:
-    """Reciprocal-space electrostatics for periodic systems (shared by MD and eval)."""
-    f = click.option('--kspace-electrostatics', 'kspace_electrostatics', default=None,
-                     type=click.Choice(['ewald', 'pme', 'p3m'], case_sensitive=False),
-                     help='K-space method for long-range electrostatics: "ewald", "pme", or "p3m". [default: None]')(f)
+KSPACE_AUTO_HELP = ('auto: PME for a periodic structure, none (real space only) otherwise; '
+                    'none turns it off. [default: auto]')
+
+
+def kspace_electrostatics_options(f: Callable = None, *, automatic: bool = True) -> Callable:
+    """Reciprocal-space electrostatics for periodic systems (shared by MD, opt and eval).
+
+    automatic: the 'auto' default (PME for periodic structures) and 'none'. tune-ewald
+    keeps its explicit method choice, where unset means tuning the cutoff."""
+    if f is None:
+        return lambda g: kspace_electrostatics_options(g, automatic=automatic)
+    methods = ['ewald', 'pme', 'p3m']
+    f = click.option('--kspace-electrostatics', 'kspace_electrostatics', default='auto' if automatic else None,
+                     type=click.Choice((['auto', 'none'] if automatic else []) + methods, case_sensitive=False),
+                     help='K-space method for long-range electrostatics: ' + (
+                         '"ewald", "pme" or "p3m"; ' + KSPACE_AUTO_HELP if automatic else
+                         '"ewald", "pme", or "p3m". [default: None]'))(f)
     f = click.option('--kspace-smearing', 'kspace_smearing', default=DEFAULT_KSPACE_SMEARING, type=float,
                      help=f'Smearing width for k-space summation in Å. [default: {DEFAULT_KSPACE_SMEARING}]')(f)
     f = click.option('--kspace-spacing', 'kspace_spacing', default=DEFAULT_KSPACE_SPACING, type=float,
@@ -459,9 +471,11 @@ def kspace_electrostatics_options(f: Callable) -> Callable:
     return f
 
 
-def kspace_options(f: Callable) -> Callable:
+def kspace_options(f: Callable = None, *, automatic: bool = True) -> Callable:
     """K-space electrostatics options for MD: the shared set plus NPT re-tuning."""
-    f = kspace_electrostatics_options(f)
+    if f is None:
+        return lambda g: kspace_options(g, automatic=automatic)
+    f = kspace_electrostatics_options(f, automatic=automatic)
     f = click.option('--kspace-npt-cycles', 'kspace_npt_cycles', default=None,
                      type=click.IntRange(min=1),
                      help='Frequency (in MD cycles) to re-tune k-space grid in NPT. [default: None]')(f)
@@ -470,9 +484,9 @@ def kspace_options(f: Callable) -> Callable:
 
 def kspace_dispersion_options(f: Callable) -> Callable:
     """Reciprocal-space dispersion for periodic systems."""
-    f = click.option('--kspace-dispersion', 'kspace_dispersion', default=None,
-                     type=click.Choice(['ewald', 'pme'], case_sensitive=False),
-                     help='K-space method for long-range dispersion: "ewald" or "pme". [default: None]')(f)
+    f = click.option('--kspace-dispersion', 'kspace_dispersion', default='auto',
+                     type=click.Choice(['auto', 'none', 'ewald', 'pme'], case_sensitive=False),
+                     help='K-space method for long-range dispersion: "ewald" or "pme"; ' + KSPACE_AUTO_HELP)(f)
     f = click.option('--kspace-dispersion-smearing', 'kspace_dispersion_smearing',
                      default=_KS.DEFAULT_KSPACE_DISPERSION_SMEARING, type=float,
                      help=f'Smearing width for k-space dispersion in Å. [default: {_KS.DEFAULT_KSPACE_DISPERSION_SMEARING}]')(f)
@@ -485,6 +499,35 @@ def kspace_dispersion_options(f: Callable) -> Callable:
     return f
 
 
+# Display options of the top-level command that may also follow the subcommand
+# (`so3lr nvt --input x.xyz -q`); no subcommand defines an option of these names.
+_DISPLAY_FLAGS = ('-q', '--quiet', '-v', '--verbose', '--no-color')
+_GROUP_VALUE_OPTIONS = ('--settings', '--display')
+
+
+def _hoist_display_options(commands, args):
+    """Move display options written after the subcommand in front of it."""
+    index = 0
+    while index < len(args) and args[index] not in commands:
+        if args[index] == '--':
+            return args
+        index += 2 if args[index] in _GROUP_VALUE_OPTIONS else 1
+    if index >= len(args):
+        return args
+    moved, rest = [], []
+    tail = iter(args[index + 1:])
+    for arg in tail:
+        if arg == '--':
+            rest += [arg, *tail]
+        elif arg in _DISPLAY_FLAGS or arg.startswith('--display='):
+            moved.append(arg)
+        elif arg == '--display':
+            moved += [arg, next(tail, '')]
+        else:
+            rest.append(arg)
+    return [*args[:index], *moved, args[index], *rest]
+
+
 class CustomCommandClass(click.Group):
     """Generated help, with shared option grouping for every subcommand."""
 
@@ -492,6 +535,9 @@ class CustomCommandClass(click.Group):
 
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         format_overview(self, ctx, formatter, __version__)
+
+    def parse_args(self, ctx: click.Context, args):
+        return super().parse_args(ctx, _hoist_display_options(self.commands, list(args)))
 
 
 def _help_or_require_input(help_requested, **required_options):
@@ -507,6 +553,34 @@ def _help_or_require_input(help_requested, **required_options):
         return True
     label = 'option' if len(missing) == 1 else 'options'
     raise click.UsageError(f"Missing required {label}: {', '.join(missing)}.", ctx=ctx)
+
+
+# Chosen per structure when the user leaves them unset (setup_physics.resolve_long_range).
+LONG_RANGE_SETTINGS = ('lr_cutoff', 'kspace_electrostatics', 'kspace_smearing', 'kspace_spacing',
+                       'kspace_dispersion', 'kspace_dispersion_smearing', 'kspace_dispersion_spacing')
+
+
+def _given(names):
+    """The running command's parameters among names that the user set, not their defaults."""
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return set(names)
+    defaults = (click.core.ParameterSource.DEFAULT, click.core.ParameterSource.DEFAULT_MAP, None)
+    return {name for name in names if ctx.get_parameter_source(name) not in defaults}
+
+
+def _resolve_long_range(settings, explicit):
+    """PME for periodic structures and a cutoff that fits small cells, unless set; the log note."""
+    from .setup_physics import resolve_long_range
+    return resolve_long_range(settings, explicit, settings.get('input_file'))
+
+
+def _refuse_existing_outputs(settings, task='md'):
+    """Fail before the run's journal opens, so a refused start leaves no record behind."""
+    from ..md_settings_validation import output_refusal
+    problem = output_refusal(settings, task)
+    if problem:
+        raise click.ClickException(problem)
 
 
 # Default values applied to the settings dict when using the YAML pathway.
@@ -741,18 +815,60 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
     _run_settings_file(settings)
 
 
-def _run_settings_file(settings):
-    """Use the same YAML path for scripts and explicitly launched setup runs."""
+def _run_settings_file(settings, resume=False):
+    """Use the same YAML path for scripts and explicitly launched setup runs; resume
+    continues the run from its checkpoint (so3lr resume)."""
     settings_path, raw_settings = _read_settings_file(settings, cli_errors=True)
     if not isinstance(raw_settings, dict) or any(not isinstance(key, str) for key in raw_settings):
         raise click.UsageError(f'{settings_path.name} must contain a YAML mapping with string setting names.')
+    if resume:
+        raw_settings = _resume_settings(raw_settings, settings_path)
+        if raw_settings is None:
+            return
+    notes = []
     try:
-        settings_dict = load_md_settings(settings_path, loaded_settings=raw_settings)
+        settings_dict = load_md_settings(settings_path, loaded_settings=raw_settings, notes=notes)
     except (ValueError, TypeError, OverflowError) as exc:
         # Only loading/normalization errors are usage errors. Numerical execution
         # below must retain its original exceptions for library callers and logs.
         raise click.UsageError(f'Invalid settings in {settings_path.name}: {exc}') from exc
-    _execute_md(settings_dict, settings_source=settings)
+    _execute_md(settings_dict, settings_source=settings, long_range_note='; '.join(notes))
+
+
+def _checkpoint_file(path):
+    """The file a restart_save_path names (numpy adds .npz to a path without it)."""
+    path = Path(path)
+    return path if path.suffix == '.npz' else Path(f'{path}.npz')
+
+
+def _resume_settings(raw, settings_path):
+    """The settings that continue this run from its checkpoint for the rest of its
+    md_cycles; None (after saying so) when the checkpoint is already at the end."""
+    name = settings_path.name
+    if raw.get('restart_load_path'):
+        raise click.UsageError(f'{name} already continues another run (restart_load_path), so its '
+                               'original length is unknown. Set restart_load_path and md_cycles by hand.')
+    if not raw.get('restart_save_path'):
+        raise click.UsageError(f'{name} saves no checkpoint (restart_save_path), so the run cannot be resumed.')
+    checkpoint = _checkpoint_file(raw['restart_save_path'])
+    if not checkpoint.is_file():
+        raise click.UsageError(f'No checkpoint at {checkpoint} yet. Start the run with so3lr --settings {name}.')
+    import numpy as np
+    with np.load(checkpoint) as data:
+        cycle = int(data['step'])   # save_state stores the cycle the checkpoint was taken at
+    total = int(raw.get('md_cycles', YAML_DEFAULTS['md_cycles']))
+    if cycle >= total:
+        click.echo(f'Already complete: the checkpoint is at cycle {cycle:,} of {total:,}.')
+        return None
+    # A restart runs md_cycles more cycles; EXTXYZ appends, HDF5 needs a new file.
+    resumed = dict(raw, restart_load_path=str(checkpoint), md_cycles=total - cycle)
+    output = raw.get('output_file')
+    if output and infer_output_format(output) == 'hdf5':
+        output = Path(output)
+        resumed['output_file'] = str(output.with_name(f'{output.stem}.from_cycle_{cycle}{output.suffix}'))
+    click.echo(f'Resuming from cycle {cycle:,} of {total:,} ({checkpoint}): {total - cycle:,} cycles to go.',
+               err=True)
+    return resumed
 
 
 def _read_settings_file(settings, *, cli_errors=False):
@@ -769,8 +885,11 @@ def _read_settings_file(settings, *, cli_errors=False):
     return settings_path, settings_dict
 
 
-def load_md_settings(settings, *, loaded_settings=None):
-    """Read and normalize user-facing YAML units without loading a model."""
+def load_md_settings(settings, *, loaded_settings=None, notes=None):
+    """Read and normalize user-facing YAML units without loading a model.
+
+    notes, a list, receives a description of the long-range settings chosen for
+    the structure (PME for periodic structures unless the file sets otherwise)."""
     if loaded_settings is None:
         settings_path, settings_dict = _read_settings_file(settings)
     else:
@@ -783,8 +902,13 @@ def load_md_settings(settings, *, loaded_settings=None):
 
     # Surface typos early. Unknown keys (e.g. `md_t` for `md_T`,
     # `tempreature` for `md_T`) would otherwise be silently ignored and the
-    # default value used, wasting GPU time on the wrong physics.
+    # default value used, wasting GPU time on the wrong physics. They are then
+    # dropped, as the warning says: kept, they would make the flash engine
+    # decline a setting it does not know and change the engine.
     validate_yaml_keys(settings_dict, settings_path)
+    for key in set(settings_dict) - known_yaml_keys():
+        del settings_dict[key]
+    explicit = set(settings_dict)
 
     # Unit boundary: md_dt is in fs in the YAML / CLI (documented in
     # md_settings.yaml and the CLI --dt help), but every internal consumer
@@ -825,6 +949,9 @@ def load_md_settings(settings, *, loaded_settings=None):
             f"{Path(settings_dict['input_file']).stem}_{settings_dict['ensemble'].replace('-', '_')}.xyz")
 
     settings_dict['output_format'] = infer_output_format(settings_dict.get('output_file', ''))
+    note = _resolve_long_range(settings_dict, explicit)
+    if notes is not None and note:
+        notes.append(note)
 
     # Default the log file to the settings YAML name with a .log extension
     # (e.g. `npt.yaml` -> `npt.log`), unless the YAML specifies `log_file`.
@@ -855,10 +982,76 @@ def _interactive_setup():
             _run_settings_file(settings_path)
 
 
-@cli.command(name='start', help='Set up MD, optimization or evaluation interactively; saves settings.yaml or run.sh in a new run folder.',
+_POSITIVE = click.FloatRange(min=0, min_open=True)
+
+
+@cli.command(name='start', help='Set up MD, optimization or evaluation interactively; saves settings.yaml or run.sh '
+                                'in a new run folder. With --input, writes the MD setup without prompts.',
              context_settings={'help_option_names': ['--help', '-h']})
-def start_command():
-    _interactive_setup()
+@click.option('--input', 'input_file', type=click.Path(exists=True, dir_okay=False), default=None,
+              help='Structure (.xyz or .extxyz): propose the MD setup for it without prompts (scripts, agents).')
+@click.option('--frame', type=click.IntRange(min=1), default=None,
+              help='Frame of a multi-frame structure file to copy (1-based).')
+@click.option('--ensemble', type=click.Choice(['nvt', 'nvt-langevin', 'nve', 'npt']), default='nvt',
+              show_default=True)
+@click.option('--model', 'model_path', type=str, default=None, callback=_validate_model_choice, help=MODEL_HELP)
+@click.option('--temperature', type=_POSITIVE, default=DEFAULT_TEMPERATURE, show_default=True,
+              help='Temperature in K (NVE: initial temperature).')
+@click.option('--pressure', type=_POSITIVE, default=DEFAULT_PRESSURE, show_default=True, help='Pressure in bar (NPT).')
+@click.option('--duration', type=_POSITIVE, default=DEFAULT_TIMESTEP * DEFAULT_MD_STEPS_PER_CYCLE * DEFAULT_MD_CYCLES / 1000,
+              show_default=True, help='Length in ps, rounded up to whole frames.')
+@click.option('--frame-interval', type=_POSITIVE, default=DEFAULT_TIMESTEP * DEFAULT_MD_STEPS_PER_CYCLE / 1000,
+              show_default=True, help='ps between saved frames (a whole number of timesteps).')
+@click.option('--dt', type=_POSITIVE, default=DEFAULT_TIMESTEP, show_default=True, help='Timestep in fs.')
+@click.option('--total-charge', type=int, default=None, help='[default: the file\'s charge=, else 0]')
+@click.option('--spin', type=click.IntRange(min=0), default=None,
+              help='Unpaired electrons. [default: from the file\'s multiplicity, else 0]')
+@click.option('--seed', type=click.IntRange(min=0), default=DEFAULT_SEED, show_default=True)
+@click.option('--relax/--no-relax', default=True, show_default=True, help='Relax the geometry before MD.')
+@click.option('--lr-cutoff', type=_POSITIVE, default=None,
+              help='Long-range cutoff in Å. [default: 12, or one that fits a small periodic cell]')
+@click.option('--keep-velocities', is_flag=True, help='Keep the velocities stored in the structure file.')
+@click.option('--output-dir', type=click.Path(file_okay=False), default=None,
+              help='New run folder. [default: so3lr-run, or so3lr-run-2, ...]')
+@click.option('--print', 'print_only', is_flag=True, help='Print the settings YAML instead of writing a run folder.')
+def start_command(input_file, frame, ensemble, model_path, temperature, pressure, duration, frame_interval, dt,
+                  total_charge, spin, seed, relax, lr_cutoff, keep_velocities, output_dir, print_only):
+    if input_file is None:
+        if _given(click.get_current_context().params) - {'input_file'}:
+            raise click.UsageError('Options other than --input need --input: they describe the MD setup '
+                                   'written without prompts.')
+        _interactive_setup()
+        return
+    from .setup import noninteractive_md_setup
+    from .formatting import home_path
+    try:
+        directory = noninteractive_md_setup(
+            input_file, frame=frame, ensemble=ensemble, model=model_path or DEFAULT_MODEL,
+            temperature=temperature, pressure=pressure, dt=dt, duration=duration, frame_interval=frame_interval,
+            charge=total_charge, spin=spin, seed=seed, relax=relax, cutoff=lr_cutoff,
+            keep_velocities=keep_velocities, directory=output_dir, print_only=print_only)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if directory is not None:
+        click.echo(f'Saved run: {home_path(directory)}')
+        click.echo(f'Start it with: sh {home_path(directory / "run.sh")}  (or sbatch run.sh in that folder)')
+
+
+@cli.command(name='resume', help='Continue a settings-file MD run from its last checkpoint: `so3lr resume RUN_FOLDER`.',
+             context_settings={'help_option_names': ['--help', '-h']})
+@click.argument('path', type=click.Path(exists=True, path_type=Path), default='.')
+def resume_command(path):
+    """PATH is a run folder made by so3lr start (paths in its settings.yaml are relative
+    to it) or a settings file (paths relative to the current directory, as with
+    so3lr --settings). The run continues from restart_save_path for the rest of its
+    md_cycles, without relaxation; a finished run says so and exits."""
+    if path.is_dir():
+        with chdir(path):
+            if not Path('settings.yaml').is_file():
+                raise click.UsageError(f'No settings.yaml in {path}. Pass the run folder or its settings file.')
+            _run_settings_file('settings.yaml', resume=True)
+    else:
+        _run_settings_file(path, resume=True)
 
 
 @cli.command(name='init', hidden=True,
@@ -874,11 +1067,14 @@ def init_command():
 @click.option('--once', is_flag=True, help='Print one snapshot and exit (automatic when output is redirected).')
 @click.option('--interval', type=click.FloatRange(min=0.1), default=1.0, show_default=True,
               help='Seconds between journal reads.')
+@click.option('--json', 'as_json', is_flag=True,
+              help='Print one machine-readable snapshot (state, progress, last sample, checkpoint per run) '
+                   'and exit.')
 @click.pass_context
-def show_command(ctx, path, once, interval):
+def show_command(ctx, path, once, interval, as_json):
     from .monitor import JournalPathError, show
     try:
-        show(path, once=once, interval=interval,
+        show(path, once=once, interval=interval, as_json=as_json,
              no_color=ctx.find_root().params.get('no_color', False))
     except JournalPathError as exc:
         raise click.BadParameter(str(exc), param_hint='PATH') from exc
@@ -930,8 +1126,9 @@ def _record_run_failure(exc, message, log_file):
         return
 
 
-def _execute_md(settings: Dict[str, Any], settings_source=None) -> None:
+def _execute_md(settings: Dict[str, Any], settings_source=None, long_range_note='') -> None:
     """Share presentation lifetime between YAML and flag-based MD invocations."""
+    _refuse_existing_outputs(settings)
     with presentation.run_display(settings) as reporter:
         logger_ready = False
         try:
@@ -944,6 +1141,8 @@ def _execute_md(settings: Dict[str, Any], settings_source=None) -> None:
                 logger.info(f'Watch live: so3lr show {show_argument(reporter.journal.path)}')
             if settings_source is not None:
                 logger.info(f'Loading settings from {settings_source}')
+            if long_range_note:
+                logger.info(f'Long range: {long_range_note}')
             log_simulation_settings(settings)
             reserve_gpu(settings)       # before JAX starts
             get_hardware_info()
@@ -1031,6 +1230,9 @@ def log_simulation_settings(s: Dict[str, Any]) -> None:
             logger.info(f"K-space interp nodes:      {s['kspace_interp_nodes']}")
         if s.get('kspace_npt_cycles'):
             logger.info(f"K-space NPT cycles:        {s['kspace_npt_cycles']}")
+    if s.get('kspace_dispersion'):
+        logger.info(f"K-space dispersion:        {s['kspace_dispersion']} "
+                    f"(smearing {s.get('kspace_dispersion_smearing')}, spacing {s.get('kspace_dispersion_spacing')})")
     if s.get('output_atom_indices') is not None:
         logger.info(f"Output atom indices:       {s['output_atom_indices']}")
     if s.get('restart_reset'):
@@ -1102,11 +1304,16 @@ def run_md_simulation(
     langevin_removecmmotion: Optional[bool] = None,
     langevin_thermo: Optional[float] = None,
     # K-space electrostatics
-    kspace_electrostatics: Optional[str] = None,
+    kspace_electrostatics: Optional[str] = 'auto',
     kspace_smearing: float = DEFAULT_KSPACE_SMEARING,
     kspace_spacing: float = DEFAULT_KSPACE_SPACING,
     kspace_interp_nodes: int = DEFAULT_KSPACE_INTERP_NODES,
     kspace_npt_cycles: Optional[int] = None,
+    # K-space dispersion
+    kspace_dispersion: Optional[str] = 'auto',
+    kspace_dispersion_smearing: float = _KS.DEFAULT_KSPACE_DISPERSION_SMEARING,
+    kspace_dispersion_spacing: float = _KS.DEFAULT_KSPACE_DISPERSION_SPACING,
+    kspace_dispersion_interp_nodes: int = _KS.DEFAULT_KSPACE_DISPERSION_INTERP_NODES,
     # Charge embedding: overrides only what the embedding sees, never
     # equilibration. Must be declared here -- nvt_md(**kwargs) forwards every
     # common_model_options flag straight into this explicit signature.
@@ -1165,6 +1372,10 @@ def run_md_simulation(
         'kspace_smearing': kspace_smearing,
         'kspace_spacing': kspace_spacing,
         'kspace_interp_nodes': kspace_interp_nodes,
+        'kspace_dispersion': kspace_dispersion,
+        'kspace_dispersion_smearing': kspace_dispersion_smearing,
+        'kspace_dispersion_spacing': kspace_dispersion_spacing,
+        'kspace_dispersion_interp_nodes': kspace_dispersion_interp_nodes,
         'charge_embed_total_charge': charge_embed_total_charge,
         'charge_equilibration_total_charge': charge_equilibration_total_charge,
         'engine': engine,
@@ -1206,7 +1417,8 @@ def run_md_simulation(
         settings['langevin_removecmmotion'] = langevin_removecmmotion
         settings['langevin_thermo'] = langevin_thermo
 
-    _execute_md(settings)
+    note = _resolve_long_range(settings, _given(LONG_RANGE_SETTINGS))
+    _execute_md(settings, long_range_note=note)
 
 
 # Define the 'opt' subcommand
@@ -1337,6 +1549,8 @@ def fire_optimization(
     }
     settings['log_file'] = log_file
     settings['output_format'] = infer_output_format(output_file)
+    long_range_note = _resolve_long_range(settings, _given(LONG_RANGE_SETTINGS))
+    _refuse_existing_outputs(settings, task='opt')
 
     with presentation.run_display(settings) as reporter:
         logger_ready = False
@@ -1364,7 +1578,13 @@ def fire_optimization(
             _model = model_path or DEFAULT_MODEL
             _kind = 'bundled' if _model in available_models() else 'custom path'
             logger.info(f"Force field:               {_model} ({_kind})")
-            logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
+            logger.info(f"Long-range cutoff:         {settings['lr_cutoff']} Å")
+            for key, label in (('kspace_electrostatics', 'K-space method:            '),
+                               ('kspace_dispersion', 'K-space dispersion:        ')):
+                if settings[key]:
+                    logger.info(f"{label}{settings[key]}")
+            if long_range_note:
+                logger.info(f'Long range: {long_range_note}')
 
             if force_conv is not None:
                 logger.info(f"Force convergence:         {force_conv} eV/Å")
@@ -1401,6 +1621,7 @@ def fire_optimization(
 @common_io_options
 @common_model_options
 @kspace_options
+@kspace_dispersion_options
 @common_md_options
 @thermostat_options
 @flash_options
@@ -1419,6 +1640,7 @@ def nvt_md(**kwargs) -> None:
 @common_io_options
 @common_model_options
 @kspace_options
+@kspace_dispersion_options
 @common_md_options
 @langevin_options
 @flash_options
@@ -1439,6 +1661,7 @@ def nvt_langevin_md(**kwargs) -> None:
 @common_io_options
 @common_model_options
 @kspace_options
+@kspace_dispersion_options
 @common_md_options
 @thermostat_options
 @barostat_options
@@ -1460,6 +1683,7 @@ def npt_md(**kwargs) -> None:
 @common_io_options
 @common_model_options
 @kspace_options
+@kspace_dispersion_options
 @common_md_options
 @flash_options
 def nve_md(**kwargs) -> None:
@@ -1621,6 +1845,9 @@ def eval_model(
         kspace_dispersion_spacing=kspace_dispersion_spacing,
         kspace_dispersion_interp_nodes=kspace_dispersion_interp_nodes,
         engine=engine, flash_mode=flash_mode, flash_mixed=flash_mixed, flash_devices=flash_devices, flash_kernels=flash_kernels)
+    # PME for a periodic dataset (its first structure decides) unless set otherwise
+    from .setup_physics import resolve_long_range
+    long_range_note = resolve_long_range(settings, _given(LONG_RANGE_SETTINGS), datafile, fit_cell=False, index=0)
     from so3lr.model_registry import DEFAULT_MODEL, available_models
     _model = model_path or DEFAULT_MODEL
     _kind = 'bundled' if _model in available_models() else 'custom path'
@@ -1652,6 +1879,8 @@ def eval_model(
             logger.info(f"Saving to:                 {save_to}")
             logger.info(f"Overwrite if exists:       {'Yes' if overwrite else 'No (default)'}")
         logger.info(f"Targets:                   {targets}")
+        if long_range_note:
+            logger.info(f'Long range: {long_range_note}')
         logger.info("=" * 60)
 
         # before JAX starts: what flash may run (the structures are checked once read)
@@ -1836,7 +2065,7 @@ def train_model(
               help='Path to YAML settings file.')
 @common_io_options
 @common_model_options
-@kspace_options
+@kspace_options(automatic=False)
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
               help='Use JIT compilation for speed. [default: enabled]')
 @click.option('--engine', 'engine', default='auto', type=click.Choice(list(ENGINES)),
@@ -2018,8 +2247,9 @@ def _run_cli() -> None:
         if not getattr(exc, '_so3lr_traceback_preserved', False):
             raise
         if not getattr(exc, '_so3lr_reported', False):
-            message = presentation.exception_message(exc).splitlines()[0]
-            click.ClickException(presentation.terminal_text(message)).show()
+            # The whole message (several lines for some errors); the traceback stays in the log.
+            message = presentation.exception_message(exc)
+            click.ClickException(presentation.terminal_text(message, allow_newlines=True)).show()
             details = presentation.failure_details(exc)
             if details:
                 click.echo(details, err=True)

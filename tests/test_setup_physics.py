@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from so3lr.cli.setup_physics import long_range_settings
+from so3lr.cli.setup_physics import long_range_settings, resolve_long_range
 from so3lr.model_registry import DEFAULT_MODEL
 
 
@@ -17,9 +17,13 @@ def test_water64_proposal_fits_cell_and_preserves_both_long_range_terms():
     assert 2 * settings['lr_cutoff'] < 12.4
 
 
-def test_large_and_isolated_structures_keep_existing_cutoff_policy():
+LARGE_CELL = {'lr_cutoff': 12.0, 'kspace_electrostatics': 'pme', 'kspace_smearing': 4.0, 'kspace_spacing': 2.0,
+              'kspace_dispersion': 'pme', 'kspace_dispersion_smearing': 2.0, 'kspace_dispersion_spacing': 3.0}
+
+
+def test_periodic_cells_get_pme_and_isolated_structures_a_long_cutoff():
     assert long_range_settings(False, None, DEFAULT_MODEL) == {'lr_cutoff': 100.0}
-    assert long_range_settings(True, 999.9, DEFAULT_MODEL) == {'lr_cutoff': 12.0}
+    assert long_range_settings(True, 999.9, DEFAULT_MODEL) == LARGE_CELL
 
 
 def test_invalid_model_cell_and_cutoff_are_rejected_before_export():
@@ -48,7 +52,7 @@ def test_npt_proposal_and_custom_cutoff_leave_backend_contraction_margin(height)
     with pytest.raises(ValueError, match='3% NPT contraction margin'):
         long_range_settings(True, height, DEFAULT_MODEL, cutoff=12, ensemble='npt')
     for ensemble in ('nvt', 'nve', 'nvt-langevin'):
-        assert long_range_settings(True, height, DEFAULT_MODEL, ensemble=ensemble) == {'lr_cutoff': 12.0}
+        assert long_range_settings(True, height, DEFAULT_MODEL, ensemble=ensemble) == LARGE_CELL
 
 
 def test_npt_margin_applies_to_short_range_and_half_cell_user_cutoffs():
@@ -57,10 +61,10 @@ def test_npt_margin_applies_to_short_range_and_half_cell_user_cutoffs():
     assert long_range_settings(True, height, DEFAULT_MODEL)['lr_cutoff'] == height / 2
     with pytest.raises(ValueError, match='short-range cutoff.*NPT contraction margin'):
         long_range_settings(True, height, DEFAULT_MODEL, ensemble='npt')
-    assert long_range_settings(True, 30, DEFAULT_MODEL, cutoff=15) == {'lr_cutoff': 15.0}
+    assert long_range_settings(True, 30, DEFAULT_MODEL, cutoff=15) == dict(LARGE_CELL, lr_cutoff=15.0)
     with pytest.raises(ValueError, match='at most 14.55'):
         long_range_settings(True, 30, DEFAULT_MODEL, cutoff=15, ensemble='npt')
-    assert long_range_settings(True, 30, DEFAULT_MODEL, ensemble='npt') == {'lr_cutoff': 12.0}
+    assert long_range_settings(True, 30, DEFAULT_MODEL, ensemble='npt') == LARGE_CELL
 
 
 def test_proposed_pme_mesh_reduces_reciprocal_discretization_error(x64):
@@ -106,3 +110,52 @@ def test_proposal_reads_model_metadata_without_initializing_jax():
                     "long_range_settings(True, 12.4, DEFAULT_MODEL, ensemble='npt'); "
                     "import sys; assert 'jax' not in sys.modules; assert 'flax' not in sys.modules"],
                    check=True)
+
+
+def _water(tmp_path, side=12.4, periodic=True):
+    from ase import Atoms
+    from ase.io import write
+    atoms = Atoms('OH2', positions=[[0, 0, 0], [0.96, 0, 0], [-0.24, 0.93, 0]],
+                  cell=[side] * 3 if periodic else None, pbc=periodic)
+    path = tmp_path / 'water.xyz'
+    write(path, atoms, format='extxyz')
+    return path
+
+
+def test_unset_kspace_means_pme_for_periodic_structures_with_a_cell_fitting_cutoff(tmp_path):
+    settings = {'lr_cutoff': 12.0, 'kspace_smearing': 4.0, 'kspace_spacing': 2.0, 'ensemble': 'npt'}
+    note = resolve_long_range(settings, set(), _water(tmp_path))
+    assert settings['kspace_electrostatics'] == settings['kspace_dispersion'] == 'pme'
+    assert (settings['lr_cutoff'], settings['kspace_smearing'], settings['kspace_spacing']) == (5.5, 2.0, 1.0)
+    assert 'default for periodic structures' in note and '12.4 Å cell' in note
+
+
+def test_large_cells_keep_the_usual_cutoff_and_gas_phase_stays_real_space(tmp_path):
+    settings = {'lr_cutoff': 12.0, 'kspace_smearing': 4.0, 'kspace_spacing': 2.0, 'kspace_electrostatics': 'auto'}
+    resolve_long_range(settings, set(), _water(tmp_path, side=30.0))
+    assert (settings['kspace_electrostatics'], settings['lr_cutoff'], settings['kspace_smearing']) == ('pme', 12.0, 4.0)
+    gas = {'lr_cutoff': 12.0}
+    assert resolve_long_range(gas, set(), _water(tmp_path, periodic=False)) == ''
+    assert gas['kspace_electrostatics'] is None and gas['kspace_dispersion'] is None
+
+
+def test_explicit_choices_win_over_the_proposal(tmp_path):
+    water = _water(tmp_path)
+    off = {'lr_cutoff': 12.0, 'kspace_electrostatics': 'none', 'kspace_dispersion': None}
+    resolve_long_range(off, {'kspace_dispersion'}, water)   # YAML null is explicit: off
+    assert off == {'lr_cutoff': 12.0, 'kspace_electrostatics': None, 'kspace_dispersion': None}
+    fixed = {'lr_cutoff': 6.0, 'kspace_smearing': 4.0, 'kspace_spacing': 2.0}
+    resolve_long_range(fixed, {'lr_cutoff'}, water)
+    assert (fixed['lr_cutoff'], fixed['kspace_smearing'], fixed['kspace_electrostatics']) == (6.0, 4.0, 'pme')
+    fitted = {'lr_cutoff': 12.0, 'kspace_smearing': 3.0, 'kspace_spacing': 2.0, 'kspace_electrostatics': 'ewald'}
+    resolve_long_range(fitted, {'kspace_electrostatics', 'kspace_smearing'}, water)
+    assert (fitted['kspace_electrostatics'], fitted['lr_cutoff'], fitted['kspace_smearing']) == ('ewald', 5.5, 3.0)
+
+
+def test_evaluation_keeps_the_cutoff_and_unreadable_structures_turn_auto_off(tmp_path):
+    settings = {'lr_cutoff': 12.0}
+    resolve_long_range(settings, set(), _water(tmp_path), fit_cell=False, index=0)
+    assert (settings['kspace_electrostatics'], settings['lr_cutoff']) == ('pme', 12.0)
+    missing = {'lr_cutoff': 12.0}
+    resolve_long_range(missing, set(), tmp_path / 'missing.xyz')
+    assert missing['kspace_electrostatics'] is None

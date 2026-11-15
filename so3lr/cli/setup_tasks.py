@@ -15,7 +15,7 @@ from . import theme
 from .prompts import Back
 from .setup import (_choose, _confirm, _entered_path, _positive, _prompt, TASK_REVIEW_ACTIONS, ask_new_directory, _say,
                     _select_model, _select_structure, _stage, _stage_rule, _unused_directory,
-                    _LAUNCHER, electron_count_problem, export_run, run_steps)
+                    electron_count_problem, export_run, launcher_script, run_steps)
 from so3lr.md_settings_validation import DEFAULT_PRECISION
 from so3lr.model_registry import DEFAULT_MODEL
 
@@ -38,6 +38,8 @@ class Action:
 
 
 def _charge_and_spin(console, structure):
+    if structure.spin_reading:
+        _say(console, f'Default multiplicity from the file: {structure.spin_reading}.', theme.MUTED)
     charge = _prompt('Total charge (e)', default=structure.input_charge or 0, type=int)
     spin = _prompt('Unpaired electrons (multiplicity minus one)', default=structure.input_unpaired or 0,
                    type=click.IntRange(min=0))
@@ -125,7 +127,7 @@ def optimization_setup(console):
                 ('Files', 'structure.extxyz, run.sh (the so3lr opt command); the run adds optimization.extxyz, run.log')]
         console.print(_rows_view(3, 'Review and start', rows, (
             'Start now saves the files, then optimizes in this terminal.',
-            'Save for later writes those files only. Start later with sh run.sh from the output directory.')))
+            'Save for later writes those files only. Start later with sh run.sh, or submit it with sbatch run.sh.')))
         action = _choose(console, 'Next action · Enter starts now', TASK_REVIEW_ACTIONS)
         if action == 2:
             _say(console, 'Setup cancelled. No files written.')
@@ -141,7 +143,7 @@ def optimization_setup(console):
             _say(console, 'Starting the optimization now in this terminal.')
             state['result'] = Action('opt', tuple(argv), destination)
             return
-        _say(console, 'Start later with sh run.sh from that directory, in an environment with SO3LR installed.')
+        _say(console, 'Start later with sh run.sh (or sbatch run.sh) in an environment with SO3LR installed.')
         state['result'] = None
 
     run_steps(structure, model, details, review)
@@ -226,8 +228,8 @@ def eval_setup(console):
 
     def details():
         default = state['cutoff'] or ('12' if state['kind'] == 'periodic' else '100')
-        _say(console, 'Use 12 Å for periodic data; gas-phase molecules need a long cutoff such as 100 Å.',
-             theme.MUTED)
+        _say(console, 'Use 12 Å for periodic data (PME electrostatics and dispersion by default); gas-phase '
+             'molecules need a long cutoff such as 100 Å.', theme.MUTED)
         state['cutoff'] = _positive(console, 'Long-range cutoff (Å)', default)
         state['destination'] = ask_new_directory(console, _unused_directory('so3lr-eval'))
 
@@ -242,7 +244,7 @@ def eval_setup(console):
                 ('Files', 'run.sh; the run adds predictions.extxyz and eval.log (the dataset is not copied)')]
         console.print(_rows_view(3, 'Review and start', rows, (
             'Start now saves run.sh, then evaluates in this terminal.',
-            'Save for later writes run.sh only. Start later with sh run.sh from the output directory.')))
+            'Save for later writes run.sh only. Start later with sh run.sh, or submit it with sbatch run.sh.')))
         action = _choose(console, 'Next action · Enter starts now', TASK_REVIEW_ACTIONS)
         if action == 2:
             _say(console, 'Setup cancelled. No files written.')
@@ -253,7 +255,7 @@ def eval_setup(console):
             try:
                 launcher = destination / 'run.sh'
                 with launcher.open('x') as handle:
-                    handle.write(_LAUNCHER.format(command=_shell_command(argv)))
+                    handle.write(launcher_script(destination, 'exec ' + _shell_command(argv)))
                 launcher.chmod(0o755)
             except BaseException:
                 shutil.rmtree(destination, ignore_errors=True)  # the directory this step created
@@ -266,7 +268,7 @@ def eval_setup(console):
             _say(console, 'Starting the evaluation now in this terminal.')
             state['result'] = Action('eval', argv, destination)
             return
-        _say(console, 'Start later with sh run.sh from that directory, in an environment with SO3LR installed.')
+        _say(console, 'Start later with sh run.sh (or sbatch run.sh) in an environment with SO3LR installed.')
         state['result'] = None
 
     run_steps(dataset, model, details, review)

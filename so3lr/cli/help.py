@@ -53,13 +53,14 @@ def format_overview(command, ctx, formatter, version):
     formatter.write_paragraph()
     formatter.write_usage(ctx.command_path, '[OPTIONS] [COMMAND] [ARGS]...')
     groups = (
-        ('Prepare and monitor', ('start', 'show')),
+        ('Prepare and monitor', ('start', 'show', 'resume')),
         ('Simulate', ('nvt', 'nvt-langevin', 'npt', 'nve', 'opt')),
         ('Evaluate and train', ('eval', 'train', 'finetune', 'tune-ewald')),
     )
     descriptions = {
         'start': 'Choose a structure, review settings, then start or save',
-        'show': 'Browse a run folder and inspect simulation plots',
+        'show': 'Browse a run folder and inspect simulation plots (--json for scripts)',
+        'resume': 'Continue a run folder from its last checkpoint',
         'nvt': 'NVT dynamics with a Nose–Hoover thermostat',
         'nvt-langevin': 'NVT dynamics with a Langevin thermostat',
         'npt': 'NPT dynamics at constant temperature and pressure',
@@ -91,16 +92,20 @@ def format_overview(command, ctx, formatter, version):
             formatter.write_dl(extras)
     with formatter.section('Start here'):
         formatter.write_text('\b\nso3lr start\n'
+                             'so3lr start --input box.xyz --ensemble npt --print\n'
                              'so3lr --settings run.yaml\n'
                              'so3lr show runs/\n'
+                             'so3lr resume so3lr-run\n'
                              'so3lr nvt --input molecule.xyz --lr-cutoff 100\n'
                              'so3lr nvt --help')
         formatter.write_paragraph()
         formatter.write_text('In an interactive terminal, bare so3lr also opens guided setup. '
-                             'Use --settings for an existing YAML run, including batch jobs.')
+                             'Use --settings for an existing YAML run, including batch jobs. '
+                             'Periodic structures use PME electrostatics and dispersion unless told otherwise.')
     rows = [p.get_help_record(ctx) for p in command.get_params(ctx)]
     with formatter.section('Global options (before the command)'):
         formatter.write_dl([row for row in rows if row is not None])
+        formatter.write_text('--display, --verbose, --quiet and --no-color may also follow the command.')
     if ctx.params.get('help_full'):
         with formatter.section('More examples'):
             formatter.write_text('\b\nso3lr opt --input molecule.xyz --lr-cutoff 100\n'

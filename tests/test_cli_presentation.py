@@ -265,7 +265,7 @@ def test_preamble_failure_retains_traceback_or_proves_it_was_saved(failure_cli, 
 
 
 @pytest.mark.parametrize('operation', ['md', 'opt'])
-def test_multiline_saved_failure_prints_one_verified_log_pointer(failure_cli, monkeypatch, capsys, operation):
+def test_multiline_saved_failure_prints_the_whole_message_and_one_log_pointer(failure_cli, monkeypatch, capsys, operation):
     app, log_path, invoke = failure_cli
     def runtime(settings):
         raise RuntimeError('first line\nsecond line')
@@ -275,9 +275,8 @@ def test_multiline_saved_failure_prints_one_verified_log_pointer(failure_cli, mo
         invoke(operation)
     assert caught.value.code == 1
     err = capsys.readouterr().err
-    assert err.count('Error: RuntimeError: first line') == 1
+    assert err.count('Error: RuntimeError: first line\nsecond line') == 1  # every line of the message
     assert err.count(f'Full traceback: {log_path.resolve()}') == 1
-    assert 'second line' not in err
     assert 'Traceback (most recent call last)' not in err
     assert 'RuntimeError: first line\nsecond line' in log_path.read_text()
 

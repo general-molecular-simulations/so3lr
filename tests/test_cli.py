@@ -17,7 +17,7 @@ MD_SETTINGS_PATH = PROJECT_ROOT / "so3lr" / "cli" / "md_settings.yaml"
 
 SUBCOMMANDS = ["opt", "nvt", "nvt-langevin", "npt", "nve", "eval", "finetune", "train", "tune-ewald"]
 # All visible command groups; the legacy init alias intentionally stays hidden.
-HELP_LISTED_COMMANDS = ["start", "show", "opt", "nvt", "nvt-langevin", "npt", "nve", "eval", "finetune", "train", "tune-ewald"]
+HELP_LISTED_COMMANDS = ["start", "show", "resume", "opt", "nvt", "nvt-langevin", "npt", "nve", "eval", "finetune", "train", "tune-ewald"]
 
 
 # ---------------------------------------------------------------------------

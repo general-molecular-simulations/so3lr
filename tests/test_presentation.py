@@ -594,31 +594,35 @@ def _wait_for_native_marker(process, path):
         time.sleep(.01)
 
 
-# Every non-terminal display skips the signal guard; forced rich is the one that could get it wrong.
-@pytest.mark.parametrize('display,quiet', [('rich', False)])
-def test_nonterminal_run_retains_native_termination_during_blocked_c_call(tmp_path, native_signal_blocker, display, quiet):
+def test_batch_run_records_termination_and_ends_by_the_signal(tmp_path):
+    """scancel or a time limit sends SIGTERM to a batch run: the journal records it, with the
+    resume hint on stderr, and the process still ends by the signal."""
+    import json
     import signal
-    code = '''
-import ctypes, sys
+    code = """
+import pathlib, time
 from so3lr.cli import presentation as ui
-library = ctypes.PyDLL(sys.argv[1])
-library.block_forever.argtypes = [ctypes.c_int]
-ui.configure(display=sys.argv[2], quiet=sys.argv[3] == 'True')
-with ui.run_display({'log_file': 'run.log'}):
-    with open('native-ready', 'wb') as marker:
-        library.block_forever(marker.fileno())
-'''
-    process = subprocess.Popen([sys.executable, '-c', code, str(native_signal_blocker), display, str(quiet)],
-                               cwd=tmp_path, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
+ui.configure(display='plain')
+with ui.run_display({'log_file': 'run.log', 'output_file': 'out.xyz'}) as reporter:
+    reporter.start_md(0, 100, 0.5)
+    pathlib.Path('ready').write_text('ready')
+    while True:
+        time.sleep(.05)
+"""
+    process = subprocess.Popen([sys.executable, '-c', code], cwd=tmp_path, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     try:
-        _wait_for_native_marker(process, tmp_path / 'native-ready')
+        _wait_for_native_marker(process, tmp_path / 'ready')
         process.send_signal(signal.SIGTERM)
-        assert process.wait(timeout=2) == -signal.SIGTERM
+        _, stderr = process.communicate(timeout=10)
+        assert process.returncode == -signal.SIGTERM
     finally:
         if process.poll() is None:
             process.kill()
             process.wait()
+    events = [json.loads(line) for line in next(tmp_path.glob('*.events.jsonl')).read_text().splitlines()]
+    assert events[-1]['type'] == 'run_failed' and events[-1]['data']['reason'] == 'signal'
+    assert 'interrupted' in stderr and 'restart_save_path' in stderr  # no checkpoint: how to make one
 
 
 # A different second signal: proves every disposition, not just the received one, is native again.

@@ -33,6 +33,8 @@ import jax_md
 from jax_md import units, partition
 from jax_md.space import DisplacementOrMetricFn, raw_transform
 from so3lr.mlff.calculators.potential import PotentialSparse
+from so3lr.md_settings_validation import (  # noqa: F401 (flash.md imports them from here)
+    _existing_regular_output_mode, _validate_md_output_write_policy)
 from so3lr.mlff.nn.observable.dispersion_ref_data import (
     check_atomic_numbers_supported,
 )
@@ -99,17 +101,6 @@ def intermediate_quantity_kwargs(observables) -> Dict[str, Any]:
 # per_atom: the leading dataset axis is atoms, so atom selections apply to it.
 DataSetEntry = namedtuple('DataSetEntry', ('chunk_length', 'shape', 'dtype', 'per_atom'),
                           defaults=(False,))
-
-
-def _existing_regular_output_mode(path: Path) -> Optional[int]:
-    """Return an existing output file's mode (symlinks are followed)."""
-    try:
-        metadata = path.stat()
-    except FileNotFoundError:
-        return None
-    if not stat.S_ISREG(metadata.st_mode):
-        raise RuntimeError(f'Output must be a regular file: {path}')
-    return stat.S_IMODE(metadata.st_mode)
 
 
 class HDF5Store(object):
@@ -957,9 +948,9 @@ def check_box_for_neighbour_lists(box, cutoff: float, where: str) -> None:
     if problem:
         raise ValueError(
             f'{where}: {problem}. Use a larger box, a smaller --lr-cutoff with k-space '
-            f'carrying the long range (--kspace-electrostatics pme, and kspace_dispersion: pme '
-            f'in a --settings file for dispersion), or the ASE calculator (So3lrCalculator), '
-            f'which lists every periodic image.')
+            f'carrying the long range (--kspace-electrostatics pme --kspace-dispersion pme, the '
+            f'default for periodic structures), the flash engine (it lists every periodic image '
+            f'on a GPU), or the ASE calculator (So3lrCalculator).')
 
 
 def cell_from_atoms_boundary_conditions(
@@ -1623,8 +1614,9 @@ def _warn_about_charge_and_spin(atoms, total_charge, num_unpaired_electrons):
 
     The settings stay authoritative: a file value never replaces them here.
     """
-    from so3lr.structure_info import electron_count_problem, recorded_charge_and_unpaired
+    from so3lr.structure_info import electron_count_problem, recorded_charge_and_unpaired, spin_key_note
     file_charge, file_unpaired = recorded_charge_and_unpaired(atoms)
+    reading = spin_key_note(atoms)
     charge = None if total_charge is None else int(total_charge)
     unpaired = 0 if num_unpaired_electrons is None else int(num_unpaired_electrons)
     if file_charge is not None and charge is not None and file_charge != charge:
@@ -1634,7 +1626,8 @@ def _warn_about_charge_and_spin(atoms, total_charge, num_unpaired_electrons):
     if file_unpaired is not None and file_unpaired != unpaired:
         logger.warning(f"The structure file records multiplicity {file_unpaired + 1}, but this run uses "
                        f"{unpaired} unpaired electrons. Pass --spin {file_unpaired} "
-                       f"(YAML: num_unpaired_electrons) if the file is right.")
+                       f"(YAML: num_unpaired_electrons) if the file is right."
+                       + (f" ({reading}.)" if reading else ''))
     if charge is not None:
         problem = electron_count_problem(int(atoms.get_atomic_numbers().sum()), charge, unpaired)
         if problem:
@@ -1909,47 +1902,6 @@ def save_restart_checkpoints(
         if path is None:
             path = pysages_path
     return path
-
-
-def _validate_md_output_write_policy(
-    *,
-    output_file: Optional[Union[str, Path]],
-    output_format: Optional[str],
-    overwrite: bool,
-    restart_load_path: Optional[Union[str, Path]],
-) -> bool:
-    """Reject an existing trajectory that the selected writer would truncate.
-
-    EXTXYZ is intentionally appendable when continuing from a restart. HDF5 is
-    opened in ``mode='w'`` and therefore needs a fresh output path unless the
-    caller explicitly opts in to replacement with ``--overwrite``. Return
-    whether the first EXTXYZ batch should append to an existing restart output.
-    """
-    append = (
-        restart_load_path is not None and output_format == 'extxyz'
-        and not overwrite
-    )
-    if output_file is None:
-        return append
-
-    output_path = Path(output_file)
-    output_mode = _existing_regular_output_mode(output_path)
-    if output_mode is None or overwrite:
-        return append
-    if append:
-        return True
-
-    if restart_load_path is not None and output_format == 'hdf5':
-        raise RuntimeError(
-            f"HDF5 output file already exists: {output_file}. Refusing to "
-            "truncate it during restart. Choose a new --output path for the "
-            "continued trajectory, or pass --overwrite to replace it."
-        )
-
-    raise RuntimeError(
-        f"Output file already exists: {output_file}. Refusing to overwrite. "
-        "Pass --overwrite to replace it, or choose a different --output."
-    )
 
 
 def perform_md(

@@ -1115,8 +1115,9 @@ def run_display(settings, *, record=True):
     rich_enabled = _rich_enabled()
     if _configuration.display == 'rich' and not _configuration.quiet and not rich_enabled:
         print('Warning: --display rich requires a terminal; using plain output.', file=sys.stderr)
-    # _rich_enabled already requires stderr to be a terminal.
-    with _termination_signals(enabled=rich_enabled):
+    # Terminal and batch runs alike: a scheduler's SIGTERM (scancel, a time limit) is
+    # recorded with the resume hint, then the process still ends by that signal.
+    with _termination_signals():
         renderer = (_Reporter(settings) if rich_enabled
                     else _null if _configuration.quiet else _PlainReporter())
         try:
