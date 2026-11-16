@@ -108,7 +108,7 @@ def test_md_refuses_a_box_shorter_than_twice_the_cutoff(runner, tmp_path):
     neighbour lists; the run stops once the model's cutoff is known."""
     water = tmp_path / "water.xyz"
     water.write_text((Path(__file__).parent / "test_data" / "water_64.xyz").read_text())
-    result = runner.invoke(cli, ["nvt", "--input", str(water), "--no-relax", "--md-cycles", "1",
+    result = runner.invoke(cli, ["nvt", "--input", str(water), "--lr-cutoff", "12", "--no-relax", "--md-cycles", "1",
                                  "--md-steps", "1", "--engine", "standard",
                                  "--output", str(tmp_path / "out.xyz")])
     assert isinstance(result.exception, ValueError)

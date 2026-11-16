@@ -17,7 +17,7 @@ def test_water64_proposal_fits_cell_and_preserves_both_long_range_terms():
     assert 2 * settings['lr_cutoff'] < 12.4
 
 
-LARGE_CELL = {'lr_cutoff': 12.0, 'kspace_electrostatics': 'pme', 'kspace_smearing': 4.0, 'kspace_spacing': 2.0,
+LARGE_CELL = {'lr_cutoff': 10.0, 'kspace_electrostatics': 'pme', 'kspace_smearing': 2.0, 'kspace_spacing': 1.55,
               'kspace_dispersion': 'pme', 'kspace_dispersion_smearing': 2.0, 'kspace_dispersion_spacing': 3.0}
 
 
@@ -131,10 +131,12 @@ def test_unset_kspace_means_pme_for_periodic_structures_with_a_cell_fitting_cuto
     assert 'default for periodic structures' in note and '12.4 Å cell' in note
 
 
-def test_large_cells_keep_the_usual_cutoff_and_gas_phase_stays_real_space(tmp_path):
+def test_large_cells_get_the_pme_default_and_gas_phase_stays_real_space(tmp_path):
     settings = {'lr_cutoff': 12.0, 'kspace_smearing': 4.0, 'kspace_spacing': 2.0, 'kspace_electrostatics': 'auto'}
-    resolve_long_range(settings, set(), _water(tmp_path, side=30.0))
-    assert (settings['kspace_electrostatics'], settings['lr_cutoff'], settings['kspace_smearing']) == ('pme', 12.0, 4.0)
+    note = resolve_long_range(settings, set(), _water(tmp_path, side=30.0))
+    assert ({key: settings[key] for key in ('kspace_electrostatics', 'lr_cutoff', 'kspace_smearing', 'kspace_spacing')}
+            == {'kspace_electrostatics': 'pme', 'lr_cutoff': 10.0, 'kspace_smearing': 2.0, 'kspace_spacing': 1.55})
+    assert note.endswith('10 Å cutoff, 2 Å smearing and 1.55 Å mesh spacing')
     gas = {'lr_cutoff': 12.0}
     assert resolve_long_range(gas, set(), _water(tmp_path, periodic=False)) == ''
     assert gas['kspace_electrostatics'] is None and gas['kspace_dispersion'] is None
@@ -146,17 +148,21 @@ def test_explicit_choices_win_over_the_proposal(tmp_path):
     resolve_long_range(off, {'kspace_dispersion'}, water)   # YAML null is explicit: off
     assert off == {'lr_cutoff': 12.0, 'kspace_electrostatics': None, 'kspace_dispersion': None}
     fixed = {'lr_cutoff': 6.0, 'kspace_smearing': 4.0, 'kspace_spacing': 2.0}
-    resolve_long_range(fixed, {'lr_cutoff'}, water)
-    assert (fixed['lr_cutoff'], fixed['kspace_smearing'], fixed['kspace_electrostatics']) == (6.0, 4.0, 'pme')
+    resolve_long_range(fixed, {'lr_cutoff'}, water)  # the smearing and mesh follow a given cutoff
+    assert (fixed['lr_cutoff'], fixed['kspace_smearing'], fixed['kspace_spacing'], fixed['kspace_electrostatics']) \
+        == (6.0, 2.0, 1.0, 'pme')
     fitted = {'lr_cutoff': 12.0, 'kspace_smearing': 3.0, 'kspace_spacing': 2.0, 'kspace_electrostatics': 'ewald'}
     resolve_long_range(fitted, {'kspace_electrostatics', 'kspace_smearing'}, water)
     assert (fitted['kspace_electrostatics'], fitted['lr_cutoff'], fitted['kspace_smearing']) == ('ewald', 5.5, 3.0)
+    given = {'lr_cutoff': 12.0, 'kspace_smearing': 4.0, 'kspace_spacing': 2.0}
+    resolve_long_range(given, {'lr_cutoff', 'kspace_smearing'}, _water(tmp_path, side=30.0))
+    assert (given['lr_cutoff'], given['kspace_smearing'], given['kspace_spacing']) == (12.0, 4.0, pytest.approx(3.1))
 
 
-def test_evaluation_keeps_the_cutoff_and_unreadable_structures_turn_auto_off(tmp_path):
+def test_evaluation_skips_cell_fitting_and_unreadable_structures_turn_auto_off(tmp_path):
     settings = {'lr_cutoff': 12.0}
     resolve_long_range(settings, set(), _water(tmp_path), fit_cell=False, index=0)
-    assert (settings['kspace_electrostatics'], settings['lr_cutoff']) == ('pme', 12.0)
+    assert (settings['kspace_electrostatics'], settings['lr_cutoff'], settings['kspace_smearing']) == ('pme', 10.0, 2.0)
     missing = {'lr_cutoff': 12.0}
     resolve_long_range(missing, set(), tmp_path / 'missing.xyz')
     assert missing['kspace_electrostatics'] is None
@@ -177,6 +183,7 @@ def test_dispersion_off_keeps_the_cutoff_and_mixed_datasets_keep_real_space(tmp_
     settings = {'lr_cutoff': 12.0, 'kspace_smearing': 4.0, 'kspace_spacing': 2.0, 'kspace_dispersion': 'none'}
     resolve_long_range(settings, {'kspace_dispersion'}, _water(tmp_path))
     assert (settings['kspace_electrostatics'], settings['kspace_dispersion'], settings['lr_cutoff']) == ('pme', None, 12.0)
+    assert (settings['kspace_smearing'], settings['kspace_spacing']) == (2.0, 1.55)
     mixed = tmp_path / 'mixed.extxyz'
     box = '3\nLattice="30 0 0 0 30 0 0 0 30" Properties=species:S:1:pos:R:3 pbc="T T T"\nO 0 0 0\nH 1 0 0\nH 0 1 0\n'
     mixed.write_text(box + '3\nProperties=species:S:1:pos:R:3\nO 0 0 0\nH 1 0 0\nH 0 1 0\n')

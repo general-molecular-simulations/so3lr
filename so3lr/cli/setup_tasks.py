@@ -229,8 +229,8 @@ def eval_setup(console):
         state['model'] = _select_model(console, state['model'])
 
     def details():
-        default = state['cutoff'] or ('12' if state['kind'] == 'periodic' else '100')
-        _say(console, 'Use 12 Å for periodic data (PME electrostatics and dispersion by default); gas-phase '
+        default = state['cutoff'] or ('10' if state['kind'] == 'periodic' else '100')
+        _say(console, 'Use 10 Å for periodic data (PME electrostatics and dispersion by default); gas-phase '
              'molecules need a long cutoff such as 100 Å.', theme.MUTED)
         state['cutoff'] = _positive(console, 'Long-range cutoff (Å)', default)
         state['destination'] = ask_new_directory(console, _unused_directory('so3lr-eval'))

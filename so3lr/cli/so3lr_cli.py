@@ -27,6 +27,7 @@ from ..flash.check import ENGINES, FLASH_MODES, KERNELS, reserve_gpu
 # listed names and the default cannot go stale when a release lands.
 from ..model_registry import DEFAULT_MODEL, available_models
 from .help import GroupedCommand, format_overview
+from .setup_physics import PME_LR_CUTOFF, PME_SMEARING, PME_SPACING
 from . import presentation
 from .formatting import show_command as show_argument
 
@@ -320,11 +321,13 @@ def common_model_options(f: Callable) -> Callable:
                      callback=_validate_model_choice, help=MODEL_HELP)(f)
     f = click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(PRECISIONS), help=PRECISION_HELP)(f)
     f = click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
-                     help=f'Long-range (real-space) cutoff distance in Å. With PME (the default for '
-                          f'periodic structures) a periodic cell too small for {DEFAULT_LR_CUTOFF:g} Å '
-                          f'gets a cutoff and mesh that fit it unless this is given; for gas-phase / '
-                          f'non-periodic systems use --lr-cutoff 100 so the long-range electrostatics '
-                          f'and dispersion are not artificially truncated. [default: {DEFAULT_LR_CUTOFF}]')(f)
+                     help=f'Long-range (real-space) cutoff distance in Å. With PME for electrostatics and '
+                          f'dispersion (the default for periodic structures) it defaults to {PME_LR_CUTOFF:g} Å '
+                          f'with a {PME_SMEARING:g} Å smearing and {PME_SPACING:g} Å mesh, or to a cutoff and '
+                          f'mesh that fit a smaller cell; for gas-phase / non-periodic systems use '
+                          f'--lr-cutoff 100 so the long-range electrostatics and dispersion are not '
+                          f'artificially truncated. [default: {PME_LR_CUTOFF:g} with PME, '
+                          f'{DEFAULT_LR_CUTOFF:g} otherwise]')(f)
     f = click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
                      help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}]')(f)
     f = click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
@@ -461,9 +464,13 @@ def _kspace_electrostatics(automatic: bool) -> Callable:
                          type=click.Choice(choices + ['ewald', 'pme', 'p3m'], case_sensitive=False),
                          help='K-space method for long-range electrostatics: "ewald", "pme" or "p3m"' + suffix)(f)
         f = click.option('--kspace-smearing', 'kspace_smearing', default=DEFAULT_KSPACE_SMEARING, type=float,
-                         help=f'Smearing width for k-space summation in Å. [default: {DEFAULT_KSPACE_SMEARING}]')(f)
+                         help='Smearing width for k-space summation in Å. ' + (
+                             f'[default: {PME_SMEARING:g}]' if automatic else f'[default: {DEFAULT_KSPACE_SMEARING}]'))(f)
         f = click.option('--kspace-spacing', 'kspace_spacing', default=DEFAULT_KSPACE_SPACING, type=float,
-                         help=f'Grid spacing for k-space summation in Å. [default: {DEFAULT_KSPACE_SPACING}]')(f)
+                         help='Grid spacing for k-space summation in Å. ' + (
+                             f'[default: {PME_SPACING:g}, 1 for cutoffs below {_KS.MIN_DIRECT_LR_CUTOFF:g} Å; '
+                             f'{PME_SPACING / PME_SMEARING:g} × a given smearing]' if automatic
+                             else f'[default: {DEFAULT_KSPACE_SPACING}]'))(f)
         f = click.option('--kspace-interp-nodes', 'kspace_interp_nodes', default=DEFAULT_KSPACE_INTERP_NODES, type=int,
                          help=f'Number of interpolation nodes for PME/P3M. [default: {DEFAULT_KSPACE_INTERP_NODES}]')(f)
         return f
@@ -1724,7 +1731,8 @@ def nve_md(**kwargs) -> None:
               callback=_validate_model_choice, help=MODEL_HELP)
 @click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(PRECISIONS), help=PRECISION_HELP)
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
-              help=f'Long-range cutoff distance in Å. [default: {DEFAULT_LR_CUTOFF}]')
+              help=f'Long-range cutoff distance in Å. [default: {PME_LR_CUTOFF:g} when every structure is '
+                   f'periodic (PME), {DEFAULT_LR_CUTOFF:g} otherwise]')
 @click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
               help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}].')
 @click.option('--total-charge', 'total_charge', default=None, type=int,

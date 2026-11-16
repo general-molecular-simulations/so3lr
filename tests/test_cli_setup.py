@@ -103,9 +103,9 @@ def test_npt_setup_proposes_margin_and_retries_an_unsafe_custom_cutoff(tmp_path,
     assert '3% NPT contraction margin' in ' '.join(result.output.split())
     exported = yaml.safe_load((destination / 'settings.yaml').read_text())
     assert exported['ensemble'] == 'npt'
-    assert exported['lr_cutoff'] == 10.8
-    assert exported['kspace_spacing'] == 1.0
-    assert '1 Å mesh spacing' in ' '.join(result.output.split())
+    assert exported['lr_cutoff'] == 10.0
+    assert (exported['kspace_smearing'], exported['kspace_spacing']) == (2.0, 1.55)
+    assert '1.55 Å mesh spacing' in ' '.join(result.output.split())
 
 
 @pytest.mark.parametrize('action', ['1', ''])

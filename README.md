@@ -78,9 +78,10 @@ energy = atoms.get_potential_energy()
 forces = atoms.get_forces()
 ```
 
-Units are eV and Å. The default long-range cutoff of 12 Å is meant for periodic,
-condensed-phase systems; for gas-phase simulations, we suggest using
-`--lr-cutoff 100`.
+Units are eV and Å. On the command line, periodic structures use PME for
+electrostatics and dispersion with a 10 Å real-space cutoff (2 Å smearing,
+1.55 Å mesh), as in the paper's liquid and scaling simulations. The Python calculators default to 12 Å without k-space. For
+gas-phase simulations, we suggest using `--lr-cutoff 100`.
 
 ## Models
 
