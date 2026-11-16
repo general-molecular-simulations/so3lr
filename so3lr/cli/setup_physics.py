@@ -163,15 +163,18 @@ def structure_cell(path, index=-1):
     """(periodic, minimum cell height) of frame ``index`` of a structure file (by
     default the frame MD reads), or of every frame with index None (periodic only
     if all are); None if unreadable. An (ext)xyz file is read only up to its
-    comment lines: a multi-million-atom input is not parsed twice."""
+    comment lines: a multi-million-atom input is not parsed twice. Mixed periodicity
+    (a slab) raises ValueError."""
+    from so3lr.pbc import is_fully_periodic, minimum_cell_height
     try:
-        from so3lr.pbc import is_fully_periodic, minimum_cell_height
-        heights = [minimum_cell_height(cell) if is_fully_periodic(pbc, context='Long-range defaults') else 0.0
-                   for cell, pbc in _cells(path, index)]
-        periodic = bool(heights) and min(heights) > 0
-        return periodic, min(heights) if periodic else None
+        cells = _cells(path, index)
     except Exception:
         return None  # resolve_long_range says the cell could not be read; the run reports why
+    # A slab or wire (mixed pbc) raises here with the reason, as the run itself would.
+    heights = [minimum_cell_height(cell) if is_fully_periodic(pbc, context=str(path)) else 0.0
+               for cell, pbc in cells]
+    periodic = bool(heights) and min(heights) > 0
+    return periodic, min(heights) if periodic else None
 
 
 def resolve_long_range(settings, explicit, structure_path, *, fit_cell=True, index=-1):

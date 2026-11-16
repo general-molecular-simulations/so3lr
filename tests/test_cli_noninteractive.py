@@ -129,6 +129,23 @@ def test_resume_or_start_runs_a_run_without_a_checkpoint_from_the_beginning(tmp_
     result = CliRunner().invoke(cli, ['resume', '--or-start', str(bundle)])
     assert result.exit_code == 0, result.output
     assert 'restart_load_path' not in seen and seen['md_cycles'] == 100
+    assert seen['overwrite'] is True  # an attempt stopped before its first checkpoint left outputs
+
+
+def test_resume_continues_the_pysages_bias(tmp_path, monkeypatch):
+    from so3lr.cli import so3lr_cli
+    seen = {}
+    monkeypatch.setattr(so3lr_cli, '_execute_md', lambda settings, **kwargs: seen.update(settings))
+    monkeypatch.setattr(so3lr_cli, '_load_md_settings', lambda path, loaded: (loaded, set(loaded)))
+    bundle = _bundle(tmp_path)
+    settings = yaml.safe_load((bundle / 'settings.yaml').read_text())
+    settings.update(do_enhanced_sampling=True, restart_pysages_save_path='bias.pkl')
+    (bundle / 'settings.yaml').write_text(yaml.safe_dump(settings))
+    assert CliRunner().invoke(cli, ['resume', str(bundle)]).exit_code == 2  # no bias saved: refused
+    (bundle / 'bias.pkl').write_bytes(b'state')
+    result = CliRunner().invoke(cli, ['resume', str(bundle)])
+    assert result.exit_code == 0, result.output
+    assert seen['restart_pysages_load_path'] == 'bias.pkl'
 
 
 def test_resume_of_a_finished_run_says_so(tmp_path):

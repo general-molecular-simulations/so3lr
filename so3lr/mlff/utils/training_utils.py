@@ -1595,6 +1595,7 @@ def fit(
                 break  # exit the batch loop
 
         reporter.task_progress(epoch + 1, num_epochs, 'epochs')
+        reporter.update_info(train_epochs_done=epoch + 1)  # so3lr show's progress
         if stop_training:
             break  # exit the epoch loop
 
@@ -1927,7 +1928,7 @@ def fit_from_iterator(
     start_step = step
     reporter = _reporter()
     reporter.task_progress(start_epoch, num_epochs, 'epochs')
-    reporter.update_info(train_total_epochs=num_epochs)
+    reporter.update_info(train_total_epochs=num_epochs, train_epochs_done=start_epoch)
     for epoch in range(start_epoch, num_epochs):
         if stop_training:
             logger.info(
@@ -2103,6 +2104,7 @@ def fit_from_iterator(
                 'a smaller batch or data_parallel: false.'
             )
         reporter.task_progress(epoch + 1, num_epochs, 'epochs')
+        reporter.update_info(train_epochs_done=epoch + 1)  # so3lr show's progress
         if stop_training:
             break  # exit the epoch loop
 

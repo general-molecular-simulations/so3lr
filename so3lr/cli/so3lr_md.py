@@ -1886,7 +1886,8 @@ def save_restart_checkpoints(
     pysages_result=None,
     restart_pysages_save_path: Optional[str] = None,
 ) -> Optional[str]:
-    """Persist one accepted cycle and return the primary checkpoint actually written."""
+    """Persist one accepted cycle; return the SO3LR checkpoint written (the file a run resumes
+    from), or None when only PySAGES state was saved."""
     path = None
     if restart_save_path is not None:
         path = save_state(
@@ -1898,9 +1899,7 @@ def save_restart_checkpoints(
             fractional_coordinates=fractional_coordinates,
         )
     if restart_pysages_save_path is not None:
-        pysages_path = save_pysages_state(pysages_result, restart_pysages_save_path)
-        if path is None:
-            path = pysages_path
+        save_pysages_state(pysages_result, restart_pysages_save_path)
     return path
 
 

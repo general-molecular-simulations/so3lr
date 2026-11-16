@@ -584,7 +584,10 @@ def _resolve_long_range(settings, structure_path, explicit=None, **options):
     Returns the note for the log."""
     from .setup_physics import LONG_RANGE_KEYS, resolve_long_range
     explicit = _given(LONG_RANGE_KEYS) if explicit is None else explicit
-    return resolve_long_range(settings, explicit, structure_path, **options)
+    try:
+        return resolve_long_range(settings, explicit, structure_path, **options)
+    except ValueError as exc:  # a slab or wire: mixed periodicity, said before anything starts
+        raise click.UsageError(str(exc)) from exc
 
 
 def _refuse_existing_outputs(settings, task='md'):
@@ -882,7 +885,11 @@ def _resume_settings(raw, settings_path, or_start=False):
     checkpoint = checkpoint_file(raw['restart_save_path'])
     if not checkpoint.is_file():
         if or_start:
-            return raw
+            # An earlier attempt that stopped before its first checkpoint (a preempted or
+            # timed-out job) left outputs nothing can continue: start again over them.
+            click.echo(f'No checkpoint at {checkpoint} yet: starting from the beginning, replacing the '
+                       f'outputs of any earlier attempt.', err=True)
+            return dict(raw, overwrite=True)
         raise click.UsageError(f'No checkpoint at {checkpoint} yet. Start the run with so3lr --settings {name}, '
                                f'or with so3lr resume --or-start.')
     import numpy as np
@@ -895,6 +902,11 @@ def _resume_settings(raw, settings_path, or_start=False):
     # A restart runs md_cycles more cycles. EXTXYZ appends (overwrite would truncate the
     # trajectory written so far); HDF5 needs a new file, a fresh name per attempt.
     resumed = dict(raw, restart_load_path=str(checkpoint), md_cycles=total - cycle, overwrite=False)
+    if raw.get('do_enhanced_sampling') and raw.get('restart_pysages_save_path'):
+        bias = Path(raw['restart_pysages_save_path'])
+        if not bias.is_file():
+            raise click.UsageError(f'No PySAGES state at {bias}: the enhanced-sampling bias cannot be continued.')
+        resumed['restart_pysages_load_path'] = str(bias)  # the bias continues with the dynamics
     output = raw.get('output_file')
     if output and infer_output_format(output) == 'hdf5':
         output, attempt = Path(output), 1
@@ -1858,7 +1870,7 @@ def eval_model(
         # the generic 'SO3LR' label) and tag it as bundled vs. a custom-path model.
         logger.info(f"Force field:               {_model} ({_kind})")
         logger.info(f"Precision:                 {precision}")
-        logger.info(f"Long-range cutoff:         {lr_cutoff} Å")
+        logger.info(f"Long-range cutoff:         {settings['lr_cutoff']} Å")
         logger.info(f"Dispersion damping:        {dispersion_damping} Å")
         logger.info(f"Total charge:              {'(from info{} or 0)' if total_charge is None else total_charge}")
         logger.info(f"Spin (unpaired e-):        {'(from info{} or 0)' if num_unpaired_electrons is None else num_unpaired_electrons}")

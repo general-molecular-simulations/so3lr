@@ -1016,6 +1016,8 @@ class _RunReporter:
         return lines
 
     def checkpoint(self, step, path):
+        if path is None:  # PySAGES state alone: no SO3LR checkpoint to resume from
+            return
         self._drain_logs()
         self.journal.emit('checkpoint', {'step': int(step), 'path': str(path)})
         self._last_checkpoint = (int(step), str(path))

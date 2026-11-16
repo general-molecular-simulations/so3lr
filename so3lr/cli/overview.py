@@ -65,7 +65,7 @@ def _sample(state):
 _MODES = {'optimization': 'OPT', 'training': 'TRN'}
 # what a stepwise run counts as its progress: optimization iterations, training epochs
 _PROGRESS_KEYS = {'optimization': ('opt_step', 'opt_total_steps'),
-                  'training': ('train_epoch', 'train_total_epochs')}
+                  'training': ('train_epochs_done', 'train_total_epochs')}  # train_epoch: the validated one
 
 
 def _operation(state):

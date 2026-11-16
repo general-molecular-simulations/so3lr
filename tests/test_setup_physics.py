@@ -192,3 +192,13 @@ def test_dispersion_off_keeps_the_cutoff_and_mixed_datasets_keep_real_space(tmp_
     assert dataset['kspace_electrostatics'] is None and dataset['kspace_dispersion'] is None
     unreadable = {'lr_cutoff': 12.0}
     assert 'could not be read' in resolve_long_range(unreadable, set(), tmp_path / 'missing.xyz')
+
+
+def test_mixed_periodicity_is_named_not_reported_as_unreadable(tmp_path):
+    from so3lr.cli.setup_physics import structure_cell
+    slab = tmp_path / 'slab.xyz'
+    slab.write_text('1\nLattice="20 0 0 0 20 0 0 0 40" Properties=species:S:1:pos:R:3 pbc="T T F"\nH 0 0 0\n')
+    with pytest.raises(ValueError, match='mixed-axis'):
+        structure_cell(slab)
+    with pytest.raises(ValueError, match='mixed-axis'):
+        resolve_long_range({'lr_cutoff': 12.0}, set(), slab)

@@ -206,7 +206,7 @@ def test_mixed_optimization_overview_uses_its_own_iterations_and_explicit_mode()
 
 def test_training_runs_count_epochs_in_the_overview():
     training = reader('/runs/finetune/run.events.jsonl', status='Completed',
-                      info=dict(operation='training', train_epoch=300, train_total_epochs=300))
+                      info=dict(operation='training', train_epochs_done=300, train_total_epochs=300))
     text = render([training, reader('/runs/md/run.events.jsonl')], height=24)
     assert 'TRN' in text and '300/300' in text and 'training epoch' in text
 

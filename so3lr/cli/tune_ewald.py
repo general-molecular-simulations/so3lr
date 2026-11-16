@@ -1013,10 +1013,14 @@ def tune(
     elif kspace_electrostatics == 'cutoff' or kspace_dispersion == 'cutoff':
         logger.info("=" * 60)
         logger.info("To run MD with this cutoff, e.g. NVT (CLI):")
-        command = f"so3lr nvt --input {input_file_path} --lr-cutoff {rec['cutoff']:g} --temperature 300"
+        # Real space only, as tuned: periodic structures otherwise default to PME.
+        command = (f"so3lr nvt --input {input_file_path} --lr-cutoff {rec['cutoff']:g} "
+                   f"--kspace-electrostatics none --kspace-dispersion none --temperature 300")
         logger.info(f"  {command}")
         logger.info("Or add the following to your settings.yaml:")
         logger.info(f"  lr_cutoff: {rec['cutoff']}")
+        logger.info("  kspace_electrostatics: none")
+        logger.info("  kspace_dispersion: none")
         logger.info("=" * 60)
     _report_recommendation(rec, errs[rec_index], timings[rec_index], accuracy, met=met, command=command,
                            kspace=kspace_electrostatics if kspace_dispersion != 'cutoff' else None)
