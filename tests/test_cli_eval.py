@@ -253,3 +253,15 @@ def test_cli_eval_reports_binding_energies_without_saving(eval_dir):
     mae = float(re.search(r'MAE ([0-9.]+) kcal/mol', output).group(1))
     assert 0 < mae < 3, output
     assert list(eval_dir.iterdir()) == []
+
+
+def test_dimer_labels_are_read_from_the_comment_lines(tmp_path, caplog):
+    from so3lr.cli.so3lr_eval import _dimer_pairs
+    frame = '1\nstructure_type={kind} benchmark_Eint={e} Properties=species:S:1:pos:R:3\nH 0 0 0\n'
+    path = tmp_path / 'dimers.xyz'
+    path.write_text(frame.format(kind='dimer', e=-1.5) + frame.format(kind='dimer_translated', e=0))
+    assert _dimer_pairs(path) == [-1.5]
+    path.write_text(frame.format(kind='dimer', e=-1.5))  # unpaired: said, not silently dropped
+    assert _dimer_pairs(path) is None and 'Binding energies skipped' in caplog.text
+    (tmp_path / 'plain.xyz').write_text('1\nProperties=species:S:1:pos:R:3\nH 0 0 0\n')
+    assert _dimer_pairs(tmp_path / 'plain.xyz') is None

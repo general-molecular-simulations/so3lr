@@ -1,11 +1,22 @@
 """Import-cheap signal ownership for runs (terminal or batch) and the terminal viewer."""
 from contextlib import contextmanager
+import os
 import signal
 import threading
 
 # Set inside batch-scheduler jobs: no prompts, no network checks there.
 SCHEDULER_VARIABLES = ('SLURM_JOB_ID', 'SLURM_JOBID', 'PBS_JOBID', 'LSB_JOBID',
                        'JOB_ID', 'COBALT_JOBID')
+
+
+def is_tty(stream):
+    return bool(getattr(stream, 'isatty', lambda: False)())
+
+
+def interactive(*streams, environ=None):
+    """Every stream is a terminal and TERM is not 'dumb': prompts, keys and live views may run."""
+    environ = os.environ if environ is None else environ
+    return environ.get('TERM') != 'dumb' and all(is_tty(stream) for stream in streams)
 
 
 class TerminationSignal(BaseException):

@@ -90,16 +90,20 @@ SO3LR_ASCII = """
 
 @contextmanager
 def _command_display(settings, *, failure, log_file, record=False, **info):
-    """eval, finetune, train and tune-ewald: the live display, the log file with its banner,
-    and the traceback kept in the log when the command fails. Training records a run journal
-    for so3lr show (record=True); eval and tuning have no graphs to follow."""
+    """Every command's live display, the log file with its banner, and the traceback kept in
+    the log when the command fails. MD, opt and training record a run journal for so3lr show
+    (record=True); eval and tuning have no graphs to follow."""
     with presentation.run_display(settings, record=record) as reporter:
         logger_ready = False
         try:
-            reporter.update_info(**info)
+            if info:
+                reporter.update_info(**info)
             setup_logger(log_file)
             logger_ready = True
             logger.info(log_banner())
+            if record and reporter.journal.active:
+                logger.info(f'Run journal: {reporter.journal.path}')
+                logger.info(f'Watch live: so3lr show {show_argument(reporter.journal.path)}')
             yield reporter
         except Exception as exc:
             _record_run_failure(exc, failure, log_file if logger_ready else None)
@@ -1020,7 +1024,7 @@ DEFAULT_FRAME_INTERVAL_PS = DEFAULT_TIMESTEP * DEFAULT_MD_STEPS_PER_CYCLE / 1000
 DEFAULT_DURATION_PS = DEFAULT_FRAME_INTERVAL_PS * DEFAULT_MD_CYCLES
 
 
-@cli.command(name='start', help='Set up MD, optimization or evaluation interactively; saves settings.yaml or run.sh '
+@cli.command(name='start', short_help='Choose a structure, review settings, then start or save', help='Set up MD, optimization or evaluation interactively; saves settings.yaml or run.sh '
                                 'in a new run folder. With --input, writes the MD setup without prompts.',
              context_settings={'help_option_names': ['--help', '-h']})
 @click.option('--input', 'input_file', type=click.Path(exists=True, dir_okay=False), default=None,
@@ -1067,7 +1071,7 @@ def start_command(input_file, **options):
         click.echo(f'Start it with: sh {home_path(directory / "run.sh")}  (or sbatch run.sh in that folder)')
 
 
-@cli.command(name='resume', help='Continue a settings-file MD run from its last checkpoint: `so3lr resume RUN_FOLDER`.',
+@cli.command(name='resume', short_help='Continue a run folder from its last checkpoint', help='Continue a settings-file MD run from its last checkpoint: `so3lr resume RUN_FOLDER`.',
              context_settings={'help_option_names': ['--help', '-h']})
 @click.argument('path', type=click.Path(exists=True, path_type=Path), default='.')
 @click.option('--or-start', is_flag=True,
@@ -1093,7 +1097,7 @@ def init_command():
     _interactive_setup()
 
 
-@cli.command(name='show', help='Show live or completed simulations from a local run folder or journal.',
+@cli.command(name='show', short_help='Browse a run folder and inspect simulation plots (--json for scripts)', help='Show live or completed simulations from a local run folder or journal.',
              context_settings={'help_option_names': ['--help', '-h']})
 @click.argument('path', type=click.Path(exists=True, path_type=Path), default='.')
 @click.option('--once', is_flag=True, help='Print one snapshot and exit (automatic when output is redirected).')
@@ -1160,30 +1164,17 @@ def _record_run_failure(exc, message, log_file):
 
 def _execute_md(settings: Dict[str, Any], settings_source=None, long_range_note='') -> None:
     """Share presentation lifetime between YAML and flag-based MD invocations."""
-    with presentation.run_display(settings) as reporter:
-        logger_ready = False
-        try:
-            # The display starts before the lazy MD import initializes JAX.
-            setup_logger(settings.get('log_file'))
-            logger_ready = True
-            logger.info(log_banner())
-            if reporter.journal.active:
-                logger.info(f'Run journal: {reporter.journal.path}')
-                logger.info(f'Watch live: so3lr show {show_argument(reporter.journal.path)}')
-            if settings_source is not None:
-                logger.info(f'Loading settings from {settings_source}')
-            log_simulation_settings(settings, long_range_note)
-            reserve_gpu(settings)       # before JAX starts
-            get_hardware_info()
-            time_start = time.time()
-            run(settings)
-            logger.info('Simulation completed successfully!')
-            logger.info(f'Total runtime: {_format_runtime(time.time() - time_start)}')
-        except Exception as exc:
-            # Preserve the diagnostic traceback in the file while the terminal
-            # shows the useful error once. Programmatic callers still get it.
-            _record_run_failure(exc, 'Simulation failed', settings.get('log_file') if logger_ready else None)
-            raise
+    # The display starts before the lazy MD import initializes JAX.
+    with _command_display(settings, failure='Simulation failed', log_file=settings.get('log_file'), record=True):
+        if settings_source is not None:
+            logger.info(f'Loading settings from {settings_source}')
+        log_simulation_settings(settings, long_range_note)
+        reserve_gpu(settings)       # before JAX starts
+        get_hardware_info()
+        time_start = time.time()
+        run(settings)
+        logger.info('Simulation completed successfully!')
+        logger.info(f'Total runtime: {_format_runtime(time.time() - time_start)}')
 
 
 
@@ -1439,7 +1430,7 @@ def run_md_simulation(
 
 
 # Define the 'opt' subcommand
-@cli.command(name='opt', help="Run geometry optimization with `so3lr opt --input geometry.xyz`.")
+@cli.command(name='opt', short_help='Relax a molecular structure', help="Run geometry optimization with `so3lr opt --input geometry.xyz`.")
 @common_io_options
 @common_model_options
 @kspace_options
@@ -1569,67 +1560,52 @@ def fire_optimization(
     _refuse_existing_outputs(settings, task='opt')
     long_range_note = _resolve_long_range(settings, input_file)
 
-    with presentation.run_display(settings) as reporter:
-        logger_ready = False
-        try:
-            reporter.update_info(operation='optimization')
-            # Setup logging with default levels
-            setup_logger(log_file)
-            logger_ready = True
+    with _command_display(settings, failure='Optimization failed', log_file=log_file, record=True,
+                          operation='optimization'):
+        logger.info("=" * 60)
+        logger.info(f"SO3LR Geometry Optimization (v{__version__})")
+        logger.info("=" * 60)
+        logger.info(f"Initial geometry:          {input_file}")
+        logger.info(f"Output geometry:           {output_file}")
+        logger.info(f"Log file:                  {log_file}")
+        logger.info(f"Total charge:              {total_charge}")
+        logger.info(f"Spin (unpaired e-):        {num_unpaired_electrons}")
+        # Mirror the MD / eval banner: log the resolved short name even when the
+        # user did not pass --model (otherwise the user has no record of which
+        # bundled checkpoint was loaded by default, e.g. so3lr-tauri-m vs. legacy v1).
+        from so3lr.model_registry import DEFAULT_MODEL, available_models
+        _model = model_path or DEFAULT_MODEL
+        _kind = 'bundled' if _model in available_models() else 'custom path'
+        logger.info(f"Force field:               {_model} ({_kind})")
+        logger.info(f"Long-range cutoff:         {settings['lr_cutoff']} Å")
+        _log_long_range(settings, long_range_note)
 
-            # Log the ASCII art
-            logger.info(log_banner())
+        if force_conv is not None:
+            logger.info(f"Force convergence:         {force_conv} eV/Å")
 
-            logger.info("=" * 60)
-            logger.info(f"SO3LR Geometry Optimization (v{__version__})")
-            logger.info("=" * 60)
-            logger.info(f"Initial geometry:          {input_file}")
-            logger.info(f"Output geometry:           {output_file}")
-            logger.info(f"Log file:                  {log_file}")
-            logger.info(f"Total charge:              {total_charge}")
-            logger.info(f"Spin (unpaired e-):        {num_unpaired_electrons}")
-            # Mirror the MD / eval banner: log the resolved short name even when the
-            # user did not pass --model (otherwise the user has no record of which
-            # bundled checkpoint was loaded by default, e.g. so3lr-tauri-m vs. legacy v1).
-            from so3lr.model_registry import DEFAULT_MODEL, available_models
-            _model = model_path or DEFAULT_MODEL
-            _kind = 'bundled' if _model in available_models() else 'custom path'
-            logger.info(f"Force field:               {_model} ({_kind})")
-            logger.info(f"Long-range cutoff:         {settings['lr_cutoff']} Å")
-            _log_long_range(settings, long_range_note)
+        else:
+            logger.info(f"Minimization cycles:       {min_cycles} cycles, each {min_steps} steps")
 
-            if force_conv is not None:
-                logger.info(f"Force convergence:         {force_conv} eV/Å")
-
-            else:
-                logger.info(f"Minimization cycles:       {min_cycles} cycles, each {min_steps} steps")
-
-            logger.info(f"Initial step size:         {min_start_dt} Å")
-            logger.info(f"Maximum step size:         {min_max_dt} Å")
-            logger.info(f"Min steps between updates: {min_n_min}")
-            logger.info(f"Precision:                 {precision}")
-            logger.info(f"Dispersion damping:        {dispersion_damping} Å")
-            logger.info(f"Short-range buffer:        {buffer_sr}")
-            logger.info(f"Long-range buffer:         {buffer_lr}")
-            logger.info("=" * 60)
-            if reporter.journal.active:
-                logger.info(f'Run journal: {reporter.journal.path}')
-                logger.info(f'Watch live: so3lr show {show_argument(reporter.journal.path)}')
-            reserve_gpu(settings, task='opt')   # before JAX starts
-            get_hardware_info()
-            # Run optimization
-            time_start = time.time()
-            perform_min(settings)
-            time_end = time.time()
-            logger.info("=" * 60)
-            logger.info('Optimization execution finished.')
-            logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
-        except Exception as exc:
-            _record_run_failure(exc, 'Optimization failed', log_file if logger_ready else None)
-            raise
+        logger.info(f"Initial step size:         {min_start_dt} Å")
+        logger.info(f"Maximum step size:         {min_max_dt} Å")
+        logger.info(f"Min steps between updates: {min_n_min}")
+        logger.info(f"Precision:                 {precision}")
+        logger.info(f"Dispersion damping:        {dispersion_damping} Å")
+        logger.info(f"Short-range buffer:        {buffer_sr}")
+        logger.info(f"Long-range buffer:         {buffer_lr}")
+        logger.info("=" * 60)
+        reserve_gpu(settings, task='opt')   # before JAX starts
+        get_hardware_info()
+        # Run optimization
+        time_start = time.time()
+        perform_min(settings)
+        time_end = time.time()
+        logger.info("=" * 60)
+        logger.info('Optimization execution finished.')
+        logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
 
 # Define the 'nvt' subcommand
-@cli.command(name='nvt', help="Run NVT molecular dynamics simulation with `so3lr nvt --input geometry.xyz`.")
+@cli.command(name='nvt', short_help='NVT dynamics with a Nose–Hoover thermostat', help="Run NVT molecular dynamics simulation with `so3lr nvt --input geometry.xyz`.")
 @common_io_options
 @common_model_options
 @kspace_options
@@ -1648,7 +1624,7 @@ def nvt_md(**kwargs) -> None:
 
 
 # Define the 'nvt-langevin' subcommand
-@cli.command(name='nvt-langevin', help="Run NVT (Langevin thermostat) molecular dynamics simulation with `so3lr nvt-langevin --input geometry.xyz`.")
+@cli.command(name='nvt-langevin', short_help='NVT dynamics with a Langevin thermostat', help="Run NVT (Langevin thermostat) molecular dynamics simulation with `so3lr nvt-langevin --input geometry.xyz`.")
 @common_io_options
 @common_model_options
 @kspace_options
@@ -1667,7 +1643,7 @@ def nvt_langevin_md(**kwargs) -> None:
 
 
 # Define the 'npt' subcommand
-@cli.command(name='npt', help="Run NPT molecular dynamics simulation with `so3lr npt --input geometry.xyz`. "
+@cli.command(name='npt', short_help='NPT dynamics at constant temperature and pressure', help="Run NPT molecular dynamics simulation with `so3lr npt --input geometry.xyz`. "
                               "Box coupling is isotropic; set `npt_coupling: semi-isotropic` in a settings "
                               "YAML for the EXPERIMENTAL semi-isotropic mode (anisotropic is unsupported).")
 @common_io_options
@@ -1691,7 +1667,7 @@ def npt_md(**kwargs) -> None:
 
 
 # Define the 'nve' subcommand
-@cli.command(name='nve', help="Run NVE molecular dynamics simulation with `so3lr nve --input geometry.xyz`.")
+@cli.command(name='nve', short_help='NVE dynamics at constant volume and energy', help="Run NVE molecular dynamics simulation with `so3lr nve --input geometry.xyz`.")
 @common_io_options
 @common_model_options
 @kspace_options
@@ -1713,7 +1689,7 @@ def nve_md(**kwargs) -> None:
 
 
 # Define the 'eval' subcommand
-@cli.command(name='eval', help="Evaluate SO3LR model on a dataset with `so3lr eval --datafile dataset.extxyz`.")
+@cli.command(name='eval', short_help='Evaluate a model on a dataset', help="Evaluate SO3LR model on a dataset with `so3lr eval --datafile dataset.extxyz`.")
 # Input/Output group
 @click.option('--datafile', '--data-file', '--datafile_path', 'datafile',
               type=click.Path(exists=True, dir_okay=False), required=False,
@@ -1909,7 +1885,7 @@ def eval_model(
 
 
 # Define the 'finetune' subcommand
-@cli.command(name='finetune', help="Finetune SO3LR model on a dataset with `so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10`.")
+@cli.command(name='finetune', short_help='Fine-tune a model on custom data', help="Finetune SO3LR model on a dataset with `so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10`.")
 # Input/Output group
 @click.option('--workdir', '--work-dir', '--workdir_path', 'workdir',
               type=click.Path(), help='Working directory for fine-tuned model checkpoints and logs.')
@@ -2021,7 +1997,7 @@ def _config_workdir(config_path):
     return str(workdir) if workdir else None
 
 
-@cli.command(name='train', help="Train a SO3krates model from a config file with `so3lr train --config config.yaml`.")
+@cli.command(name='train', short_help='Train a model from a configuration file', help="Train a SO3krates model from a config file with `so3lr train --config config.yaml`.")
 @click.option('--config', 'config_path', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Path to the training config file (YAML or JSON).')
 @click.option('--log-file', default=None, type=click.Path(),
@@ -2071,7 +2047,7 @@ def train_model(
 
 
 # Define the 'tune-ewald' subcommand
-@cli.command(name='tune-ewald', help="Tune k-space electrostatics parameters (Ewald/PME/P3M): `so3lr tune-ewald --input geometry.xyz`.")
+@cli.command(name='tune-ewald', short_help='Tune Ewald, PME or P3M parameters', help="Tune k-space electrostatics parameters (Ewald/PME/P3M): `so3lr tune-ewald --input geometry.xyz`.")
 @click.option('--settings', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Path to YAML settings file.')
 @common_io_options

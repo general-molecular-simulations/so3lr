@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-from .terminal import SCHEDULER_VARIABLES
+from .terminal import SCHEDULER_VARIABLES, interactive
 
 RELEASES_URL = 'https://api.github.com/repos/general-molecular-simulations/so3lr/releases/latest'
 UPGRADE_HINT = 'pip install -U git+https://github.com/general-molecular-simulations/so3lr.git'
@@ -35,9 +35,9 @@ def allowed(environ=None, stdin=None, stderr=None, quiet=False):
     stderr = sys.stderr if stderr is None else stderr
     if quiet or environ.get('SO3LR_NO_UPDATE_CHECK', '').strip() not in ('', '0'):
         return False
-    if any(environ.get(name) for name in _BATCH_VARIABLES) or environ.get('TERM') == 'dumb':
+    if any(environ.get(name) for name in _BATCH_VARIABLES):
         return False
-    return all(bool(getattr(stream, 'isatty', lambda: False)()) for stream in (stdin, stderr))
+    return interactive(stdin, stderr, environ=environ)
 
 
 def _version_key(text):

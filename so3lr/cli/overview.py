@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import theme
 from .formatting import finite_number as _number, home_path, terminal_text as _literal
+from .telemetry import JOURNAL_SUFFIX
 from .monitor import _age_seconds, observation_status, observation_timestamp, origin_label
 
 
@@ -48,7 +49,7 @@ def _names(states):
         if directory == '.':
             directory = path.parent.name or str(path.parent)
         if counts[path.parent] > 1:
-            stem = path.name.removesuffix('.events.jsonl')
+            stem = path.name.removesuffix(JOURNAL_SUFFIX)
             directory = f'{directory}/{stem}'
         names.append(directory)
     return names, common

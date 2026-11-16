@@ -20,7 +20,8 @@ from types import SimpleNamespace
 from .telemetry import EventJournal
 from . import theme
 from .formatting import ascii_only_console, display_path as _display_path, duration_label, finite_number as _finite, precision_label, throughput_label, optimization_status, terminal_text
-from .terminal import TerminationSignal as _TerminationSignal, termination_signals as _termination_signals, stop_live
+from .terminal import (TerminationSignal as _TerminationSignal, interactive, is_tty, termination_signals as _termination_signals,
+                       stop_live)
 
 
 @dataclass(frozen=True)
@@ -52,9 +53,9 @@ def reset():
 def _rich_enabled():
     if _configuration.quiet or _configuration.display == 'plain':
         return False
-    if not bool(getattr(sys.stderr, 'isatty', lambda: False)()):
+    if not is_tty(sys.stderr):
         return False
-    return _configuration.display == 'rich' or os.environ.get('TERM') != 'dumb'
+    return _configuration.display == 'rich' or interactive(sys.stderr)
 
 
 class _NullReporter:
@@ -125,6 +126,10 @@ OUTPUT_LABELS = {'optimization': 'Optimization trajectory', 'evaluation': 'Predi
 
 
 PLAIN_PROGRESS_INTERVAL = 600  # seconds between plain progress lines without a checkpoint
+# Live redraws run on the MD host thread. Text-only views are cheap; plots take ~10 ms to draw,
+# so they redraw at most once a second (forced redraws, e.g. a key press, still happen at once).
+TEXT_REFRESH_SECONDS = 0.25
+GRAPH_REFRESH_SECONDS = 1.0
 
 
 class _PlainReporter(_NullReporter):
@@ -630,7 +635,7 @@ class _Reporter:
             return
         from .monitor import _Keyboard
         try:
-            if not getattr(sys.stdin, 'isatty', lambda: False)() or not getattr(sys.stderr, 'isatty', lambda: False)():
+            if not interactive(sys.stdin, sys.stderr):
                 return
             sys.stdin.fileno()
             self._keyboard = _Keyboard()
@@ -679,7 +684,8 @@ class _Reporter:
             return
         force = self._poll_keyboard() or force
         now = time.monotonic()
-        if force or now - self._last_refresh >= 0.25:
+        interval = GRAPH_REFRESH_SECONDS if self._state.samples and not self._graphs_hidden else TEXT_REFRESH_SECONDS
+        if force or now - self._last_refresh >= interval:
             self._live_snapshot = self._snapshot()
             self.live.update(self._live_view(), refresh=True)
             self._last_refresh = now

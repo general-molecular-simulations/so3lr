@@ -7,16 +7,15 @@ model or JAX import happens while drafting.
 from dataclasses import dataclass
 from pathlib import Path
 import shlex
-import shutil
 
 import click
 
 from . import theme
 from .prompts import Back
-from .setup import (_choose, _confirm, _entered_path, _positive, _prompt, TASK_REVIEW_ACTIONS, ask_new_directory, _say,
-                    _select_model, _select_structure, _stage, _stage_rule, _unused_directory, SAVE_FOR_LATER,
-                    START_LATER, default_charge_and_spin, electron_count_problem, export_run, launcher_script,
-                    run_steps)
+from .setup import (_choose, _entered_path, _positive, _prompt, TASK_REVIEW_ACTIONS, ask_charge_and_spin,
+                    ask_new_directory, _say, _select_model, _select_structure, _stage, _stage_rule, _unused_directory,
+                    SAVE_FOR_LATER, START_LATER, default_charge_and_spin, export_run, run_steps)
+from .setup_physics import GAS_PHASE_LR_CUTOFF, PME_LR_CUTOFF
 from so3lr.md_settings_validation import DEFAULT_PRECISION
 from so3lr.model_registry import DEFAULT_MODEL
 
@@ -41,16 +40,7 @@ class Action:
 def _charge_and_spin(console, structure):
     if structure.spin_reading:
         _say(console, f'Default multiplicity from the file: {structure.spin_reading}.', theme.MUTED)
-    charge_default, spin_default = default_charge_and_spin(structure)
-    charge = _prompt('Total charge (e)', default=charge_default, type=int)
-    spin = _prompt('Unpaired electrons (multiplicity minus one)', default=spin_default,
-                   type=click.IntRange(min=0))
-    problem = electron_count_problem(structure.electrons, charge, spin)
-    if problem:
-        _say(console, problem, theme.DANGER)
-        if not _confirm('Keep these values anyway?', default=False):
-            return _charge_and_spin(console, structure)
-    return charge, spin
+    return ask_charge_and_spin(console, structure, *default_charge_and_spin(structure))
 
 
 def _rows_view(number, title, rows, notes):
@@ -229,9 +219,9 @@ def eval_setup(console):
         state['model'] = _select_model(console, state['model'])
 
     def details():
-        default = state['cutoff'] or ('10' if state['kind'] == 'periodic' else '100')
-        _say(console, 'Use 10 Å for periodic data (PME electrostatics and dispersion by default); gas-phase '
-             'molecules need a long cutoff such as 100 Å.', theme.MUTED)
+        default = state['cutoff'] or f"{PME_LR_CUTOFF if state['kind'] == 'periodic' else GAS_PHASE_LR_CUTOFF:g}"
+        _say(console, f'Use {PME_LR_CUTOFF:g} Å for periodic data (PME electrostatics and dispersion by default); '
+             f'gas-phase molecules need a long cutoff such as {GAS_PHASE_LR_CUTOFF:g} Å.', theme.MUTED)
         state['cutoff'] = _positive(console, 'Long-range cutoff (Å)', default)
         state['destination'] = ask_new_directory(console, _unused_directory('so3lr-eval'))
 
@@ -253,16 +243,8 @@ def eval_setup(console):
             state['result'] = None
             return
         try:
-            destination.mkdir()
-            try:
-                launcher = destination / 'run.sh'
-                with launcher.open('x') as handle:
-                    handle.write(launcher_script(destination, 'exec ' + _shell_command(argv)))
-                launcher.chmod(0o755)
-            except BaseException:
-                shutil.rmtree(destination, ignore_errors=True)  # the directory this step created
-                raise
-        except OSError as exc:  # as for MD: say so, then choose the directory again
+            export_run(destination, command=_shell_command(argv))
+        except (OSError, ValueError) as exc:  # as for MD: say so, then choose the directory again
             _say(console, f'Could not save the run: {exc}', theme.DANGER)
             raise Back() from None
         _say(console, f'{theme.status_glyph("completed")} Saved: {home_path(destination)}', theme.SUCCESS)

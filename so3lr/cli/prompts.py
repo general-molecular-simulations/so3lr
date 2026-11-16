@@ -7,7 +7,7 @@ import sys
 import click
 
 from .formatting import terminal_text
-from .terminal import live_display, termination_signals
+from .terminal import interactive, live_display, termination_signals
 
 
 _KEYS = {
@@ -141,8 +141,7 @@ def terminal_keys():
 
 
 def arrow_input_available(console):
-    return (console.is_terminal and bool(getattr(sys.stdin, 'isatty', lambda: False)())
-            and os.environ.get('TERM') != 'dumb')
+    return console.is_terminal and interactive(sys.stdin)
 
 
 def selection_view(title, choices, selected=0, height=24):

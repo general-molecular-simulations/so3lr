@@ -2228,9 +2228,9 @@ def perform_md(
 
     # Loading the model. A bundled name (so3lr-tauri-s/m/l/so3lr) or a custom path; None
     # falls back to the default model. load_model resolves names and paths alike.
-    from so3lr.model_registry import DEFAULT_MODEL, available_models, model_aliases
+    from so3lr.model_registry import DEFAULT_MODEL, available_models, display_name
     selected_model = model_path if model_path is not None else DEFAULT_MODEL
-    reporter.update_info(model=model_aliases().get(str(selected_model), str(selected_model)))
+    reporter.update_info(model=display_name(selected_model))
     reporter.phase('Loading', 'Loading the force field')
     if selected_model in available_models():
         logger.info(f"Using bundled SO3LR model: {selected_model}")
@@ -3218,9 +3218,9 @@ def perform_min(
 
     # Loading the model. A bundled name (so3lr-tauri-s/m/l/so3lr) or a custom path; None
     # falls back to the default model. load_model resolves names and paths alike.
-    from so3lr.model_registry import DEFAULT_MODEL, available_models, model_aliases
+    from so3lr.model_registry import DEFAULT_MODEL, available_models, display_name
     selected_model = model_path if model_path is not None else DEFAULT_MODEL
-    reporter.update_info(model=model_aliases().get(str(selected_model), str(selected_model)),
+    reporter.update_info(model=display_name(selected_model),
                          precision=all_settings['precision'], engine='standard', device_count=1, kernels='JAX')
     reporter.phase('Loading', 'Loading the force field')
     if selected_model in available_models():

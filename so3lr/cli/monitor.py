@@ -17,6 +17,7 @@ import sys
 import time
 
 from .formatting import ascii_only_console, display_path, duration_label, finite_number as _finite, optimization_status, show_command, precision_label, throughput_label, terminal_text
+from .telemetry import JOURNAL_SUFFIX
 from .terminal import input_mode, live_display, termination_signals
 from . import theme
 
@@ -38,6 +39,26 @@ MAX_MEAN_BINS = 2048
 READ_BUDGET = 4 * 1024 * 1024
 MAX_LINE_BYTES = 1024 * 1024
 
+
+def _model(state):
+    """The model a run reports, else the one its settings name (None when neither does)."""
+    return state.info.get('model', state.settings.get('model', state.settings.get('model_path')))
+
+
+def _precision(state):
+    return state.info.get('precision', state.settings.get('precision'))
+
+
+def _throughput(state):
+    """The latest cycle's throughput label ('' before the first sample)."""
+    cycle_seconds = _finite(state.samples[-1].get('seconds_per_step')) if state.samples else None
+    return throughput_label(cycle_seconds, state.dt_fs, state.info.get('atoms'))
+
+
+def _segment(state, sample):
+    """Steps done in the current MD segment at a sample (0 when unknown), as so3lr show --json counts them."""
+    from .overview import progress  # overview imports this module
+    return progress(state, sample)[0] or 0
 
 def _stamp(value):
     try:
@@ -155,10 +176,10 @@ def discover_journals(path, max_depth=3, max_files=128, max_dirs=512):
     """Discover journals in a bounded subtree without following directory links."""
     path = Path(path).expanduser()
     if path.is_file():
-        if not path.name.endswith('.events.jsonl'):
+        if not path.name.endswith(JOURNAL_SUFFIX):
             neighbors = discover_journals(path.parent, max_depth=0, max_files=2)
             target = neighbors[0] if len(neighbors) == 1 else path.parent
-            raise JournalPathError(f'Expected a *.events.jsonl journal, not {path.name}. '
+            raise JournalPathError(f'Expected a *{JOURNAL_SUFFIX} journal, not {path.name}. '
                              f'Try: so3lr show {show_command(target)}')
         return [path]
     if not path.is_dir():
@@ -177,7 +198,7 @@ def discover_journals(path, max_depth=3, max_files=128, max_dirs=512):
                     if entry.name.startswith('.') or entry.name in excluded:
                         continue
                     try:
-                        if entry.is_file(follow_symlinks=False) and entry.name.endswith('.events.jsonl'):
+                        if entry.is_file(follow_symlinks=False) and entry.name.endswith(JOURNAL_SUFFIX):
                             found.append(Path(entry.path))
                             if len(found) >= max_files:
                                 break
@@ -690,7 +711,7 @@ def _plot(samples, key, title, unit, width, target=None, ascii_only=False, rows=
 
 def _run_name(reader):
     """The run's folder, or for a journal in the current directory its file name without the run id."""
-    name = reader.path.parent.name or reader.path.name.removesuffix('.events.jsonl')
+    name = reader.path.parent.name or reader.path.name.removesuffix(JOURNAL_SUFFIX)
     run_id = reader.state.run_id
     return name[:-(len(run_id) + 1)] if run_id and name.endswith('.' + run_id) else name
 
@@ -868,11 +889,11 @@ def _attached_header(state, width, ascii_only, live=None):
     title.append(label(f'{theme.BRAND} SO3LR TAURI'), style=theme.ACCENT_BOLD)
     title.append(label(f'  {glyph} {status}' if glyph else f'  {status}'),
                  style=f'bold {theme.status_style(status)}')
-    model = state.info.get('model', state.settings.get('model', state.settings.get('model_path', '')))
+    model = _model(state)
     details = [str(state.settings.get('ensemble', '')).upper(),
                f"{state.info['atoms']:,} atoms" if isinstance(state.info.get('atoms'), int) else '',
                str(model or '')]
-    precision = state.info.get('precision', state.settings.get('precision'))
+    precision = _precision(state)
     if precision is not None:
         details.append(precision_label(precision))
     rows = [title]
@@ -895,8 +916,7 @@ def _attached_header(state, width, ascii_only, live=None):
         line.append(separator + rest, style=theme.MUTED)
         rows.append(line)
     timing = live.timing_text() if live is not None else ''
-    cycle_seconds = _finite(state.samples[-1].get('seconds_per_step')) if state.samples else None
-    throughput = throughput_label(cycle_seconds, state.dt_fs, state.info.get('atoms'))
+    throughput = _throughput(state)
     timing = ' · '.join(item for item in (timing, throughput) if item)
     if timing:
         rows.append(Text(label(timing), style=theme.MUTED, no_wrap=True, overflow='ellipsis'))
@@ -969,8 +989,8 @@ def _render_steps(reader, selected=0, count=1, ascii_only=False, compact=False, 
     if origin := origin_label(state):
         add(origin, theme.MUTED, 9)
     add('Training · latest validation' if training else 'Optimization · latest recorded cycle', theme.MUTED, 13)
-    model = state.info.get('model', state.settings.get('model', state.settings.get('model_path')))
-    precision = state.info.get('precision', state.settings.get('precision'))
+    model = _model(state)
+    precision = _precision(state)
     if model is not None:
         add(f'Model      {model}', priority=11)
     if precision is not None:
@@ -1044,7 +1064,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     now = now or datetime.now(timezone.utc)
     rows = [Text(theme.BRAND + (' SO3LR TAURI  live MD' if attached else ' SO3LR TAURI  snapshot' if static else ' SO3LR TAURI  monitor'), style=theme.ACCENT_BOLD)]
     if not readers:
-        rows.append(Text('No *.events.jsonl journals found.' if static else 'Waiting for *.events.jsonl journals.', style=theme.MUTED))
+        rows.append(Text(f'No *{JOURNAL_SUFFIX} journals found.' if static else f'Waiting for *{JOURNAL_SUFFIX} journals.', style=theme.MUTED))
         if not static:
             rows.append(Text('Esc/q: close observer', style=theme.MUTED))
         return Group(*rows)
@@ -1064,7 +1084,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     metadata = Table.grid(padding=(0, 2))
     metadata.add_column(style=theme.MUTED, no_wrap=True)
     metadata.add_column(overflow='fold')
-    model = state.info.get('model', state.settings.get('model', state.settings.get('model_path')))
+    model = _model(state)
     if model is not None:
         metadata.add_row(Text('Model'), Text(model))
     details = [state.settings.get('ensemble'),
@@ -1080,7 +1100,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
                 value = ', '.join(str(item) for item in value)
             if value is not None:
                 metadata.add_row(Text(label), Text(value))
-    precision = state.info.get('precision', state.settings.get('precision'))
+    precision = _precision(state)
     if precision is not None:
         metadata.add_row(Text('Precision'), Text(precision_label(precision)))
     if state.phase:
@@ -1096,8 +1116,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
     elif state.samples:
         last = state.samples[-1]
         step = _finite(last.get('step'))
-        segment = _finite(last.get('segment_step'))
-        segment = segment if segment is not None else step - state.start_step
+        segment = _segment(state, last)
         progress = f'Segment {int(segment):,}/{state.total_steps:,} steps' if state.total_steps else f'Segment step {int(segment):,}'
         rows.append(Text(f'{progress} · step counter {int(step):,} · plots show the current segment', style=theme.MUTED))
     else:
@@ -1110,8 +1129,7 @@ def _render_monitor(readers, selected=0, energy='energy_eV', width=80, now=None,
             rows.append(Text(''))
         rows.append(_state_plot(state, key, title, unit, max(24, width), target, ascii_only, label_width=label_width))
     rows.append(Text(f'{state.sample_count:,} samples · {len(state.samples):,} retained · lines connect recorded samples', style=theme.MUTED))
-    cycle_seconds = _finite(state.samples[-1].get('seconds_per_step')) if state.samples else None
-    throughput = throughput_label(cycle_seconds, state.dt_fs, state.info.get('atoms'))
+    throughput = _throughput(state)
     if throughput:
         rows.append(Text(f'Cycle throughput {throughput} (excludes startup/I/O)', style=theme.MUTED))
     if state.checkpoint:
@@ -1169,16 +1187,13 @@ def _paged_monitor(console, options, readers, selected, energy, width, height, p
         if origin := origin_label(state):
             header.append(Text(origin, theme.MUTED))
     if state.samples and not attached:
-        last = state.samples[-1]
-        segment = _finite(last.get('segment_step'))
-        segment = segment if segment is not None else last['step'] - state.start_step
+        segment = _segment(state, state.samples[-1])
         progress = f'{int(segment):,}/{state.total_steps:,} steps' if state.total_steps else f'{int(segment):,} steps'
         header.append(Text(f"Age {_age(observation_timestamp(state), now)} · {str(state.settings.get('ensemble', '')).upper()} · {progress}", theme.MUTED))
     elif not attached:
         header.append(Text(f'Age {_age(observation_timestamp(state), now)} · ' + (state.detail or 'Waiting for MD samples.'), theme.MUTED))
     summary = []
-    cycle_seconds = _finite(state.samples[-1].get('seconds_per_step')) if state.samples else None
-    throughput = throughput_label(cycle_seconds, state.dt_fs, state.info.get('atoms'))
+    throughput = _throughput(state)
     if throughput and not attached:  # the attached header already shows throughput
         summary.append(f'Cycle {throughput}')
     if state.checkpoint:
@@ -1453,7 +1468,8 @@ def show(path, once=False, interval=1.0, no_color=False, as_json=False):
         now = datetime.now(timezone.utc)
         print(json.dumps({'schema': 1, 'runs': [run_summary(reader, now) for reader in readers]}, indent=2))
         return
-    interactive = console.is_terminal and sys.stdin.isatty() and os.environ.get('TERM') != 'dumb'
+    from .prompts import arrow_input_available
+    interactive = arrow_input_available(console)
     ascii_only = ascii_only_console(console)
     if once or not interactive:
         for reader in readers:
@@ -1464,7 +1480,8 @@ def show(path, once=False, interval=1.0, no_color=False, as_json=False):
     # The overview is an extra navigation stop, not a synthetic run. Keep the
     # selected file stable when new journals appear or old ones are removed.
     selected, energy_index, plot_page = (-1 if len(readers) > 1 else 0), list(ENERGIES).index('energy_eV'), 0
-    next_refresh = next_discovery = 0.0
+    next_refresh = 0.0
+    next_discovery = time.monotonic() + max(5.0, interval)  # the journals were just discovered
     try:
         with termination_signals(enabled=interactive), input_mode(_Keyboard()) as keyboard, live_display(Live(console=console, auto_refresh=False,
                                            screen=False, transient=False,

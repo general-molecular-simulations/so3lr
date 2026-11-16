@@ -123,6 +123,13 @@ def model_aliases():
     return dict(_FLOATING_ALIASES)
 
 
+def display_name(name_or_path=None):
+    """The name a run reports for a model: the canonical name for an alias, the default
+    model for None, a custom path as given."""
+    name = str(name_or_path if name_or_path is not None else DEFAULT_MODEL)
+    return _FLOATING_ALIASES.get(name, name)
+
+
 def available_models():
     """Return every accepted model name, canonical names first."""
     return canonical_models() + tuple(_FLOATING_ALIASES)

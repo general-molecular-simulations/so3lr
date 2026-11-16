@@ -25,6 +25,7 @@ LONG_RANGE_KEYS = KSPACE_METHOD_KEYS + _CELL_FITTED_KEYS
 PME_LR_CUTOFF = 10.0     # Å
 PME_SMEARING = 2.0       # Å
 PME_SPACING = 1.55       # Å
+GAS_PHASE_LR_CUTOFF = 100.0  # Å: the guided setup's proposal for isolated structures
 
 
 def long_range_settings(periodic, minimum_cell_height, model, cutoff=None, *, ensemble=None):
@@ -36,7 +37,7 @@ def long_range_settings(periodic, minimum_cell_height, model, cutoff=None, *, en
     a truncated short cutoff as equivalent physics.
     """
     if not periodic:
-        value = 100.0 if cutoff is None else float(cutoff)
+        value = GAS_PHASE_LR_CUTOFF if cutoff is None else float(cutoff)
         if not math.isfinite(value) or value < MIN_DIRECT_LR_CUTOFF:
             raise ValueError('Gas-phase MD requires a finite long-range cutoff of at least '
                              f'{MIN_DIRECT_LR_CUTOFF:g} Å.')

@@ -904,16 +904,34 @@ def _finish_evaluation(*, target_list, tot_abs, tot_sq, tot_n, total_time, compi
     return metrics
 
 
+def _frame_infos(datafile):
+    """Each frame's info dict; for (ext)xyz from the comment lines alone, without the atoms."""
+    from pathlib import Path
+    if Path(datafile).suffix.lower() in ('.xyz', '.extxyz'):
+        from ase.io.extxyz import key_val_str_to_dict
+        from .setup_physics import _xyz_headers
+        return (key_val_str_to_dict(header) for header in _xyz_headers(datafile))
+    from ase.io import iread
+    return (atoms.info for atoms in iread(str(datafile), index=':'))
+
+
 def _dimer_pairs(datafile):
-    """benchmark_Eint per pair for a prepare_dimer_xyz file, else None."""
-    from ase.io import iread, read
+    """benchmark_Eint per pair for a prepare_dimer_xyz file, else None (said in the log when
+    the file looks like one but its frames do not pair up)."""
     from so3lr.binding_energies import BOUND, dimer_references
     try:
-        if read(str(datafile), index=0).info.get('structure_type') not in BOUND:
+        infos = _frame_infos(datafile)
+        first = next(infos, {})
+        if first.get('structure_type') not in BOUND:
             return None
-        return dimer_references(atoms.info for atoms in iread(str(datafile), index=':'))
-    except Exception:
+        references = dimer_references([first, *infos])
+    except Exception as exc:  # the evaluation itself reports an unreadable dataset
+        logger.warning(f'Binding energies skipped: could not read the dimer labels ({exc}).')
         return None
+    if references is None:
+        logger.warning('Binding energies skipped: the frames do not alternate dimer / dimer_translated '
+                       'with a finite benchmark_Eint on each dimer.')
+    return references
 
 
 def _report_binding_energies(references, energies, energy_scored=False):

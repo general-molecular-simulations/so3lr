@@ -57,27 +57,13 @@ def format_overview(command, ctx, formatter, version):
         ('Simulate', ('nvt', 'nvt-langevin', 'npt', 'nve', 'opt')),
         ('Evaluate and train', ('eval', 'train', 'finetune', 'tune-ewald')),
     )
-    descriptions = {
-        'start': 'Choose a structure, review settings, then start or save',
-        'show': 'Browse a run folder and inspect simulation plots (--json for scripts)',
-        'resume': 'Continue a run folder from its last checkpoint',
-        'nvt': 'NVT dynamics with a Nose–Hoover thermostat',
-        'nvt-langevin': 'NVT dynamics with a Langevin thermostat',
-        'npt': 'NPT dynamics at constant temperature and pressure',
-        'nve': 'NVE dynamics at constant volume and energy',
-        'opt': 'Relax a molecular structure',
-        'eval': 'Evaluate a model on a dataset',
-        'train': 'Train a model from a configuration file',
-        'finetune': 'Fine-tune a model on custom data',
-        'tune-ewald': 'Tune Ewald, PME or P3M parameters',
-    }
     shown = set()
     for label, names in groups:
         rows = []
         for name in names:
             child = command.get_command(ctx, name)
             if child is not None and not child.hidden:
-                rows.append((name, descriptions.get(name, child.get_short_help_str())))
+                rows.append((name, child.get_short_help_str()))
                 shown.add(name)
         if rows:
             with formatter.section(label):

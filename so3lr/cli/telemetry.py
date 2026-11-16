@@ -18,6 +18,8 @@ import threading
 import time
 import uuid
 
+JOURNAL_SUFFIX = '.events.jsonl'  # <log stem>.<run id>.events.jsonl
+
 
 _LOGGER = logging.getLogger('SO3LR')
 _SCHEDULER_KEYS = (
@@ -75,7 +77,7 @@ class EventJournal:
             # The exclusive create, not probability alone, guarantees that even
             # colliding IDs cannot overwrite or mix concurrent invocations.
             for attempt in range(4):
-                self.path = base.with_name(f'{base.stem}.{self.run_id}.events.jsonl').absolute()
+                self.path = base.with_name(f'{base.stem}.{self.run_id}{JOURNAL_SUFFIX}').absolute()
                 try:
                     self._stream = self.path.open('x', encoding='utf-8')
                     break

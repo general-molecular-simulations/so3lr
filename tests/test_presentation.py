@@ -752,8 +752,11 @@ def test_progress_refresh_is_throttled(monkeypatch):
             reporter.phase('Running')
         # The first sample immediately replaces startup status with live plots.
         assert len(updates) == 1
-        clock[0] += 0.3
+        clock[0] += ui.TEXT_REFRESH_SECONDS
         reporter.progress(10)
+        assert len(updates) == 1  # plots redraw at most once a second
+        clock[0] += ui.GRAPH_REFRESH_SECONDS
+        reporter.progress(11)
         assert len(updates) == 2
 
 
@@ -771,7 +774,7 @@ def test_attached_plots_update_before_completion_without_reading_journal(monkeyp
         frames = []
         monkeypatch.setattr(reporter.live, 'update', lambda *args, **kwargs: frames.append(render(reporter)))
         reporter.progress(0, temperature=280, potential_energy=-39, volume=1000)
-        clock[0] += 0.3
+        clock[0] += ui.GRAPH_REFRESH_SECONDS
         reporter.progress(100, temperature=300, potential_energy=-38, time_per_step=0.002,
                           energy=-37, conserved_energy=-36, volume=1100)
         assert reporter.status == 'running'

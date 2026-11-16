@@ -112,10 +112,9 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
     it off: single points keep the model's forces)."""
     if box_margin is None:
         box_margin = NPT_BOX_MARGIN if settings.get("ensemble") == "npt" else 0.0
-    from so3lr.model_registry import DEFAULT_MODEL, model_aliases
-    selected_model = settings.get("model_path") or DEFAULT_MODEL
+    from so3lr.model_registry import display_name
     reporter = get_reporter()
-    reporter.update_info(model=model_aliases().get(str(selected_model), str(selected_model)),
+    reporter.update_info(model=display_name(settings.get("model_path") or None),
                          precision=settings.get("precision", "mixed"), engine='flash', atoms=len(atoms))
     reporter.phase('Loading', 'Loading the Flash force field')
     precision = "float64" if dtype == jnp.float64 else "float32"
