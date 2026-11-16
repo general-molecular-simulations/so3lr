@@ -236,3 +236,32 @@ def test_cli_eval_with_intermediates_and_embeddings(eval_dir):
         f"forces RMSE = {forces_rmse} is not a finite positive float.\n"
         f"Log content:\n{log_content}"
     )
+
+
+def test_cli_eval_reports_binding_energies_without_saving(eval_dir):
+    """A prepare_dimer_xyz file reports binding energies even without --save-to:
+    the predictions are kept in memory for them, and nothing is written."""
+    project_root = pathlib.Path(__file__).resolve().parent.parent
+    datafile = project_root / 'so3lr' / 'cli' / 'examples' / 'sapt10k_10_dimers.xyz'
+    result = subprocess.run(
+        ['so3lr', 'eval', '--datafile', str(datafile), '--lr-cutoff', '100', '--targets', 'energy'],
+        capture_output=True, text=True, timeout=600, cwd=eval_dir, env=so3lr_subprocess_env(),
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert 'Binding energies (dimer - separated) for 10 dimers' in output
+    mae = float(re.search(r'MAE ([0-9.]+) kcal/mol', output).group(1))
+    assert 0 < mae < 3, output
+    assert list(eval_dir.iterdir()) == []
+
+
+def test_dimer_labels_are_read_from_the_comment_lines(tmp_path, caplog):
+    from so3lr.cli.so3lr_eval import _dimer_pairs
+    frame = '1\nstructure_type={kind} benchmark_Eint={e} Properties=species:S:1:pos:R:3\nH 0 0 0\n'
+    path = tmp_path / 'dimers.xyz'
+    path.write_text(frame.format(kind='dimer', e=-1.5) + frame.format(kind='dimer_translated', e=0))
+    assert _dimer_pairs(path) == [-1.5]
+    path.write_text(frame.format(kind='dimer', e=-1.5))  # unpaired: said, not silently dropped
+    assert _dimer_pairs(path) is None and 'Binding energies skipped' in caplog.text
+    (tmp_path / 'plain.xyz').write_text('1\nProperties=species:S:1:pos:R:3\nH 0 0 0\n')
+    assert _dimer_pairs(tmp_path / 'plain.xyz') is None

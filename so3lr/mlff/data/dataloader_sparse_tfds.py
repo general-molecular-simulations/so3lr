@@ -5,6 +5,7 @@ import queue
 import traceback
 from ase import Atoms
 from ase.neighborlist import neighbor_list
+from so3lr.mlff.utils.console import say
 from so3lr.mlff.utils.jraph_utils import dynamically_batch_with_lr
 from so3lr.mlff.utils.param_utils import MAX_NUM_THEORY_LEVELS
 
@@ -573,17 +574,17 @@ class QCMLDataLoaderSparseParallel:
         train_total = sum(x for x in self.num_train if x is not None)
         valid_total = sum(x for x in self.num_valid if x is not None)
         if train_total > 0 or valid_total > 0:
-            print(f"Using TFDS splits with limits: num_train={train_total if train_total > 0 else 'unlimited'}, "
+            say(f"Using TFDS splits with limits: num_train={train_total if train_total > 0 else 'unlimited'}, "
                   f"num_valid={valid_total if valid_total > 0 else 'unlimited'}")
         else:
-            print("Using full TFDS splits without limits")
+            say("Using full TFDS splits without limits")
 
         try:
             self.n_proc = int(config.training.batch_n_proc)
-            print(f"Using {self.n_proc} processes for parallel data loading")
+            say(f"Using {self.n_proc} processes for parallel data loading")
         except (AttributeError, TypeError, ValueError):
             self.n_proc = 8
-            print("Warning: No number of processes specified. Defaulting to 8.")
+            logger.warning("No number of processes specified. Defaulting to 8.")
         if self.n_proc < 1:
             raise ValueError('training.batch_n_proc must be at least 1.')
 

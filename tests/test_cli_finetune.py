@@ -90,6 +90,13 @@ def _assert_finetuning_succeeded(result, workdir, max_loss=0.1):
     assert (workdir / 'hyperparameters.json').exists(), "hyperparameters.json not created"
     assert (workdir / 'fine_tuning.json').exists(), "fine_tuning.json not created"
     assert (workdir / 'checkpoints').exists(), "checkpoints directory not created"
+    # so3lr show follows the run through the journal next to the default log
+    assert list(workdir.glob('finetuning.*.events.jsonl')), "no run journal"
+    # The shipped config's data.filter values only get a note in the log, and the
+    # parameter tree stays out of CLI output.
+    output = result.stdout + result.stderr
+    assert not [line for line in output.splitlines() if 'WARNING' in line and 'data.filter' in line]
+    assert 'kernel: (' not in output
 
     # Parse the final eval loss from the printed metrics table. The trainer logs
     # validation checkpoints as rows of a table (print_metrics_header/row):

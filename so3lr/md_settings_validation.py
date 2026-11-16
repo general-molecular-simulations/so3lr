@@ -1,10 +1,15 @@
 """Import-light settings helpers shared by the CLI and ``so3lr_md``: loading a
-settings YAML, resolving the ensemble and the run's precision, checking the MD counts."""
+settings YAML, resolving the ensemble and the run's precision, checking the MD counts
+and which output files a run would refuse to replace."""
 
 import difflib
 import logging
+import math
 import re
-from numbers import Integral
+import stat
+from numbers import Integral, Real
+from pathlib import Path
+from typing import Optional, Union
 
 import yaml
 
@@ -171,11 +176,15 @@ def resolve_ensemble(settings: dict) -> dict:
 
 
 def validate_md_counts(settings) -> None:
-    """Require positive integer MD counts (Click checks CLI flags; YAML/Python land here)."""
+    """Require positive integer MD counts and a positive timestep (Click checks CLI
+    flags; YAML/Python land here)."""
     for name in ('md_cycles', 'md_steps', 'save_buffer', 'kspace_npt_cycles'):
         value = settings.get(name)
         if value is not None and (isinstance(value, bool) or not isinstance(value, Integral) or value < 1):
             raise ValueError(f"{name} must be a positive integer (received {value!r}).")
+    dt = settings.get('md_dt')
+    if dt is not None and (isinstance(dt, bool) or not isinstance(dt, Real) or not math.isfinite(dt) or dt <= 0):
+        raise ValueError(f"md_dt must be a positive, finite timestep (received {dt!r}).")
 
 
 class _SettingsLoader(yaml.SafeLoader):
@@ -193,3 +202,91 @@ def load_settings_yaml(path) -> dict:
     """A settings YAML as a dict (empty for an empty file)."""
     with open(path) as f:
         return yaml.load(f, Loader=_SettingsLoader) or {}
+
+
+def _existing_regular_output_mode(path: Path) -> Optional[int]:
+    """Return an existing output file's mode (symlinks are followed)."""
+    try:
+        metadata = path.stat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(f'Output must be a regular file: {path}')
+    return stat.S_IMODE(metadata.st_mode)
+
+
+def _validate_md_output_write_policy(
+    *,
+    output_file: Optional[Union[str, Path]],
+    output_format: Optional[str],
+    overwrite: bool,
+    restart_load_path: Optional[Union[str, Path]],
+) -> bool:
+    """Reject an existing trajectory that the selected writer would truncate.
+
+    EXTXYZ is intentionally appendable when continuing from a restart. HDF5 is
+    opened in ``mode='w'`` and therefore needs a fresh output path unless the
+    caller explicitly opts in to replacement with ``--overwrite``. Return
+    whether the first EXTXYZ batch should append to an existing restart output.
+    """
+    append = (
+        restart_load_path is not None and output_format == 'extxyz'
+        and not overwrite
+    )
+    if output_file is None:
+        return append
+
+    output_path = Path(output_file)
+    output_mode = _existing_regular_output_mode(output_path)
+    if output_mode is None or overwrite:
+        return append
+    if append:
+        return True
+
+    if restart_load_path is not None and output_format == 'hdf5':
+        raise RuntimeError(
+            f"HDF5 output file already exists: {output_file}. Refusing to "
+            "truncate it during restart. Choose a new --output path for the "
+            "continued trajectory, or pass --overwrite to replace it."
+        )
+
+    raise RuntimeError(
+        f"Output file already exists: {output_file}. Refusing to overwrite. "
+        "Pass --overwrite to replace it, or choose a different --output."
+    )
+
+
+
+def relaxation_output(output_file) -> Path:
+    """The trajectory of the relaxation before MD: <output stem>_opt.xyz beside the output."""
+    path = Path(output_file)
+    return path.with_name(f'{path.stem}_opt.xyz')
+
+
+def checkpoint_file(path) -> Path:
+    """The file save_state writes for restart_save_path: NumPy's .npz suffix added when missing."""
+    return Path(path) if str(path).endswith('.npz') else Path(f'{path}.npz')
+
+
+def refuse_existing(path, overwrite: bool) -> None:
+    """Raise when path exists and overwrite is off (the writers and the CLI's preflight)."""
+    if path and not overwrite and _existing_regular_output_mode(Path(path)) is not None:
+        raise RuntimeError(f"Output file already exists: {path}. Refusing to overwrite. "
+                           f"Pass --overwrite to replace it, or choose a different --output.")
+
+
+def check_outputs(settings, task='md') -> None:
+    """Raise RuntimeError when a run would refuse to write its outputs (one exists, no overwrite).
+
+    The CLI asks before it opens the run's journal, so a refused start leaves no
+    record behind; the writers keep their own checks."""
+    output_file = settings.get('output_file')
+    overwrite = bool(settings.get('overwrite', False))
+    if task == 'opt':
+        refuse_existing(output_file, overwrite)
+        return
+    restart = settings.get('restart_load_path')
+    _validate_md_output_write_policy(output_file=output_file, output_format=settings.get('output_format'),
+                                     overwrite=overwrite, restart_load_path=restart)
+    if output_file and settings.get('relax_before_run', True) and restart is None:
+        refuse_existing(relaxation_output(output_file), overwrite)

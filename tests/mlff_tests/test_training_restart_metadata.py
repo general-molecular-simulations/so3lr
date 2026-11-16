@@ -62,7 +62,7 @@ def test_training_entry_point_keeps_metadata_when_loop_rejects_restart(
                             lambda params: params)
         monkeypatch.setattr(training_utils, 'freeze_parameters',
                             lambda optimizer, **kwargs: optimizer)
-        monkeypatch.setattr(from_config, 'print_param_shapes', lambda *args: None)
+        monkeypatch.setattr(from_config, 'print_param_shapes', lambda *args, **kwargs: None)
         for name in ('count_params', 'count_trainable_params'):
             monkeypatch.setattr(from_config, name, lambda *args, **kwargs: 1)
     calls = []

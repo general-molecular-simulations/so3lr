@@ -883,8 +883,9 @@ def warn_restart_method_mismatch(method, restored_method):
 
 
 def save_pysages_state(pysages_result, path_to_save):
-    """Save PySAGES result for restart."""
+    """Save PySAGES result for restart and return the written filename."""
     pysages.serialization.save(pysages_result, path_to_save)
+    return str(path_to_save)
 
 
 def load_pysages_state(path_to_load):

@@ -20,7 +20,6 @@ import time
 import logging
 from types import SimpleNamespace
 from typing import Any
-from warnings import warn
 from itertools import product
 from functools import lru_cache, partial
 
@@ -38,6 +37,7 @@ from so3lr.model_registry import resolve_model
 from so3lr.pbc import lattice_rows, minimum_image_problem
 from so3lr.cli.so3lr_md import load_model, atoms_to_jnp, process_model, dispersion_ratios, run_on_flash
 from .so3lr_md import run_dtypes, setup_logger, setup_run
+from .presentation import get_reporter
 
 # Setup logging
 logger = logging.getLogger("SO3LR")
@@ -314,14 +314,22 @@ def grid_search(candidates, error_fn, time_fn, accuracy):
         raise ValueError(f"'{accuracy}' is not a float.")
     logger.info(f"Testing {len(candidates)} parameter combinations.")
     logger.info("Force-error estimates:")
+    reporter = get_reporter()
+    reporter.phase('Estimating', 'Force-error estimate of each candidate')
     errors = []
     for candidate in candidates:
         logger.info(f"  {_describe(candidate)}")
         errors.append(float(error_fn(**candidate)))
+        reporter.task_progress(len(errors), len(candidates), 'candidates')
     logger.info("Timings of the candidates within the accuracy:")
-    timings = []
+    reporter.phase('Timing', f'Force calls of the candidates within {accuracy:g} eV/Å')
+    within = sum(error <= accuracy for error in errors)
+    timings, timed = [], 0
     for candidate, error in zip(candidates, errors):
         timings.append(time_fn(**candidate) if error <= accuracy else float("inf"))
+        if error <= accuracy:
+            timed += 1
+            reporter.task_progress(timed, within, 'candidates timed')
         logger.info(f"  {_describe(candidate)}: {timings[-1]} s per force call, "
                     f"estimated error {error}")
     return candidates, errors, timings
@@ -659,6 +667,30 @@ def cell_is_present(cell) -> bool:
     return cell is not None and not np.all(np.asarray(cell) == 0.0)
 
 
+def _report_recommendation(rec, error, timing, accuracy, *, met, kspace, command):
+    """The chosen parameters as the live display's result table (settings-file names)."""
+    names = (('cutoff', 'lr_cutoff', ' Å'), ('smearing', 'kspace_smearing', ' Å'),
+             ('spacing', 'kspace_spacing', ' Å'), ('interpolation_nodes', 'kspace_interp_nodes', ''),
+             ('cutoff_lr_damping', 'dispersion_damping', ' Å'))
+    rows = [(name, f'{rec[key]:g}{unit}') for key, name, unit in names if rec.get(key) is not None]
+    if kspace in ('ewald', 'pme', 'p3m'):
+        rows.insert(1, ('kspace_electrostatics', kspace))
+    rows.append(('Force error', f'{error:.3g} eV/Å estimated · target ≤ {accuracy:g}'))
+    if timing != float('inf'):
+        rows.append(('Force call', f'{timing * 1e3:.3g} ms'))
+    if command:
+        rows.append(('Run MD', command))
+    title = ('Fastest settings within the target' if met
+             else 'No candidate meets the target: smallest error')
+    reporter = get_reporter()
+    reporter.results(title, rows)
+    if met:
+        reporter.outcome(f'force error {error:.2g} ≤ {accuracy:g} eV/Å')
+    else:
+        reporter.outcome(f'smallest force error {error:.2g} eV/Å',
+                         warning=f'no candidate meets the {accuracy:g} eV/Å target')
+
+
 def _flash_setup(settings, atoms, cutoff, smearing, spacing):
     """(charges, timer) on the flash engine where ``run_on_flash`` takes the tune task (PME
     on a structure flash runs; engine auto or flash), else None: the neighbour-list engine
@@ -788,6 +820,8 @@ def tune(
     # Tuning parameters
     # Note that all the tuning parameters are loaded further below
 
+    reporter = get_reporter()
+    reporter.phase('Loading', 'Reading the structure')
     input_file_path = settings.get('input_file')
     if input_file_path is None:
         raise ValueError(
@@ -836,6 +870,7 @@ def tune(
     # finest mesh, the likeliest within the accuracy), which is timed too
     first_spacing = (pme_mesh_spacing(float(np.min(np.linalg.norm(cell, axis=1))), mesh_hi)
                      if kspace_electrostatics == 'pme' else None)
+    reporter.phase('Loading', 'Loading the force field')
     on_flash = _flash_setup(settings, initial_geometry, cutoff_hi, smear_lo, first_spacing)
     if on_flash is not None:
         from so3lr.flash.check import model_cutoff
@@ -904,11 +939,9 @@ def tune(
             model_kwargs=dispersion_model_kwargs,
         )
 
-    recommended_param = None
     best = recommended_index(errs, timings, accuracy)
     if best is not None:
         param, timing, error = params[best], timings[best], errs[best]
-        recommended_param = param  # fastest param that still meets the accuracy target
         if kspace_electrostatics == 'cutoff':
             logger.info(
                 f"Optimally timed parameters for cutoff electrostatics with an estimated force error below {accuracy}eV/A:")
@@ -931,7 +964,7 @@ def tune(
         logger.info(f"  force error estimate [eV/A]: {error}")
 
     else:
-        warn("No parameter meets the accuracy requirement.\n", stacklevel=1)
+        logger.warning(f"No parameter meets the accuracy requirement ({accuracy:g} eV/Å).")
     param, timing, error = params[errs.index(
         min(errs))], timings[errs.index(min(errs))], min(errs)
     logger.info("The parameters with the smallest error estimate are:")
@@ -955,18 +988,20 @@ def tune(
     # Print a ready-to-run MD command using the tuned parameters so users know
     # exactly how to launch a simulation next. Prefer the fastest param that met
     # the accuracy target; otherwise fall back to the smallest-error param.
-    rec = recommended_param if recommended_param is not None else param
+    met = best is not None
+    rec_index = best if met else errs.index(min(errs))
+    rec = params[rec_index]
+    command = None
     if kspace_electrostatics in ('ewald', 'pme', 'p3m'):
         _interp = rec.get('interpolation_nodes')
         _interp_flag = f" --kspace-interp-nodes {int(_interp)}" if _interp is not None else ""
         logger.info("=" * 60)
         logger.info("To run MD with these k-space parameters, e.g. NPT (CLI):")
-        logger.info(
-            f"  so3lr npt --input {input_file_path} --lr-cutoff {rec['cutoff']} "
-            f"--kspace-electrostatics {kspace_electrostatics} "
-            f"--kspace-smearing {rec['smearing']} --kspace-spacing {rec['spacing']}{_interp_flag} "
-            f"--temperature 300 --pressure 1.0"
-        )
+        command = (f"so3lr npt --input {input_file_path} --lr-cutoff {rec['cutoff']:g} "
+                   f"--kspace-electrostatics {kspace_electrostatics} "
+                   f"--kspace-smearing {rec['smearing']:g} --kspace-spacing {rec['spacing']:g}{_interp_flag} "
+                   f"--temperature 300 --pressure 1.0")
+        logger.info(f"  {command}")
         logger.info("Or add the following to your settings.yaml:")
         logger.info(f"  lr_cutoff: {rec['cutoff']}")
         logger.info(f"  kspace_electrostatics: {kspace_electrostatics}")
@@ -978,9 +1013,14 @@ def tune(
     elif kspace_electrostatics == 'cutoff' or kspace_dispersion == 'cutoff':
         logger.info("=" * 60)
         logger.info("To run MD with this cutoff, e.g. NVT (CLI):")
-        logger.info(
-            f"  so3lr nvt --input {input_file_path} --lr-cutoff {rec['cutoff']} --temperature 300"
-        )
+        # Real space only, as tuned: periodic structures otherwise default to PME.
+        command = (f"so3lr nvt --input {input_file_path} --lr-cutoff {rec['cutoff']:g} "
+                   f"--kspace-electrostatics none --kspace-dispersion none --temperature 300")
+        logger.info(f"  {command}")
         logger.info("Or add the following to your settings.yaml:")
         logger.info(f"  lr_cutoff: {rec['cutoff']}")
+        logger.info("  kspace_electrostatics: none")
+        logger.info("  kspace_dispersion: none")
         logger.info("=" * 60)
+    _report_recommendation(rec, errs[rec_index], timings[rec_index], accuracy, met=met, command=command,
+                           kspace=kspace_electrostatics if kspace_dispersion != 'cutoff' else None)
