@@ -189,12 +189,16 @@ def test_md_settings_template_matches_the_yaml_defaults():
     """md_settings.yaml is the documented template users copy: every key in it must be
     one the settings validator knows (else every copy warns of a typo), it must list
     every key that has a YAML default, and the values it shows must be those defaults.
+    The long-range keys chosen for the structure (lr_cutoff: 10 Å with PME on a periodic
+    one) are left unset, as a copy that set them would opt out of that choice.
     md_dt is in fs in the file and in ps in YAML_DEFAULTS; convert as `so3lr --settings` does."""
+    from so3lr.cli.setup_physics import LONG_RANGE_KEYS
     template = load_settings_yaml(MD_SETTINGS_PATH)
     assert sorted(set(template) - known_yaml_keys()) == []
-    assert sorted(set(YAML_DEFAULTS) - set(template)) == []
+    assert sorted(set(YAML_DEFAULTS) - set(template) - set(LONG_RANGE_KEYS)) == []
+    assert sorted(set(template) & set(LONG_RANGE_KEYS)) == ['kspace_dispersion', 'kspace_electrostatics']
     template['md_dt'] = template['md_dt'] / 1000
-    assert {k: (template[k], v) for k, v in YAML_DEFAULTS.items() if template[k] != v} == {}
+    assert {k: (template[k], v) for k, v in YAML_DEFAULTS.items() if k in template and template[k] != v} == {}
 
 
 @pytest.fixture

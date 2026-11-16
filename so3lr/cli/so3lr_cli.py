@@ -1060,7 +1060,7 @@ DEFAULT_DURATION_PS = DEFAULT_FRAME_INTERVAL_PS * DEFAULT_MD_CYCLES
 @click.option('--seed', type=click.IntRange(min=0), default=DEFAULT_SEED, show_default=True)
 @click.option('--relax/--no-relax', default=True, show_default=True, help='Relax the geometry before MD.')
 @click.option('--lr-cutoff', 'cutoff', type=_POSITIVE, default=None,
-              help='Long-range cutoff in Å. [default: 12, or one that fits a small periodic cell]')
+              help='Long-range cutoff in Å. [default: 10 for a periodic structure (fitted to a small cell), 100 for an isolated one]')
 @click.option('--keep-velocities', is_flag=True, help='Keep the velocities stored in the structure file.')
 @click.option('--output-dir', 'directory', type=click.Path(file_okay=False), default=None,
               help='New run folder. [default: so3lr-run, or so3lr-run-2, ...]')

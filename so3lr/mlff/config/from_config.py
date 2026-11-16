@@ -866,8 +866,9 @@ def run_fine_tuning(
             f"{long_range_overrides['kspace_electrostatics']!r}."
         )
     if long_range_overrides.get('kspace_electrostatics', None) is not None:
-        # Unset k-space settings take the values eval and MD use by default, so the
-        # model is trained with the long-range terms it is later run with.
+        # Unset k-space settings take the library defaults (So3lrCalculator's), not the
+        # CLI's periodic default (10 Å, smearing 2, spacing 1.55, k-space dispersion); a config
+        # that should match the CLI sets those keys.
         long_range_overrides.setdefault('kspace_smearing', DEFAULT_KSPACE_SMEARING)
         long_range_overrides.setdefault('kspace_spacing', DEFAULT_KSPACE_SPACING)
         long_range_overrides.setdefault('kspace_dispersion', False)

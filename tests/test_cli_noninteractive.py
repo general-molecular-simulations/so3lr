@@ -95,6 +95,20 @@ def test_unknown_settings_are_dropped_after_the_warning(water, caplog):
     assert "Unknown setting 'md_temp'" in caplog.text
 
 
+def test_the_shipped_settings_template_keeps_the_pme_default(water):
+    # A copy of the template must not opt out of PME by setting the long range explicitly.
+    from so3lr.cli.so3lr_cli import load_md_settings
+    template_path = pathlib.Path(__file__).resolve().parents[1] / 'so3lr' / 'cli' / 'md_settings.yaml'
+    template = yaml.safe_load(template_path.read_text())
+    template.update(input_file=str(water), output_file=str(water.parent / 'out.extxyz'))
+    path = water.parent / 'run.yaml'
+    path.write_text(yaml.safe_dump(template))
+    settings = load_md_settings(path)
+    assert settings['kspace_electrostatics'] == settings['kspace_dispersion'] == 'pme'
+    # water_64's 12.4 Å cell is too small for 10 Å: the fitted cutoff and its 1 Å mesh
+    assert (settings['lr_cutoff'], settings['kspace_smearing'], settings['kspace_spacing']) == (5.5, 2.0, 1.0)
+
+
 def _bundle(tmp_path, md_cycles=100, cycle=40):
     bundle = tmp_path / 'run'
     bundle.mkdir()

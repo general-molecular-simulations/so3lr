@@ -11,11 +11,11 @@ needs (OpenMM, i-PI, LAMMPS, a loop of your own).
 The atoms, charge and spin are fixed; positions and box change from call to call. For each
 box the engine takes the first of so3lr's three ways that can compute it:
 
-* flash (``so3lr.flash``): GPU kernels, for orthorhombic boxes at least twice the cutoffs
-  across, or no box (``flash.check.flash_problem`` says where else it declines: e.g. Ewald,
-  or a CPU). Once the box moves, the cell grid is laid out with NPT's margin, so boxes
-  within a few per cent compile nothing (with PME, each box gets its own mesh, as on the
-  other ways: a new mesh compiles again);
+* flash (``so3lr.flash``): GPU kernels, for orthorhombic boxes (one smaller than twice a
+  cutoff through its periodic images), or no box (``flash.check.flash_problem`` says where
+  else it declines: e.g. Ewald, or a CPU). Once the box moves, the cell grid is laid out
+  with NPT's margin, so boxes within a few per cent compile nothing (with PME, each box gets
+  its own mesh, as on the other ways: a new mesh compiles again);
 * neighbour lists (``to_jax_md``): one compiled step that updates the lists on the device;
   a list that overflows is allocated again here. Orthorhombic boxes at least twice the
   cutoffs (plus the skin) across, or no box;
