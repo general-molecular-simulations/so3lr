@@ -1902,7 +1902,7 @@ class _StrategyChoice(click.Choice):
 
     def convert(self, value, param, ctx):
         if value in REMOVED_FINETUNING_STRATEGIES:
-            self.fail(REMOVED_FINETUNING_STRATEGIES[value], param, ctx)
+            self.fail(f'{value} was removed: {REMOVED_FINETUNING_STRATEGIES[value]}', param, ctx)
         return super().convert(value, param, ctx)
 
 

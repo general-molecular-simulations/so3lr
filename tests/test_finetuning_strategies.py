@@ -69,7 +69,7 @@ def test_unknown_strategy_lists_every_valid_name():
 
 
 @pytest.mark.parametrize('strategy', sorted(REMOVED_FINETUNING_STRATEGIES))
-def test_a_removed_strategy_says_what_replaces_it(strategy):
+def test_a_removed_strategy_says_what_replaces_it(strategy, tmp_path):
     """`freeze_long_range` / `forces_only` froze the long-range heads, which read features
     that keep training, so the charges and ratios drifted anyway. They are gone, and the
     error names the recipes that do keep the long-range terms."""
@@ -81,9 +81,30 @@ def test_a_removed_strategy_says_what_replaces_it(strategy):
 
     from click.testing import CliRunner
     from so3lr.cli.so3lr_cli import cli
-    result = CliRunner().invoke(cli, ['finetune', '--strategy', strategy])
+    datafile = tmp_path / 'data.xyz'
+    datafile.write_text('')
+    result = CliRunner().invoke(cli, ['finetune', '--datafile', str(datafile),
+                                      '--workdir', str(tmp_path / 'out'), '--strategy', strategy])
     assert result.exit_code == 2
-    assert 'was removed' in result.output and 'readout_only' in result.output
+    assert f'{strategy} was removed' in result.output
+    assert f'--strategy {strategy} was removed' not in result.output  # the flag is named once
+    assert 'readout_only' in result.output
+
+
+def test_freeze_parameters_freezes_only_the_named_keys():
+    """The frozen-keys (blacklist) form of freeze_parameters: no strategy uses it since
+    freeze_long_range went, so it is checked here directly. It once froze nothing."""
+    import jax
+    import jax.numpy as jnp
+    import optax
+    from so3lr.mlff.utils.training_utils import freeze_parameters
+
+    params = {'params': {'layers_0': {'w': jnp.ones(2)}, 'observables_2': {'w': jnp.ones(2)}}}
+    opt = freeze_parameters(optax.sgd(1.0), frozen_subset_keys=['observables_2'])
+    grads = jax.tree_util.tree_map(jnp.ones_like, params)
+    updates, _ = opt.update(grads, opt.init(params), params)
+    assert (updates['params']['observables_2']['w'] == 0).all()
+    assert (updates['params']['layers_0']['w'] == -1).all()
 
 
 @pytest.mark.parametrize('strategy', FINETUNING_STRATEGY_NAMES)

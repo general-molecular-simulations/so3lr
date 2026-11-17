@@ -36,6 +36,7 @@ _FINAL_MLP_KEYS = [
     'observables_0/energy_offset',
 ]
 
+
 def _last_layer(num_layers: int) -> str:
     """Name of the last message-passing block of an ``num_layers``-deep model."""
     return f'layers_{num_layers - 1}'
@@ -87,19 +88,16 @@ FINETUNING_STRATEGIES: Dict[str, Callable[[int], Tuple[Optional[List[str]], Opti
 
 FINETUNING_STRATEGY_NAMES: Tuple[str, ...] = tuple(FINETUNING_STRATEGIES)
 
-# Removed strategy name -> what to use instead. `freeze_long_range` (alias `forces_only`)
-# froze the long-range heads, but they read the message-passing features, which kept
-# training, so the predicted charges and a0/C6 ratios drifted anyway.
-_KEEP_LONG_RANGE = (
+# Removed strategy name -> why, and what to use instead. `freeze_long_range` (alias
+# `forces_only`) froze the long-range heads, but they read the message-passing features,
+# which kept training, so the predicted charges and a0/C6 ratios drifted anyway.
+REMOVED_FINETUNING_STRATEGIES: Dict[str, str] = dict.fromkeys(
+    ('freeze_long_range', 'forces_only'),
     'it did not keep the long-range terms: the frozen heads read features that keep '
     'training. To keep them on energy/force-only data, use --strategy readout_only with '
     'a residual readout (model.energy_residual_mlp_widths), or --strategy full with '
-    'training.long_range_anchor_weights; see so3lr/config/finetune.yaml.'
+    'training.long_range_anchor_weights; see so3lr/config/finetune.yaml.',
 )
-REMOVED_FINETUNING_STRATEGIES: Dict[str, str] = {
-    'freeze_long_range': f'--strategy freeze_long_range was removed: {_KEEP_LONG_RANGE}',
-    'forces_only': f'--strategy forces_only was removed: {_KEEP_LONG_RANGE}',
-}
 
 
 def resolve_finetuning_strategy(
@@ -123,7 +121,7 @@ def resolve_finetuning_strategy(
             (the message says what replaces it).
     """
     if strategy in REMOVED_FINETUNING_STRATEGIES:
-        raise ValueError(REMOVED_FINETUNING_STRATEGIES[strategy])
+        raise ValueError(f'--strategy {strategy} was removed: {REMOVED_FINETUNING_STRATEGIES[strategy]}')
     try:
         spec = FINETUNING_STRATEGIES[strategy]
     except KeyError:
