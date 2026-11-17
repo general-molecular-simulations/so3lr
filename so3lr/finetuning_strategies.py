@@ -23,6 +23,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 __all__ = [
     'FINETUNING_STRATEGIES',
     'FINETUNING_STRATEGY_NAMES',
+    'REMOVED_FINETUNING_STRATEGIES',
     'resolve_finetuning_strategy',
 ]
 
@@ -34,18 +35,6 @@ _FINAL_MLP_KEYS = [
     'observables_0/energy_dense*',
     'observables_0/energy_offset',
 ]
-
-# The long-range heads: partial charges (electrostatics), Hirshfeld/a0 ratios
-# and C6 ratios. The partial charges live under
-# ``observables_0/electrostatic_energy`` -- no shipped checkpoint has an
-# ``observables_1``, so freezing that name was a silent no-op that left the
-# charges training on data carrying no electrostatics labels.
-_LONG_RANGE_KEYS = [
-    'observables_0/electrostatic_energy',
-    'observables_2',
-    'observables_3',
-]
-
 
 def _last_layer(num_layers: int) -> str:
     """Name of the last message-passing block of an ``num_layers``-deep model."""
@@ -90,12 +79,6 @@ FINETUNING_STRATEGIES: Dict[str, Callable[[int], Tuple[Optional[List[str]], Opti
     'll_obs_023': lambda n: (
         [_last_layer(n), 'observables_0', 'observables_2', 'observables_3'], None
     ),
-    # Freeze the long-range head weights, train everything else. NOTE: the heads
-    # read the shared backbone features, which keep training, so the predicted
-    # charges and a0/C6 ratios still drift. To keep them fixed use 'readout_only',
-    # or anchor them (training.long_range_anchor_weights).
-    'freeze_long_range': lambda n: (None, list(_LONG_RANGE_KEYS)),
-    'forces_only': lambda n: (None, list(_LONG_RANGE_KEYS)),
     # Freeze the backbone and the long-range heads; train the energy readout and
     # the residual readout (model.energy_residual_mlp_widths in the finetune
     # config). Charges and a0/C6 ratios stay exactly the pretrained ones.
@@ -103,6 +86,20 @@ FINETUNING_STRATEGIES: Dict[str, Callable[[int], Tuple[Optional[List[str]], Opti
 }
 
 FINETUNING_STRATEGY_NAMES: Tuple[str, ...] = tuple(FINETUNING_STRATEGIES)
+
+# Removed strategy name -> what to use instead. `freeze_long_range` (alias `forces_only`)
+# froze the long-range heads, but they read the message-passing features, which kept
+# training, so the predicted charges and a0/C6 ratios drifted anyway.
+_KEEP_LONG_RANGE = (
+    'it did not keep the long-range terms: the frozen heads read features that keep '
+    'training. To keep them on energy/force-only data, use --strategy readout_only with '
+    'a residual readout (model.energy_residual_mlp_widths), or --strategy full with '
+    'training.long_range_anchor_weights; see so3lr/config/finetune.yaml.'
+)
+REMOVED_FINETUNING_STRATEGIES: Dict[str, str] = {
+    'freeze_long_range': f'--strategy freeze_long_range was removed: {_KEEP_LONG_RANGE}',
+    'forces_only': f'--strategy forces_only was removed: {_KEEP_LONG_RANGE}',
+}
 
 
 def resolve_finetuning_strategy(
@@ -122,8 +119,11 @@ def resolve_finetuning_strategy(
         ``(trainable_subset_keys, frozen_subset_keys)``; at most one is non-None.
 
     Raises:
-        ValueError: If ``strategy`` is not a known strategy name.
+        ValueError: If ``strategy`` is not a known strategy name, or a removed one
+            (the message says what replaces it).
     """
+    if strategy in REMOVED_FINETUNING_STRATEGIES:
+        raise ValueError(REMOVED_FINETUNING_STRATEGIES[strategy])
     try:
         spec = FINETUNING_STRATEGIES[strategy]
     except KeyError:

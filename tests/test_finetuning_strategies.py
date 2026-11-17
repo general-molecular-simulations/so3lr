@@ -14,6 +14,7 @@ import pytest
 
 from so3lr.finetuning_strategies import (
     FINETUNING_STRATEGY_NAMES,
+    REMOVED_FINETUNING_STRATEGIES,
     resolve_finetuning_strategy,
 )
 from so3lr.mlff.utils.param_utils import (
@@ -67,6 +68,24 @@ def test_unknown_strategy_lists_every_valid_name():
         assert f'`{name}`' in message
 
 
+@pytest.mark.parametrize('strategy', sorted(REMOVED_FINETUNING_STRATEGIES))
+def test_a_removed_strategy_says_what_replaces_it(strategy):
+    """`freeze_long_range` / `forces_only` froze the long-range heads, which read features
+    that keep training, so the charges and ratios drifted anyway. They are gone, and the
+    error names the recipes that do keep the long-range terms."""
+    assert strategy not in FINETUNING_STRATEGY_NAMES
+    with pytest.raises(ValueError, match='was removed') as excinfo:
+        resolve_finetuning_strategy(strategy, num_layers=3)
+    assert 'readout_only' in str(excinfo.value)
+    assert 'long_range_anchor_weights' in str(excinfo.value)
+
+    from click.testing import CliRunner
+    from so3lr.cli.so3lr_cli import cli
+    result = CliRunner().invoke(cli, ['finetune', '--strategy', strategy])
+    assert result.exit_code == 2
+    assert 'was removed' in result.output and 'readout_only' in result.output
+
+
 @pytest.mark.parametrize('strategy', FINETUNING_STRATEGY_NAMES)
 @pytest.mark.parametrize('model_name', BUNDLED_MODELS)
 def test_strategy_selects_real_parameters(strategy, model_name):
@@ -104,8 +123,7 @@ def test_strategy_selects_real_parameters(strategy, model_name):
     # Every key must select something, so a typo or a renamed head cannot pass
     # unnoticed. The legacy `so3lr` checkpoint genuinely has no C6 head, and no
     # shipped checkpoint has the residual readout, which fine-tuning creates.
-    if model_name == 'so3lr' and (strategy in _OBS_3_STRATEGIES
-                                  or strategy in ('freeze_long_range', 'forces_only')):
+    if model_name == 'so3lr' and strategy in _OBS_3_STRATEGIES:
         assert unmatched == ['observables_3']
     elif strategy == 'readout_only':
         assert unmatched == ['observables_0/energy_residual*']
@@ -113,32 +131,7 @@ def test_strategy_selects_real_parameters(strategy, model_name):
         assert unmatched == [], f'{strategy} on {model_name}: {unmatched} match nothing'
 
 
-@pytest.mark.parametrize('model_name', BUNDLED_MODELS)
-def test_forces_only_freezes_the_partial_charges(model_name):
-    """`forces_only` must freeze the electrostatics head.
-
-    It used to name a non-existent `observables_1`, so the partial charges under
-    `observables_0/electrostatic_energy` kept training on data that carries no
-    electrostatics labels -- destroying exactly the pretrained predictions the
-    strategy exists to protect.
-    """
-    params, num_layers = _load(model_name)
-    _, frozen_keys = resolve_finetuning_strategy('forces_only', num_layers)
-
-    charges = params['params']['observables_0']['electrostatic_energy']
-    n_charge_params = count_params(charges)
-    assert n_charge_params > 0
-
-    trainable = count_trainable_params(params, frozen_keys=frozen_keys)
-    trainable_without_charges_frozen = count_trainable_params(
-        params, frozen_keys=[k for k in frozen_keys if k != 'observables_0/electrostatic_energy']
-    )
-    assert trainable_without_charges_frozen - trainable == n_charge_params
-
-
 def test_aliases_resolve_identically():
-    assert (resolve_finetuning_strategy('forces_only', 3)
-            == resolve_finetuning_strategy('freeze_long_range', 3))
     assert (resolve_finetuning_strategy('freeze_all_but_final_mlp', 3)
             == resolve_finetuning_strategy('final_mlp', 3))
 
