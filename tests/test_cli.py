@@ -196,7 +196,8 @@ def test_md_settings_template_matches_the_yaml_defaults():
     template = load_settings_yaml(MD_SETTINGS_PATH)
     assert sorted(set(template) - known_yaml_keys()) == []
     assert sorted(set(YAML_DEFAULTS) - set(template) - set(LONG_RANGE_KEYS)) == []
-    assert sorted(set(template) & set(LONG_RANGE_KEYS)) == ['kspace_dispersion', 'kspace_electrostatics']
+    assert {key: template[key] for key in set(template) & set(LONG_RANGE_KEYS)} == {
+        'kspace_electrostatics': 'auto', 'kspace_dispersion': 'auto'}
     template['md_dt'] = template['md_dt'] / 1000
     assert {k: (template[k], v) for k, v in YAML_DEFAULTS.items() if k in template and template[k] != v} == {}
 

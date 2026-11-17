@@ -64,15 +64,15 @@ restart_pysages_load_path: null            # Path to load PySAGES state from a p
 
 ## Model Settings
 model_path: null                           # Model: a canonical bundled name (for example so3lr-tauri-m-2606), a floating alias (so3lr-tauri-s/m/l), or a custom MLFF directory. If null, uses the pinned so3lr-tauri-m-2606 default. [Default: null -> so3lr-tauri-m-2606]
-# lr_cutoff: 10.0                          # Long-range cutoff distance in Å. Left unset: 10 Å with PME for both terms on a periodic structure (fitted to a cell too small for it), 12 Å otherwise (an isolated molecule usually wants 100). A value set here is kept.  (CLI: --lr-cutoff)
+# lr_cutoff:                               # Long-range cutoff distance in Å. Leave unset for 10 Å with PME for both terms on a periodic structure (fitted to a cell under 20 Å), 12 Å otherwise; an isolated molecule usually wants 100. A value set here is used as given, also in a small cell.  (CLI: --lr-cutoff)
 dispersion_damping: 2.0                    # Dispersion interactions start damping at (lr_cutoff - dispersion_damping) Å [Default: 2.0]  (CLI: --dispersion-damping)
 buffer_size_multiplier_sr: 1.25           # Buffer size multiplier for short-range neighbor list [Default: 1.25]  (CLI: --buffer-sr)
 buffer_size_multiplier_lr: 1.25           # Buffer size multiplier for long-range neighbor list [Default: 1.25]  (CLI: --buffer-lr)
 
 ## K-space Electrostatics (for periodic systems)
 kspace_electrostatics: auto               # K-space method: "auto" (PME for a periodic structure, off otherwise) / "none" / "ewald" / "pme" / "p3m". An explicit null also turns it off. [Default: auto]  (CLI: --kspace-electrostatics)
-# kspace_smearing: 2.0                    # Smearing width for k-space summation in Å. Left unset: 2 Å  (CLI: --kspace-smearing)
-# kspace_spacing: 1.55                    # Grid spacing for k-space summation in Å. Left unset: 1.55 Å (1 Å below a 10 Å cutoff; 0.775 × a smearing you set)  (CLI: --kspace-spacing)
+# kspace_smearing:                        # Smearing width for k-space summation in Å. Leave unset for 2 Å. A value set here also sets the mesh spacing to 0.775 × it, unless kspace_spacing is set.  (CLI: --kspace-smearing)
+# kspace_spacing:                         # Grid spacing for k-space summation in Å. Leave unset for 1.55 Å (1 Å below a 10 Å cutoff).  (CLI: --kspace-spacing)
 kspace_interp_nodes: 4                    # Number of interpolation nodes for PME/P3M [Default: 4]
 kspace_npt_cycles: 100                    # Re-tune the k-space grid every this many MD cycles in NPT; null disables [Default: 100]
 kspace_remove_net_force: true             # MD/opt forces with k-space minus their mean, so the box does not drift (PME's net force) [Default: true]

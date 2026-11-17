@@ -35,7 +35,8 @@ workdir: null  # Working directory, i.e., for saving the checkpoints and log. Du
 #   # Unset, these take the library defaults, as in So3lrCalculator: smearing 4.0, spacing 2.0,
 #   # no k-space dispersion.
 #   # The CLI's own default for periodic structures is PME for both terms with cutoff_lr 10.0,
-#   # smearing 2.0 and spacing 1.55: set those and kspace_dispersion: true to train with it.
+#   # smearing 2.0 and spacing 1.55 (a cell under 20 Å gets a fitted cutoff and a 1.0 mesh):
+#   # set those and kspace_dispersion: true to train with it.
 #   kspace_smearing: 4.0
 #   kspace_spacing: 2.0
 #   kspace_dispersion: false

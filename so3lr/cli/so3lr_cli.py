@@ -2169,6 +2169,10 @@ def tune_ewald(
             settings_dict[internal_key] = val
         else:
             settings_dict.setdefault(internal_key, val)
+    # A settings file written for MD (the shipped template) may say auto: tune-ewald takes
+    # periodic structures only, where auto means PME.
+    if str(settings_dict.get('kspace_electrostatics')).strip().lower() == 'auto':
+        settings_dict['kspace_electrostatics'] = 'pme'
 
     # Default the log file to the settings YAML name with a .log extension when
     # a settings file is given (e.g. `tune.yaml` -> `tune.log`); otherwise fall
