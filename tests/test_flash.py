@@ -1958,6 +1958,26 @@ def test_cuda_kernels_asked_for_say_why_they_do_not_fit(monkeypatch):
                               jnp.float32)
 
 
+def test_auto_memory_mode_says_why_the_cuda_kernels_are_not_used(monkeypatch, caplog):
+    """--flash-mode auto where the CUDA kernels serve no mode (here: a stand-in reason): the log
+    names the reason, as with a memory mode given, and the engine is built on the Pallas kernels."""
+    import logging
+    from so3lr.flash import cuda
+    from so3lr.flash import md as flash_md
+
+    class Built(Exception):
+        pass
+
+    def stop(*args, kernels, **kwargs):
+        raise Built(kernels)
+
+    monkeypatch.setattr(cuda, "pick_mode", lambda *args: (None, "nvcc not found (a stand-in)"))
+    monkeypatch.setattr(flash_md, "FlashSO3LR", stop)
+    with caplog.at_level(logging.INFO, logger="SO3LR"), pytest.raises(Built, match="pallas"):
+        flash_md.build_engine(_water((1, 1, 1)), dict(SETTINGS, model_path="so3lr-tauri-m-2606"), jnp.float32)
+    assert "Flash: CUDA kernels not used (nvcc not found (a stand-in)); Pallas kernels" in caplog.text
+
+
 # ---- boxes under 2 x a cutoff: that range over the periodic images ----
 SMALL_PME = dict(pme_electrostatics=(2.0, 1.55), pme_dispersion=(2.0, 1.55))
 
