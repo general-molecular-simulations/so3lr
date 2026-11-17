@@ -95,6 +95,33 @@ def test_unknown_settings_are_dropped_after_the_warning(water, caplog):
     assert "Unknown setting 'md_temp'" in caplog.text
 
 
+def test_the_shipped_settings_template_keeps_the_pme_default(water):
+    # A copy of the template must not opt out of PME by setting the long range explicitly.
+    from so3lr.cli.so3lr_cli import load_md_settings
+    from so3lr.md_settings_validation import load_settings_yaml
+    template = load_settings_yaml(pathlib.Path(__file__).resolve().parents[1] / 'so3lr' / 'cli' / 'md_settings.yaml')
+    template.update(input_file=str(water), output_file=str(water.parent / 'out.extxyz'))
+    path = water.parent / 'run.yaml'
+    path.write_text(yaml.safe_dump(template))
+    settings = load_md_settings(path)
+    assert settings['kspace_electrostatics'] == settings['kspace_dispersion'] == 'pme'
+    # water_64's 12.4 Å cell is too small for 10 Å: the fitted cutoff and its 1 Å mesh
+    assert (settings['lr_cutoff'], settings['kspace_smearing'], settings['kspace_spacing']) == (5.5, 2.0, 1.0)
+
+
+def test_tune_ewald_reads_auto_in_a_settings_file_as_pme(water, monkeypatch):
+    from so3lr.cli import so3lr_cli
+    seen = {}
+    monkeypatch.setattr(so3lr_cli, 'tune', lambda settings: seen.update(settings))
+    monkeypatch.setattr(so3lr_cli, 'reserve_gpu', lambda *args, **kwargs: None)
+    monkeypatch.setattr(so3lr_cli, 'get_hardware_info', lambda *args, **kwargs: None)
+    (water.parent / 'md.yaml').write_text(f'input_file: {water}\nkspace_electrostatics: auto\n'
+                                          'kspace_dispersion: auto\n')
+    result = CliRunner().invoke(cli, ['tune-ewald', '--settings', 'md.yaml'])
+    assert result.exit_code == 0, result.output
+    assert seen['kspace_electrostatics'] == 'pme'
+
+
 def _bundle(tmp_path, md_cycles=100, cycle=40):
     bundle = tmp_path / 'run'
     bundle.mkdir()
