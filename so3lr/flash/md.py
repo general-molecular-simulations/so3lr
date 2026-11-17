@@ -147,6 +147,9 @@ def build_engine(atoms, settings, dtype, box_margin=None, positions=None):
         mode = picked or pick_mode(n, _free_bytes() - reserve, statics)
         if not picked and kernels == "auto":
             kernels = "pallas"           # not the CUDA kernels in a mode of theirs auto does not pick
+            # as attach says it for a mode given: why this run is on the Pallas kernels (no nvcc,
+            # an older or AMD GPU, tiles that do not fit, too little free memory)
+            logger.info("Flash: CUDA kernels not used (%s); Pallas kernels", why)
         elif not picked and kernels == "cuda" and not cuda_serves(mode):
             # asked for, the kernels serve the leaner modes in chunks, but not those of the
             # attention in passes (why: their memory, or what they do not serve at all)
