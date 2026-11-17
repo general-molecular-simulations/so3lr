@@ -113,13 +113,11 @@ def _assert_finetuning_succeeded(result, workdir, max_loss=0.1):
 
 
 # What every strategy selects, and how many parameters that trains, is checked against
-# every bundled model in test_finetuning_strategies.py, without a training run. These
-# two runs cover what only `so3lr finetune` shows: `last_layer` must name its block from
-# the *pretrained* model's num_layers, not the finetune config's (#15), and
-# `forces_only` is the frozen-keys (blacklist) path, which once reported everything
-# trainable because frozen_keys were ignored. `full` (everything trainable) runs in
-# test_cli_finetune_water_pbc (--full).
-@pytest.mark.parametrize('strategy', ['last_layer', 'forces_only'])
+# every bundled model in test_finetuning_strategies.py, without a training run. This
+# run covers what only `so3lr finetune` shows: `last_layer` must name its block from
+# the *pretrained* model's num_layers, not the finetune config's (#15). `full`
+# (everything trainable) runs in test_cli_finetune_water_pbc (--full).
+@pytest.mark.parametrize('strategy', ['last_layer'])
 def test_cli_finetune(workdir, test_config, strategy):
     """Run `so3lr finetune` on ac.xyz with 20 train / 5 valid and verify it completes."""
     result = subprocess.run(

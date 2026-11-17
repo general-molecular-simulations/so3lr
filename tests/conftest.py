@@ -46,7 +46,6 @@ KNOWN_SLOW_TEST_DURATIONS = {
     'tests/test_cli_train.py::test_cli_train_forces_and_energy_with_lse_shifts': 79.0,
     'tests/test_cli_train.py::test_cli_train_water_pbc_with_long_range': 60.0,
     'tests/test_cli_finetune.py::test_cli_finetune[last_layer]': 35.0,
-    'tests/test_cli_finetune.py::test_cli_finetune[forces_only]': 31.0,
     'tests/mlff_tests/test_data_loader_ase.py::test_data_load_with_pbc[True]': 13.0,
     'tests/test_glp_cell_list_overflow.py::test_overfilled_cell_is_reallocated': 26.0,
 }

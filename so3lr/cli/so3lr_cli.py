@@ -18,7 +18,7 @@ from .. import __version__
 # Import-cheap by design (no JAX): `so3lr --help` builds the --strategy
 # choices from this table at import time, and run_fine_tuning resolves the
 # same table into parameter keys, so the two cannot drift apart.
-from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES
+from ..finetuning_strategies import FINETUNING_STRATEGY_NAMES, REMOVED_FINETUNING_STRATEGIES
 from ..md_observables import MD_OBSERVABLES
 from ..md_settings_validation import (
     DEFAULT_PRECISION, DEFAULT_PRESSURE, PRECISIONS, load_settings_yaml, resolve_ensemble, validate_md_counts)
@@ -1897,6 +1897,15 @@ def eval_model(
 
 
 # Define the 'finetune' subcommand
+class _StrategyChoice(click.Choice):
+    """--strategy choices; a removed strategy says what replaces it instead of listing the choices."""
+
+    def convert(self, value, param, ctx):
+        if value in REMOVED_FINETUNING_STRATEGIES:
+            self.fail(f'{value} was removed: {REMOVED_FINETUNING_STRATEGIES[value]}', param, ctx)
+        return super().convert(value, param, ctx)
+
+
 @cli.command(name='finetune', short_help='Fine-tune a model on custom data', help="Finetune SO3LR model on a dataset with `so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10`.")
 # Input/Output group
 @click.option('--workdir', '--work-dir', '--workdir_path', 'workdir',
@@ -1908,7 +1917,7 @@ def eval_model(
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Finetuning settings.
-@click.option('--strategy', type=click.Choice(list(FINETUNING_STRATEGY_NAMES)),
+@click.option('--strategy', type=_StrategyChoice(list(FINETUNING_STRATEGY_NAMES)),
               default='full', help='Strategy for finetuning. [default: full]')
 @click.option('--config', '--config_path', 'config_path', type=click.Path(exists=False), default=None,
               help='Path to the finetuning config (YAML only; unlike `so3lr train --config`, JSON is not supported here). '

@@ -2,8 +2,7 @@ workdir: null  # Working directory, i.e., for saving the checkpoints and log. Du
 # Fine-tuning on energies and forces only. The data cannot tell short-range from
 # long-range energy, so plain full fine-tuning (--strategy full) drifts the predicted
 # charges and a0/C6 ratios: C6 by 15-67 % and dipole angles 2-4x worse in our tests.
-# --strategy freeze_long_range does NOT prevent this (the frozen heads read a backbone
-# that keeps training). Use one of these, with energy weight 1.0 (see loss_weights):
+# Use one of these, with energy weight 1.0 (see loss_weights):
 #   1. Anchors (best accuracy): --strategy full + training.long_range_anchor_weights.
 #      a0/C6 stay within ~1 % of the pretrained model, charges ~0.006 e; out-of-domain
 #      dipoles still degrade, by about half as much as full fine-tuning.
