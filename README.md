@@ -18,6 +18,7 @@ for short-range repulsion, long-range electrostatics, and dispersion interaction
 ## Installation
 
 Try SO3LR without any local installation using our
+[light web version](https://so3lr.github.io/gui/) or
 [Colab notebook](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb).
 
 We recommend installing SO3LR with [uv](https://docs.astral.sh/uv/) (it's magical):
