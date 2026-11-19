@@ -1,0 +1,34 @@
+#trajectory-analysis{margin-top:14px}
+.result:has(#trajectory-analysis:not([hidden])){padding:0;border:0;border-radius:0;background:transparent;overflow:visible}
+.pa-heading,.pa-legend,.pa-legend-item{display:flex;align-items:center}
+.pa-heading h3{margin:0}
+.pa-heading{justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:5px 12px}
+.pa-heading h3{font:620 1rem/1.35 var(--type);letter-spacing:-.025em}
+.pa-current{font:.79rem var(--mono);color:#3e4756}
+.pa-sub,.pa-note,.pa-axis-caption{color:var(--soft);font-size:.8rem;line-height:1.45}
+.pa-note{margin:4px 0 7px}
+.pa-group{min-width:0;padding:15px 17px 13px;border:1px solid var(--line);border-radius:8px;background:#fff}
+.pa-population{background:#f9fafc}
+.pa-population .pa-legend{margin:10px 0}
+.pa-legend{gap:5px 8px;flex-wrap:wrap}
+.pa-legend-item{gap:6px;padding:4px 7px;border:1px solid #d5d9df;background:white;border-radius:5px;font-size:.8rem;line-height:1.25;white-space:nowrap}
+button.pa-legend-item:hover{border-color:#939ba7}
+.pa-swatch{width:14px;height:3px;background:var(--ss-color);border-radius:2px}
+.pa-value{color:#4c535d;font:.75rem var(--mono)}
+.pa-legend-item[aria-pressed=false]{opacity:.55}
+.pa-legend-item[aria-pressed=false] .pa-swatch{background:#9ea3aa}
+.pa-axis-caption{font-size:.75rem;margin-top:8px}
+.pa-surface{min-width:0;width:100%}
+.pa-chart{display:block;width:100%;height:auto;touch-action:pan-y;cursor:crosshair;overflow:visible}
+.pa-chart text{fill:#616872;font:11px var(--mono)}
+.pa-chart .pa-axis-title{font:12px var(--type);fill:#4e5561}
+.pa-reference{stroke:#568097;stroke-width:1.1;stroke-dasharray:5 4;opacity:.8}
+.pa-grid{stroke:#d6dbe2;stroke-width:1}
+.pa-marker{stroke:#606a7a;stroke-width:1;stroke-dasharray:3 3;pointer-events:none}
+.pa-group+.pa-group{margin-top:12px}
+.pa-plots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.pa-population+.pa-plots{margin-top:12px}
+.pa-plots .pa-group{margin:0}
+.pa-scalar{margin-top:12px}
+@media(max-width:780px){.pa-plots{grid-template-columns:1fr}}
+@media(max-width:650px){.pa-group{padding:12px 10px}.pa-heading h3{font-size:.93rem}.pa-legend-item{font-size:.77rem}.pa-sub{font-size:.77rem}}

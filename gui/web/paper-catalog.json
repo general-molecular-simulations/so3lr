@@ -1,0 +1,119 @@
+[
+  {
+    "id": "paper-benchmark-torsionnet500",
+    "name": "Benzimidazole–indazole",
+    "group": "TorsionNet500",
+    "category": "TorsionNet500",
+    "formula": "C14H10N4",
+    "atom_count": 28,
+    "charge": 0,
+    "source": "SO3LR Tauri · Zenodo",
+    "source_url": "https://doi.org/10.5281/zenodo.22920714",
+    "source_file": "test_benchmarks/table2_external/torsionnet500.xyz",
+    "source_frame": 7340,
+    "description": "Start from a twisted conformer and relax the two rings toward a common plane.",
+    "structure_file": "paper-data/paper-benchmark-torsionnet500.json",
+    "structure_kind": "Molecular geometry",
+    "periodic": false,
+    "pbc": [
+      false,
+      false,
+      false
+    ],
+    "source_id": "305",
+    "default_task": "relax",
+    "relax_steps": 300
+  },
+  {
+    "id": "paper-test-dna",
+    "name": "Guanine–cytosine dinucleotide",
+    "group": "QCell",
+    "category": "DNA · QCell",
+    "formula": "C19H24N8O10P",
+    "atom_count": 62,
+    "charge": -1,
+    "source": "SO3LR Tauri · Zenodo",
+    "source_url": "https://doi.org/10.5281/zenodo.22920714",
+    "source_file": "test_benchmarks/heldout_test_splits/test_dna.extxyz",
+    "source_frame": 6,
+    "description": "Two DNA residues joined by a phosphodiester bond.",
+    "structure_file": "paper-data/paper-test-dna.json",
+    "structure_kind": "Molecular geometry",
+    "periodic": false,
+    "pbc": [
+      false,
+      false,
+      false
+    ],
+    "source_atom_range_1based": [
+      1,
+      62
+    ]
+  },
+  {
+    "id": "paper-test-sug",
+    "name": "Disaccharide",
+    "group": "QCell",
+    "category": "Sugar · QCell",
+    "formula": "C12H22O11",
+    "atom_count": 45,
+    "charge": 0,
+    "source": "SO3LR Tauri · Zenodo",
+    "source_url": "https://doi.org/10.5281/zenodo.22920714",
+    "source_file": "test_benchmarks/heldout_test_splits/test_sug.extxyz",
+    "source_frame": 1,
+    "description": "",
+    "structure_file": "paper-data/paper-test-sug.json",
+    "structure_kind": "Molecular geometry",
+    "periodic": false,
+    "pbc": [
+      false,
+      false,
+      false
+    ]
+  },
+  {
+    "id": "paper-test-lip",
+    "name": "Phosphatidylserine",
+    "group": "QCell",
+    "category": "Lipid · QCell",
+    "formula": "C40H75NO10P",
+    "atom_count": 127,
+    "charge": -1,
+    "source": "SO3LR Tauri · Zenodo",
+    "source_url": "https://doi.org/10.5281/zenodo.22920714",
+    "source_file": "test_benchmarks/heldout_test_splits/test_lip.extxyz",
+    "source_frame": 21,
+    "description": "A phosphatidylserine molecule with palmitoyl and oleoyl tails.",
+    "structure_file": "paper-data/paper-test-lip.json",
+    "structure_kind": "Molecular geometry",
+    "periodic": false,
+    "pbc": [
+      false,
+      false,
+      false
+    ]
+  },
+  {
+    "id": "paper-test-ion",
+    "name": "Ion with water",
+    "group": "QCell",
+    "category": "Ion · QCell",
+    "formula": "H10NaO5",
+    "atom_count": 16,
+    "charge": 1,
+    "source": "SO3LR Tauri · Zenodo",
+    "source_url": "https://doi.org/10.5281/zenodo.22920714",
+    "source_file": "test_benchmarks/heldout_test_splits/test_ion.extxyz",
+    "source_frame": 1,
+    "description": "A sodium ion surrounded by five water molecules.",
+    "structure_file": "paper-data/paper-test-ion.json",
+    "structure_kind": "Molecular geometry",
+    "periodic": false,
+    "pbc": [
+      false,
+      false,
+      false
+    ]
+  }
+]
