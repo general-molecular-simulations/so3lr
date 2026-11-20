@@ -26,7 +26,7 @@ from ..flash.check import ENGINES, FLASH_MODES, KERNELS, reserve_gpu
 # Import-cheap (standard library only); the --model help is built from it so the
 # listed names and the default cannot go stale when a release lands.
 from ..model_registry import DEFAULT_MODEL, available_models
-from .help import GroupedCommand, format_overview
+from .help import GroupedCommand, NVT_EXAMPLE, format_overview
 from .setup_physics import PME_LR_CUTOFF, PME_SMEARING, PME_SPACING
 from . import presentation
 from .formatting import show_command as show_argument
@@ -300,18 +300,19 @@ def _validate_model_choice(ctx, param, value):
     return value
 
 
-def common_io_options(f: Callable) -> Callable:
-    """Common input/output options for all MD commands."""
-    f = click.option('--input', '--input_file', 'input_file', type=click.Path(exists=True, dir_okay=False),
-                     help='Input geometry file (any ASE-readable format). [default: None]')(f)
-    f = click.option('--output', '--output_file', 'output_file', type=click.Path(),
-                     help='Output trajectory file (.hdf5 or .xyz). [default: <input>_<ensemble>.xyz]')(f)
-    f = click.option('--log-file', default=None, type=click.Path(),
-                     help='File to write logs to. [default: <output>.log]')(f)
-    f = click.option('--overwrite/--no-overwrite', 'overwrite', default=False,
-                     help='If the trajectory output already exists, overwrite it. '
-                          'Default is to refuse (rename your previous run, or pass --overwrite).')(f)
-    return f
+def common_io_options(*,
+                      output_help='Save the trajectory as .xyz, .extxyz, .h5 or .hdf5. '
+                                  '[default: <input stem>_<ensemble>.xyz]',
+                      log_help='Write a run log. [default: <output stem>.log, next to the trajectory]',
+                      overwrite_help='Replace existing output files. [default: refuse]') -> Callable:
+    """Share file flags while describing what each command writes."""
+    def decorate(f):
+        f = click.option('--input', '--input_file', 'input_file', type=click.Path(exists=True, dir_okay=False),
+                         help='Read the starting structure (any ASE-readable format).')(f)
+        f = click.option('--output', '--output_file', 'output_file', type=click.Path(), help=output_help)(f)
+        f = click.option('--log-file', default=None, type=click.Path(), help=log_help)(f)
+        return click.option('--overwrite/--no-overwrite', 'overwrite', default=False, help=overwrite_help)(f)
+    return decorate
 
 
 PRECISION_HELP = ('float32 or float64 throughout, or mixed: a float32 model around a float64 MD state '
@@ -364,11 +365,11 @@ def common_md_options(f: Callable) -> Callable:
     f = click.option('--temperature', default=DEFAULT_TEMPERATURE, type=float,
                      help=f'Simulation temperature in Kelvin. [default: {DEFAULT_TEMPERATURE}]')(f)
     f = click.option('--dt', default=DEFAULT_TIMESTEP, type=click.FloatRange(min=0, min_open=True),
-                     help=f'MD timestep in femtoseconds. [default: {DEFAULT_TIMESTEP}]')(f)
+                     help=f'Time per step in fs. [default: {DEFAULT_TIMESTEP}]')(f)
     f = click.option('--md-cycles', default=DEFAULT_MD_CYCLES, type=click.IntRange(min=1),
-                     help=f'Number of MD cycles to run. [default: {DEFAULT_MD_CYCLES}]')(f)
+                     help=f'Number of cycles to run. Save one frame per completed cycle. [default: {DEFAULT_MD_CYCLES}]')(f)
     f = click.option('--md-steps', default=DEFAULT_MD_STEPS_PER_CYCLE, type=click.IntRange(min=1),
-                     help=f'Number of steps per MD cycle. [default: {DEFAULT_MD_STEPS_PER_CYCLE}]')(f)
+                     help=f'Steps per cycle. Frame interval in fs = --dt × --md-steps. [default: {DEFAULT_MD_STEPS_PER_CYCLE}]')(f)
     f = click.option('--restart-save', type=click.Path(), default=None,
                      help='Path to save restart data.')(f)
     f = click.option('--restart-load', type=click.Path(exists=True, dir_okay=False), default=None,
@@ -380,12 +381,13 @@ def common_md_options(f: Callable) -> Callable:
     f = click.option('--seed', default=DEFAULT_SEED, type=int,
                      help=f'Random seed for MD. [default: {DEFAULT_SEED}]')(f)
     f = click.option('--observable', default=DEFAULT_OBSERVABLES, multiple=True,
-                     type=click.Choice(list(MD_OBSERVABLES)),
-                     help='Observable to compute and save during MD. Repeatable. '
-                          'Note zbl_repulsion (legacy so3lr) and nlh_repulsion '
+                     type=click.Choice(list(MD_OBSERVABLES)), metavar='NAME',
+                     help='Compute and save an observable during MD. Repeat to save several. '
+                          f'Choose from {", ".join(MD_OBSERVABLES)}. '
+                          'The names zbl_repulsion (legacy so3lr) and nlh_repulsion '
                           '(so3lr-tauri-s/m/l) are the same quantity under the two '
                           'model generations\' output keys. [default: none]')(f)
-    f = click.option('--help', '-h', is_flag=True, help='Show brief command overview.')(f)
+    f = click.option('--help', '-h', is_flag=True, help='Show command help.')(f)
     return f
 
 
@@ -786,38 +788,23 @@ def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Pa
 
 
 @click.group(cls=CustomCommandClass, invoke_without_command=True,
-             help="Run molecular dynamics using SO3LR Machine Learned Force Field.",
+             help='Run molecular simulations with machine-learned force fields.',
              context_settings={"help_option_names": []})
 @click.option('--settings', type=click.Path(exists=True, dir_okay=False), default=None,
-              help='Path to YAML settings file. All simulation parameters are read from this file.')
+              help='Run a simulation from a YAML settings file. Use without a subcommand.')
 @click.option('--help-full', is_flag=True,
               help='Show the command overview with additional examples.')
 @click.option('--help', '-h', is_flag=True,
-              help='Show brief command overview.')
-@click.version_option(version=__version__, prog_name='SO3LR Tauri')
+              help='Show commands and how to start.')
+@click.version_option(version=__version__, prog_name='SO3LR', message='%(prog)s v%(version)s')
 @click.option('--display', type=click.Choice(['auto', 'rich', 'plain']), default='auto',
-              show_default=True, help='MD terminal display; auto uses rich output in a terminal.')
+              show_default=True, help='Terminal output format. Auto uses rich output in a terminal.')
 @click.option('--verbose', '-v', is_flag=True, help='Also show detailed MD diagnostics in the terminal.')
 @click.option('--quiet', '-q', is_flag=True, help='Only show warnings and errors.')
 @click.option('--no-color', is_flag=True, help='Disable terminal colors (also honors NO_COLOR).')
 @click.pass_context
 def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool,
         display: str, verbose: bool, quiet: bool, no_color: bool) -> None:
-    """
-    Run molecular dynamics simulations with SO3LR or MLFF models.
-
-    \b
-    Subcommands:
-      opt           Run geometry optimization
-      nvt           Run NVT MD (Nose-Hoover thermostat)
-      nvt-langevin  Run NVT MD (Langevin thermostat)
-      npt           Run NPT MD
-      nve           Run NVE MD
-
-    When called without a subcommand, all settings are read from a YAML file:
-
-      so3lr --settings settings.yaml
-    """
     if verbose and quiet:
         raise click.UsageError('--verbose and --quiet cannot be combined.')
     presentation.configure(display=display, verbose=verbose, quiet=quiet, no_color=no_color)
@@ -831,7 +818,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
             'Use `so3lr --settings FILE`, or pass options directly to the subcommand.')
 
     if help or help_full:
-        click.echo(ctx.get_help())
+        click.echo(ctx.get_help(), color=ctx.color)
         return
 
     if ctx.invoked_subcommand is not None:
@@ -842,7 +829,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
         if should_launch():
             _interactive_setup()
         else:
-            click.echo(ctx.get_help())
+            click.echo(ctx.get_help(), color=ctx.color)
         return
 
     _run_settings_file(settings)
@@ -1036,11 +1023,10 @@ DEFAULT_FRAME_INTERVAL_PS = DEFAULT_TIMESTEP * DEFAULT_MD_STEPS_PER_CYCLE / 1000
 DEFAULT_DURATION_PS = DEFAULT_FRAME_INTERVAL_PS * DEFAULT_MD_CYCLES
 
 
-@cli.command(name='start', short_help='Choose a structure, review settings, then start or save', help='Set up MD, optimization or evaluation interactively; saves settings.yaml or run.sh '
-                                'in a new run folder. With --input, writes the MD setup without prompts.',
+@cli.command(name='start', short_help='Open guided setup or save MD settings',
              context_settings={'help_option_names': ['--help', '-h']})
 @click.option('--input', 'input_file', type=click.Path(exists=True, dir_okay=False), default=None,
-              help='Structure (.xyz or .extxyz): propose the MD setup for it without prompts (scripts, agents).')
+              help='Use a structure (.xyz or .extxyz) to prepare an MD run without prompts.')
 @click.option('--frame', type=click.IntRange(min=1), default=None,
               help='Frame of a multi-frame structure file to copy (1-based).')
 @click.option('--ensemble', type=click.Choice(['nvt', 'nvt-langevin', 'nve', 'npt']), default='nvt',
@@ -1054,7 +1040,8 @@ DEFAULT_DURATION_PS = DEFAULT_FRAME_INTERVAL_PS * DEFAULT_MD_CYCLES
 @click.option('--frame-interval', type=_POSITIVE, default=DEFAULT_FRAME_INTERVAL_PS,
               show_default=True, help='ps between saved frames (a whole number of timesteps).')
 @click.option('--dt', type=_POSITIVE, default=DEFAULT_TIMESTEP, show_default=True, help='Timestep in fs.')
-@click.option('--total-charge', 'charge', type=int, default=None, help='[default: the file\'s charge=, else 0]')
+@click.option('--total-charge', 'charge', type=int, default=None,
+              help='Total charge. [default: the structure file\'s charge, or 0]')
 @click.option('--spin', type=click.IntRange(min=0), default=None,
               help='Unpaired electrons. [default: from the file\'s multiplicity, else 0]')
 @click.option('--seed', type=click.IntRange(min=0), default=DEFAULT_SEED, show_default=True)
@@ -1066,6 +1053,15 @@ DEFAULT_DURATION_PS = DEFAULT_FRAME_INTERVAL_PS * DEFAULT_MD_CYCLES
               help='New run folder. [default: so3lr-run, or so3lr-run-2, ...]')
 @click.option('--print', 'print_only', is_flag=True, help='Print the settings YAML instead of writing a run folder.')
 def start_command(input_file, **options):
+    """Open guided setup for molecular dynamics, relaxation or dataset evaluation.
+
+    With --input, prepare an MD run without prompts. Use --print to see the
+    YAML or --output-dir to choose where the run files go.
+
+    \b
+    so3lr start
+    so3lr start --input molecule.xyz --duration 1 --print
+    """
     if input_file is None:
         if _given(options):
             raise click.UsageError('Options other than --input need --input: they describe the MD setup '
@@ -1083,16 +1079,21 @@ def start_command(input_file, **options):
         click.echo(f'Start it with: sh {home_path(directory / "run.sh")}  (or sbatch run.sh in that folder)')
 
 
-@cli.command(name='resume', short_help='Continue a run folder from its last checkpoint', help='Continue a settings-file MD run from its last checkpoint: `so3lr resume RUN_FOLDER`.',
+@cli.command(name='resume', short_help='Continue a simulation from its last checkpoint',
              context_settings={'help_option_names': ['--help', '-h']})
 @click.argument('path', type=click.Path(exists=True, path_type=Path), default='.')
 @click.option('--or-start', is_flag=True,
               help='Start the run from the beginning when it has no checkpoint yet (what run.sh does).')
 def resume_command(path, or_start):
-    """PATH is a run folder made by so3lr start (paths in its settings.yaml are relative
-    to it) or a settings file (paths relative to the current directory, as with
-    so3lr --settings). The run continues from restart_save_path for the rest of its
-    md_cycles, without relaxation; a finished run says so and exits."""
+    """Continue a settings-file simulation from its last checkpoint.
+
+    PATH is a run folder or a YAML settings file. A run folder uses paths
+    relative to that folder. A settings file uses paths relative to the current
+    directory, as with so3lr --settings. Omit PATH to use the current folder.
+
+    \b
+    so3lr resume so3lr-run
+    """
     if path.is_dir():
         with chdir(path):
             if not Path('settings.yaml').is_file():
@@ -1109,7 +1110,7 @@ def init_command():
     _interactive_setup()
 
 
-@cli.command(name='show', short_help='Browse a run folder and inspect simulation plots (--json for scripts)', help='Show live or completed simulations from a local run folder or journal.',
+@cli.command(name='show', short_help='Inspect progress and plots for a run',
              context_settings={'help_option_names': ['--help', '-h']})
 @click.argument('path', type=click.Path(exists=True, path_type=Path), default='.')
 @click.option('--once', is_flag=True, help='Print one snapshot and exit (automatic when output is redirected).')
@@ -1120,6 +1121,13 @@ def init_command():
                    'and exit.')
 @click.pass_context
 def show_command(ctx, path, once, interval, as_json):
+    """Inspect a live or completed run. Pass a run folder or an .events.jsonl
+    journal file. Use --json to read the latest state from a script.
+
+    \b
+    so3lr show so3lr-run
+    so3lr show so3lr-run --json
+    """
     from .monitor import JournalPathError, show
     try:
         show(path, once=once, interval=interval, as_json=as_json,
@@ -1442,8 +1450,8 @@ def run_md_simulation(
 
 
 # Define the 'opt' subcommand
-@cli.command(name='opt', short_help='Relax a molecular structure', help="Run geometry optimization with `so3lr opt --input geometry.xyz`.")
-@common_io_options
+@cli.command(name='opt', short_help='Relax a molecular structure')
+@common_io_options(output_help='Save relaxation frames as .xyz or .extxyz. [default: <input stem>_opt.xyz]')
 @common_model_options
 @kspace_options
 @kspace_dispersion_options
@@ -1461,7 +1469,7 @@ def run_md_simulation(
 @click.option('--force-conv', default=None, type=float,
               help='Force convergence criterion in eV/Å, overrides --min-cycles and --min-steps. [default: None]')
 @flash_options
-@click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
+@click.option('--help', '-h', is_flag=True, help='Show command help.')
 def fire_optimization(
     input_file: Optional[str],
     output_file: Optional[str],
@@ -1499,15 +1507,12 @@ def fire_optimization(
     flash_devices: int = 1,
     flash_kernels: str = 'auto',
 ) -> None:
-    """
-    Run geometry optimization using the FIRE algorithm.
+    """Relax the starting structure with the FIRE algorithm. The last frame in
+    the output contains the final geometry.
 
-    This command performs geometry optimization of a molecular structure
-    using the FIRE (Fast Inertial Relaxation Engine) algorithm with either
-    the SO3LR potential or a custom MLFF model.
-
-    Example:
-        so3lr opt --input geometry.xyz
+    \b
+    so3lr opt --input molecule.xyz --output relaxed.xyz \\
+        --lr-cutoff 100
     """
     # Print help
     if _help_or_require_input(help, **{'--input': input_file}):
@@ -1617,8 +1622,11 @@ def fire_optimization(
         logger.info(f'Total runtime: {_format_runtime(time_end - time_start)}')
 
 # Define the 'nvt' subcommand
-@cli.command(name='nvt', short_help='NVT dynamics with a Nose–Hoover thermostat', help="Run NVT molecular dynamics simulation with `so3lr nvt --input geometry.xyz`.")
-@common_io_options
+@cli.command(name='nvt', short_help='NVT dynamics with a Nose–Hoover thermostat',
+             help='Run molecular dynamics at constant temperature and volume (NVT) with a Nose–Hoover thermostat. '
+                  'This example runs for 1 ps at 300 K and saves a frame every 10 fs.\n\n'
+                  f'\b\n{NVT_EXAMPLE}')
+@common_io_options()
 @common_model_options
 @kspace_options
 @kspace_dispersion_options
@@ -1626,18 +1634,12 @@ def fire_optimization(
 @thermostat_options
 @flash_options
 def nvt_md(**kwargs) -> None:
-    """
-    Run NVT (constant volume and temperature) MD simulation using the Nose-Hoover chain thermostat.
-
-    Example:
-        so3lr nvt --input geometry.xyz --temperature 300
-    """
     run_md_simulation(ensemble='nvt', **kwargs)
 
 
 # Define the 'nvt-langevin' subcommand
-@cli.command(name='nvt-langevin', short_help='NVT dynamics with a Langevin thermostat', help="Run NVT (Langevin thermostat) molecular dynamics simulation with `so3lr nvt-langevin --input geometry.xyz`.")
-@common_io_options
+@cli.command(name='nvt-langevin', short_help='NVT dynamics with a Langevin thermostat')
+@common_io_options()
 @common_model_options
 @kspace_options
 @kspace_dispersion_options
@@ -1645,20 +1647,20 @@ def nvt_md(**kwargs) -> None:
 @langevin_options
 @flash_options
 def nvt_langevin_md(**kwargs) -> None:
-    """
-    Run NVT (constant volume and temperature) MD simulation using the Langevin thermostat.
+    """Run molecular dynamics at constant temperature and volume (NVT) with a
+    Langevin thermostat.
 
-    Example:
-        so3lr nvt-langevin --input geometry.xyz --temperature 300
+    \b
+    so3lr nvt-langevin --input molecule.xyz \\
+        --temperature 300 --dt 0.5 \\
+        --md-cycles 100 --md-steps 20
     """
     run_md_simulation(ensemble='nvt-langevin', **kwargs)
 
 
 # Define the 'npt' subcommand
-@cli.command(name='npt', short_help='NPT dynamics at constant temperature and pressure', help="Run NPT molecular dynamics simulation with `so3lr npt --input geometry.xyz`. "
-                              "Box coupling is isotropic; set `npt_coupling: semi-isotropic` in a settings "
-                              "YAML for the EXPERIMENTAL semi-isotropic mode (anisotropic is unsupported).")
-@common_io_options
+@cli.command(name='npt', short_help='NPT dynamics at constant temperature and pressure')
+@common_io_options()
 @common_model_options
 @kspace_options
 @kspace_dispersion_options
@@ -1667,48 +1669,53 @@ def nvt_langevin_md(**kwargs) -> None:
 @barostat_options
 @flash_options
 def npt_md(**kwargs) -> None:
-    """
-    Run NPT (constant pressure and temperature) MD simulation using the Nose-Hoover chain thermostat and barostat.
+    """Run molecular dynamics at constant temperature and pressure (NPT).
+    The input structure must include a periodic cell.
 
-    Note: NPT simulations require a periodic cell in the input structure.
+    The box scales equally in all directions by default. Set
+    `npt_coupling: semi-isotropic` in settings YAML to use experimental
+    semi-isotropic coupling.
 
-    Example:
-        so3lr npt --input geometry.xyz --temperature 300 --pressure 1
+    \b
+    so3lr npt --input box.xyz --temperature 300 --pressure 1 \\
+        --dt 0.5 --md-cycles 100 --md-steps 20
     """
     run_md_simulation(ensemble='npt', **kwargs)
 
 
 # Define the 'nve' subcommand
-@cli.command(name='nve', short_help='NVE dynamics at constant volume and energy', help="Run NVE molecular dynamics simulation with `so3lr nve --input geometry.xyz`.")
-@common_io_options
+@cli.command(name='nve', short_help='NVE dynamics at constant volume and energy')
+@common_io_options()
 @common_model_options
 @kspace_options
 @kspace_dispersion_options
 @common_md_options
 @flash_options
 def nve_md(**kwargs) -> None:
-    """
-    Run NVE (constant volume and energy) MD simulation with no thermostat.
+    """Run molecular dynamics at constant volume and energy (NVE).
+    Use --temperature to set the temperature for sampling initial velocities.
+    The kinetic temperature evolves freely during the run.
 
-    Note: --temperature sets the initial-velocity-sampling temperature in
-    Kelvin only; NVE has no thermostat, so the kinetic temperature drifts
-    freely during the trajectory. [default: 300.0]
-
-    Example:
-        so3lr nve --input geometry.xyz --temperature 300
+    \b
+    so3lr nve --input molecule.xyz --temperature 300 \\
+        --dt 0.5 --md-cycles 100 --md-steps 20
     """
     run_md_simulation(ensemble='nve', **kwargs)
 
 
 # Define the 'eval' subcommand
-@cli.command(name='eval', short_help='Evaluate a model on a dataset', help="Evaluate SO3LR model on a dataset with `so3lr eval --datafile dataset.extxyz`.")
+@cli.command(name='eval', short_help='Evaluate a model on a dataset',
+             help='Predict energies, forces or other values for a dataset. Compare with reference values '
+                  'when they are present. Use --save-to to keep the predictions in an extended XYZ file.\n\n'
+                  '\b\nso3lr eval --datafile dataset.extxyz \\\n'
+                  '    --save-to predictions.extxyz')
 # Input/Output group
 @click.option('--datafile', '--data-file', '--datafile_path', 'datafile',
               type=click.Path(exists=True, dir_okay=False), required=False,
               help='Path to dataset file containing structures to evaluate '
                    '(extxyz or any ASE-readable format, e.g. xyz, pdb, cif).')
 @click.option('--save-to', type=click.Path(), default=None,
-              help='Output file to save predictions (.extxyz format). If not provided, predictions are not saved.')
+              help='Save the predictions to an .extxyz file.')
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 @click.option('--overwrite/--no-overwrite', 'overwrite', default=False,
@@ -1760,7 +1767,7 @@ def nve_md(**kwargs) -> None:
 @kspace_dispersion_options
 @flash_options
 # Help option
-@click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
+@click.option('--help', '-h', is_flag=True, help='Show command help.')
 def eval_model(
     # Input/Output group
     datafile: str,
@@ -1906,7 +1913,10 @@ class _StrategyChoice(click.Choice):
         return super().convert(value, param, ctx)
 
 
-@cli.command(name='finetune', short_help='Fine-tune a model on custom data', help="Finetune SO3LR model on a dataset with `so3lr finetune --datafile dataset.extxyz --workdir finetune_so3lr --num-train 50 --num-valid 10`.")
+@cli.command(name='finetune', short_help='Fine-tune a model on your data',
+             help='Adapt an existing model to your dataset. Checkpoints go into --workdir.\n\n'
+                  '\b\nso3lr finetune --datafile dataset.extxyz \\\n'
+                  '    --workdir finetuned --num-train 50 --num-valid 10')
 # Input/Output group
 @click.option('--workdir', '--work-dir', '--workdir_path', 'workdir',
               type=click.Path(), help='Working directory for fine-tuned model checkpoints and logs.')
@@ -1917,8 +1927,9 @@ class _StrategyChoice(click.Choice):
 @click.option('--log-file', default=None, type=click.Path(),
               help='File to write logs to [default: None].')
 # Finetuning settings.
-@click.option('--strategy', type=_StrategyChoice(list(FINETUNING_STRATEGY_NAMES)),
-              default='full', help='Strategy for finetuning. [default: full]')
+@click.option('--strategy', type=_StrategyChoice(list(FINETUNING_STRATEGY_NAMES)), metavar='NAME',
+              default='full', help=f'Choose a fine-tuning strategy from {", ".join(FINETUNING_STRATEGY_NAMES)}. '
+                                   '[default: full]')
 @click.option('--config', '--config_path', 'config_path', type=click.Path(exists=False), default=None,
               help='Path to the finetuning config (YAML only; unlike `so3lr train --config`, JSON is not supported here). '
                    'If not provided, defaults to so3lr/config/finetune.yaml shipped with the package. [default: None]')
@@ -1929,7 +1940,7 @@ class _StrategyChoice(click.Choice):
 @click.option('--num-train', '--num_train', default=None, type=int, help='Number of data points used for gradient calculations.')
 @click.option('--num-valid', '--num_valid', default=None, type=int, help='Number of data points used for validation.')
 # Help option
-@click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
+@click.option('--help', '-h', is_flag=True, help='Show command help.')
 def finetune_model(
     # Input/Output group
     workdir: str,
@@ -2018,22 +2029,22 @@ def _config_workdir(config_path):
     return str(workdir) if workdir else None
 
 
-@cli.command(name='train', short_help='Train a model from a configuration file', help="Train a SO3krates model from a config file with `so3lr train --config config.yaml`.")
+@cli.command(name='train', short_help='Train a model from a configuration file')
 @click.option('--config', 'config_path', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Path to the training config file (YAML or JSON).')
 @click.option('--log-file', default=None, type=click.Path(),
-              help='File to write logs to [default: None].')
-@click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
+              help='Write a training log. [default: <config stem>.log, next to the config]')
+@click.option('--help', '-h', is_flag=True, help='Show command help.')
 def train_model(
     config_path: Optional[str],
     log_file: Optional[str],
     help: bool
 ) -> None:
-    """
-    Train a SO3krates model from a config file.
+    """Train a SO3krates model from a configuration file. The file specifies
+    the dataset, model and training settings.
 
-    Example:
-        so3lr train --config config.yaml
+    \b
+    so3lr train --config config.yaml
     """
     if _help_or_require_input(help, **{'--config': config_path}):
         return
@@ -2068,10 +2079,13 @@ def train_model(
 
 
 # Define the 'tune-ewald' subcommand
-@cli.command(name='tune-ewald', short_help='Tune Ewald, PME or P3M parameters', help="Tune k-space electrostatics parameters (Ewald/PME/P3M): `so3lr tune-ewald --input geometry.xyz`.")
+@cli.command(name='tune-ewald', short_help='Tune Ewald, PME or P3M parameters')
 @click.option('--settings', type=click.Path(exists=True, dir_okay=False), default=None,
-              help='Path to YAML settings file.')
-@common_io_options
+              help='Read the structure path and tuning settings from YAML.')
+@common_io_options(output_help='Accepted for compatibility. Recommendations go in the log.',
+                   log_help='Write the recommended parameters and error estimates. '
+                            '[default: <settings stem>.log or <input stem>_tune-kspace.log]',
+                   overwrite_help='Accepted for compatibility.')
 @common_model_options
 @_kspace(automatic=False)
 @click.option('--jit-compile/--no-jit-compile', 'jit_compile', default=True,
@@ -2082,7 +2096,7 @@ def train_model(
                    'structure, else on the neighbour-list potential; the log says which and why. standard '
                    'forces the neighbour lists, flash forces flash (an error where it cannot run, e.g. for '
                    'Ewald, P3M or cutoff tuning, which auto runs on the neighbour lists). [default: auto]')
-@click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
+@click.option('--help', '-h', is_flag=True, help='Show command help.')
 @click.pass_context
 def tune_ewald(
     ctx: click.Context,
@@ -2115,16 +2129,12 @@ def tune_ewald(
     # Help option
     help: bool
 ) -> None:
-    """
-    Tune k-space electrostatics parameters (Ewald/PME/P3M) for running SO3LR model on a given structure.
+    """Find long-range settings for a periodic structure. The log includes
+    recommended settings you can copy into an MD command or YAML file.
 
-    Supports three methods:
-    - ewald: Traditional Ewald summation
-    - pme: Particle Mesh Ewald (faster, uses Lagrange interpolation)
-    - p3m: Particle-Particle Particle-Mesh (uses B-spline interpolation)
-
-    Example:
-        so3lr tune-ewald --input geometry.xyz --kspace-electrostatics pme
+    \b
+    so3lr tune-ewald --input box.xyz \\
+        --kspace-electrostatics pme
     """
      # Print help if needed (and handle the no-args invocation that
      # previously fell through and crashed when input_file was None).
