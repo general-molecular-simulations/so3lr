@@ -11,6 +11,8 @@ def test_help_discovers_yaml_workflow_and_keeps_extra_examples_for_full_help():
     full = CliRunner().invoke(cli, ['--help-full'], prog_name='so3lr')
     assert brief.exit_code == full.exit_code == 0
     assert 'Usage: so3lr ' in brief.output
+    example = 'so3lr nvt --input molecule.xyz --output trajectory.xyz'
+    assert brief.output.index(example) < brief.output.index('Set up and run:')
     assert 'so3lr --settings run.yaml' in brief.output
     assert '--display' in brief.output
     assert 'More examples' not in brief.output
@@ -26,10 +28,35 @@ def test_version_is_available_without_model_initialization():
 def test_grouped_help_exposes_common_and_advanced_options():
     result = CliRunner().invoke(cli, ['nvt', '--help'])
     assert result.exit_code == 0
-    for label in ('Input and output', 'Dynamics', 'Engine and performance', 'Long-range interactions'):
-        assert label in result.output
-    for option in ('--input', '--temperature', '--flash-kernels', '--kspace-electrostatics'):
-        assert option in result.output
+    headings = ('Input and output:', 'Dynamics:', 'Checkpoints:', 'Long-range interactions:', 'Engine and performance:')
+    positions = [result.output.index(heading) for heading in headings]
+    assert positions == sorted(positions)
+    assert result.output.index('so3lr nvt --input') < positions[0]
+    assert positions[0] < result.output.index('--input,') < result.output.index('--output,') < positions[1]
+    assert '--flash-kernels' in result.output and '--kspace-electrostatics' in result.output
+    assert '--help' in result.output
+
+
+@pytest.mark.parametrize(('command', 'output_default'), [
+    ('nvt', '<input stem>_<ensemble>.xyz'), ('opt', '<input stem>_opt.xyz'),
+])
+def test_output_help_matches_the_command(command, output_default):
+    result = CliRunner().invoke(cli, [command, '--help'])
+    assert result.exit_code == 0, result.output
+    assert output_default in result.output
+    if command == 'opt':
+        assert '.hdf5' not in result.output
+
+
+@pytest.mark.parametrize(('command', 'choice'), [
+    ('nvt', 'electrostatic_energy_undamped'), ('finetune', 'freeze_all_but_final_mlp'),
+])
+def test_help_keeps_choices_readable_in_a_narrow_terminal(command, choice):
+    width = 60
+    result = CliRunner().invoke(cli, [command, '--help'], prog_name='so3lr', terminal_width=width)
+    assert result.exit_code == 0, result.output
+    assert choice in result.output
+    assert all(len(line) <= width for line in result.output.splitlines())
 
 
 def test_display_configuration_does_not_leak_between_invocations():
@@ -56,7 +83,8 @@ def test_new_commands_are_discoverable_and_help_never_launches(monkeypatch):
     assert 'so3lr start' in overview
     assert 'so3lr init' not in overview
     assert cli.commands['init'].hidden and not cli.commands['start'].hidden
-    assert 'so3lr show runs/' in overview
+    assert 'Monitor and continue:' in overview
+    assert 'so3lr show so3lr-run --json' in CliRunner().invoke(cli, ['show', '--help']).output
 
 
 def test_bare_interactive_cli_dispatches_setup(monkeypatch):

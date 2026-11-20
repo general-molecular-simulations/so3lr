@@ -3,59 +3,81 @@ import click
 
 
 OPTION_GROUPS = (
-    ('Input and output', {'input_file', 'output_file', 'datafile', 'save_to', 'log_file',
-                          'config', 'workdir', 'settings', 'overwrite', 'targets'}),
-    ('Model and precision', {'model_path', 'precision', 'total_charge', 'num_unpaired_electrons',
-                             'charge_embed_total_charge', 'charge_equilibration_total_charge'}),
-    ('Dynamics', {'temperature', 'pressure', 'dt', 'md_cycles', 'md_steps', 'seed',
-                  'nhc_chain', 'nhc_steps', 'nhc_thermo', 'nhc_baro', 'nhc_sy_steps',
-                  'langevin_thermo', 'langevin_removecmmotion'}),
-    ('Relaxation and restart', {'relax', 'force_conv', 'min_cycles', 'min_steps',
-                                'restart_load', 'restart_save', 'save_buffer'}),
-    ('Engine and performance', {'engine', 'flash_mode', 'flash_kernels', 'flash_devices',
-                                'flash_mixed', 'buffer_sr', 'buffer_lr', 'jit_compile', 'batch_size'}),
-    ('Long-range interactions', {'lr_cutoff', 'dispersion_damping', 'kspace_electrostatics',
+    ('Input and output', ('input_file', 'frame', 'datafile', 'config_path', 'settings',
+                          'output_file', 'save_to', 'directory', 'workdir', 'print_only',
+                          'log_file', 'overwrite', 'save_buffer')),
+    ('Dynamics', ('ensemble', 'temperature', 'pressure', 'dt', 'duration', 'frame_interval',
+                  'md_cycles', 'md_steps', 'seed', 'keep_velocities')),
+    ('Relaxation', ('relax', 'force_conv', 'min_cycles', 'min_steps', 'min_start_dt',
+                    'min_max_dt', 'min_n_min')),
+    ('Checkpoints', ('restart_load', 'restart_save', 'or_start')),
+    ('Values to compute', ('targets', 'observable')),
+    ('Monitoring', ('once', 'interval', 'as_json')),
+    ('Model and precision', ('model_path', 'model', 'precision', 'total_charge', 'charge',
+                             'num_unpaired_electrons', 'spin', 'charge_embed_total_charge',
+                             'charge_equilibration_total_charge')),
+    ('Training', ('strategy', 'num_train', 'num_valid')),
+    ('Thermostat and barostat', ('nhc_chain', 'nhc_steps', 'nhc_thermo', 'nhc_baro', 'nhc_sy_steps',
+                                 'langevin_thermo', 'langevin_removecmmotion')),
+    ('Long-range interactions', ('lr_cutoff', 'cutoff', 'dispersion_damping', 'kspace_electrostatics',
                                  'kspace_smearing', 'kspace_spacing', 'kspace_interp_nodes',
                                  'kspace_npt_cycles', 'kspace_dispersion', 'kspace_dispersion_smearing',
-                                 'kspace_dispersion_spacing', 'kspace_dispersion_interp_nodes'}),
+                                 'kspace_dispersion_spacing', 'kspace_dispersion_interp_nodes')),
+    ('Engine and performance', ('engine', 'flash_mode', 'flash_kernels', 'flash_devices',
+                                'flash_mixed', 'buffer_sr', 'buffer_lr', 'jit_compile', 'batch_size')),
 )
+
+NVT_EXAMPLE = ('so3lr nvt --input molecule.xyz --output trajectory.xyz \\\n'
+               '    --temperature 300 --dt 0.5 --lr-cutoff 100 \\\n'
+               '    --md-cycles 10 --md-steps 20')
 
 
 class GroupedCommand(click.Command):
     """Keep Click's option definitions authoritative, including future options."""
 
     def format_options(self, ctx, formatter):
-        grouped = {label: [] for label, _ in OPTION_GROUPS}
-        other, help_rows = [], []
+        records = {}
+        help_rows = []
+        auto_help = self.get_help_option(ctx)
         for parameter in self.get_params(ctx):
             row = parameter.get_help_record(ctx)
             if row is None:
                 continue
-            if parameter.name in {'help', 'help_full'}:
+            if parameter is auto_help or parameter.name in ('help', 'help_full'):
                 help_rows.append(row)
-                continue
-            for label, names in OPTION_GROUPS:
-                if parameter.name in names:
-                    grouped[label].append(row)
-                    break
             else:
-                other.append(row)
-        for label, rows in [*grouped.items(), ('Other options', other), ('Help', help_rows)]:
+                records[parameter.name] = row
+        for label, names in OPTION_GROUPS:
+            rows = [records.pop(name) for name in names if name in records]
             if rows:
                 with formatter.section(label):
                     formatter.write_dl(rows)
+        if records:
+            with formatter.section('Other options'):
+                formatter.write_dl(records.values())
+        if help_rows:
+            with formatter.section('Help'):
+                formatter.write_dl(help_rows)
 
 
 def format_overview(command, ctx, formatter, version):
     """Render commands/options from Click metadata and a few useful examples."""
-    formatter.write_text(click.style(f'SO3LR TAURI  {version}', fg='yellow', bold=True))
-    formatter.write_text('Molecular simulation with machine-learned force fields.')
+    formatter.write_text(f'SO3LR Tauri {version}')
+    formatter.write_text('Run molecular simulations with pretrained force fields.')
     formatter.write_paragraph()
     formatter.write_usage(ctx.command_path, '[OPTIONS] [COMMAND] [ARGS]...')
+    with formatter.section('Run a simulation'):
+        formatter.write_text('Run 0.1 ps at 300 K. Replace molecule.xyz with your isolated molecule.')
+        formatter.write_paragraph()
+        formatter.write_text(f'\b\n{NVT_EXAMPLE}')
+        formatter.write_paragraph()
+        formatter.write_text('Use so3lr start for guided setup or so3lr --settings run.yaml to run a saved setup.')
+
     groups = (
-        ('Prepare and monitor', ('start', 'show', 'resume')),
-        ('Simulate', ('nvt', 'nvt-langevin', 'npt', 'nve', 'opt')),
-        ('Evaluate and train', ('eval', 'train', 'finetune', 'tune-ewald')),
+        ('Set up and run', ('start', 'opt', 'nvt', 'nvt-langevin', 'npt', 'nve')),
+        ('Monitor and continue', ('show', 'resume')),
+        ('Evaluate and train', ('eval', 'finetune', 'train')),
+        ('Tune electrostatics', ('tune-ewald',)),
     )
     shown = set()
     for label, names in groups:
@@ -76,29 +98,19 @@ def format_overview(command, ctx, formatter, version):
     if extras:
         with formatter.section('Other commands'):
             formatter.write_dl(extras)
-    with formatter.section('Start here'):
-        formatter.write_text('\b\nso3lr start\n'
-                             'so3lr start --input box.xyz --ensemble npt --print\n'
-                             'so3lr --settings run.yaml\n'
-                             'so3lr show runs/\n'
-                             'so3lr resume so3lr-run\n'
-                             'so3lr nvt --input molecule.xyz --lr-cutoff 100\n'
-                             'so3lr nvt --help')
-        formatter.write_paragraph()
-        formatter.write_text('In an interactive terminal, bare so3lr also opens guided setup. '
-                             'Use --settings for an existing YAML run, including batch jobs. '
-                             'Periodic structures use PME electrostatics and dispersion unless told otherwise.')
     rows = [p.get_help_record(ctx) for p in command.get_params(ctx)]
     with formatter.section('Global options (before the command)'):
         formatter.write_dl([row for row in rows if row is not None])
         formatter.write_text('--display, --verbose, --quiet and --no-color may also follow the command.')
     if ctx.params.get('help_full'):
         with formatter.section('More examples'):
-            formatter.write_text('\b\nso3lr opt --input molecule.xyz --lr-cutoff 100\n'
-                                 'so3lr eval --datafile dataset.extxyz --save-to predictions.extxyz\n'
-                                 'so3lr --display plain --settings run.yaml')
-        formatter.write_paragraph()
-        formatter.write_text('Use COMMAND --help for every option and default. '
-                             'YAML runs use --settings without a subcommand.')
+            formatter.write_text('\b\nso3lr start --input box.xyz --ensemble npt --print\n'
+                                 'so3lr opt --input molecule.xyz --lr-cutoff 100\n'
+                                 'so3lr eval --datafile dataset.extxyz \\\n'
+                                 '    --save-to predictions.extxyz\n'
+                                 'so3lr --display plain --settings run.yaml\n'
+                                 'so3lr show so3lr-run\n'
+                                 'so3lr resume so3lr-run')
     formatter.write_paragraph()
+    formatter.write_text('Use so3lr COMMAND --help for examples and options.')
     formatter.write_text('Documentation: https://so3lr.github.io/usage/cli/')
