@@ -37,7 +37,7 @@ into that environment:
 ```shell
 git clone https://github.com/general-molecular-simulations/so3lr.git
 cd so3lr
-uv pip install .   # or: pip install .
+uv pip install ".[cuda12]"   # NVIDIA GPU; ROCm or CPU: uv pip install .
 so3lr --help
 ```
 
