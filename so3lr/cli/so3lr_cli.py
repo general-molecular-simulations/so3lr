@@ -788,7 +788,7 @@ def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Pa
 
 
 @click.group(cls=CustomCommandClass, invoke_without_command=True,
-             help='Run molecular simulations with pretrained force fields.',
+             help='Run molecular simulations with machine-learned force fields.',
              context_settings={"help_option_names": []})
 @click.option('--settings', type=click.Path(exists=True, dir_okay=False), default=None,
               help='Run a simulation from a YAML settings file. Use without a subcommand.')
@@ -796,7 +796,7 @@ def validate_yaml_keys(settings_dict: Dict[str, Any], settings_path: Optional[Pa
               help='Show the command overview with additional examples.')
 @click.option('--help', '-h', is_flag=True,
               help='Show commands and how to start.')
-@click.version_option(version=__version__, prog_name='SO3LR Tauri')
+@click.version_option(version=__version__, prog_name='SO3LR', message='%(prog)s v%(version)s')
 @click.option('--display', type=click.Choice(['auto', 'rich', 'plain']), default='auto',
               show_default=True, help='Terminal output format. Auto uses rich output in a terminal.')
 @click.option('--verbose', '-v', is_flag=True, help='Also show detailed MD diagnostics in the terminal.')
@@ -818,7 +818,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
             'Use `so3lr --settings FILE`, or pass options directly to the subcommand.')
 
     if help or help_full:
-        click.echo(ctx.get_help())
+        click.echo(ctx.get_help(), color=ctx.color)
         return
 
     if ctx.invoked_subcommand is not None:
@@ -829,7 +829,7 @@ def cli(ctx: click.Context, settings: Optional[str], help_full: bool, help: bool
         if should_launch():
             _interactive_setup()
         else:
-            click.echo(ctx.get_help())
+            click.echo(ctx.get_help(), color=ctx.color)
         return
 
     _run_settings_file(settings)
@@ -1624,7 +1624,7 @@ def fire_optimization(
 # Define the 'nvt' subcommand
 @cli.command(name='nvt', short_help='NVT dynamics with a Nose–Hoover thermostat',
              help='Run molecular dynamics at constant temperature and volume (NVT) with a Nose–Hoover thermostat. '
-                  'This example runs an isolated molecule at 300 K for 0.1 ps and saves one frame every 10 fs.\n\n'
+                  'This example runs for 1 ps at 300 K and saves a frame every 10 fs.\n\n'
                   f'\b\n{NVT_EXAMPLE}')
 @common_io_options()
 @common_model_options
@@ -1652,7 +1652,8 @@ def nvt_langevin_md(**kwargs) -> None:
 
     \b
     so3lr nvt-langevin --input molecule.xyz \\
-        --temperature 300 --lr-cutoff 100
+        --temperature 300 --dt 0.5 \\
+        --md-cycles 100 --md-steps 20
     """
     run_md_simulation(ensemble='nvt-langevin', **kwargs)
 
@@ -1676,7 +1677,8 @@ def npt_md(**kwargs) -> None:
     semi-isotropic coupling.
 
     \b
-    so3lr npt --input box.xyz --temperature 300 --pressure 1
+    so3lr npt --input box.xyz --temperature 300 --pressure 1 \\
+        --dt 0.5 --md-cycles 100 --md-steps 20
     """
     run_md_simulation(ensemble='npt', **kwargs)
 
@@ -1695,8 +1697,8 @@ def nve_md(**kwargs) -> None:
     The kinetic temperature evolves freely during the run.
 
     \b
-    so3lr nve --input molecule.xyz \\
-        --temperature 300 --lr-cutoff 100
+    so3lr nve --input molecule.xyz --temperature 300 \\
+        --dt 0.5 --md-cycles 100 --md-steps 20
     """
     run_md_simulation(ensemble='nve', **kwargs)
 

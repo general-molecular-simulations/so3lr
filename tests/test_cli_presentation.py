@@ -2,6 +2,7 @@
 from click.testing import CliRunner
 import pytest
 
+from so3lr import __version__
 from so3lr.cli.so3lr_cli import cli
 from so3lr.cli import presentation
 
@@ -10,19 +11,62 @@ def test_help_discovers_yaml_workflow_and_keeps_extra_examples_for_full_help():
     brief = CliRunner().invoke(cli, ['--help'], prog_name='so3lr')
     full = CliRunner().invoke(cli, ['--help-full'], prog_name='so3lr')
     assert brief.exit_code == full.exit_code == 0
+    assert brief.output.splitlines()[:2] == [
+        f'SO3LR v{__version__}',
+        'Run molecular simulations with machine-learned force fields.',
+    ]
     assert 'Usage: so3lr ' in brief.output
     example = 'so3lr nvt --input molecule.xyz --output trajectory.xyz'
     assert brief.output.index(example) < brief.output.index('Set up and run:')
-    assert 'so3lr --settings run.yaml' in brief.output
+    assert 'Run 1 ps of NVT dynamics at 300 K.' in brief.output
+    assert 'Use so3lr start for guided setup.' in brief.output
+    assert 'Use so3lr --settings run.yaml to run a saved setup.' in brief.output
     assert '--display' in brief.output
     assert 'More examples' not in brief.output
     assert 'More examples' in full.output
+    assert '--duration 1 --print' in full.output
+
+
+def test_overview_emphasizes_commands_only_when_color_enabled():
+    runner = CliRunner()
+    styled = runner.invoke(cli, ['--help'], color=True, env={'NO_COLOR': None})
+    plain = runner.invoke(cli, ['--no-color', '--help'], color=True)
+    assert styled.exit_code == plain.exit_code == 0
+    for command in ('so3lr start', 'so3lr --settings run.yaml'):
+        assert f'\x1b[1m{command}\x1b[0m' in styled.output
+        assert command in plain.output
+    assert '\x1b' not in plain.output
+
+
+@pytest.mark.parametrize('args', [
+    ['--help'], ['-h'], ['--help-full'],
+    *([name, flag] for name in cli.commands for flag in ('--help', '-h')),
+])
+def test_help_ends_with_documentation_link(args):
+    width = 60
+    result = CliRunner().invoke(cli, args, prog_name='so3lr', terminal_width=width)
+    assert result.exit_code == 0, result.output
+    footer = 'Documentation: https://so3lr.github.io/'
+    assert result.output.count(footer) == 1
+    lines = result.output.splitlines()
+    assert lines[-1] == footer
+    assert all(len(line) <= width for line in lines)
 
 
 def test_version_is_available_without_model_initialization():
     result = CliRunner().invoke(cli, ['--version'])
     assert result.exit_code == 0
-    assert 'SO3LR Tauri' in result.output
+    assert result.output.strip() == f'SO3LR v{__version__}'
+
+
+@pytest.mark.parametrize('command', ['nvt', 'nvt-langevin', 'npt', 'nve'])
+def test_md_help_examples_run_for_one_ps(command):
+    result = CliRunner().invoke(cli, [command, '--help'])
+    assert result.exit_code == 0, result.output
+    example = result.output.split('Input and output:', 1)[0]
+    assert f'so3lr {command} --input' in example
+    assert '--dt 0.5' in example and '--md-cycles 100 --md-steps 20' in example
+    assert '--lr-cutoff' not in example
 
 
 def test_grouped_help_exposes_common_and_advanced_options():

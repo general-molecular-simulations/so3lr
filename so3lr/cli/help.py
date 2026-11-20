@@ -28,12 +28,21 @@ OPTION_GROUPS = (
 )
 
 NVT_EXAMPLE = ('so3lr nvt --input molecule.xyz --output trajectory.xyz \\\n'
-               '    --temperature 300 --dt 0.5 --lr-cutoff 100 \\\n'
-               '    --md-cycles 10 --md-steps 20')
+               '    --temperature 300 --dt 0.5 \\\n'
+               '    --md-cycles 100 --md-steps 20')
+
+
+def _write_documentation(formatter):
+    formatter.write_paragraph()
+    formatter.write_text('Documentation: https://so3lr.github.io/')
 
 
 class GroupedCommand(click.Command):
     """Keep Click's option definitions authoritative, including future options."""
+
+    def format_epilog(self, ctx, formatter):
+        super().format_epilog(ctx, formatter)
+        _write_documentation(formatter)
 
     def format_options(self, ctx, formatter):
         records = {}
@@ -62,16 +71,18 @@ class GroupedCommand(click.Command):
 
 def format_overview(command, ctx, formatter, version):
     """Render commands/options from Click metadata and a few useful examples."""
-    formatter.write_text(f'SO3LR Tauri {version}')
-    formatter.write_text('Run molecular simulations with pretrained force fields.')
+    formatter.write_text(f'SO3LR v{version}')
+    formatter.write_text(command.help)
     formatter.write_paragraph()
     formatter.write_usage(ctx.command_path, '[OPTIONS] [COMMAND] [ARGS]...')
     with formatter.section('Run a simulation'):
-        formatter.write_text('Run 0.1 ps at 300 K. Replace molecule.xyz with your isolated molecule.')
+        formatter.write_text('Run 1 ps of NVT dynamics at 300 K.')
         formatter.write_paragraph()
         formatter.write_text(f'\b\n{NVT_EXAMPLE}')
         formatter.write_paragraph()
-        formatter.write_text('Use so3lr start for guided setup or so3lr --settings run.yaml to run a saved setup.')
+        formatter.write_text('\b\n'
+                             f'Use {click.style("so3lr start", bold=True)} for guided setup.\n'
+                             f'Use {click.style("so3lr --settings run.yaml", bold=True)} to run a saved setup.')
 
     groups = (
         ('Set up and run', ('start', 'opt', 'nvt', 'nvt-langevin', 'npt', 'nve')),
@@ -104,7 +115,8 @@ def format_overview(command, ctx, formatter, version):
         formatter.write_text('--display, --verbose, --quiet and --no-color may also follow the command.')
     if ctx.params.get('help_full'):
         with formatter.section('More examples'):
-            formatter.write_text('\b\nso3lr start --input box.xyz --ensemble npt --print\n'
+            formatter.write_text('\b\nso3lr start --input box.xyz --ensemble npt \\\n'
+                                 '    --duration 1 --print\n'
                                  'so3lr opt --input molecule.xyz --lr-cutoff 100\n'
                                  'so3lr eval --datafile dataset.extxyz \\\n'
                                  '    --save-to predictions.extxyz\n'
@@ -113,4 +125,4 @@ def format_overview(command, ctx, formatter, version):
                                  'so3lr resume so3lr-run')
     formatter.write_paragraph()
     formatter.write_text('Use so3lr COMMAND --help for examples and options.')
-    formatter.write_text('Documentation: https://so3lr.github.io/usage/cli/')
+    _write_documentation(formatter)
