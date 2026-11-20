@@ -10,16 +10,19 @@
 
 ## About
 
-SO3LR - pronounced *Solar* - is a pretrained machine-learned force field for
-(bio)molecular simulations. It integrates the fast and stable SO3krates neural
-network for semi-local interactions with universal pairwise force fields designed
-for short-range repulsion, long-range electrostatics, and dispersion interactions.
+SO3LR (pronounced *Solar*) is a pretrained machine-learned force field for
+(bio)molecular simulations. Use it to relax structures, run molecular dynamics,
+or calculate energies and forces.
+
+It integrates the fast and stable SO3krates neural network for semi-local
+interactions with universal pairwise force fields designed for short-range
+repulsion, long-range electrostatics, and dispersion interactions.
 
 ## Installation
 
-Try SO3LR without any local installation using our
-[light web version](https://so3lr.github.io/gui/) or
-[Colab notebook](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb).
+[Open the web viewer](https://so3lr.github.io/gui/) to explore structures or
+replay a recorded trajectory. To try the CLI without installing it locally, run
+the [Colab notebook](https://colab.research.google.com/github/general-molecular-simulations/so3lr/blob/main/examples/so3lr_colab_example.ipynb).
 
 We recommend installing SO3LR with [uv](https://docs.astral.sh/uv/) (it's magical):
 
@@ -50,13 +53,24 @@ SO3LR provides a command-line interface for geometry optimization, molecular
 dynamics and evaluation. Each command can be run with `--help` to see all
 available options.
 
+From the repository root, run 0.1 ps of NVT dynamics on the bundled Ala4
+structure at a target temperature of 300 K.
+
+```shell
+so3lr nvt --input so3lr/cli/examples/ala4.xyz --output trajectory.xyz \
+    --temperature 300 --dt 0.5 --md-cycles 10 --md-steps 20 --lr-cutoff 100
+```
+
+The run writes `trajectory.xyz` and `trajectory.log`. To replay the result,
+choose **Open trajectory** in the [local GUI](https://github.com/so3lr/gui#start-the-workbench)
+and enter `10` fs between frames.
+
 ```shell
 # Geometry optimization
 so3lr opt --input geometry.xyz --force-conv 0.05
 
-# NVT and NPT molecular dynamics
-so3lr nvt --input geometry.xyz --temperature 300 --dt 0.5 --md-cycles 100 --md-steps 100
-so3lr npt --input geometry.xyz --temperature 300 --pressure 1.0 --dt 0.5 --md-cycles 100 --md-steps 100
+# NPT molecular dynamics (requires a periodic cell)
+so3lr npt --input box.xyz --temperature 300 --pressure 1.0 --dt 0.5 --md-cycles 100 --md-steps 100
 
 # Evaluation on a dataset
 so3lr eval --datafile dataset.extxyz --lr-cutoff 100 --save-to predictions.extxyz
