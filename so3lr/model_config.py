@@ -28,6 +28,17 @@ def load_model_config(workdir):
     return copy.deepcopy(_load(path, (st.st_mtime_ns, st.st_ino, st.st_size)))
 
 
+def is_legacy_model(model):
+    """True for the original v1 SO3LR model or a model fine-tuned from it (``legacy_so3lr_bool``):
+    a bundled name, an alias or a model directory. False when the model cannot be read; the run
+    that loads it reports why."""
+    from so3lr.model_registry import resolve_model
+    try:
+        return bool(load_model_config(resolve_model(model).dir)['model'].get('legacy_so3lr_bool', False))
+    except Exception:
+        return False
+
+
 @functools.lru_cache(maxsize=None)
 def _load(path, version):
     cfg = json.loads(path.read_text())

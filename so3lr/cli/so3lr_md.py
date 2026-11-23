@@ -989,15 +989,6 @@ def warn_legacy_kspace(kspace_electrostatics):
         f"Results may be unreliable; consider a real-space long-range cutoff instead.")
 
 
-def _is_legacy_model(model_dir) -> bool:
-    """Return True if the resolved model is the legacy v1 SO3LR (legacy_so3lr_bool)."""
-    try:
-        from ..model_config import load_model_config
-        return bool(load_model_config(model_dir)['model'].get('legacy_so3lr_bool', False))
-    except Exception:
-        return False
-
-
 def load_model(
     model_path: str,
     precision: jnp.dtype,
@@ -1041,7 +1032,8 @@ def load_model(
     spec = resolve_model(model_path)
     model_dir, from_file = spec.dir, spec.from_file
 
-    if kspace_electrostatics is not None and _is_legacy_model(model_dir):
+    from ..model_config import is_legacy_model
+    if kspace_electrostatics is not None and is_legacy_model(model_dir):
         warn_legacy_kspace(kspace_electrostatics)
 
     long_range_kw = dict(
