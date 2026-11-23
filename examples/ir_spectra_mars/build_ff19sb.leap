@@ -1,0 +1,44 @@
+# ff19SB topology for Ac-Ala5-LysH+ (neutral C-terminal COOH, protonated Lys side chain).
+# ff19SB has no neutral-COOH C-terminal Lys, so LYC is built from CLYS:
+#   - all atoms except the carboxyl group keep the ff19SB internal LYS charges (residue +1);
+#   - the COOH group takes the ff19SB GLH carboxylic-acid charges and types (C, O, OH, HO),
+#     shifted uniformly so the group carries the same charge as the LYS backbone C=O (+0.1447).
+source leaprc.protein.ff19SB
+LYC = copy CLYS
+set LYC name "LYC"
+set LYC.1 name "LYC"
+set LYC.1.N   charge -0.3479
+set LYC.1.H   charge  0.2747
+set LYC.1.CA  charge -0.2400
+set LYC.1.HA  charge  0.1426
+set LYC.1.CB  charge -0.0094
+set LYC.1.HB2 charge  0.0362
+set LYC.1.HB3 charge  0.0362
+set LYC.1.CG  charge  0.0187
+set LYC.1.HG2 charge  0.0103
+set LYC.1.HG3 charge  0.0103
+set LYC.1.CD  charge -0.0479
+set LYC.1.HD2 charge  0.0621
+set LYC.1.HD3 charge  0.0621
+set LYC.1.CE  charge -0.0143
+set LYC.1.HE2 charge  0.1135
+set LYC.1.HE3 charge  0.1135
+set LYC.1.NZ  charge -0.3854
+set LYC.1.HZ1 charge  0.3400
+set LYC.1.HZ2 charge  0.3400
+set LYC.1.HZ3 charge  0.3400
+set LYC.1.C   charge  0.7390
+set LYC.1.O   type   O
+set LYC.1.O   charge -0.5250
+set LYC.1.OXT type   OH
+set LYC.1.OXT charge -0.5923
+HXT = createAtom HXT HO 0.5230
+set HXT element H
+add LYC.1 HXT
+bond LYC.1.OXT HXT
+mol = loadpdb ala5lysh_amber_names.pdb
+charge mol
+check mol
+saveamberparm mol ala5lysh_ff19sb.prmtop ala5lysh_ff19sb.inpcrd
+savepdb mol ala5lysh_ff19sb.pdb
+quit
