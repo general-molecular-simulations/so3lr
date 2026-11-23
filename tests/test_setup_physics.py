@@ -108,7 +108,7 @@ def test_proposal_reads_model_metadata_without_initializing_jax():
     subprocess.run([sys.executable, '-c',
                     "from so3lr.cli.setup_physics import long_range_settings; "
                     "from so3lr.model_registry import DEFAULT_MODEL; "
-                    "long_range_settings(True, 12.4, DEFAULT_MODEL, ensemble='npt'); "
+                    "long_range_settings(True, 12.4, DEFAULT_MODEL, ensemble='npt'); long_range_settings(True, 30.0, 'so3lr'); "
                     "import sys; assert 'jax' not in sys.modules; assert 'flax' not in sys.modules"],
                    check=True)
 
@@ -202,3 +202,30 @@ def test_mixed_periodicity_is_named_not_reported_as_unreadable(tmp_path):
         structure_cell(slab)
     with pytest.raises(ValueError, match='mixed-axis'):
         resolve_long_range({'lr_cutoff': 12.0}, set(), slab)
+
+
+def test_the_original_model_keeps_real_space_on_periodic_structures(tmp_path):
+    # The original so3lr model was trained with real-space long range, and v0.1.0 ran
+    # periodic structures that way: auto leaves k-space off and the 12 Å cutoff stands.
+    box = _water(tmp_path, side=30.0)
+    legacy = {'lr_cutoff': 12.0, 'model_path': 'so3lr'}
+    note = resolve_long_range(legacy, set(), box)
+    assert (legacy['kspace_electrostatics'], legacy['kspace_dispersion'], legacy['lr_cutoff']) == (None, None, 12.0)
+    assert 'real-space electrostatics and dispersion up to 12 Å' in note
+    data = {'lr_cutoff': 12.0, 'model_path': 'so3lr'}            # evaluation of a periodic dataset
+    resolve_long_range(data, set(), box, fit_cell=False, index=None)
+    assert data['kspace_electrostatics'] is None and data['lr_cutoff'] == 12.0
+    asked = {'lr_cutoff': 12.0, 'model_path': 'so3lr', 'kspace_electrostatics': 'pme'}
+    resolve_long_range(asked, {'kspace_electrostatics'}, box)   # an explicit method still wins
+    assert (asked['kspace_electrostatics'], asked['kspace_dispersion'], asked['lr_cutoff']) == ('pme', None, 12.0)
+    both = {'lr_cutoff': 12.0, 'model_path': 'so3lr', 'kspace_electrostatics': 'pme', 'kspace_dispersion': 'pme'}
+    resolve_long_range(both, {'kspace_electrostatics', 'kspace_dispersion'}, box)   # k-space asked: PME's defaults
+    assert (both['lr_cutoff'], both['kspace_smearing'], both['kspace_spacing']) == (10.0, 2.0, 1.55)
+    tauri = {'lr_cutoff': 12.0, 'model_path': 'so3lr-tauri-m'}
+    resolve_long_range(tauri, set(), box)
+    assert (tauri['kspace_electrostatics'], tauri['lr_cutoff']) == ('pme', 10.0)
+    # the guided setup proposes the same, and does not shrink the cutoff to fit a small cell
+    assert long_range_settings(True, 30.0, 'so3lr') == {
+        'lr_cutoff': 12.0, 'kspace_electrostatics': 'none', 'kspace_dispersion': 'none'}
+    with pytest.raises(ValueError, match='original so3lr model'):
+        long_range_settings(True, 12.4, 'so3lr')

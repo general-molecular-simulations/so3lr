@@ -81,7 +81,8 @@ forces = atoms.get_forces()
 
 Units are eV and Å. On the command line, periodic structures use PME for
 electrostatics and dispersion with a 10 Å real-space cutoff (2 Å smearing,
-1.55 Å mesh), as in the paper's liquid and scaling simulations. The Python calculators default to 12 Å without k-space. For
+1.55 Å mesh), as in the paper's liquid and scaling simulations. The original `so3lr` model keeps real space
+up to 12 Å, as in v0.1.0. The Python calculators default to 12 Å without k-space. For
 gas-phase simulations, we suggest using `--lr-cutoff 100`.
 
 ## Models

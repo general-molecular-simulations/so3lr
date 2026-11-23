@@ -2,7 +2,8 @@
 
 Periodic structures use PME for electrostatics and dispersion by default, with a
 10 Å real-space cutoff and a 2 Å electrostatic smearing. A cell too small for
-10 Å gets a cutoff that fits it and a finer mesh. These are starting settings,
+10 Å gets a cutoff that fits it and a finer mesh. The original SO3LR model keeps
+real-space long range up to 12 Å instead. These are starting settings,
 displayed for review, not an accuracy tuning procedure; the numerical backend's minimum-image bounds stay
 authoritative. Import-light: no JAX.
 """
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from so3lr.kspace_defaults import (
     DEFAULT_KSPACE_DISPERSION_SMEARING, DEFAULT_KSPACE_DISPERSION_SPACING, MIN_DIRECT_LR_CUTOFF)
+from so3lr.model_config import is_legacy_model
 
 KSPACE_METHOD_KEYS = ('kspace_electrostatics', 'kspace_dispersion')
 # The cutoff and mesh the PME defaults set when the user left them unset.
@@ -26,10 +28,15 @@ PME_LR_CUTOFF = 10.0     # Å
 PME_SMEARING = 2.0       # Å
 PME_SPACING = 1.55       # Å
 GAS_PHASE_LR_CUTOFF = 100.0  # Å: the guided setup's proposal for isolated structures
+# The real-space cutoff without k-space (the CLI's DEFAULT_LR_CUTOFF). The original SO3LR
+# model (and models fine-tuned from it) was trained with real-space long range, and v0.1.0
+# ran periodic structures that way, so it keeps this instead of the PME default.
+REAL_SPACE_LR_CUTOFF = 12.0  # Å
 
 
-def long_range_settings(periodic, minimum_cell_height, model, cutoff=None, *, ensemble=None):
-    """Propose the long-range settings for a structure: PME for periodic cells.
+def long_range_settings(periodic, minimum_cell_height, model, cutoff=None, *, ensemble=None, real_space=None):
+    """Propose the long-range settings for a structure: PME for periodic cells, except
+    real space up to 12 Å for the original model (real_space=None: the model decides).
 
     The water example's 12.4 Å cell cannot use the usual 10 Å real-space
     cutoff with the neighbour-list engine. Both long-range terms stay in
@@ -56,8 +63,12 @@ def long_range_settings(periodic, minimum_cell_height, model, cutoff=None, *, en
     if minimum_image_problem(cell, short_cutoff):
         raise ValueError(f'The {height:g} Å cell height is too small for this model’s '
                          f'{short_cutoff:g} Å short-range cutoff{margin_detail}. Choose a larger cell.')
+    real_space = is_legacy_model(model) if real_space is None else real_space
     small_cell = minimum_image_problem(cell, PME_LR_CUTOFF) is not None
-    if cutoff is None:
+    if cutoff is None and real_space:
+        # Not shrunk to fit a small cell: without k-space that would change the physics.
+        value = REAL_SPACE_LR_CUTOFF
+    elif cutoff is None:
         # NPT must also reserve the backend's initial contraction margin when
         # deciding whether the usual cutoff fits. Existing small-cell proposals
         # already leave 10%; the runtime still checks later cell changes.
@@ -70,8 +81,11 @@ def long_range_settings(periodic, minimum_cell_height, model, cutoff=None, *, en
         raise ValueError(f'Guided setup requires a long-range cutoff of at least '
                          f'the model’s {short_cutoff:g} Å short-range cutoff.')
     if minimum_image_problem(cell, value):
+        hint = ' The original so3lr model runs without k-space: choose a larger cell or a SO3LR Tauri model.'
         raise ValueError(f'Cutoff must be at most {available_height / 2:g} Å for the '
-                         f'{height:g} Å minimum cell height{margin_detail}.')
+                         f'{height:g} Å minimum cell height{margin_detail}.{hint if real_space else ""}')
+    if real_space:
+        return {'lr_cutoff': value, 'kspace_electrostatics': 'none', 'kspace_dispersion': 'none'}
     smearing, spacing = pme_mesh(value)
     return {'lr_cutoff': value,
             'kspace_electrostatics': 'pme', 'kspace_smearing': smearing, 'kspace_spacing': spacing,
@@ -181,7 +195,8 @@ def resolve_long_range(settings, explicit, structure_path, *, fit_cell=True, ind
     """Fill the long-range settings the user left unset, in place, for this structure.
 
     ``explicit`` holds the setting names the user gave. 'auto' (or unset)
-    k-space means PME for a periodic structure and off otherwise. With both
+    k-space means PME for a periodic structure and off otherwise; for the original
+    SO3LR model it stays off, with the real-space cutoff (12 Å unless set). With both
     terms in k-space and no explicit cutoff, the cutoff is the PME default (10 Å)
     or, for a cell too small for it, the guided setup's cell-fitting one (not with
     fit_cell=False: evaluation lists every periodic image). With real-space
@@ -192,20 +207,22 @@ def resolve_long_range(settings, explicit, structure_path, *, fit_cell=True, ind
     Returns a short description of what was chosen, for the log ('' when nothing was).
     """
     methods = {key: kspace_method(settings.get(key), key in explicit) for key in KSPACE_METHOD_KEYS}
+    auto = [key.removeprefix('kspace_') for key, method in methods.items() if method == 'auto']
     pme_defaults = 'lr_cutoff' not in explicit and None not in methods.values()
     fit_cutoff = fit_cell and pme_defaults
-    needs_cell = structure_path is not None and ('auto' in methods.values() or fit_cutoff)
+    needs_cell = structure_path is not None and (bool(auto) or fit_cutoff)
     cell = structure_cell(structure_path, index) if needs_cell else None
     periodic = bool(cell and cell[0])
-    chosen = []
+    # The model's metadata is read only when it decides something.
+    real_space = periodic and bool(auto) and is_legacy_model(settings.get('model_path'))
     for key, method in methods.items():
-        if method == 'auto':
-            method = 'pme' if periodic else None
-            if method:
-                chosen.append(key.removeprefix('kspace_'))
-        settings[key] = method
-    notes = [f"PME {' and PME '.join(chosen)} (the default for periodic structures)"] if chosen else []
-    if needs_cell and cell is None and 'auto' in methods.values():
+        settings[key] = ('pme' if periodic and not real_space else None) if method == 'auto' else method
+    notes = []
+    if periodic and auto:
+        notes.append(f"real-space {' and '.join(auto)} up to {_g(settings.get('lr_cutoff'))} Å "
+                     f"(the original so3lr model runs without k-space)" if real_space else
+                     f"PME {' and PME '.join(auto)} (the default for periodic structures)")
+    if needs_cell and cell is None and auto:
         notes.append(f'the cell of {structure_path} could not be read, so k-space stays off')
     if settings['kspace_electrostatics']:  # periodic, or k-space the user asked for
         cutoff = settings.get('lr_cutoff')
@@ -214,7 +231,7 @@ def resolve_long_range(settings, explicit, structure_path, *, fit_cell=True, ind
             if fit_cutoff:
                 try:
                     cutoff = long_range_settings(True, cell[1], settings.get('model_path'),
-                                                 ensemble=settings.get('ensemble'))['lr_cutoff']
+                                                 ensemble=settings.get('ensemble'), real_space=False)['lr_cutoff']
                 except (ValueError, OSError, KeyError):
                     cutoff = settings.get('lr_cutoff')  # the run itself reports a cell that no cutoff fits
         unset = [key for key in _CELL_FITTED_KEYS if key not in explicit]

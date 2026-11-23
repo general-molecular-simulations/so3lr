@@ -27,7 +27,7 @@ from ..flash.check import ENGINES, FLASH_MODES, KERNELS, reserve_gpu
 # listed names and the default cannot go stale when a release lands.
 from ..model_registry import DEFAULT_MODEL, available_models
 from .help import GroupedCommand, NVT_EXAMPLE, format_overview
-from .setup_physics import PME_LR_CUTOFF, PME_SMEARING, PME_SPACING
+from .setup_physics import PME_LR_CUTOFF, PME_SMEARING, PME_SPACING, REAL_SPACE_LR_CUTOFF
 from . import presentation
 from .formatting import show_command as show_argument
 
@@ -188,7 +188,7 @@ def get_hardware_info():
 
 
 # Default settings
-DEFAULT_LR_CUTOFF = 12.0  # Angstrom
+DEFAULT_LR_CUTOFF = REAL_SPACE_LR_CUTOFF  # Angstrom
 DEFAULT_SEED = 52
 DEFAULT_TOTAL_CHARGE = 0
 DEFAULT_SPIN = 0  # number of unpaired electrons (multiplicity - 1)
@@ -332,7 +332,8 @@ def common_model_options(f: Callable) -> Callable:
                           f'mesh that fit a smaller cell; for gas-phase / non-periodic systems use '
                           f'--lr-cutoff 100 so the long-range electrostatics and dispersion are not '
                           f'artificially truncated. [default: {PME_LR_CUTOFF:g} with PME, '
-                          f'{DEFAULT_LR_CUTOFF:g} otherwise]')(f)
+                          f'{DEFAULT_LR_CUTOFF:g} otherwise, and for the original so3lr model, which keeps '
+                          f'real space on periodic structures]')(f)
     f = click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
                      help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}]')(f)
     f = click.option('--buffer-sr', default=DEFAULT_BUFFER_MULTIPLIER, type=float,
@@ -454,7 +455,8 @@ def flash_options(f: Callable) -> Callable:
     return f
 
 
-KSPACE_AUTO_HELP = ('auto: PME for a periodic structure, none (real space only) otherwise; '
+KSPACE_AUTO_HELP = ('auto: PME for a periodic structure (none for the original so3lr model), '
+                    'none (real space only) otherwise; '
                     'none turns it off. [default: auto]')
 
 
@@ -1047,7 +1049,8 @@ DEFAULT_DURATION_PS = DEFAULT_FRAME_INTERVAL_PS * DEFAULT_MD_CYCLES
 @click.option('--seed', type=click.IntRange(min=0), default=DEFAULT_SEED, show_default=True)
 @click.option('--relax/--no-relax', default=True, show_default=True, help='Relax the geometry before MD.')
 @click.option('--lr-cutoff', 'cutoff', type=_POSITIVE, default=None,
-              help='Long-range cutoff in Å. [default: 10 for a periodic structure (fitted to a small cell), 100 for an isolated one]')
+              help='Long-range cutoff in Å. [default: 10 for a periodic structure (fitted to a small cell; 12 without '
+                   'k-space for the original so3lr model), 100 for an isolated one]')
 @click.option('--keep-velocities', is_flag=True, help='Keep the velocities stored in the structure file.')
 @click.option('--output-dir', 'directory', type=click.Path(file_okay=False), default=None,
               help='New run folder. [default: so3lr-run, or so3lr-run-2, ...]')
@@ -1727,7 +1730,8 @@ def nve_md(**kwargs) -> None:
 @click.option('--precision', default=DEFAULT_PRECISION, type=click.Choice(PRECISIONS), help=PRECISION_HELP)
 @click.option('--lr-cutoff', default=DEFAULT_LR_CUTOFF, type=float,
               help=f'Long-range cutoff distance in Å. [default: {PME_LR_CUTOFF:g} when every structure is '
-                   f'periodic (PME), {DEFAULT_LR_CUTOFF:g} otherwise]')
+                   f'periodic (PME), {DEFAULT_LR_CUTOFF:g} otherwise and for the original so3lr model, '
+                   f'which keeps real space]')
 @click.option('--dispersion-damping', 'dispersion_damping', default=DEFAULT_DISPERSION_DAMPING, type=float,
               help=f'Dispersion interactions start to switch off at (lr_cutoff - dispersion_damping) Å. [default: {DEFAULT_DISPERSION_DAMPING}].')
 @click.option('--total-charge', 'total_charge', default=None, type=int,
